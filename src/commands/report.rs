@@ -6155,6 +6155,54 @@ mod tests {
         assert!(!log.to_lowercase().contains("unblocked"), "{log}");
     }
 
+    /// Pausing a command step and resuming it runs the command again in full:
+    /// the exit code its last run left on disk is not the answer to the new
+    /// visit, so the run reads as never started rather than as `Exited`.
+    #[test]
+    fn resuming_a_paused_command_step_forgets_the_exit_code_of_its_old_run() {
+        use crate::command_step::{RunState, Runs};
+
+        let (repo, _root_guard) = fixture("unpark-command-rerun");
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("handover", None);
+        task.save().unwrap();
+
+        // The run exited while nothing was reading it, so only its code is left.
+        let dir = repo.commands_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Runs::key("handover", "stuck");
+        std::fs::write(
+            crate::runfiles::RunFiles::new(dir.clone()).exit_path(&key),
+            "1",
+        )
+        .unwrap();
+        let runs = Runs::new(&dir);
+        assert_eq!(runs.state(&key), RunState::Exited(1));
+
+        crate::status::park_under_lock(&repo, "stuck", crate::status::ParkedBy::QueuePause)
+            .unwrap();
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "stuck").stage(), "handover");
+        assert_eq!(
+            runs.state(&key),
+            RunState::Fresh,
+            "the command must run again in full, not be routed on the old exit code"
+        );
+    }
+
     /// A `--stage` reroute past a park leaves `back_onto_its_step`'s ordinary
     /// road rather than `unpark`'s, but the park is answered all the same —
     /// `parked_from` must not survive it, or a later, ordinary retry of the

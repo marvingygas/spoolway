@@ -745,8 +745,8 @@ pub struct Task {
     pub path: PathBuf,
     pub front: Frontmatter,
     pub body: String,
-    /// The step [`Task::set_stage`] moved this task onto since the last
-    /// [`Task::save`], which is where an arrival at a command step starts
+    /// The step [`Task::set_stage`] or [`Task::set_stage_unbanked`] moved this
+    /// task onto since the last [`Task::save`], which is where an arrival at a command step starts
     /// that step's run from nothing. Never loaded from disk, so a pass that
     /// only reads the queue cannot set it.
     pub(crate) arrived_at: Arrival,
@@ -960,8 +960,9 @@ impl Task {
         Ok(format!("---\n{yaml}---\n{}", self.body))
     }
 
-    /// Write the task file. If [`Task::set_stage`] moved it onto a step since
-    /// the last save, that step's old command run is cleared first.
+    /// Write the task file. If [`Task::set_stage`] or
+    /// [`Task::set_stage_unbanked`] moved it onto a step since the last save,
+    /// that step's old command run is cleared first.
     ///
     /// The clearing lives in the write, not in the dispatcher, because a task
     /// reaches a command step by many roads: a dispatcher pass, a lane's
@@ -1071,12 +1072,19 @@ impl Task {
     /// `launch_failures` are reset the same way `set_stage` resets them,
     /// since neither a parked task nor the lane it is handed back to has
     /// anything of those left to mean.
+    ///
+    /// The step's old command run is still cleared by the next `save`, as for
+    /// `set_stage`. Pausing a command step kills only a run that was still
+    /// going, so one that had already exited would otherwise leave its exit
+    /// code for the resume to route on, and the command would never run again.
+    /// Clearing a run is not counting an arrival: `rounds` stays as it was.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
         self.front.launched_at = None;
         self.front.launch_failures.remove(stage);
         self.front.launch_busy_since.remove(stage);
+        self.arrived_at.set(stage);
 
         let line = format!("→ `{}`: {}", stage, message.trim().replace('\n', " "));
         self.log_status(&line);

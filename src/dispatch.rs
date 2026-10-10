@@ -12861,16 +12861,28 @@ mod tests {
 
         task.set_stage_unbanked("b", "resumed");
         task.save().unwrap();
-        let report = with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
 
-        // The attempt line goes to the pass report, never to the task file.
+        // The resume is an arrival at `b`, so `b` runs again and fails again
+        // before the task reaches the unblocker. Passes go on until it does.
+        // The attempt line goes to the pass reports, never to the task file.
+        let mut actions = Vec::new();
+        let started = std::time::Instant::now();
+        while !actions
+            .iter()
+            .any(|a: &String| a.contains("`blocked`") && a.contains("(attempt"))
+        {
+            let report = with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+            actions.extend(report.actions);
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the task never reached the unblocker: {actions:?}"
+            );
+        }
         assert!(
-            report
-                .actions
+            actions
                 .iter()
                 .any(|a| a.contains("`blocked`") && a.contains("(attempt 1 of 3)")),
-            "the unblocker's count did not start over: {:?}",
-            report.actions
+            "the unblocker's count did not start over: {actions:?}"
         );
         let task = reload(&path);
         assert_ne!(task.stage(), crate::pipeline::PAUSED, "{}", task.body);
@@ -21013,11 +21025,15 @@ mod tests {
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
-        // step, and the run it started is still going behind it. Put back
-        // without an arrival, since a real arrival would stop that run — a
-        // pass that fails to place a destination never moves the task at all.
+        // step, and the run it started is still going behind it. Set the
+        // stage directly, since that records no arrival, and an arrival
+        // would stop that run — a pass that fails to place a destination
+        // never moves the task at all. The launch counters are put back as a
+        // task that was never launched at `review` has them.
         let mut task = reload(&path);
-        task.set_stage_unbanked("implement", "put back");
+        task.front.stage = "implement".into();
+        task.front.attempts = 0;
+        task.front.launched_at = None;
         task.save().unwrap();
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("implement", "demo");

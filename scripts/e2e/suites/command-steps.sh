@@ -1496,6 +1496,64 @@ else
   bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c) time(s))"
 fi
 
+# ------------------------------------------------------------- paused after the run exited
+# Pausing a command step kills a run that is still going, and the command runs
+# again in full on resume. A run that had already exited has nothing to kill,
+# so only its exit code is left on disk, and a resume that kept it would route
+# on that code at once without running the command. The dispatcher is stopped
+# while the command runs, and the command waits for a file that is only
+# touched once the dispatcher is gone, so the exit lands while nothing is
+# reading it. The first run fails and the second passes. The step sends a
+# failure to `blocked`, so a resume that kept the old code would stop there
+# with one run; the file counts how often the command ran.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+HELD_GATE="$LIVE/held.gate"
+HELD_GO="$LIVE/held.go"
+HELD_RAN="$LIVE/held-c.txt"
+rm -f "$HELD_GATE" "$HELD_GO" "$HELD_RAN"
+{
+  printf '\n  - id: held-c\n'
+  printf '    description: Fails while its gate file is missing, and passes once it is there.\n'
+  printf '    run: echo ran >> %s; while [ ! -f %s ]; do sleep 0.2; done; test -f %s\n' \
+    "$HELD_RAN" "$HELD_GO" "$HELD_GATE"
+  printf '    headless: true\n'
+  printf '    on_pass: review\n    on_fail: blocked\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: held-c/" .spoolway/pipelines/default.yml
+works "a command step to pause after its run exited checks out" "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/held.md" held "$BODY" "group: held"
+must "a task for the paused-after-exit case queues" "$SPOOLWAY" queue add --from "$LIVE/held.md"
+drive held held-c 120 || bad "the task reaches the command step (at \`$(stage_of held)\`)"
+poll_while 30 test ! -s "$HELD_RAN"
+dispatcher_stop
+touch "$HELD_GO"
+if poll_while 30 sh -c '! ls "$1"/*held-c*.exit >/dev/null 2>&1' _ "$SPOOLWAY_PROJECT_HOME/commands"; then
+  ok "the command's run exited while the dispatcher was stopped"
+else
+  bad "the command's run exited while the dispatcher was stopped"
+fi
+must "pausing the task after its run exited" "$SPOOLWAY" queue pause held
+must "resuming it" "$SPOOLWAY" queue resume held
+touch "$HELD_GATE"
+if drive held gone 240; then ok "a task resumed after its run exited still reaches the end"
+else bad "a task resumed after its run exited still reaches the end (at \`$(stage_of held)\`)"; fi
+if [ "$(wc -l < "$HELD_RAN" 2>/dev/null || echo 0)" -eq 2 ]; then
+  ok "the command ran again on resume rather than routing on the old run's code"
+else
+  bad "the command ran again on resume rather than routing on the old run's code \
+($(wc -l < "$HELD_RAN" 2>/dev/null || echo 0) run(s) in $HELD_RAN, wanted 2)"
+fi
+# The pipeline's own count, not the status log: the resume writes a
+# `→ \`held-c\`` line of its own, which is not an arrival.
+HELD_ARRIVALS=$(awk '/^arrivals:/{f=1;next} f&&/^  held-c:/{print $2;exit} f&&!/^  /{exit}' \
+  "$SPOOLWAY_PROJECT_HOME/archive/held.md")
+if [ "${HELD_ARRIVALS:-0}" -eq 1 ]; then
+  ok "and the resume did not count as an arrival"
+else
+  bad "and the resume did not count as an arrival (${HELD_ARRIVALS:-0} arrival(s), wanted 1)"
+fi
+
 # ------------------------------------------------------------- a second visit runs again
 # Arriving at a command step starts it from nothing, whichever road the task
 # took in. Here the road is the ordinary one: `visit-d` fails once and sends the
