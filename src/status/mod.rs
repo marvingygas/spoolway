@@ -4702,10 +4702,11 @@ fn off_a_step(
     let on_pass = land(Outcome::Pass);
     let on_fail = land(Outcome::Fail);
     let (on_pass, on_fail) = (on_pass.as_deref(), on_fail.as_deref());
-    // The dispatcher's own walk-past still writes the raw `on_pass` — see
-    // `crate::dispatch::fall_through` — and a failed lane start the raw
-    // `on_fail` — see `Dispatcher::handle_boot_failure` — so a move either
-    // made is read against that.
+    // The dispatcher's own walk-past writes the raw `on_pass` — see
+    // `crate::dispatch::fall_through` — and a lane whose pane never came
+    // free writes the raw `on_fail` — see `Dispatcher::note_pane_busy`,
+    // reached through `handle_boot_failure` — so a move either made is read
+    // against that.
     let raw_pass = step.destination(Outcome::Pass);
     let raw_fail = step.destination(Outcome::Fail);
 
@@ -11352,9 +11353,10 @@ mod tests {
         }
     }
 
-    /// A lane start refused on `document`, whose `on_fail` names the hidden
-    /// `suite`, writes that raw `on_fail` — a failed start does not land
-    /// past hidden steps — and still reads as the launch that failed.
+    /// A lane whose pane stayed busy past its timeout on `document`, whose
+    /// `on_fail` names the hidden `suite`, writes that raw `on_fail` — such a
+    /// move does not land past hidden steps — and still reads as the launch
+    /// that failed.
     #[test]
     fn a_failed_start_onto_a_hidden_on_fail_reads_could_not_launch() {
         for rule in RULES {

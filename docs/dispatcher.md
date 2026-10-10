@@ -588,8 +588,8 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | Limit | What it bounds | Reset by |
 |---|---|---|
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
-| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab, an unconfigured model or a worktree that cannot be cut, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
-| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the task. |
+| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab, an unconfigured model or a worktree that cannot be cut, is retried twice. The third failure in a row routes the task to `blocked`. Only a command step whose own process will not start goes to its `on_fail`, or `blocked` when it names none. If the `blocked` lane itself cannot start, the task stops on `paused` for a person. | A launch that starts; arriving at the step again; re-queueing the task. |
+| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the task to the step's `on_fail`, or to `blocked` when the step names none. | A launch that starts; arriving at the step again; re-queueing the task. |
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
@@ -607,7 +607,7 @@ or to `paused`, depending on the cause and the run.
 |---|---|---|
 | A step reported a block, a launch failed, or a loop budget ran out | `blocked` | `blocked` |
 | A lane ended without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
-| The `blocked` lane itself went quiet | `paused` | `paused` |
+| The `blocked` lane itself went quiet, or could not be started | `paused` | `paused` |
 
 In an attended run the board marks a `blocked` row amber and names the pane in NEXT. The task
 waits for `spoolway resume`. A task on `paused` waits for `spoolway resume` too.
@@ -723,7 +723,8 @@ had.
 
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
-The message names the branch. The branch is either left over from an earlier task with the same
+In an unattended run the `blocked` lane meets the same failure, and the task then stops on
+`paused`. The message names the branch. The branch is either left over from an earlier task with the same
 id, or it holds this task's own work saved by `spoolway queue unqueue --force`. A dispatcher
 stopped in the middle of a cut does not count: the task records the cut before the branch is made,
 so the next dispatcher re-cuts onto it. Otherwise, choose one:

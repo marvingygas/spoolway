@@ -269,8 +269,9 @@ The board reads a stacked group's line as `after <group>`. See [Rows are grouped
 ## When a task needs a person
 
 A task moves to `blocked` when a step reports `block`, when a step spends its `loop` budget
-and routes to `blocked`, or when a lane fails to start three times. The reason is written to
-`## Blocker`, and the board pins the task at the top of its group.
+and routes to `blocked`, or when a lane fails to start three times. The reason for a lane that
+fails to start is written to `## Status Log`. Other reasons are written to `## Blocker`. The board
+pins the task at the top of its group.
 
 A person puts the task back with `spoolway resume`, with `r` or restart on the board, or by answering a gate. Each adds one line under the entries in `## Blocker`:
 
