@@ -879,7 +879,7 @@ mod tests {
 
     /// A scratch directory stands in for the commands directory a real
     /// [`DirWatch`] joins — see `commands::dispatch`'s own wait loop.
-    /// Writing into it must wake `poll_ready` on the watch's own fd and
+    /// Changing it must wake `poll_ready` on the watch's own fd and
     /// [`DirWatch::drain`] must say so.
     #[cfg(target_os = "linux")]
     #[test]
@@ -890,12 +890,12 @@ mod tests {
 
         let watch = DirWatch::new(&commands_dir).expect("inotify must be available");
 
-        std::fs::write(commands_dir.join("demo.exit"), "0").unwrap();
+        change_commands_dir(&commands_dir, || {});
         let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
         assert_eq!(
             ready,
             vec![true],
-            "a write into the commands dir must wake the watch"
+            "creating a subdirectory must wake the watch"
         );
         assert!(watch.drain(), "the commands directory changed");
 
@@ -903,6 +903,121 @@ mod tests {
         // time out rather than report a stale wake.
         let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(50));
         assert_eq!(ready, vec![false]);
+        assert!(!watch.drain());
+
+        let _ = std::fs::remove_dir_all(&commands_dir);
+    }
+
+    /// The change [`dir_watch_wakes_on_a_commands_directory_change`] makes
+    /// to the watched directory. It creates a subdirectory, which queues
+    /// `IN_CREATE` at once and opens no descriptor. A file written here
+    /// would be the wrong trigger: a child forked on another test thread
+    /// while it is open holds it until the child execs, and the file's
+    /// `IN_CLOSE_WRITE` is then queued late, after the test's `drain()`.
+    /// `during` runs right after the change, where such a fork can land.
+    #[cfg(target_os = "linux")]
+    fn change_commands_dir(commands_dir: &std::path::Path, during: impl FnOnce()) {
+        std::fs::create_dir(commands_dir.join("demo.d")).unwrap();
+        during();
+    }
+
+    /// The forked child of the test below, and the write end of the pipe it
+    /// blocks on. Dropping it releases and reaps the child, so an assertion
+    /// that panics before the test does so itself cannot leave the child
+    /// blocked, holding a copy of every descriptor open at fork time, for
+    /// the rest of the test process.
+    #[cfg(target_os = "linux")]
+    struct LateChild {
+        release_write: std::os::unix::io::RawFd,
+        pid: libc::pid_t,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl LateChild {
+        /// Lets the child go and waits until it has exited. A second call
+        /// does nothing.
+        fn release(&mut self) {
+            if self.release_write < 0 {
+                return;
+            }
+            close(self.release_write);
+            self.release_write = -1;
+            if self.pid > 0 {
+                // SAFETY: `pid` is this test's own child process.
+                unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) };
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for LateChild {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Guards the stale wake the test above once hit under a full
+    /// `cargo test` run. Other tests spawn children with a `pre_exec` hook
+    /// (`command_step`, `headless`), which forces a real `fork`. A child
+    /// forked while a watched file is open holds it until the child execs,
+    /// so that file's `IN_CLOSE_WRITE` is queued only then, after `drain()`
+    /// when the child is slow. The child here waits on a pipe instead of
+    /// exec, so a late close would land after `drain()` every time. The
+    /// change holds no file open, so a slow child has nothing to close.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dir_watch_stays_quiet_when_a_forked_child_closes_the_file_late() {
+        let commands_dir = crate::scratch::root("dir-watch-late-close");
+        let _ = std::fs::remove_dir_all(&commands_dir);
+        std::fs::create_dir_all(&commands_dir).unwrap();
+
+        let watch = DirWatch::new(&commands_dir).expect("inotify must be available");
+
+        // Close-on-exec, so a process another test thread spawns while this
+        // pipe is open does not inherit the write end: the forked child below
+        // reads until every copy of it is closed, and `waitpid` would then
+        // wait out that unrelated process.
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a well-formed two-element buffer `pipe2` fills in.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let (release_read, release_write) = (fds[0], fds[1]);
+        let mut child = LateChild {
+            release_write,
+            pid: 0,
+        };
+        change_commands_dir(&commands_dir, || {
+            // SAFETY: the child calls only async-signal-safe functions
+            // (`close`, `read`, `_exit`) before it leaves.
+            child.pid = unsafe { libc::fork() };
+            assert!(child.pid >= 0, "fork failed");
+            if child.pid == 0 {
+                // SAFETY: async-signal-safe calls on descriptors the child
+                // inherited; it blocks until the parent closes its end.
+                unsafe {
+                    libc::close(release_write);
+                    let mut byte = 0u8;
+                    libc::read(release_read, (&raw mut byte).cast(), 1);
+                    libc::_exit(0);
+                }
+            }
+        });
+        close(release_read);
+
+        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
+        assert_eq!(
+            ready,
+            vec![true],
+            "creating a subdirectory must wake the watch"
+        );
+        assert!(watch.drain(), "the commands directory changed");
+
+        // Let the child go, and wait until it has exited and released every
+        // descriptor it inherited.
+        child.release();
+
+        // The same check as the test above: no writes since the drain.
+        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(50));
+        assert_eq!(ready, vec![false], "stale wake after drain");
         assert!(!watch.drain());
 
         let _ = std::fs::remove_dir_all(&commands_dir);
