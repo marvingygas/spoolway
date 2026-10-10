@@ -184,6 +184,44 @@ else
   bad "and the lane it interrupted is really over"
 fi
 
+# ------------------------------------- a started task whose branch was never made
+# `queue add` stamps `branch: task/<id>` before anything is cut, so a task
+# can name a branch that does not exist. Deleting the real one afterwards
+# leaves the same shape on disk. Only a repo with a remote asks
+# whether a branch is pushed at all, so one is added here. `--force` must then
+# say nothing about a kept branch: there is no branch to keep, rename or
+# delete, and the line would send a person after one.
+echo hang > "$CTL/ghost"
+task_doc "$LIVE/ghost.md" ghost "$BODY" "group: ghost"
+must "a task whose branch will be deleted" "$SPOOLWAY" queue add --from "$LIVE/ghost.md"
+if drive_and_hold ghost implement 120; then ok "it reaches implement, then the dispatcher stops"
+else bad "it reaches implement, then the dispatcher stops (at \`$(stage_of ghost)\`)"; fi
+GHOST_WORKTREE=$(worktree_of ghost)
+must "a remote, so the push state is asked" \
+  git init -q --bare -b main "$LIVE/ghost-origin.git"
+must "wired up as origin" git remote add origin "$LIVE/ghost-origin.git"
+must "its checkout is removed from under it" \
+  git worktree remove --force "$GHOST_WORKTREE"
+must "and its branch deleted, as if it had never been cut" \
+  git branch -D task/ghost
+works "so the branch it names does not exist" \
+  test -z "$(git branch --list task/ghost)"
+GHOST_OUT="$LIVE/unqueue-ghost.out"
+if "$SPOOLWAY" queue unqueue ghost --force >"$GHOST_OUT" 2>&1; then
+  ok "\`--force\` unqueues it"
+else
+  bad "\`--force\` unqueues it"
+  sed 's/^/        /' "$GHOST_OUT"
+fi
+has "it says it unqueued" "unqueued \`ghost\`" "$GHOST_OUT"
+lacks "and prints no kept-branch line" "kept branch" "$GHOST_OUT"
+works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/ghost.md"
+if [ -n "$GHOST_WORKTREE" ] && [ ! -d "$GHOST_WORKTREE" ]; then
+  ok "and its worktree is gone"
+else
+  bad "and its worktree is gone (\"$GHOST_WORKTREE\" still exists)"
+fi
+
 # ------------------------------------------------------------- --all --force
 # Refused outright, in either flag order — tearing down every checkout in the
 # queue is not a command a script should reach by accident.

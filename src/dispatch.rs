@@ -9039,6 +9039,37 @@ mod tests {
         );
     }
 
+    /// A task that was never cut still names `task/<id>` on its document, but
+    /// there is no such branch to keep. Teardown must not tell a person it kept
+    /// a branch that does not exist, because the advice that follows — rename
+    /// it, or delete it — has nothing to act on. Nothing lands on the problem
+    /// list, and the task still finishes.
+    #[test]
+    fn a_branch_that_was_never_made_is_not_reported_as_kept() {
+        let (repo, _root_guard) = fixture("cleanup-branch-never-made");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        assert!(!has_branch(&repo, "task/demo"), "the branch was never cut");
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived, "the task itself still finishes");
+        assert!(
+            !report.problems.iter().any(|p| p.contains("kept branch")),
+            "no branch exists, so none is reported as kept: {:?}",
+            report.problems
+        );
+    }
+
     /// The one repository the check above does not apply to: with no remote
     /// at all, `--remotes` matches nothing, so every commit would read as
     /// unpushed and a local-only project would keep one `task/…` branch per
