@@ -44,6 +44,49 @@ pub(crate) struct RoutineFolder {
     /// "N tasks" tail counts, what the right pane lists for the highlighted
     /// folder, and what `enter` queues whole.
     pub(crate) tasks: Vec<RoutineTask>,
+    /// Every `*.md` at or below this folder that [`read_task`] could not
+    /// read, in the same order as [`Self::tasks`]. Queueing the folder is
+    /// refused while this is not empty — see [`Self::refusal`] — so a batch
+    /// never goes in short of a task the person believes is part of it.
+    pub(crate) unparseable: Vec<PathBuf>,
+}
+
+impl RoutineFolder {
+    /// Why this folder cannot be queued, naming each file that will not
+    /// parse — or `None` when every `*.md` in it does.
+    pub(crate) fn refusal(&self) -> Option<String> {
+        if self.unparseable.is_empty() {
+            return None;
+        }
+        // One `task contract` line per file, not one command over all of
+        // them: `task contract --from <folder>` reads only the folder's own
+        // `*.md` files, so it reported "no problems" for a file nested below
+        // it, and given several `--from` files it stops at the first that
+        // fails and names only that one's reason.
+        let files: Vec<String> = self
+            .unparseable
+            .iter()
+            .map(|path| {
+                format!(
+                    "  {}\n    spoolway task contract --from \"{}\"",
+                    path.display(),
+                    path.display()
+                )
+            })
+            .collect();
+        let (them, it) = match self.unparseable.len() {
+            1 => ("a task file".to_string(), "it"),
+            n => (format!("{n} task files"), "them"),
+        };
+        Some(format!(
+            "{} holds {them} that will not parse, so queueing it would leave {it} out:\n\n\
+             {}\n\n\
+             Run the command under each for its reason, fix or remove {it}, and queue the \
+             folder again.",
+            self.path.display(),
+            files.join("\n"),
+        ))
+    }
 }
 
 /// Every top-level folder under [`Repo::routines_dir`], recursively read.
@@ -109,13 +152,15 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
 
     let mut folders = Vec::new();
     let mut tasks = Vec::new();
+    let mut unparseable = Vec::new();
     for entry in entries {
         if entry.is_dir() {
             folders.push(read_folder(&entry)?);
-        } else if entry.extension().and_then(|e| e.to_str()) == Some("md")
-            && let Some(task) = read_task(&entry)
-        {
-            tasks.push(task);
+        } else if entry.extension().and_then(|e| e.to_str()) == Some("md") {
+            match read_task(&entry) {
+                Some(task) => tasks.push(task),
+                None => unparseable.push(entry),
+            }
         }
     }
     // A subfolder's own tasks are already gathered into its `tasks` by
@@ -124,12 +169,14 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
     // or below it, not just what sits directly inside.
     for sub in &folders {
         tasks.extend(sub.tasks.iter().map(clone_task));
+        unparseable.extend(sub.unparseable.iter().cloned());
     }
 
     Ok(RoutineFolder {
         name,
         path: path.to_path_buf(),
         tasks,
+        unparseable,
     })
 }
 
@@ -148,8 +195,9 @@ fn clone_task(task: &RoutineTask) -> RoutineTask {
 /// One task, read the same tolerant way [`super::pending::list_groups`]
 /// reads a pending one: no fence, no readable YAML or no `id:` at all is
 /// `None` rather than an error, so one bad file does not take a whole
-/// folder's listing down with it. `super::queue::validate_batch` is what
-/// refuses it for real, once a person actually queues it.
+/// folder's listing down with it. [`read_folder`] keeps the path of every
+/// file that comes back `None`, and [`RoutineFolder::refusal`] is what
+/// refuses queueing the folder over them.
 fn read_task(path: &Path) -> Option<RoutineTask> {
     let doc = std::fs::read_to_string(path).ok()?;
     let (yaml, _) = crate::task::split_fence(&doc).ok()?;
@@ -201,6 +249,60 @@ mod tests {
         assert_eq!(routines[0].name, "nightly");
         let ids: Vec<&str> = routines[0].tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["audit-deps", "audit-docs"]);
+    }
+
+    /// A file that will not parse is no task of the folder's, but it is not
+    /// dropped without a word either: the folder keeps its path, a nested
+    /// one's included, and refuses to be queued over it.
+    #[test]
+    fn a_file_that_will_not_parse_is_named_by_its_folder_and_refuses_it() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-unparseable");
+        let top = repo.routines_dir().join("nightly");
+        write(&top, "good.md", "good", "");
+        std::fs::write(top.join("bad.md"), "title: no fence at all\n").unwrap();
+        let sub = top.join("weekly");
+        write(&sub, "fine.md", "fine", "");
+        std::fs::write(sub.join("worse.md"), "---\nid: [unclosed\n---\nx\n").unwrap();
+
+        let routines = list_routines(&repo).unwrap();
+        let names: Vec<String> = routines[0]
+            .unparseable
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["bad.md", "worse.md"], "{names:?}");
+        let ids: Vec<&str> = routines[0].tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["good", "fine"]);
+
+        let refusal = routines[0]
+            .refusal()
+            .expect("a folder with bad files is refused");
+        assert!(refusal.contains("bad.md"), "{refusal}");
+        assert!(refusal.contains("worse.md"), "{refusal}");
+        // The remedy has to reach the nested file: `task contract --from` on
+        // the top folder does not look into `weekly/`.
+        // One command per file, since `task contract` given several stops at
+        // the first failure and explains only that one.
+        for file in [top.join("bad.md"), sub.join("worse.md")] {
+            let line = format!("spoolway task contract --from \"{}\"", file.display());
+            assert_eq!(refusal.matches(&line).count(), 1, "{refusal}");
+        }
+        assert_eq!(
+            refusal.matches("spoolway task contract").count(),
+            2,
+            "{refusal}"
+        );
+        let top_only = format!("--from {}", top.display());
+        assert!(!refusal.contains(&top_only), "{refusal}");
+    }
+
+    /// A folder whose every file parses has nothing to refuse.
+    #[test]
+    fn a_folder_that_reads_cleanly_has_no_refusal() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-clean");
+        write(&repo.routines_dir().join("nightly"), "a.md", "a", "");
+
+        assert!(list_routines(&repo).unwrap()[0].refusal().is_none());
     }
 
     /// A folder's own "at or below it" count and listing reach into every

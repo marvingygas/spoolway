@@ -1349,6 +1349,19 @@ works "the aged queue entry did not — queue/ is never swept, whatever its age"
 must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
 
+# A queue file that will not parse is named by `queue list`, in both forms,
+# rather than left out as if it had never been queued. Placed by hand, as a
+# half-edited file would be.
+TORN_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/torn-queued-task.md"
+printf -- '---\nid: torn-queued-task\nstage: queued\n' >"$TORN_QUEUED"
+says "queue list names a queue file that will not parse" \
+  "torn-queued-task.md" "$SPOOLWAY" queue list
+says "and says the file did not parse" "did not parse" "$SPOOLWAY" queue list
+says "queue list --json names it under unparseable" \
+  "torn-queued-task.md" "$SPOOLWAY" queue list --json
+says "in a key of its own" '"unparseable"' "$SPOOLWAY" queue list --json
+rm -f "$TORN_QUEUED"
+
 # ------------------------------------------------------ config set checks
 # `config set` runs the file-based checks `doctor` runs. A value that can
 # never be right is refused, and one naming something not set up yet is saved

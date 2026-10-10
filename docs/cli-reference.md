@@ -169,6 +169,11 @@ Queueing deletes the group's pending tasks from the pending directory. A sibling
 already in the queue or the archive is left where it is. A group that fails validation is
 refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
 
+A file in the pending directory that does not parse has no row. The screen names it in a popup
+when the tab opens, and again when a file starts to break while the tab is open. A file already
+named is not named again until it is fixed and breaks anew. The popup is titled `tasks not listed`
+beside queueable groups and `nothing to queue` otherwise.
+
 A task whose start branch does not exist is not queued. Neither is any task in the selection that
 depends on it. These tasks stay in the pending directory and the rest of the selection is queued.
 See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
@@ -279,7 +284,10 @@ spoolway queue list
 spoolway queue list --json
 ```
 
-`--json` prints the dispatcher's pid and one object per task.
+`--json` prints the dispatcher's pid, one object per task, and an `unparseable` array.
+
+A file in the queue that does not parse has no row. Under the table, the text output lists each
+such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
 
 ### `spoolway queue show <task>`
 

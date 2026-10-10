@@ -120,12 +120,16 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
     // something this guard has any business refusing.
-    let live_tasks = repo.tasks()?;
+    //
+    // A queue file that will not parse is not nothing: the task it holds is
+    // still to do once a person fixes it, so it keeps the run going. Each
+    // pass names the file — see `Dispatcher::pass`.
+    let (live_tasks, live_problems) = repo.tasks_and_problems()?;
     // A run the screen started is the exception: it waits on an empty queue
     // for whatever the queue tab sends next, and the board greets the person
     // over `Nothing queued` meanwhile — the screen, not the queue, decides
     // when it ends.
-    if live_tasks.is_empty() && !args.screen {
+    if live_tasks.is_empty() && live_problems.is_empty() && !args.screen {
         if crate::jobs::enabled_count(repo) == 0 {
             println!("nothing is queued, so there is nothing to dispatch.");
             println!("  spoolway queue add --from <path>");
@@ -355,8 +359,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
 
-        match repo.tasks() {
-            Ok(tasks) if tasks.is_empty() => {
+        match repo.tasks_and_problems() {
+            // Not for a queue holding a file that will not parse: that file
+            // is a task nobody has finished, and this pass already named it.
+            Ok((tasks, problems)) if tasks.is_empty() && problems.is_empty() => {
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
                 if crate::jobs::enabled_count(repo) == 0 && !args.screen {
