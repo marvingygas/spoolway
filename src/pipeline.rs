@@ -1214,9 +1214,9 @@ impl Pipeline {
         for step in &self.steps {
             // A step id is a path component before it is a graph node: it names
             // this step's prompt, its headless record and its command output.
-            // See [`crate::config::check_id`], which is the same rule a task id
-            // is held to.
-            crate::config::check_id("step id", &step.id)?;
+            // See [`crate::config::check_step_id`]: the same character rule a
+            // task id is held to, with a length limit of its own.
+            crate::config::check_step_id(&step.id)?;
             if !seen.insert(step.id.as_str()) {
                 bail!("duplicate step id `{}`", step.id);
             }

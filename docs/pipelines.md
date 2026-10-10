@@ -76,7 +76,7 @@ steps:
 
 | Key | Default | What it does |
 |---|---|---|
-| `id` | required | The step name. Written to the task's `stage:`. |
+| `id` | required | The step name, at most 64 characters. Written to the task's `stage:`. |
 | `description` | none | One line, shown by `spoolway pipeline show`. |
 | `agent` | none | A profile from `config.toml`. Makes this an agent step. |
 | `run` | none | A shell command line. Makes this a command step. |

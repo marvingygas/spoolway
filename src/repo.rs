@@ -635,7 +635,7 @@ impl Repo {
     /// the dispatcher and that task's own `spoolway report` — see
     /// [`crate::lock::TaskLock`]. The caller is responsible for `id` being a
     /// safe single path segment: the dispatcher only ever passes an id that
-    /// has already been through `check_id`, and `spoolway report --task`
+    /// has already been through `check_task_id`, and `spoolway report --task`
     /// joins the same unvalidated id here that `Repo::task` already joins.
     pub fn task_lock_file(&self, id: &str) -> PathBuf {
         self.home().join("task-locks").join(format!("{id}.lock"))

@@ -1344,10 +1344,21 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
 /// task's own bare id (see [`parse_submission`]), so the first minted
 /// arm is the first number that actually tells two runs of the same
 /// task apart.
+///
+/// The result never passes [`crate::config::TASK_ID_MAX`]. A base id may be
+/// exactly that long, because `task contract` accepts it, and appending
+/// `-<n>` would then make every routine run and eval trial of it refused. So
+/// the base is cut short, by as much as the suffix needs, before the suffix
+/// goes on.
 fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String>) -> String {
     let mut n = 1usize;
     loop {
-        let candidate = format!("{base_id}-{n}");
+        let suffix = format!("-{n}");
+        let room = crate::config::TASK_ID_MAX.saturating_sub(suffix.len());
+        // An id is ASCII (see `check_id`), so cutting at a byte is safe. A
+        // hyphen left at the cut would double up against the suffix.
+        let base = base_id.get(..room).unwrap_or(base_id).trim_end_matches('-');
+        let candidate = format!("{base}{suffix}");
         if !taken.contains(&candidate) && existing_task_path(repo, &candidate).is_none() {
             return candidate;
         }
@@ -14002,6 +14013,35 @@ mod tests {
             repo.queue_dir().join("solo-3.md").exists(),
             "solo-1 is queued and solo-2 is archived, so the mint has to reach -3"
         );
+    }
+
+    /// A task id at the length limit passes `task contract`, so the id minted
+    /// from it for a routine run or an eval trial must pass the same check.
+    /// Before the base was cut short, `<100 characters>-1` was 102 and the
+    /// run was refused.
+    #[test]
+    fn a_minted_id_stays_within_the_task_id_limit() {
+        let (repo, _root_guard) = fixture("mint-id-limit");
+        let max = crate::config::TASK_ID_MAX;
+        let base = format!("a{}", "b".repeat(max - 1));
+        let taken = std::collections::BTreeSet::new();
+
+        let first = mint_id(&repo, &base, &taken);
+        assert!(first.len() <= max, "{} characters: {first}", first.len());
+        assert!(crate::config::check_task_id(&first).is_ok());
+
+        // Two ids that share their first characters still mint apart, and
+        // past the single-digit suffixes the base is cut further.
+        let mut taken = taken;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..12 {
+            let id = mint_id(&repo, &base, &taken);
+            assert!(id.len() <= max && seen.insert(id.clone()), "{id}");
+            taken.insert(id);
+        }
+
+        // A short base keeps its whole name.
+        assert_eq!(mint_id(&repo, "solo", &Default::default()), "solo-1");
     }
 
     /// An arm forked from a task already in the archive gets its own

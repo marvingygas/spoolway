@@ -2393,7 +2393,7 @@ pub(crate) fn branch_slug(branch: &str) -> String {
 /// already in place: `ensure_workspace` refuses a task's first cut onto a
 /// branch that task did not make.
 ///
-/// The task id is safe to join onto the root, and [`crate::config::check_id`]
+/// The task id is safe to join onto the root, and [`crate::config::check_task_id`]
 /// is what makes it so — at `queue add` and again whenever a task file is read,
 /// which is the half that matters: a file nobody queued is still a file the
 /// dispatcher will pick up.
@@ -2486,17 +2486,15 @@ pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
 /// [`Mux::list_lanes`] can still resolve the lane's full name back from it.
 const AGENT_NAME_MAX: usize = 32;
 
-/// Is `id` usable as a task id? The one length-independent rule left once
-/// herdr's own 32-character name limit stopped gating it — see
-/// [`AGENT_NAME_MAX`]'s own doc for why a task id no longer has to fit a lane
-/// name at all, on any pipeline.
-///
-/// The character rule is not the multiplexer's alone — it is what keeps every
-/// id a single path component — so it is stated once, in
-/// [`crate::config::check_id`], and applied here as well as when a task file
-/// is read.
+/// Is `id` usable as a task id? Herdr's own 32-character name limit no longer
+/// gates it — see [`AGENT_NAME_MAX`]'s own doc for why a task id no longer has
+/// to fit a lane name at all, on any pipeline. What gates it is the file names
+/// spoolway builds from it: the character rule that keeps every id a single
+/// path component, and the length limit [`crate::config::TASK_ID_MAX`]. Both
+/// are stated once, in [`crate::config::check_task_id`], and applied here as
+/// well as when a task file is read.
 pub fn check_task_id(id: &str) -> Result<()> {
-    crate::config::check_id("task id", id)
+    crate::config::check_task_id(id)
 }
 
 /// Split a lane name back into its step and task, if it is one of ours.
@@ -3409,15 +3407,18 @@ mod tests {
     /// `check_task_id` no longer measures an id against any lane it might
     /// build — see [`AGENT_NAME_MAX`]'s own doc for why a lane too long for
     /// herdr's wire spelling gets an alias instead of a refusal. What is left
-    /// is the same path-safety rule [`crate::config::check_id`] already
-    /// applies everywhere else an id is read.
+    /// is the path-safety rule and the file-name length limit that
+    /// [`crate::config::check_task_id`] applies everywhere else an id is read.
     #[test]
-    fn check_task_id_only_enforces_path_safe_syntax() {
+    fn check_task_id_enforces_path_safe_syntax_and_the_file_name_limit() {
         assert!(check_task_id("slug-subcommand").is_ok());
         // Long enough that its `implement` lane would have overrun the old
-        // budget by a wide margin — no longer this function's business.
-        let long = "a".repeat(200);
+        // lane budget by a wide margin, yet within the file-name limit: the
+        // lane name is not this function's business.
+        let long = "a".repeat(crate::config::TASK_ID_MAX);
         assert!(check_task_id(&long).is_ok());
+        let too_long = "a".repeat(crate::config::TASK_ID_MAX + 1);
+        assert!(check_task_id(&too_long).is_err());
         assert!(check_task_id("Capitalised").is_err());
         assert!(check_task_id("3rd-task").is_err());
         assert!(check_task_id("has_underscore").is_err());
