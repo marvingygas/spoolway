@@ -1665,6 +1665,35 @@ pub(crate) fn unknown_keys(raw: &str) -> Vec<Vec<String>> {
     out
 }
 
+/// Where a write to `path` should land: `path` itself, or what it links to.
+///
+/// `write_atomic` renames a temp file over its destination, and a rename
+/// replaces a symlink instead of following it. A `config.toml` linked into a
+/// shared dotfiles folder would silently become a regular file, and the shared
+/// copy would never see the edit. Writing to the end of the link chain keeps
+/// the link and edits the file it stands for. A link that points nowhere yet
+/// resolves to its missing target, so the file is created where the link says.
+pub(crate) fn write_target(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    // A bounded walk, so a link loop cannot hang it. The walk then hands back
+    // a link; `Config::load` refuses a looping `config.toml` before any write
+    // gets this far.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {}
+            _ => return current,
+        }
+        let Ok(link) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = match current.parent() {
+            Some(parent) => parent.join(link),
+            None => link,
+        };
+    }
+    current
+}
+
 impl Config {
     /// `.spoolway/config.toml` under `root`.
     ///
@@ -1948,11 +1977,11 @@ impl Config {
 
     /// Write the file from scratch, discarding whatever was there.
     ///
-    /// For `init`, and for a file that does not exist yet. Anything editing a
+    /// For a file that does not exist yet. Anything editing a
     /// config a person already has wants [`Config::save_key`].
     pub fn save(&self, root: &Path) -> Result<()> {
         let path = Config::path_in(root);
-        crate::task::write_atomic(&path, &self.render()?)
+        crate::task::write_atomic(&write_target(&path), &self.render()?)
             .with_context(|| format!("writing {}", path.display()))
     }
 
@@ -2016,7 +2045,7 @@ impl Config {
             )
         })?;
 
-        crate::task::write_atomic(&path, &edited)
+        crate::task::write_atomic(&write_target(&path), &edited)
             .with_context(|| format!("writing {}", path.display()))
     }
 
@@ -4058,6 +4087,92 @@ mod tests {
         let loaded = Config::load(&dir).unwrap();
         assert_eq!(crate::confkv::get(&loaded, key).unwrap(), "0.5");
         assert_eq!(loaded.models["claude-haiku-5-5"].input, 0.1);
+    }
+
+    /// A relative link is resolved against the folder the link is in, not the
+    /// folder the command runs from. That is the kind of link GNU stow makes.
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_key_through_a_relative_symlink_writes_the_target() {
+        let dir = crate::scratch::root("config-save-key-relative-link");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let target = dir.join("shared.toml");
+        std::fs::write(&target, "[dispatch]\nlane_quiet = \"10m\"\n").unwrap();
+        std::os::unix::fs::symlink("../shared.toml", Config::path_in(&dir)).unwrap();
+
+        let key = "dispatch.lane_quiet";
+        let config = crate::confkv::set(&Config::load(&dir).unwrap(), key, "25m").unwrap();
+        config.save_key(&dir, key).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(Config::path_in(&dir))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(after.contains("lane_quiet = \"25m\""), "{after}");
+    }
+
+    /// A `config.toml` link whose target does not exist yet gets its target
+    /// created where the link points, and stays a link.
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_key_through_a_dangling_symlink_creates_the_target() {
+        let dir = crate::scratch::root("config-save-key-dangling-link");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let target = dir.join("shared-dotfiles").join("config.toml");
+        std::os::unix::fs::symlink(&target, Config::path_in(&dir)).unwrap();
+
+        let key = "dispatch.lane_quiet";
+        let config = crate::confkv::set(&Config::default(), key, "25m").unwrap();
+        config.save_key(&dir, key).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(Config::path_in(&dir))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(after.contains("lane_quiet = \"25m\""), "{after}");
+    }
+
+    /// Setting a key on a `config.toml` that is a symlink writes the new value
+    /// into the file the link points at. The link stays a link, and every
+    /// other byte of the target is unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_key_through_a_symlinked_config_writes_the_target_and_keeps_the_link() {
+        let dir = crate::scratch::root("config-save-key-symlinked");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let shared = dir.join("shared-dotfiles");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join("config.toml");
+        let before = "# shared across projects\n[dispatch]\nlane_quiet = \"10m\"\n\n# keep me\n";
+        std::fs::write(&target, before).unwrap();
+        std::os::unix::fs::symlink(&target, Config::path_in(&dir)).unwrap();
+
+        let key = "dispatch.lane_quiet";
+        let config = crate::confkv::set(&Config::load(&dir).unwrap(), key, "25m").unwrap();
+        config.save_key(&dir, key).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(Config::path_in(&dir))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "config.toml is no longer a symlink"
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            after,
+            before.replace("lane_quiet = \"10m\"", "lane_quiet = \"25m\""),
+            "the target did not get exactly the one-key edit"
+        );
     }
 
     /// A misspelt tier sub-table loads, is named in a note, and is left out:

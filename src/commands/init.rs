@@ -954,8 +954,11 @@ fn place_setup(
     answers: &Answers,
     placer: &mut Placer,
 ) -> Result<bool> {
+    // The end of the link chain, so a `config.toml` linked into a shared folder
+    // is rewritten there rather than replaced, and a dangling link counts as
+    // absent only if its target is.
     let mut wrote_any = placer.file(
-        Config::path_in(root),
+        crate::config::write_target(&Config::path_in(root)),
         &shown(root, &Config::path_in(root)),
         config
             .render()
@@ -2249,6 +2252,40 @@ mod tests {
             config.contains("project_key = \"o/r\""),
             "a forced init with no --tracker must keep the project's tracker: {config}"
         );
+    }
+
+    /// `init --force` rewrites a `config.toml` that is a symlink through the
+    /// link: the shared file it points at is rewritten and the link stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_forced_init_writes_through_a_symlinked_config() {
+        let root = scaffold("force-symlinked-config", &confirmed());
+        let shared = root.join("shared-dotfiles");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join("config.toml");
+        std::fs::write(&target, "# stale\n").unwrap();
+        let link = Config::path_in(&root);
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        run_init(
+            &root,
+            &InitArgs {
+                force: true,
+                ..confirmed()
+            },
+        )
+        .expect("forced init");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "config.toml is no longer a symlink"
+        );
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(!written.contains("# stale"), "{written}");
     }
 
     /// A person's private `overrides/config.toml` is theirs alone: a forced

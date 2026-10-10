@@ -26,6 +26,9 @@ changes one key and leaves every other byte alone. It refuses a key the file doe
 hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
 created on first write.
 
+A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
+points at. If the link points at a file that does not exist yet, `config set` creates that file.
+
 Parallel `config set` calls in one project run one after another, and each saves its key. A
 call waits up to ten seconds for the one before it. After that it exits 1, names the process that
 holds the lock, and writes nothing. Run it again.
