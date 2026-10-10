@@ -1117,7 +1117,7 @@ spoolway config edit
 | `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. See [Configuration](configuration.md#what-config-set-checks) |
-| `edit` | Open the file in `$EDITOR` and validate it on save |
+| `edit` | Open the file in `$EDITOR` and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
 and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each

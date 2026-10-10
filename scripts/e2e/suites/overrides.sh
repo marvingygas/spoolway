@@ -363,6 +363,58 @@ says "and names the events a hook script runs on" \
   "SPOOLWAY_EVENT" \
   "$SPOOLWAY" hook contract
 
+# ----------------------------- one bad hand-written value stays its own
+# A `session_blocked_ctx` at or under `session_reuse_ctx`, typed into the
+# tracked file by hand, used to fail every override key and every `config set`
+# with a sentence about a pair neither touched.
+CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
+TRACKED_CONFIG=.spoolway/config.toml
+must "make the tracked pair wrong by hand: blocked 15 under reuse 20" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^session_blocked_ctx = .*/session_blocked_ctx = 15/' \
+  "$TRACKED_CONFIG"
+
+# Before the layer exists: `config set` still reads the override-merged config
+# and would refuse any set over the layer's own key, which is a separate fault.
+works "config set of an unrelated key succeeds beside the bad pair" \
+  "$SPOOLWAY" config set dispatch.lane_quiet 5m
+refuses "a set that itself breaks the pair is still refused" \
+  "must be above" \
+  "$SPOOLWAY" config set agents.claude.session_reuse_ctx 30
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[agents.claude]\nconcurrency = 2\n' > "$CONFIG_LAYER"
+says "the override key beside the bad pair still applies" \
+  "agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+silent_about "and is not listed as ignored" \
+  "ignored  agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+# The note an ignored override key prints carries the same sentence on the old
+# code, so the assertion is on the check's own row.
+says "doctor fails a check for the bad value" \
+  "FAIL  agents.claude holds a valid value" \
+  "$SPOOLWAY" doctor --no-live
+says "and the file it is in" \
+  "$TRACKED_CONFIG" \
+  "$SPOOLWAY" doctor --no-live
+
+# A layer key that corrects the pair hides it from the merged config, not from
+# the file: doctor reads the tracked one, so it still fails.
+printf '[agents.claude]\nconcurrency = 2\nsession_reuse_ctx = 10\n' > "$CONFIG_LAYER"
+says "doctor still fails the tracked pair when a layer key corrects it" \
+  "FAIL  agents.claude holds a valid value" \
+  "$SPOOLWAY" doctor --no-live
+
+# The same for a mode the kind does not accept: the layer's valid mode wins in
+# the merged config, so the per-agent row passes and only the new check can
+# say the file still holds the bad one.
+must "make the tracked permission_mode wrong by hand" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^permission_mode = .*/permission_mode = "nonsense"/' \
+  "$TRACKED_CONFIG"
+printf '[agents.claude]\npermission_mode = "auto"\n' > "$CONFIG_LAYER"
+says "doctor still fails a tracked permission_mode a layer key corrects" \
+  "\`agents.claude.permission_mode\`: " \
+  "$SPOOLWAY" doctor --no-live
+
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
 # `install` before the rename has the old directory on disk, and `sync`

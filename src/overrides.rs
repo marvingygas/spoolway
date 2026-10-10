@@ -1615,4 +1615,29 @@ agent: pi
         let err = remove_pipeline_patch(&overrides, "impl").unwrap_err();
         assert!(format!("{err:#}").contains("no override"), "{err:#}");
     }
+
+    /// One bad value already in the tracked config affects only itself: an
+    /// override key that touches neither field of a hand-written
+    /// `session_blocked_ctx` / `session_reuse_ctx` pair still applies, and
+    /// nothing is reported as ignored.
+    #[test]
+    fn an_override_key_still_applies_beside_a_bad_hand_written_session_pair() {
+        let overrides = crate::scratch::root("overrides-bad-pair-beside");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            config_patch_path(&overrides),
+            "[agents.claude]\nconcurrency = 2\n",
+        )
+        .unwrap();
+
+        let mut tracked = Config::default();
+        let claude = tracked.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+
+        let (patched, ignored) = apply_config_patch(tracked, &overrides).unwrap();
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(patched.agents["claude"].concurrency, 2);
+    }
 }

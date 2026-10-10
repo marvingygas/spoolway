@@ -68,6 +68,35 @@ warning: no agent `ghost` in [agents] yet — `spoolway doctor` fails until one 
 The checks on `issue_tracking.*` look for `acli` and `jq` on `PATH`. They also run
 `<tool> --version` for each tool a hook declares.
 
+`config set` also checks the agent profiles. It refuses a `permission_mode` the profile's `kind`
+does not accept. It refuses a `session_reuse_ctx` or `session_blocked_ctx` outside `0` to `100`.
+It refuses a `session_blocked_ctx` that is not above `session_reuse_ctx`.
+
+Only a wrong value that the command itself introduces is refused. A wrong value already in the
+file does not stop `config set` from changing another key. The same holds for each key of the
+overrides layer.
+
+### Wrong values written by hand
+
+A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
+on. This covers the three agent-profile values above. Two commands report each such value:
+
+| Command | What it shows |
+|---|---|
+| `spoolway doctor` | A failed check that gives the value and the path of `config.toml`. |
+| `spoolway config edit` | An error that lists the values, after the file loads. |
+
+Both read the tracked `config.toml`, not the file merged with the overrides layer. A layer key
+that corrects the value does not hide it.
+
+```
+$ spoolway doctor --no-live
+  FAIL  agents.claude holds a valid value: `session_blocked_ctx` (15) must be above `session_reuse_ctx` (20) (in .spoolway/config.toml; correct it with `spoolway config edit`)
+
+$ spoolway config edit
+spoolway: .spoolway/config.toml parses, but holds 1 value(s) spoolway cannot run on: `session_blocked_ctx` (15) must be above `session_reuse_ctx` (20) — reopen it with `spoolway config edit`
+```
+
 ## Runtime state
 
 This section describes repo mode, where the checkout itself holds the tracked files. A
@@ -161,7 +190,9 @@ merged, for example a step that already runs a command and gets `agent:` added o
 stale entry is left out of the merge. The step stays exactly as the tracked file wrote it, and
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
-applied. A prompt override for a prompt the checkout no longer has is left out too. A pipeline
+applied. A wrong value already in the tracked config does not stop a layer key from applying; see
+[Wrong values written by hand](#wrong-values-written-by-hand). A prompt override for a prompt the
+checkout no longer has is left out too. A pipeline
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file

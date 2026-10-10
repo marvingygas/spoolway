@@ -259,7 +259,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
     let mut report = Report::default();
-    report.record_all(config_checks(repo, None, config));
+    report.record_all(config_checks(repo, None, config, Some(pipelines)));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
@@ -430,7 +430,7 @@ pub fn doctor(
                 "pipelines load",
                 pipelines_load_outcome(&repo.checkout, err),
             );
-            report.record_all(config_checks(repo, config_error, &config));
+            report.record_all(config_checks(repo, config_error, &config, None));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
@@ -450,7 +450,7 @@ pub fn doctor(
     // the only symptom is tasks that quietly never start.
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
-    report.record_all(config_checks(repo, config_error, &config));
+    report.record_all(config_checks(repo, config_error, &config, Some(pipelines)));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
@@ -723,6 +723,54 @@ pub(crate) fn config_value_checks(config: &Config) -> Vec<Finding> {
     findings
 }
 
+/// One failing check per value in `config.toml` that loads but cannot be run
+/// on, each naming the value and the file it is in.
+///
+/// `config set` and the override layer deliberately look past these, so that
+/// one wrong line does not switch off every other edit; this is where a
+/// person learns the line is there.
+///
+/// `config` must be the tracked file's own, not the override-merged one: the
+/// check names `path`, and a layer key that corrects a bad tracked value
+/// would otherwise hide it while the file still holds it.
+///
+/// A bad `permission_mode` is also failed by [`agent_checks`], but only for
+/// an agent a pipeline uses (`checked_agents`), and only while no layer key
+/// corrects it, since that check reads the `merged` config. It is left to
+/// that check when both hold, so it is failed once; for any other profile, or
+/// once a layer key has corrected it, nothing else would report the file's
+/// value, so it is failed here.
+fn hand_written_value_checks(
+    path: &Path,
+    tracked: &Config,
+    merged: &Config,
+    checked_agents: &[&str],
+) -> Vec<Finding> {
+    let merged_problems = crate::confkv::value_problems(merged);
+    let left_to_agent_checks = |problem: &crate::confkv::ValueProblem| {
+        problem.field == "permission_mode"
+            && merged_problems.contains(problem)
+            && problem
+                .scope
+                .strip_prefix("agents.")
+                .is_some_and(|agent| checked_agents.contains(&agent))
+    };
+    crate::confkv::value_problems(tracked)
+        .into_iter()
+        .filter(|problem| !left_to_agent_checks(problem))
+        .map(|problem| {
+            Finding::Check(
+                format!("{} holds a valid value", problem.scope),
+                Err(anyhow::anyhow!(
+                    "{} (in {}; correct it with `spoolway config edit`)",
+                    problem.message,
+                    path.display()
+                )),
+            )
+        })
+        .collect()
+}
+
 /// What `spoolway doctor` would fail on after `key` was set, one warning line
 /// per failing check, for `spoolway config set` to print.
 ///
@@ -756,10 +804,14 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
 /// those are two different questions. Order matches `doctor`'s own: the
 /// checkout's parse, the project's parse (only when it failed), then the one
 /// setting an unattended run cannot start without.
+///
+/// `pipelines` is `None` when they did not load, so [`agent_checks`] will not
+/// run and every bad `permission_mode` is failed here.
 fn config_checks(
     repo: &Repo,
     config_error: Option<anyhow::Error>,
     config: &Config,
+    pipelines: Option<&Pipelines>,
 ) -> Vec<Finding> {
     // `home_error` is never `Some` by the time `config_checks` runs: `doctor`
     // takes a distinct path the moment it has one, before `Config::load` (or
@@ -794,6 +846,19 @@ fn config_checks(
     }
     findings.extend(unknown_key_notes(&repo.checkout));
     findings.extend(config_value_checks(config));
+    let tracked_path = Config::path_in(&repo.checkout);
+    findings.extend(match Config::load_tracked(&repo.checkout) {
+        Ok(tracked) => {
+            let checked_agents: Vec<&str> = pipelines
+                .map(|p| p.referenced_agents().into_keys().collect())
+                .unwrap_or_default();
+            hand_written_value_checks(&tracked_path, &tracked, config, &checked_agents)
+        }
+        Err(err) => vec![Finding::Check(
+            "the tracked config's values".into(),
+            Err(err.context(tracked_path.display().to_string())),
+        )],
+    });
     if let Some(note) = current_price_table_age_note(config.housekeeping.price_max_age_days) {
         findings.push(Finding::Note(note));
     }
@@ -1794,7 +1859,13 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
         // run — long after whoever set it has stopped watching.
         let permissions = config
             .agent(agent)
-            .and_then(|profile| profile.permission_mode_status());
+            .and_then(|profile| profile.permission_mode_status())
+            .map_err(|err| {
+                err.context(format!(
+                    "`agents.{agent}.permission_mode` in {}",
+                    Config::path_in(&repo.checkout).display()
+                ))
+            });
         findings.push(Finding::Check(
             format!("agent `{agent}` permission mode"),
             permissions,
@@ -2602,6 +2673,52 @@ mod tests {
             &[("logs", None), ("garbled", Some("not [ toml".into()))],
         );
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A hand-written pair `config set` looks past is still a failed check,
+    /// naming the value and the file it is in.
+    #[test]
+    fn a_bad_hand_written_pair_fails_a_check_naming_value_and_file() {
+        let mut config = Config::default();
+        let claude = config.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+        let findings =
+            hand_written_value_checks(Path::new("/p/config.toml"), &config, &config, &["claude"]);
+        let [Finding::Check(_, Err(err))] = findings.as_slice() else {
+            panic!("expected one failed check");
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("(15) must be above"), "{text}");
+        assert!(text.contains("/p/config.toml"), "{text}");
+        assert!(
+            hand_written_value_checks(
+                Path::new("/p"),
+                &Config::default(),
+                &Config::default(),
+                &["claude"]
+            )
+            .is_empty()
+        );
+
+        // A bad mode the merged config also holds, on an agent a pipeline
+        // uses, is `agent_checks`' row, so it is not failed twice. One a layer
+        // key corrected, or one on a profile no pipeline uses (which
+        // `agent_checks` never looks at), is failed here.
+        let mut config = Config::default();
+        config.agents.get_mut("claude").unwrap().permission_mode = "nonsense".into();
+        let merged = Config::default();
+        assert!(
+            hand_written_value_checks(Path::new("/p"), &config, &config, &["claude"]).is_empty()
+        );
+        assert_eq!(
+            hand_written_value_checks(Path::new("/p"), &config, &merged, &["claude"]).len(),
+            1
+        );
+        assert_eq!(
+            hand_written_value_checks(Path::new("/p"), &config, &config, &["codex"]).len(),
+            1
+        );
     }
 
     /// No layer at all is nothing to say: `override_layer_note` must not add
