@@ -393,6 +393,17 @@ pub(crate) struct LaneRecord {
     /// nothing is ever typed into the dialog.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     opening: Vec<String>,
+    /// The report this lane made, copied off the task while the lane was
+    /// still waiting to be freed.
+    ///
+    /// A task keeps only its newest report. Only set on a backend with no
+    /// pane to keep, where a lane that has reported can stay busy for
+    /// several passes, and the next step may report before it is freed,
+    /// which replaces the report this lane made. `record_usage` falls back
+    /// to this copy so the ledger line still carries the lane's own
+    /// verdict. `None` until the lane is seen to have reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verdict: Option<crate::task::LastReport>,
 }
 
 impl LaneRecord {
@@ -431,6 +442,7 @@ impl LaneRecord {
             child_since: None,
             launch_grace_since: None,
             opening: Vec::new(),
+            verdict: None,
         }
     }
 
@@ -2554,6 +2566,24 @@ impl<'a> Dispatcher<'a> {
             let busy = matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked);
             let current = tasks.iter().find(|t| t.id() == task_id);
 
+            // Copied before the busy skip below: a lane that is skipped may
+            // not be freed until after the next step has reported, and the
+            // task keeps only the newest report. The lane's own start time
+            // keeps an earlier lane's report on the same step from being
+            // taken for this one's. Only where the skip applies: a backend
+            // that keeps its panes frees a lane on the pass after its
+            // report, and a kept lane's later ledger lines must stay as
+            // they were.
+            let resident = self.mux.resident_while_waiting();
+            if let Some(record) = self.lanes.get_mut(&lane.name).filter(|_| !resident) {
+                let own = current
+                    .and_then(|t| t.front.last_report.as_ref())
+                    .filter(|r| r.step == *step_id && r.at > record.started_at);
+                if let Some(r) = own {
+                    record.verdict = Some(r.clone());
+                }
+            }
+
             if parked {
                 if !busy {
                     // `held` is false here — the `held && parked` case above
@@ -2913,8 +2943,12 @@ impl<'a> Dispatcher<'a> {
         let report = task
             .and_then(|t| t.front.last_report.as_ref())
             .filter(|report| report.step == step_id);
-        let outcome = report.map(|report| report.outcome.clone());
-        let blocked = report.is_some_and(|report| report.blocked);
+        // The task's report is the newest word; the copy on the record is
+        // what the lane said when the task has since moved on.
+        let (outcome, blocked) = match report.or(record.verdict.as_ref()) {
+            Some(report) => (Some(report.outcome.clone()), report.blocked),
+            None => (None, false),
+        };
 
         let entry = crate::usage::Entry {
             ts: banked_at.to_rfc3339(),
@@ -4363,6 +4397,7 @@ impl<'a> Dispatcher<'a> {
                             child_since: None,
                             launch_grace_since: None,
                             opening: started.opening,
+                            verdict: None,
                         },
                     );
                     // Written now, not left for the end of the pass: the unsent
@@ -12395,6 +12430,68 @@ mod tests {
             lines[1].tokens.input, 2_500,
             "only what the person added since the first bank"
         );
+    }
+
+    /// A backend that keeps its panes frees a lane on the pass after its
+    /// report, so a kept lane's closing line at done is banked as it always
+    /// was: with no verdict, not the one the lane reported when its step moved
+    /// on.
+    #[test]
+    fn a_kept_lane_closing_line_does_not_borrow_the_verdict_it_reported_earlier() {
+        let (mut repo, _root_guard) = fixture("kept-lane-no-late-verdict");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.branch = Some("task/demo".into());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: now_secs() + 5,
+                blocked: false,
+            });
+        });
+        let session = "kept-verdict-s1";
+        let kind = local_kind(&repo);
+        let mut lanes = load_lane_records(&repo);
+        lanes.insert(
+            "demo · implement".into(),
+            LaneRecord {
+                session: session.into(),
+                kind,
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(now_secs())
+            },
+        );
+        save_lane_records(&repo, &lanes).unwrap();
+
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        // A person types into the kept pane; the next step has reported.
+        let mut task = reload(&path);
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() + 10,
+            blocked: false,
+        });
+        task.set_stage("done", None);
+        task.save().unwrap();
+        let home = pi_home_with(session, 7_500);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 2, "{banked:?}");
+        assert_eq!(lines[1].outcome, None, "{:?}", lines[1]);
     }
 
     /// A kept pane nobody typed into has spent nothing since it was banked, so
@@ -22964,5 +23061,186 @@ exit 0"#,
             branches.trim().is_empty(),
             "a worktree whose checkout is already gone must still get its branch cleaned up: {branches:?}"
         );
+    }
+
+    /// A lane's ledger line carries the verdict that lane reported, even when
+    /// the backend frees the lane only after the task's next step has reported
+    /// too. A headless lane's process can outlive its own report, and a task
+    /// keeps just its newest report, so the line must not be read from
+    /// whatever the task holds at the moment the lane is freed.
+    #[test]
+    fn a_headless_lane_freed_after_the_next_step_reported_is_banked_with_its_own_verdict() {
+        const SESSION: &str = "headless-verdict-session";
+        let (mut repo, _root_guard) = fixture("headless-verdict-race");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: now_secs() - 60,
+                blocked: false,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        // The implement lane has reported, but its process is still taking
+        // its last turn, so a backend with no pane to keep leaves it alone.
+        let busy =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &busy);
+        });
+
+        // The next step reports before the implement lane is freed.
+        let mut task = reload(&path);
+        task.front.stage = "document".into();
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() - 30,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let settled =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &settled);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(
+            lines[0].outcome.as_deref(),
+            Some("pass"),
+            "the lane's own verdict, not an absent one: {:?}",
+            lines[0]
+        );
+    }
+
+    /// A lane that never reported is banked with no verdict, never with the
+    /// verdict a neighbouring step left on the task.
+    #[test]
+    fn a_lane_that_never_reported_is_banked_without_a_verdict() {
+        const SESSION: &str = "headless-verdict-session";
+        let (mut repo, _root_guard) = fixture("headless-no-verdict");
+        priced(&mut repo, "priced-model");
+        add_task_with(&repo, "demo", "document", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "review".into(),
+                outcome: "pass".into(),
+                at: now_secs() - 30,
+                blocked: false,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(lines[0].outcome, None, "{:?}", lines[0]);
+        assert!(!lines[0].blocked);
+    }
+
+    /// A report an earlier lane left on the same step is not the verdict of
+    /// the lane that runs there next. A task resumed to a step after a block
+    /// keeps that block as its report, so a headless lane started after it
+    /// must not copy it onto its own record and bank it once the task has
+    /// moved on.
+    #[test]
+    fn a_headless_lane_does_not_bank_the_report_an_earlier_lane_left_on_its_step() {
+        const SESSION: &str = "headless-stale-report-session";
+        let (mut repo, _root_guard) = fixture("headless-stale-report");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "block".into(),
+                at: now_secs() - 300,
+                blocked: true,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        // The resumed lane is still working and has reported nothing.
+        let busy =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &busy);
+        });
+
+        // The task moves on before the lane is freed.
+        let mut task = reload(&path);
+        task.front.stage = "document".into();
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() - 30,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let settled =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &settled);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(lines[0].outcome, None, "{:?}", lines[0]);
+        assert!(!lines[0].blocked, "{:?}", lines[0]);
     }
 }
