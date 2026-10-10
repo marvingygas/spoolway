@@ -6428,6 +6428,9 @@ fn prepare_boot(
     // the same directory it already reads and writes, not a guess at one —
     // see `crate::repo::git_dir`.
     let git_dir = crate::repo::git_dir(&worktree)?;
+    // The worktree's own git directory, which codex's sandbox keeps read-only
+    // even inside the grant above — see `crate::repo::worktree_git_dir`.
+    let worktree_git_dir = crate::repo::worktree_git_dir(&worktree)?;
 
     let values: BTreeMap<&str, String> = BTreeMap::from([
         ("model", model.clone()),
@@ -6448,6 +6451,7 @@ fn prepare_boot(
         // what it names can no longer read the file it is working from.
         ("project_home", repo.home().display().to_string()),
         ("git_dir", git_dir.display().to_string()),
+        ("worktree_git_dir", worktree_git_dir.display().to_string()),
     ]);
     let mut args = profile.render_args(&values)?;
     args.extend(profile.effort_args(step.effort.as_deref()));
@@ -22375,6 +22379,87 @@ mod tests {
                     args[0]
                 );
             }
+        }
+    }
+
+    /// A codex lane started in a linked worktree may write to that worktree's
+    /// own git directory, `<repo>/.git/worktrees/<name>`, as well as the
+    /// shared `.git`: without it `git add` cannot create `index.lock` there.
+    // covers: agents.codex — a codex lane in a linked worktree is granted the worktree's own git directory
+    #[test]
+    fn a_codex_lane_in_a_linked_worktree_may_write_its_own_git_directory() {
+        let (mut repo, _root_guard) = fixture("codex-linked-git-dir");
+        let codex = repo.config.agents["codex"].clone();
+        *repo.config.agents.get_mut("claude").unwrap() = codex;
+        let worktree = repo.worktree_root().join("task-linked");
+        crate::mux::cut_worktree(&repo.root, &worktree, "task/linked", "work").unwrap();
+        let own = crate::repo::run(
+            &worktree,
+            "git",
+            &["rev-parse", "--path-format=absolute", "--git-dir"],
+        )
+        .unwrap();
+        let own = own.trim().to_string();
+        assert!(own.contains("/worktrees/"), "not a linked worktree: {own}");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        let words: Vec<&str> = args[0].split_whitespace().collect();
+        let grants: Vec<&str> = words
+            .windows(2)
+            .filter(|w| w[0] == "--add-dir")
+            .map(|w| w[1])
+            .collect();
+        assert!(
+            grants.contains(&own.as_str()),
+            "no --add-dir for {own}: {grants:?}"
+        );
+    }
+
+    /// A codex lane in a checkout that is not a linked worktree starts with
+    /// every `--add-dir` followed by an existing directory: no empty and no
+    /// missing path.
+    // covers: agents.codex — a codex lane in a borrowed checkout starts with a valid argv
+    #[test]
+    fn a_codex_lane_in_a_borrowed_checkout_starts_with_every_grant_named() {
+        let (mut repo, _root_guard) = fixture("codex-borrowed-git-dir");
+        let codex = repo.config.agents["codex"].clone();
+        *repo.config.agents.get_mut("claude").unwrap() = codex;
+        let worktree = a_checkout("dispatch-codex-borrowed");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        let words: Vec<&str> = args[0].split_whitespace().collect();
+        let grants: Vec<&str> = words
+            .windows(2)
+            .filter(|w| w[0] == "--add-dir")
+            .map(|w| w[1])
+            .collect();
+        assert!(!grants.is_empty(), "{}", args[0]);
+        for grant in grants {
+            assert!(
+                Path::new(grant).is_absolute() && Path::new(grant).is_dir(),
+                "an --add-dir without an existing directory: {}",
+                args[0]
+            );
         }
     }
 

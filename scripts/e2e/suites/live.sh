@@ -21,9 +21,15 @@
 # to. The row grants that directory with `--add-dir {git_dir}` (see
 # `agent::ADAPTERS` and `repo::git_dir`), and codex-cli 0.157.1 still refused
 # the commit — its sandbox made `.git/worktrees/<name>` read-only — with every
-# check here green. `commit_in_worktree` is that lane, minus the dispatcher:
-# codex launched with the row's own flags, in a `git worktree add` checkout,
-# asked to commit, and failed by name when the commit is refused.
+# check here green. The row therefore also grants `{worktree_git_dir}`.
+# `commit_in_worktree` is that lane, minus the dispatcher: codex launched with
+# the row's own flags, in a `git worktree add` checkout, asked to commit, and
+# failed by name when the commit is refused. It checks that the row's grants
+# still let a linked worktree commit. It does not prove `{worktree_git_dir}`
+# is needed: in a scratch tree with a lane outside every grant, and in one
+# with it inside the `{project_home}` grant, codex-cli 0.157.1 committed with
+# or without that grant. The test in `src/dispatch.rs` is what keeps the
+# grant in the row.
 #
 # **Opt-in, by naming a model.** spoolway names no model of its own, and this
 # suite follows: with no model named the check is skipped, with the variable
@@ -148,6 +154,11 @@ commit_in_worktree() {
   # holds the objects, the branch ref and `worktrees/<name>` with its index.
   local git_dir
   git_dir=$(git -C "$lane" rev-parse --path-format=absolute --git-common-dir)
+  # `{worktree_git_dir}`: the worktree's own `.git/worktrees/<name>`, granted
+  # as the row grants it. It nests inside the grant above, so this layout does
+  # not show whether the sandbox would refuse the commit without it.
+  local worktree_git_dir
+  worktree_git_dir=$(git -C "$lane" rev-parse --path-format=absolute --git-dir)
 
   # The seed: credentials linked back, the config copied with this worktree
   # trusted in it. The directory is a fresh `mktemp` name, so the table
@@ -170,6 +181,7 @@ commit_in_worktree() {
       --add-dir "$state" \
       --add-dir "$project" \
       --add-dir "$git_dir" \
+      --add-dir "$worktree_git_dir" \
       -c check_for_update_on_startup=false \
       --ask-for-approval never \
       exec "Run these three commands in the current directory, in order, and nothing else:
@@ -195,9 +207,9 @@ If one of them fails, do not work around it: reply with the command and its erro
   elif [ ! -e "$lane/proof.txt" ]; then
     bad "$kind: a lane in a linked worktree commits — the turn (exit $status) never wrote proof.txt, so it never reached git"
   elif git -C "$lane" diff --cached --quiet -- proof.txt; then
-    bad "$kind: a lane in a linked worktree commits — \`git add\` was refused, though --add-dir $git_dir grants the shared git dir"
+    bad "$kind: a lane in a linked worktree commits — \`git add\` was refused, though --add-dir grants $git_dir and $worktree_git_dir"
   else
-    bad "$kind: a lane in a linked worktree commits — \`git commit\` was refused, though --add-dir $git_dir grants the shared git dir"
+    bad "$kind: a lane in a linked worktree commits — \`git commit\` was refused, though --add-dir grants $git_dir and $worktree_git_dir"
   fi
   # The refusal itself first, when git or the sandbox named one, so the line
   # that says why is not buried in the turn's whole transcript.

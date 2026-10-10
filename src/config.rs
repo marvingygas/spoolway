@@ -927,6 +927,10 @@ impl Priority {
 ///   [`crate::repo::git_dir`]) — a linked worktree's objects and branch ref
 ///   live in the main checkout's shared `.git`, outside `{worktree}` and
 ///   otherwise read-only to a lane confined to it
+/// - `{worktree_git_dir}` absolute path to the git directory `{worktree}` owns
+///   (see [`crate::repo::worktree_git_dir`]) — `.git/worktrees/<name>` in a
+///   linked worktree, holding the `index` that `git add` locks; the same
+///   directory as `{git_dir}` anywhere else
 /// - `{session_id}`   session id spoolway minted for this lane, so that the
 ///   transcript the agent writes can be found again and its token usage
 ///   recorded. Drop it and the lane still runs — it just spends unaccounted.
@@ -2665,6 +2669,7 @@ mod tests {
             "state_dir",
             "project_home",
             "git_dir",
+            "worktree_git_dir",
         ]
         .iter()
         .map(|key| (*key, format!("<{key}>")))
@@ -2906,7 +2911,9 @@ mod tests {
     /// Both agent kinds a lane can be dispatched with are launched with a
     /// third `--add-dir`, naming the git directory the lane's worktree
     /// actually uses — the grant that lets `git add`/`git commit` create
-    /// `index.lock` there instead of failing on a read-only filesystem.
+    /// `index.lock` there instead of failing on a read-only filesystem. codex
+    /// carries a fourth, the worktree's own git directory, which its sandbox
+    /// keeps read-only even inside the third.
     #[test]
     fn both_kinds_carry_the_git_dir_as_a_third_add_dir() {
         for kind in ["claude", "codex"] {
@@ -2917,11 +2924,15 @@ mod tests {
                 .filter(|pair| pair[0] == "--add-dir")
                 .map(|pair| pair[1].as_str())
                 .collect();
+            let mut want = vec!["<state_dir>", "<project_home>", "<git_dir>"];
+            if kind == "codex" {
+                want.push("<worktree_git_dir>");
+            }
             assert_eq!(
-                add_dirs,
-                ["<state_dir>", "<project_home>", "<git_dir>"],
+                add_dirs, want,
                 "`{kind}` must carry `{{state_dir}}`, `{{project_home}}` and \
-                 `{{git_dir}}` as its three `--add-dir` grants, in that order"
+                 `{{git_dir}}` as its first three `--add-dir` grants, in that \
+                 order, and codex `{{worktree_git_dir}}` after them"
             );
         }
     }

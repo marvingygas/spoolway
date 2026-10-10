@@ -147,6 +147,15 @@ directory, the project's own home and the repository's shared `.git` as extra wo
 directories with `--add-dir`. `bypassPermissions` is not the default mode, because many
 organisations disable it.
 
+### Codex lanes
+
+A `codex` lane runs with `--sandbox workspace-write`, so it can write only inside its worktree
+and the directories it is granted with `--add-dir`. It is granted the project's `.spoolway/`
+directory, the project's own home, the repository's shared `.git` and the worktree's own git
+directory (`.git/worktrees/<name>`). The last grant lets the lane run `git add` and
+`git commit` in a linked worktree. In a checkout that is not a linked worktree, it is the same
+path as the shared `.git`.
+
 ### Leaving a pane without closing it
 
 No kind is asked to leave its pane. When a step finishes, its agent stays running, idle, in its
@@ -169,6 +178,7 @@ The argv a lane is started with is fixed per kind. Each row's template substitut
 | `{state_dir}` | Absolute path to the project's `.spoolway/` |
 | `{project_home}` | Absolute path to the project's own home under `~/.spoolway/` |
 | `{git_dir}` | Absolute path to the repository's shared `.git` |
+| `{worktree_git_dir}` | Absolute path to the git directory the lane's worktree owns: `.git/worktrees/<name>` in a linked worktree, the same path as `{git_dir}` in any other checkout |
 | `{session_id}` | The session id spoolway minted for this lane |
 
 `codex` has no `{session_id}`; its session is pinned by `$CODEX_HOME`. No part of the argv is
