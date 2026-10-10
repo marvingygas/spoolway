@@ -137,7 +137,8 @@ is kept. The move prints the folder's path and says to remove it by hand. A work
 no checkout can be joined again.
 
 `spoolway doctor` names which mode a project runs in, repo mode or home mode. It also prints a
-note for each workspace under `~/.spoolway/` that lists no checkout.
+note for each workspace under `~/.spoolway/` that lists no checkout. Another note names each
+project home whose recorded checkout no longer exists, so you can delete the folder.
 
 ## Task
 

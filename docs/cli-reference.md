@@ -1432,6 +1432,14 @@ By default it prints only failures, notes and a closing line. A failing run exit
 whether the project runs in repo mode or home mode. A note names each workspace under
 `~/.spoolway/` that lists no checkout, to be removed by hand. See
 [Home mode](concepts.md#home-mode).
+A note names each project home under `~/.spoolway/` whose recorded checkout is gone, by path,
+so you can delete the folder. A workspace is named only when all of its clones are gone.
+`doctor` deletes nothing.
+
+```
+  note  2 project home(s) under ~/.spoolway/ record a checkout that is gone; delete a folder to remove it: /home/you/.spoolway/scratch-1a2b, /home/you/.spoolway/demo-3c4d
+```
+
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
 
