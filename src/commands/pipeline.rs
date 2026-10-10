@@ -1185,6 +1185,9 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     let new = crate::overrides::field_display(&probe, key)?;
 
     let overrides_dir = repo.overrides_dir();
+    // Held from the read of the patch to its write, so a parallel `--set` on
+    // another key starts from what this one saved instead of replacing it.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let mut patch =
         crate::overrides::read_pipeline_patch(&overrides_dir, name)?.unwrap_or_default();
     patch

@@ -1364,6 +1364,46 @@ says "config set warns on a hook script that is not there yet" \
   "$SPOOLWAY" config set issue_tracking.hook nosuch.sh
 must "hook restored" "$SPOOLWAY" config set issue_tracking.hook "$BEFORE_HOOK"
 
+# Calls that run at the same time, as an agent issuing several tool calls at
+# once does, each save their own key. A call that lost the race may be
+# refused, but none may print success and leave its value out of the file.
+PAR_DIR="$LIVE/config-set-parallel"
+mkdir -p "$PAR_DIR"
+for i in 1 2 3 4 5 6 7 8; do
+  ( "$SPOOLWAY" config set "models.par$i.input" "$i.5" >"$PAR_DIR/set-$i.out" 2>&1
+    echo $? >"$PAR_DIR/set-$i.status" ) &
+done
+wait
+for i in 1 2 3 4 5 6 7 8; do
+  if [ "$(cat "$PAR_DIR/set-$i.status")" != 0 ] \
+    || [ "$("$SPOOLWAY" config get "models.par$i.input" 2>/dev/null)" = "$i.5" ]; then
+    ok "parallel config set: models.par$i.input is saved, or its call was refused"
+  else
+    bad "parallel config set: models.par$i.input was reported saved but is not in config.toml"
+    sed 's/^/        /' "$PAR_DIR/set-$i.out"
+  fi
+done
+
+# The same for `pipeline override --set`, three keys of one pipeline's patch.
+PAR_STEPS=(implement review document)
+for n in 0 1 2; do
+  ( "$SPOOLWAY" pipeline override default --set "${PAR_STEPS[$n]}.model=par-model-$n" \
+      >"$PAR_DIR/ovr-$n.out" 2>&1
+    echo $? >"$PAR_DIR/ovr-$n.status" ) &
+done
+wait
+PAR_PATCH="$SPOOLWAY_PROJECT_HOME/overrides/pipelines/default.yml"
+for n in 0 1 2; do
+  if [ "$(cat "$PAR_DIR/ovr-$n.status")" != 0 ] \
+    || grep -qF "par-model-$n" "$PAR_PATCH" 2>/dev/null; then
+    ok "parallel pipeline override --set: ${PAR_STEPS[$n]}.model is saved, or its call was refused"
+  else
+    bad "parallel pipeline override --set: ${PAR_STEPS[$n]}.model was reported saved but is not in the patch"
+    sed 's/^/        /' "$PAR_DIR/ovr-$n.out"
+  fi
+done
+rm -rf "$SPOOLWAY_PROJECT_HOME/overrides"
+
 # ------------------------------------------------------------- sync panel
 # A checkout behind the binary is told nothing in front of a command: no line
 # on stderr, no stamp file. Only `spoolway sync` and `spoolway doctor` speak

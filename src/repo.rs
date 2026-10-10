@@ -549,6 +549,13 @@ impl Repo {
         self.home.join(crate::config::OVERRIDES_DIR)
     }
 
+    /// The file [`crate::lock::EditLock`] is taken on. Under [`Repo::home`]
+    /// so every worktree of one project contends for the same file, and not
+    /// inside `overrides/`, whose absence is how "no overrides" is spelled.
+    pub fn edit_lock_path(&self) -> PathBuf {
+        self.home.join("edit.lock")
+    }
+
     /// The private layer's own directory — see [`crate::local`]. Under
     /// [`Repo::home`], the same as [`Repo::overrides_dir`] and for the same
     /// reason, and read only in repo mode: [`crate::local::is_repo_mode`] is

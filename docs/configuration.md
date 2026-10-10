@@ -26,6 +26,10 @@ changes one key and leaves every other byte alone. It refuses a key the file doe
 hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
 created on first write.
 
+Parallel `config set` calls in one project run one after another, and each saves its key. A
+call waits up to ten seconds for the one before it. After that it exits 1, names the process that
+holds the lock, and writes nothing. Run it again.
+
 Run `config set` from the main checkout. The dispatcher reads the project's own config, so in
 a linked worktree the command refuses and prints the `-C` form to run instead.
 
@@ -121,7 +125,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 | `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | `retention_days` |
-| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
+| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is

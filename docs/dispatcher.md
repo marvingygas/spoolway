@@ -799,6 +799,10 @@ the lock at `<home>/archive-index.lock` before they change `archive/`. They wait
 for it. A reader of the index waits three seconds, then reads the task files without writing the
 index.
 
+`spoolway config set` and `spoolway pipeline override --set` take the lock at `<home>/edit.lock`
+while they read and write their file. They wait up to ten seconds for it. A lock left by a
+crashed command is removed, so the next call saves.
+
 ### Trial arms
 
 A trial forks a group into one full copy per ticked pipeline, each copy in a group of its own,

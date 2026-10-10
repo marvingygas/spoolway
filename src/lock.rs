@@ -551,6 +551,88 @@ impl Drop for WorkspaceLock {
     }
 }
 
+/// A short-lived advisory lock over a project's `config set` and
+/// `pipeline override --set` read-modify-write.
+///
+/// Both commands read a file, change one entry in memory and write the file
+/// back. Run at the same time, they each start from the same bytes and the
+/// last rename wins, so every other call prints success and its value is
+/// gone. An agent issuing several `config set` tool calls at once hits this.
+/// Holding this lock from the read to the write makes the second caller
+/// start from what the first saved.
+///
+/// A live holder still in it past [`EditLock::WAIT`] fails the call rather
+/// than letting it write unlocked: the point is that no value is silently
+/// lost, and a refusal says so where a lost update does not. A crashed
+/// holder's file is reaped as in [`TaskLock`], and a file that vanishes
+/// between a waiter's failed link and its read is retried without removing
+/// anything, so a crash mid-write never stops the next call and a release
+/// never costs a waiter someone else's lock.
+pub struct EditLock {
+    path: PathBuf,
+}
+
+impl EditLock {
+    /// A holder is a read, a validation and one `write_atomic`. Ten seconds
+    /// covers a burst of parallel callers queued behind one another; a
+    /// holder still in it after that has stalled.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    pub fn acquire(path: &Path) -> Result<EditLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(EditLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder_if_present(path)? {
+                    // The holder released between our link and our read. Try
+                    // the link again and remove nothing: another waiter may
+                    // already have linked its own lock into that gap, and
+                    // deleting it would admit two holders at once, which is
+                    // the lost update this lock exists to stop.
+                    None => {}
+                    Some(Some(pid)) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "another `spoolway` command (pid {pid}) has held the edit lock at \
+                                 {} for {:?}, so nothing was written. Run this command again \
+                                 once that one has finished.",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    // Stale: a file is there but nothing alive holds it.
+                    Some(None) => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for EditLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Puts `contents` at `path`, but only if nothing is there yet — `true` on
 /// success, `false` if `path` was already taken.
 ///
@@ -918,6 +1000,21 @@ mod tests {
         std::fs::write(&path, "0\n").unwrap();
         let started = std::time::Instant::now();
         let _lock = TaskLock::acquire(&path).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a dead holder is cleared immediately, not waited out"
+        );
+    }
+
+    /// An edit lock a crashed `config set` left behind names a dead pid, so
+    /// the next call reaps it and saves rather than waiting or refusing.
+    #[test]
+    fn a_stale_edit_lock_does_not_stop_the_next_edit() {
+        let (path, _guard) = scratch("edit-lock-stale");
+        let path = path.with_file_name("edit.lock");
+        std::fs::write(&path, "0\n").unwrap();
+        let started = std::time::Instant::now();
+        let _lock = EditLock::acquire(&path).unwrap();
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a dead holder is cleared immediately, not waited out"
