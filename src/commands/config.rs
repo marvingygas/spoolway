@@ -95,7 +95,12 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
         );
     }
     crate::confkv::check_typed(key, value)?;
-    let updated = crate::confkv::set(&repo.config, key, value)?;
+    // Held from the load to the save: a config loaded before the lock was
+    // taken is the one a parallel `config set` has since changed, and saving
+    // from it either drops that call's key or is refused by `save_key`.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
+    let current = Config::load(&repo.root)?;
+    let updated = crate::confkv::set(&current, key, value)?;
     updated.save_key(&repo.root, key)?;
     println!("{key} = {}", crate::confkv::get(&updated, key)?);
     for warning in crate::confkv::warnings(&updated, key) {
