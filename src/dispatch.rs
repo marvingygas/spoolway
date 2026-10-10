@@ -267,6 +267,12 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LaneRecord {
     started_at: i64,
+    /// `started_at` to the millisecond, which `reported_since` needs to tell a
+    /// report filed in this lane's first second from the previous lane's.
+    /// Zero for a lane adopted or recorded by an older spoolway, which makes
+    /// `reported_since` compare whole seconds instead.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    started_at_ms: i64,
     pub(crate) last_progress: i64,
     output_hash: u64,
     /// Seconds this lane has been `LaneStatus::Working` since the last time
@@ -426,6 +432,7 @@ impl LaneRecord {
     fn adopted(now: i64) -> LaneRecord {
         LaneRecord {
             started_at: now,
+            started_at_ms: 0,
             last_progress: now,
             output_hash: 0,
             busy_s: 0,
@@ -1616,10 +1623,14 @@ impl<'a> Dispatcher<'a> {
                     ) {
                         Some(kind) => {
                             let task = &mut tasks[index];
+                            // One reading for both clocks, so they cannot
+                            // name different seconds across a boundary.
+                            let now = chrono::Utc::now();
                             task.front.last_report = Some(crate::task::LastReport {
                                 step: step.id.clone(),
                                 outcome: outcome.as_str().to_string(),
-                                at: chrono::Utc::now().timestamp(),
+                                at: now.timestamp(),
+                                at_ms: now.timestamp_millis(),
                                 blocked: destination == crate::pipeline::BLOCKED,
                             });
                             task.front.paused_at = Some(step.id.clone());
@@ -1804,9 +1815,10 @@ impl<'a> Dispatcher<'a> {
                         // step, so either it asked something and is waiting for an
                         // answer in its own pane, or it stopped without reporting.
                         // A lane that reported never gets here: `finish_lanes`
-                        // reads `last_report.at` against its `started_at` ahead
-                        // of this arm, which needs no counter and nothing
-                        // cleared, and keeps it out of `owned`.
+                        // reads the report's clock against the lane's start
+                        // (see `Task::reported_since`) ahead of this arm,
+                        // which needs no counter and nothing cleared, and
+                        // keeps it out of `owned`.
                         //
                         // Either way this pass no longer marks anything for
                         // the board to read back: `paused` means the stage
@@ -2596,11 +2608,13 @@ impl<'a> Dispatcher<'a> {
                 // over. A held lane is the exception to the exception:
                 // its report is what parked the task, and it is over only
                 // once the task has come back.
-                let reported = self
-                    .lanes
-                    .get(&lane.name)
-                    .zip(current)
-                    .is_some_and(|(record, task)| task.reported_since(record.started_at));
+                let reported =
+                    self.lanes
+                        .get(&lane.name)
+                        .zip(current)
+                        .is_some_and(|(record, task)| {
+                            task.reported_since(record.started_at, record.started_at_ms)
+                        });
                 if !held && !reported {
                     continue;
                 }
@@ -4367,10 +4381,14 @@ impl<'a> Dispatcher<'a> {
                         Some(note) => format!("started {name} — {note}"),
                         None => format!("started {name}"),
                     };
+                    // One reading for both start clocks, so they cannot name
+                    // different seconds across a boundary.
+                    let launched = chrono::Utc::now();
                     self.lanes.insert(
                         name.clone(),
                         LaneRecord {
-                            started_at: now_secs(),
+                            started_at: launched.timestamp(),
+                            started_at_ms: launched.timestamp_millis(),
                             last_progress: now_secs(),
                             output_hash: 0,
                             busy_s: 0,
@@ -10927,6 +10945,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 5_000,
+            at_ms: 0,
             blocked: false,
         });
         reported.set_stage("review", Some("done"));
@@ -14591,6 +14610,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -14658,6 +14678,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -14723,6 +14744,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -17362,6 +17384,7 @@ mod tests {
                 step: crate::pipeline::BLOCKED.into(),
                 outcome: "block".into(),
                 at: started_at + 30,
+                at_ms: 0,
                 blocked: false,
             });
         });
@@ -17411,6 +17434,90 @@ mod tests {
             !report.actions.iter().any(|line| line.contains("stuck at")),
             "must not be escalated: {:?}",
             report.actions
+        );
+    }
+
+    /// A report filed in the same whole second the lane started still counts
+    /// as that lane's report. Scripted lanes report this fast, and a lane
+    /// that has reported must be finished, never reminded to report again.
+    // covers: dispatch.lane_quiet — a lane that reported at once is not read as silent
+    #[test]
+    fn a_report_filed_in_the_lanes_first_second_is_not_answered_with_a_reminder() {
+        let (repo, _root_guard) = unattended_fixture("same-second-report");
+        let pipelines = Pipelines::builtin();
+
+        // `blocked` routes a `--block` report back onto itself, which is the
+        // shape where the dispatcher has only the report's clock to go by.
+        // Both stamps sit in the past, in one whole second, so the
+        // whole-second compare ties however the test is timed. The fresh
+        // lane the first pass launches starts after them, and so cannot
+        // count this report as its own.
+        let second = now_secs() - 5;
+        let started_at_ms = second * 1000 + 100;
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            // Stamped the way `spoolway report` stamps it, within the same
+            // whole second the lane started.
+            f.last_report = Some(crate::task::LastReport {
+                step: crate::pipeline::BLOCKED.into(),
+                outcome: "block".into(),
+                at: second,
+                at_ms: second * 1000 + 500,
+                blocked: false,
+            });
+        });
+
+        {
+            // Silent for far longer than `lane_quiet`, so a lane read as
+            // unreported would be reminded on this very pass.
+            let mut record = LaneRecord::adopted(second);
+            record.started_at_ms = started_at_ms;
+            record.last_progress = second - 60;
+            let mut records = HashMap::new();
+            records.insert(lane_name(crate::pipeline::BLOCKED, "demo"), record);
+            save_lane_records(&repo, &records).unwrap();
+        }
+
+        let mux = FakeMux::new(vec![lane(
+            &repo,
+            &lane_name(crate::pipeline::BLOCKED, "demo"),
+            LaneStatus::Done,
+        )]);
+        // The report counts: the lane is finished and the task, still on
+        // `blocked`, is handed to a fresh lane.
+        let before_ms = chrono::Utc::now().timestamp_millis();
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            !report.actions.iter().any(|line| line.contains("reminded")),
+            "a lane that reported must not be reminded to report: {:?}",
+            report.actions
+        );
+        assert!(
+            report.actions.iter().any(|line| line.contains("kept")),
+            "finished like any other reported lane: {:?}",
+            report.actions
+        );
+        // The one prompt is the fresh lane's launch brief, not a reminder.
+        assert_eq!(mux.did("prompt").len(), 1, "{:?}", mux.calls());
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+
+        // A launch stamps the millisecond clock the report is read against.
+        // Left at 0 it would quietly send every launched lane back to the
+        // whole-second compare.
+        let fresh = load_lane_records(&repo)
+            .remove(&lane_name(crate::pipeline::BLOCKED, "demo"))
+            .expect("the fresh lane is recorded");
+        assert!(
+            fresh.started_at_ms >= before_ms,
+            "a launched lane stamps started_at_ms: {} < {before_ms}",
+            fresh.started_at_ms
+        );
+        assert_eq!(
+            fresh.started_at_ms / 1000,
+            fresh.started_at,
+            "both start clocks name the same second"
         );
     }
 
@@ -18923,6 +19030,7 @@ mod tests {
                 step: "implement".into(),
                 outcome: "pass".into(),
                 at: 0,
+                at_ms: 0,
                 blocked: false,
             });
         });
