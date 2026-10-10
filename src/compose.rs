@@ -685,7 +685,7 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
         !blocked && step.destination(Outcome::Fail) == step.destination(Outcome::Block);
 
     // Where this task actually stopped — `blocked` alone, and only to ask
-    // two questions of it: whether the first gated step at or after there
+    // two questions of it: whether the first gated step on the route from there
     // bounds `--stage`, and whether the origin itself is that step, in which
     // case a plain `--pass` is held there too. Empty for the sample task
     // `spoolway prompt contract` renders with no real task, which carries no

@@ -248,7 +248,10 @@ lane without a session, set `blocked_session = false` in the config.
   `paused` at that step's own gate, as if that step's own lane had reported the pass. A gated
   command step is handed back to itself and runs again, because its command never exited 0.
   `--stage` may not name a step past a gate this task's pass has not yet answered for. Naming the
-  gate step itself, or a step before it, still works. See [Gates](#gates).
+  gate step itself, or a step before it, still works. A step is past the gate when the `on_pass`
+  route from the blocked step reaches it after the gate. The order of the steps in the file does
+  not matter. A step the route never reaches counts as past the gate when the file lists it after
+  both the gate and the blocked step. See [Gates](#gates).
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.

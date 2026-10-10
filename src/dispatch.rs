@@ -21382,6 +21382,33 @@ mod tests {
         );
     }
 
+    /// The gate the contract names follows the route, not the order the file
+    /// lists steps in: here `review` is written first, ahead of the step the
+    /// task is blocked on, yet it is the gate `implement` runs into.
+    #[test]
+    fn the_unblockers_contract_names_the_gate_on_the_route_not_in_the_file() {
+        let (repo, _root_guard) = fixture("unblocker-gate-contract-route");
+        let yaml = "steps:\n  \
+                     - id: review\n    agent: pi\n    gate: true\n    on_pass: ship\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: ship\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("out_of_order", yaml).unwrap();
+        let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        let task = reload(&add_task_with(
+            &repo,
+            "tab-shell",
+            crate::pipeline::BLOCKED,
+            |f| f.blocked_from = Some("implement".into()),
+        ));
+
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        assert!(
+            contract.contains("and never one past `review`."),
+            "{contract}"
+        );
+    }
+
     /// A gated `run:` step is not held for a person on an unblocker's pass:
     /// `route` hands it straight back to run again. The contract therefore
     /// leaves out the line that says a person opens the pane.

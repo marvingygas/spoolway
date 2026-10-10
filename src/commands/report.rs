@@ -477,17 +477,17 @@ pub fn route(
         // unblocker names one — bounded by `steps_run`, the steps this task
         // has actually run a lane at, so a `--stage` can send it back onto
         // ground already covered but never somewhere it was never staffed.
-        // And never past a gate: `gate_between` reads the same pipeline
-        // order `steps_run` already bounds this to, from `origin` (inclusive,
-        // so naming the gate step itself is still allowed — it runs again
-        // and its own gate holds its own pass) up to but not including
-        // `named` (exclusive, so naming a step that is itself gated is never
-        // refused for being "past" its own gate). Checked first, ahead of
-        // `steps_run`'s own bound below: a `--stage` naming a step this task
-        // has genuinely never run is still a step past an unanswered gate,
-        // and the gate is the more useful refusal to give — it says what is
-        // actually in the way, where "has never been at" would read as a
-        // typo rather than a wall.
+        // And never past a gate: `gate_between` follows the route from
+        // `origin` (each step's `on_pass`), not the order the file lists
+        // steps in. Only a step off that route, such as an `on_fail` branch,
+        // is placed by file order instead. The gate step itself may still be
+        // named (it runs again and its own gate holds its own pass), and so
+        // may a step that is itself gated, which is never refused for being
+        // past its own gate. Checked first, ahead of `steps_run`'s own bound
+        // below: a `--stage` naming a step this task has genuinely never run
+        // is still a step past an unanswered gate, and the gate is the more
+        // useful refusal to give — it says what is actually in the way, where
+        // "has never been at" would read as a typo rather than a wall.
         let target = match stage {
             Some(named) => {
                 let run = steps_run(task, pipeline);
@@ -497,13 +497,9 @@ pub fn route(
                     // `--stage` from naming, so listing it back as an
                     // alternative would contradict the refusal in the same
                     // breath.
-                    let gate_idx = pipeline.steps.iter().position(|s| s.id == gate_step);
                     let allowed: Vec<&String> = run
                         .iter()
-                        .filter(|s| {
-                            let idx = pipeline.steps.iter().position(|step| step.id == **s);
-                            matches!((idx, gate_idx), (Some(i), Some(g)) if i <= g)
-                        })
+                        .filter(|s| !is_past_gate(pipeline, &origin, &gate_step, s))
                         .collect();
                     // `origin` is what this task's pass stands in for;
                     // `gate_step` is whose gate answers for it — the same
@@ -1361,44 +1357,99 @@ pub fn gate_hold(task: &Task, step: &Step, outcome: Outcome, destination: &str) 
     None
 }
 
-/// The first gated step in the pipeline's own order, at or after `origin` —
-/// what an unblocker's `--pass` may not be carried past, whether by the
-/// ordinary `on_pass` road or by a `--stage` naming a step further on. `None`
-/// when `origin` no longer names a step this pipeline has, or nothing from
-/// there on is gated.
+/// The steps a pass from `origin` would run through, in the order `on_pass`
+/// leads to them, starting with `origin` itself.
+///
+/// This is the route, which is not the order the steps are written in the
+/// file: that order only schedules them, so a step listed last can still sit
+/// in the middle of the route. The walk stops at a step with no `on_pass`, one
+/// the pipeline does not define, `blocked`, or one it has already visited, so
+/// a pipeline that loops back on itself still ends. Empty when `origin` is not
+/// a step this pipeline has.
+fn route_from<'a>(pipeline: &'a Pipeline, origin: &str) -> Vec<&'a Step> {
+    let mut route: Vec<&Step> = Vec::new();
+    let mut next = Some(origin);
+    while let Some(id) = next {
+        let Some(step) = pipeline.step(id) else {
+            break;
+        };
+        if route.iter().any(|seen| seen.id == step.id) {
+            break;
+        }
+        route.push(step);
+        next = step
+            .on_pass
+            .as_deref()
+            .filter(|id| *id != crate::pipeline::BLOCKED);
+    }
+    route
+}
+
+/// The first gated step on the route from `origin`, `origin` included — what
+/// an unblocker's `--pass` may not be carried past, whether by the ordinary
+/// `on_pass` road or by a `--stage` naming a step further on. `None` when
+/// `origin` no longer names a step this pipeline has, or nothing on the
+/// route from there on is gated.
 ///
 /// Used directly by `compose::report_contract`, which names it in the
 /// `--stage` form's own "never one past" clause before a lane has reported
 /// anything at all, and indirectly by [`route`]'s own `--stage` refusal,
 /// through [`gate_between`], which is built on this.
 pub fn first_gated_from(pipeline: &Pipeline, origin: &str) -> Option<String> {
-    let idx = pipeline.steps.iter().position(|step| step.id == origin)?;
-    pipeline.steps[idx..]
-        .iter()
+    route_from(pipeline, origin)
+        .into_iter()
         .find(|step| step.gate)
         .map(|step| step.id.clone())
 }
 
-/// [`first_gated_from`], bounded above by `target` (exclusive) — `None` when
-/// the first gated step at or after `origin` is `target` itself, lies at or
-/// past it, or `target` is not forward of `origin` at all, so a `--stage`
-/// naming an already-run step behind `origin`, or the gated step itself, is
-/// never refused by this.
+/// [`first_gated_from`], bounded by `target` — the gate's id when `target` is
+/// past that gate (see [`is_past_gate`]), and `None` otherwise: the gated step
+/// itself or a step before it, including a step behind `origin` that the
+/// route leads back through `origin`.
 ///
 /// What [`route`] refuses a `--stage` for: naming a step this bounds is
 /// naming one past a gate this task's pass has not answered for.
 pub fn gate_between(pipeline: &Pipeline, origin: &str, target: &str) -> Option<String> {
-    let target_idx = pipeline.steps.iter().position(|step| step.id == target)?;
-    let origin_idx = pipeline.steps.iter().position(|step| step.id == origin)?;
-    if target_idx <= origin_idx {
-        return None;
-    }
     let gate_step = first_gated_from(pipeline, origin)?;
-    let gate_idx = pipeline
-        .steps
-        .iter()
-        .position(|step| step.id == gate_step)?;
-    (gate_idx < target_idx).then_some(gate_step)
+    is_past_gate(pipeline, origin, &gate_step, target).then_some(gate_step)
+}
+
+/// Whether `candidate` is past the gate at `gate_step`, the first gate on the
+/// route from `origin` — the steps a `--stage` must not name, and a refusal
+/// must not offer back.
+///
+/// A step on the route is past the gate when it comes after it there, whatever
+/// order the file lists the two in. A step off the route, which only an
+/// `on_fail` branch or an already-run step behind `origin` can be, has no
+/// place on it to compare. If its own `on_pass` route reaches `origin` before
+/// the gate, it is a step behind `origin` and runs before the gate, so it is
+/// not past it, however the file lists it. Any other off-route step is
+/// decided by the file order: past the gate when the file lists it after both
+/// the gate and `origin`. That keeps a branch step such as a `fix-review`
+/// loop refused when the pipeline is written in route order, where it always
+/// sat after the gate, instead of letting it carry the task around the gate
+/// on its own `on_pass`. When `origin` is itself the gate, a step behind it
+/// and a branch that passes back to it look the same, so the file order
+/// decides there too.
+fn is_past_gate(pipeline: &Pipeline, origin: &str, gate_step: &str, candidate: &str) -> bool {
+    let route = route_from(pipeline, origin);
+    let gate_on_route = route.iter().position(|step| step.id == gate_step);
+    let on_route = route.iter().position(|step| step.id == candidate);
+    if let (Some(g), Some(i)) = (gate_on_route, on_route) {
+        return i > g;
+    }
+    let from_candidate = route_from(pipeline, candidate);
+    let reaches = |id: &str| from_candidate.iter().position(|step| step.id == id);
+    if let (Some(o), Some(g)) = (reaches(origin), reaches(gate_step))
+        && o < g
+    {
+        return false;
+    }
+    let file_idx = |id: &str| pipeline.steps.iter().position(|step| step.id == id);
+    match (file_idx(candidate), file_idx(gate_step), file_idx(origin)) {
+        (Some(c), Some(g), Some(o)) => c > g && c > o,
+        _ => false,
+    }
 }
 
 /// The three choices a stop offers, key first and then the command that does
@@ -4145,6 +4196,215 @@ mod tests {
              asked for this by name"
         );
         assert_eq!(task.front.paused_at, None);
+    }
+
+    /// A pipeline with the route `implement -> review (gate) -> ship` whose
+    /// file lists `implement, ship, review`, or with the route `implement ->
+    /// test -> review (gate) -> ship` whose file lists `implement, review,
+    /// test, ship`. `route_first` picks which.
+    fn out_of_order_pipelines(route_first: bool) -> Pipelines {
+        let yaml = if route_first {
+            "steps:\n  \
+              - id: implement\n    agent: pi\n    on_pass: review\n  \
+              - id: ship\n    agent: pi\n    on_pass: done\n  \
+              - id: review\n    agent: pi\n    gate: true\n    on_pass: ship\n  \
+              - id: blocked\n    agent: pi\n    session: true\n"
+        } else {
+            "steps:\n  \
+              - id: implement\n    agent: pi\n    on_pass: test\n  \
+              - id: review\n    agent: pi\n    gate: true\n    on_pass: ship\n  \
+              - id: test\n    agent: pi\n    on_pass: review\n  \
+              - id: ship\n    agent: pi\n    on_pass: done\n  \
+              - id: blocked\n    agent: pi\n    session: true\n"
+        };
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// A pipeline with the route `implement -> review (gate) -> ship` and a
+    /// step `prepare` that passes to `implement`, listed after the gate.
+    fn prepare_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+              - id: implement\n    agent: pi\n    on_pass: review\n  \
+              - id: review\n    agent: pi\n    gate: true\n    on_pass: ship\n  \
+              - id: prepare\n    agent: pi\n    on_pass: implement\n  \
+              - id: ship\n    agent: pi\n    on_pass: done\n  \
+              - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// Blocks `tab-shell` at `implement` after banking `banked`, then reports
+    /// an unblocker's `--pass --stage <stage>` against `pipelines`. Returns
+    /// the result and the task's stage afterwards.
+    fn staged_pass_result(
+        name: &str,
+        pipelines: &Pipelines,
+        banked: &[(&str, &str)],
+        stage: &str,
+    ) -> (anyhow::Result<()>, String) {
+        let (repo, _root_guard) = unattended_fixture(name);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+
+        let mut task = queued(&repo, "tab-shell");
+        for (from, to) in banked {
+            task.bank_launch(from, to);
+        }
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let result = report(
+            &repo,
+            pipelines,
+            &ReportArgs {
+                task: Some("tab-shell".into()),
+                stage: Some(stage.into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("done".into()),
+                handoff: vec![],
+            },
+            None,
+        );
+        (result, queued(&repo, "tab-shell").stage().to_string())
+    }
+
+    /// Which steps lie past a gate is decided by the route the steps' `on_pass`
+    /// names, not by the order the file lists them in. Here the route is
+    /// `implement -> review (gate) -> ship`, so `ship` is past `review`'s
+    /// gate however far up the file it is written, and the task stays on
+    /// `blocked`.
+    #[test]
+    fn a_staged_pass_may_not_name_a_step_past_a_gate_on_the_route_whatever_the_file_order() {
+        let (result, stage) = staged_pass_result(
+            "staged-pass-route-past-gate",
+            &out_of_order_pipelines(true),
+            &[
+                (crate::pipeline::QUEUED, "implement"),
+                ("implement", "review"),
+                ("review", "ship"),
+            ],
+            "ship",
+        );
+        let err = format!("{:#}", result.expect_err("`ship` is past `review`'s gate"));
+        assert!(err.contains("`review` after it is gated"), "{err}");
+        assert!(err.contains("may not name a step past it"), "{err}");
+        assert_eq!(stage, crate::pipeline::BLOCKED);
+    }
+
+    /// The other direction: a step the route runs before the gate may be
+    /// named, even when the file lists it after the gate. Here the route is
+    /// `implement -> test -> review (gate) -> ship`, so `test` is accepted.
+    #[test]
+    fn a_staged_pass_may_name_a_step_before_a_gate_on_the_route_whatever_the_file_order() {
+        let (result, stage) = staged_pass_result(
+            "staged-pass-route-before-gate",
+            &out_of_order_pipelines(false),
+            &[
+                (crate::pipeline::QUEUED, "implement"),
+                ("implement", "test"),
+            ],
+            "test",
+        );
+        result.expect("`test` lies before `review`'s gate on the route");
+        assert_eq!(stage, "test");
+    }
+
+    /// A pipeline written in route order whose gate has an `on_fail` branch
+    /// listed after it: `implement -> review (gate) -> ship`, with `review`
+    /// failing to `branch`. `rejoin_gate` makes the branch's pass go back to
+    /// `review`; otherwise it goes straight to `ship`, around the gate.
+    fn branch_pipelines(rejoin_gate: bool) -> Pipelines {
+        let on_pass = if rejoin_gate { "review" } else { "ship" };
+        let yaml = format!(
+            "steps:\n  \
+              - id: implement\n    agent: pi\n    on_pass: review\n  \
+              - id: review\n    agent: pi\n    gate: true\n    on_pass: ship\n    \
+              on_fail: branch\n  \
+              - id: branch\n    agent: pi\n    loop: 3\n    on_pass: {on_pass}\n  \
+              - id: ship\n    agent: pi\n    on_pass: done\n  \
+              - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        let pipeline = crate::pipeline::Pipeline::parse("default", &yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// In a pipeline written in route order, a step only an `on_fail` branch
+    /// reaches is still refused when it is listed after the gate, as it was
+    /// when the guard read the file order. Reading the route alone would call
+    /// it off the route and let it through, and a branch whose pass skips the
+    /// gate would then carry the task around it. The refusal also keeps
+    /// offering only the steps at or before the gate.
+    #[test]
+    fn a_staged_pass_may_not_name_an_on_fail_branch_listed_after_the_gate() {
+        for rejoin_gate in [true, false] {
+            let (result, stage) = staged_pass_result(
+                "staged-pass-branch-after-gate",
+                &branch_pipelines(rejoin_gate),
+                &[
+                    (crate::pipeline::QUEUED, "implement"),
+                    ("implement", "review"),
+                    ("review", "branch"),
+                ],
+                "branch",
+            );
+            let err = format!(
+                "{:#}",
+                result.expect_err("`branch` is listed after the gate")
+            );
+            assert!(err.contains("`review` after it is gated"), "{err}");
+            assert!(
+                err.contains("Name `review` or a step before it: `implement`, `review`"),
+                "{err}"
+            );
+            assert_eq!(stage, crate::pipeline::BLOCKED);
+        }
+    }
+
+    /// A step that sits behind the origin on the route is before the gate,
+    /// even when the file lists it after the gate: `prepare` passes to
+    /// `implement`, the step the task was blocked at, so it may be named. The
+    /// refusal for naming `ship` offers it back, too. Without the route check
+    /// the file order alone called `prepare` past `review`'s gate.
+    #[test]
+    fn a_staged_pass_may_name_a_step_behind_the_origin_listed_after_the_gate() {
+        let banked = [
+            (crate::pipeline::QUEUED, "prepare"),
+            ("prepare", "implement"),
+        ];
+        let (result, stage) = staged_pass_result(
+            "staged-pass-behind-origin",
+            &prepare_pipelines(),
+            &banked,
+            "prepare",
+        );
+        result.expect("`prepare` runs before `implement` and the gate");
+        assert_eq!(stage, "prepare");
+
+        let (result, _) = staged_pass_result(
+            "staged-pass-behind-origin-offered",
+            &prepare_pipelines(),
+            &banked,
+            "ship",
+        );
+        let err = format!("{:#}", result.expect_err("`ship` is past `review`'s gate"));
+        assert!(
+            err.contains("Name `review` or a step before it: `implement`, `prepare`"),
+            "{err}"
+        );
     }
 
     /// `--stage` is bounded to `--pass` off `blocked` itself, the same as
