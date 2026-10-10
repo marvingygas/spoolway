@@ -87,7 +87,8 @@ $ spoolway queue add --from mine.md
 mine.md sets `run:`, which spoolway sets on every task itself — remove it from the task
 ```
 
-Every other dispatcher field in a task is dropped.
+Every other dispatcher field in a task is dropped, including `hook_paused` and
+`missing_start_branch`.
 
 A label in `labels:` holding whitespace or a comma is refused, naming the task and the label,
 since a hook reads the whole list comma-joined.

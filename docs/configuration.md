@@ -275,7 +275,8 @@ price_max_age_days = 30
 | `price_max_age_days` | `30` | Days before `spoolway doctor` notes that the price table is old. `0` turns the note off. Refresh with `spoolway models refresh`. See [Pricing](cost.md#pricing). |
 
 Archiving a task removes its files under `tracking/`, `commands/` and its session home at
-once. `queue add` cannot name a `depends_on` that was swept out of `archive/`, which happens
+once. Moving a task back to the pending directory stops its running hooks and removes its files
+under `tracking/`, so the next queue fires each hook again. `queue add` cannot name a `depends_on` that was swept out of `archive/`, which happens
 only when `archive_retention_days` is set.
 
 ## `[watch]` — directories whose own sessions count as this project's spend

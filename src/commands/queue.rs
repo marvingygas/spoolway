@@ -1108,6 +1108,11 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.parked_from = None;
     front.escalated = false;
     front.parked_by_stop = false;
+    // Both are a dispatcher's record of why it paused a task. Left on a
+    // submitted document, `hook_paused: done` would send the task's first
+    // block and `resume` straight to `done`, past every step it never ran.
+    front.hook_paused = None;
+    front.missing_start_branch = None;
     front.resume = None;
     front.restart = None;
     front.branch = Some(format!("task/{}", front.id));
@@ -17823,6 +17828,47 @@ body\n";
         )
         .unwrap();
         assert!(repo.queue_dir().join("login.md").exists());
+    }
+
+    /// A hook-paused task carried back to pending loses `hook_paused:` and
+    /// `missing_start_branch:`, and its hook run files, so queuing it again
+    /// fires the hooks over instead of reading the old exit codes.
+    #[test]
+    fn queue_unqueue_forgets_hook_state_of_the_old_run() {
+        let (repo, _root_guard) = fixture("queue-unqueue-hook-state");
+        add(&repo, "login", &[]);
+        let mut task = queued(&repo, "login");
+        task.front.hook_paused = Some("done".to_string());
+        task.front.missing_start_branch = Some("gone".to_string());
+        task.save().unwrap();
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        let exit = repo.tracking_dir().join("login · queued.exit");
+        let other = repo.tracking_dir().join("login-two · queued.exit");
+        std::fs::write(&exit, "1\n").unwrap();
+        std::fs::write(&other, "1\n").unwrap();
+
+        queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_args("login")).unwrap();
+
+        let text = std::fs::read_to_string(repo.pending_dir().join("login.md")).unwrap();
+        assert!(!text.contains("hook_paused"), "{text}");
+        assert!(!text.contains("missing_start_branch"), "{text}");
+        assert!(!exit.exists(), "the old run's exit code must be gone");
+        assert!(other.exists(), "another task's run must be left alone");
+    }
+
+    /// A submitted task carrying `hook_paused:` or `missing_start_branch:`
+    /// is queued without them, so a later block and `resume` never takes
+    /// the road straight to `done`.
+    #[test]
+    fn parse_submission_drops_the_pause_records() {
+        let doc = task_text(
+            "solo",
+            "group: g\nhook_paused: done\nmissing_start_branch: gone\n",
+            BODY,
+        );
+        let task = parse_submission("solo.md", &doc, Some("master")).unwrap();
+        assert_eq!(task.front.hook_paused, None);
+        assert_eq!(task.front.missing_start_branch, None);
     }
 
     /// `--all` carries every not-started task back at once, with no

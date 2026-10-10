@@ -338,8 +338,9 @@ A task that is still `queued`, or has a live lane or running command on its step
 
 ### `spoolway queue unqueue <task>`
 
-Carry a not-started task back to the pending directory, with every reserved key
-stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
+Carry a not-started task back to the pending directory, with every reserved key,
+`hook_paused:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
+files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
 carries the same task and every unstarted task that depends on it; this command has no panel
 to list a chain on, so it refuses instead.
 
