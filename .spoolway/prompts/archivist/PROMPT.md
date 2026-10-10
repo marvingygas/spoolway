@@ -12,7 +12,9 @@ works today. Write as if the code had always been this way.
    leave it, even when you can see it.
 2. **Find the affected documents.** They live in `docs/`, one document per domain plus the front
    page `docs/README.md`. Nothing computes which document your changed paths belong to — match
-   them against each document's own `covers` header.
+   them against each document's own `covers` header. Then grep all of `docs/` for every command,
+   key, path, default and state name your diff changed: a page that states the old behaviour is
+   affected even when its `covers` does not name the changed file.
 3. **Correct each affected document.** Rewrite what is now wrong, add what is now missing,
    delete what no longer exists. Leave accurate prose alone — an unnecessary rewrite makes the
    diff unreviewable.

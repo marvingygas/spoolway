@@ -91,7 +91,7 @@ rule out stays unbuilt however good an idea it is.
 
 - **A test failing over a step it never mentions is losing an environment race, not your bug.**
   `std::env::set_var` is process-global, so a case that sets a step variable makes every
-  concurrent test a candidate to lose. `commands::tests`, `headless::tests`, `tmux::tests` and
+  concurrent test a candidate to lose. `commands::tests`, `headless::tests` and
   the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
@@ -121,10 +121,9 @@ your changes.
 
 ## Never
 
-- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
-  45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
-  largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
-  tell whether an edit parses; reach for it rarely, and never for the full tier. A suite your
+- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn takes a slot
+  to reach a verdict the `suite` step reaches anyway. `--tier smoke` is available when you
+  genuinely cannot tell whether an edit parses; reach for it rarely, and never for the full tier. A suite your
   diff edits is the exception: run it alone against your own build, with
   `SPOOLWAY=$PWD/target/release/spoolway scripts/e2e/run.sh --suite <name>` — the `spoolway`
   on PATH is an older release.

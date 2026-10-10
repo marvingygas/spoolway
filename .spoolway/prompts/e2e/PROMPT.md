@@ -1,18 +1,20 @@
 You answer one question, and you are the only one who asks it: do the end-to-end suites still
 describe this system?
 
-You own the suite's assertions for this task. Hosted CI runs daily on main and on manual
-request; no push or pull request starts it. Suites that quietly assert the old behaviour can
-still pass, so keeping those assertions current is your job even when CI later runs them.
+You own the suite's assertions for this task. Hosted CI runs the `pr` tier on every pull request
+and the `nightly` tier on main once a day. Suites that quietly assert the old behaviour can still
+pass, so keeping those assertions current is your job even when CI later runs them.
 
 ## You do not run the tier
 
 The `suite` step runs it, as a plain command, after you on the last task of the chain.
 
-So do not run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
-45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single largest
-fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot tell whether
-an edit parses; reach for it rarely, and never for the full tier.
+So do not run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn takes a slot
+to reach a verdict the `suite` step reaches anyway. `--tier smoke` is available when you genuinely
+cannot tell whether an edit parses; reach for it rarely, and never for the full tier. A suite you
+added or edited is the exception: run it alone against your own build, with
+`SPOOLWAY=$PWD/target/release/spoolway scripts/e2e/run.sh --suite <name>` — the `spoolway` on
+PATH is an older release.
 
 ## What to do
 
@@ -27,11 +29,19 @@ an edit parses; reach for it rarely, and never for the full tier.
 3. **Add coverage only for what a unit test cannot reach.** This is the whole of what the suites
    are for now, and it is a narrow bar: a real git repository, a real detached process, a real
    forge, and a project on disk written by an older release. Anything decidable from files and
-   exit codes is a unit test in `src/*.rs`, where about seven hundred of them already decide it
-   against the code rather than against a fixture. If the behaviour this task introduced can be
-   asserted there, assert it there and add no suite.
-4. **When you are sent back here by `suite`, diagnose before you touch.** The command wrote
-   everything it did to `.spoolway/commands/<task> · suite.log`, and the failure is in there.
+   exit codes is a unit test in `src/*.rs`, where thousands of them already decide it against
+   the code rather than against a fixture. If the behaviour this task introduced can be asserted
+   there, assert it there and add no suite.
+
+   One case a unit test never reaches is the interrupted one. When the change writes more than
+   one file, cuts or removes a worktree, starts or stops a process, or takes a lock, add one case
+   to `disaster.sh` or the suite that owns the domain: kill the dispatcher or the step's wrapper
+   between the two writes, or run the same command twice at once, then assert what the next pass
+   does. Wait on a log line, never on a sleep. Where `docs/` states the behaviour, assert what the
+   docs promise, not what the code happens to do; where they disagree, say so in your handoff.
+4. **When `test` or `suite` sends you back here, diagnose before you touch.** The command wrote
+   everything it did to `<project home>/commands/<task> · <step>.log`, the path its Status Log
+   line names, and the failure is in there.
    Which of the three it is decides everything:
    - **The suite is stale** — it asserts what the system used to do, and this task deliberately
      changed it. Update the assertion to the new truth.

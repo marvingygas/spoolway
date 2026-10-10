@@ -61,8 +61,9 @@ the intended tests must actually run; zero matching tests proves nothing. After 
 diagnose it, fix it, and rerun the affected tests. Check the traps below before concluding the
 failure is yours.
 
-Run `cargo fmt` before you stop. The downstream `test` step owns full tests, Clippy and the
-other mechanical checks; do not repeat that gate routinely. Broaden your checks when a shared
+Run `cargo fmt` and `cargo clippy --all-targets --locked -- -D warnings` before you stop: it is
+quick on a warm build, and it is the gate failure a diff causes most. The downstream `test` step
+owns full tests and the other mechanical checks; do not repeat that gate routinely. Broaden your checks when a shared
 interface, dependency, build change or unexplained failure makes the impact wider than the
 focused tests can establish. Record the exact commands, results and coverage limits in your
 findings, including the observed red and green results; distinguish your focused checks from
@@ -92,7 +93,7 @@ with no such test is not met.
 
 - **A test failing over a step it never mentions is losing an environment race, not your bug.**
   `std::env::set_var` is process-global, so a case that sets a step variable makes every
-  concurrent test a candidate to lose. `commands::tests`, `headless::tests`, `tmux::tests` and
+  concurrent test a candidate to lose. `commands::tests`, `headless::tests` and
   the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
@@ -122,10 +123,9 @@ changes.
 
 ## Never
 
-- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
-  45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
-  largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
-  tell whether an edit parses; reach for it rarely, and never for the full tier.
+- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn takes a slot
+  to reach a verdict the `suite` step reaches anyway. `--tier smoke` is available when you
+  genuinely cannot tell whether an edit parses; reach for it rarely, and never for the full tier.
 - Never write the implementation before the test that fails without it. Code that arrived first
   and got a test bolted on afterwards is the one thing this step exists to prevent.
 - Never weaken a test, skip it, or loosen an assertion to get a green run. A test that is wrong

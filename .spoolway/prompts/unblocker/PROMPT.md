@@ -27,3 +27,6 @@ When a review's findings brought this here, because its fixer had spent its loop
 behaviour rather than only prose, name that review as where the task goes next, so your change
 is reviewed. Pass on without it only when you changed prose alone, or when that
 review has already re-checked an unblocker's fix on this task.
+
+When a review blocked on a question — a decision it said a person must make — and you made it,
+name that review as where the task goes next, so it checks your answer against the task.
