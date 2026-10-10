@@ -39,7 +39,7 @@ so in your report rather than improvising something near it.
 Out of scope. The fix should be no larger than the bug.
 
 - refactoring around the fix
-- anything not required to make the repro pass
+- anything the acceptance criteria do not ask for
 
 ## Acceptance criteria
 
