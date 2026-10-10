@@ -63,7 +63,7 @@ pub struct Adapter {
 
     /// The argv template a lane of this kind is started with. Placeholders —
     /// `{model}`, `{prompt_file}`, `{task_file}`, `{worktree}`, `{repo}`,
-    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{session_id}` — are
+    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{worktree_git_dir}`, `{session_id}` — are
     /// substituted by [`crate::config::AgentProfile::render_args`] from what a lane start
     /// already computes; see that function's doc comment for what each one
     /// carries. Empty on a kind nobody has wired up yet — a profile naming
@@ -736,6 +736,14 @@ pub const ADAPTERS: &[Adapter] = &[
             // `crate::repo::git_dir`.
             "--add-dir",
             "{git_dir}",
+            // The sandbox also makes `<repo>/.git/worktrees/<name>`, the
+            // linked worktree's own git directory, read-only though it sits
+            // inside the grant above: `git add` fails creating `index.lock`
+            // there. Granted by name; in a checkout that is not a linked
+            // worktree it is the same directory as `{git_dir}`. See
+            // `crate::repo::worktree_git_dir`.
+            "--add-dir",
+            "{worktree_git_dir}",
             // codex checks for a newer release of itself on startup, and a
             // newer one stops the lane dead: `✨ Update available! 0.153.4 ->
             // 0.153.6`, then `1. Update now (runs npm install -g
