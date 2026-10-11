@@ -532,7 +532,10 @@ works "enter on the question queues the group" \
 works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"
 has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
-has "and the result popup names what was created" "╭─ issues created " "$ASK_YES"
+has "and the result popup says the hook ran" "Hook executed successfully" "$ASK_YES"
+has "above the queued list" "╭─ queued " "$ASK_YES"
+lacks "with no ticket rows" "issues created" "$ASK_YES"
+lacks "and the untracked popup carries no success line" "Hook executed successfully" "$ASK_N"
 
 # -------------------------------------------- tracking off: no hook, ever
 # Ticking a group above proved the hook never runs at `open`. This is this task's own

@@ -254,10 +254,13 @@ group's tasks the batch queues. Nothing starts ticked.
 | `enter` | Queues the batch. A ticked group's tasks get `tracking: off` written onto them and never reach the hook. Every other group's tickets are opened. |
 | `esc` | Returns to the queue screen with nothing queued. |
 
-When no group has a task without a `ticket:`, no popup opens. Once the hook runs, a popup fills
-in each task's row as the hook answers it and takes `enter` only once every row is done.
-Queueing a routine from the routines tab asks the same question. A trial never asks and opens
-no ticket. See
+When no group has a task without a `ticket:`, no popup opens. While the hook runs, a `running
+hook` popup shows one line, `running the hook: <n> of <total> tasks`. `<total>` counts the tasks
+the hook is called for, so a ticked group's tasks are not in it. The `queued` popup then opens on
+`Hook executed successfully`, followed by `queued <n> tasks`, every queued id and the dispatcher
+line. When every group was ticked, the hook is never called and the popup has no success line.
+Queueing a routine from the routines tab asks the same question and shows the same popups. A
+trial never asks and opens no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`
@@ -320,7 +323,7 @@ failure there refuses the whole batch. See
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`
 and a task's issue reads `task issue`. The status is `created`, `kept` or `FAILED`. The queue
-screen's `opening issues` and `issues created` popups use the same words.
+screen does not list these rows.
 
 ```
 issue_tracking: opening tickets for group `cart`
