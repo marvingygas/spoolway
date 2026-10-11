@@ -159,14 +159,30 @@ board's branch.
 | `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
-| `g` | With the tasks pane focused, set or clear a `gate_at` on the highlighted task |
-| `o` | With the tasks pane focused, open the highlighted task in your editor |
+| `o` | Open the options menu of the row the focused pane highlights, titled with its name |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show or hide done groups. A queued group never appears |
-| `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
-| `s` | Save the highlighted group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
 
-`g` opens a picker of the steps the pending task will run. `enter` gates the task at the step
+The options menu follows focus. Over the tasks pane it offers these items for the highlighted
+task, in this order:
+
+| Item | What it does |
+|---|---|
+| `open` | Open the task in your editor |
+| `gate` | Set or clear a `gate_at` on the task |
+
+Over the groups pane it offers these for the highlighted group, and a group with no tasks says
+`nothing to do here`. To reach them from the tasks pane, press `tab` first.
+
+| Item | What it does |
+|---|---|
+| `trial` | Fork the group into a trial. See [Trials](planning.md#trials) |
+| `save as routine` | Save the group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
+
+`enter` runs the item under the cursor and `esc` closes the menu. See
+[Options menu](planning.md#options-menu).
+
+`gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
 with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 

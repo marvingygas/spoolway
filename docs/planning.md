@@ -135,11 +135,8 @@ group's tasks and what each waits on.
 | `esc` | With the tasks pane focused, return focus to the groups pane. |
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
-| `g` | With the tasks pane focused, open the gate picker on the highlighted task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
-| `o` | With the tasks pane focused, open the highlighted task in your editor. |
+| `o` | Open the options menu of the row the focused pane highlights. See [Options menu](#options-menu). |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
-| `t` | Fork the group as a trial. See [Trials](#trials). |
-| `s` | Save the highlighted group as a routine. See [Routines](#routines). |
 | `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
 
@@ -160,9 +157,38 @@ One more command:
 spoolway group list         # every group with open tasks, and which tasks are open
 ```
 
+### Options menu
+
+`o` opens a menu for the row the focused pane highlights, titled with that row's name. With
+the tasks pane focused it acts on the highlighted task. With the groups pane focused it acts
+on the highlighted group, even though the tasks pane shows that group's tasks too. To reach a
+group's actions from the tasks pane, press `tab` first. The cursor opens on the first item:
+
+```
+╭─ cart-totals ───────────────────╮
+│  > open                         │
+│    gate                         │
+│                                 │
+│  [enter] confirm   [esc] close  │
+╰─────────────────────────────────╯
+```
+
+| Item | Listed on | What it does |
+|---|---|---|
+| `open` | A task. | Open the task in your editor. |
+| `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
+| `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
+| `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |
+
+A group with no tasks opens the menu with `nothing to do here` over `[esc] close`. `enter`
+runs the item under the cursor, and `esc` closes the menu having done nothing. If a fresh read
+of the pending directory moves another row under the cursor while the menu is open, `enter`
+closes the menu and does nothing.
+
 ### Trials
 
-A trial runs the same group under several pipelines to compare them. Press `t` on a group.
+A trial runs the same group under several pipelines to compare them. With the groups pane
+focused, press `o` on a group and pick `trial`.
 
 1. The first screen lists every project pipeline with a tick. Pipelines the group's own tasks
    already name start ticked. `space` ticks or unticks the highlighted pipeline. A line under
@@ -209,32 +235,39 @@ highlighted routine's tasks.
 |---|---|
 | `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
 | `enter` | Queue every task under every ticked routine as one batch. |
-| `n` | Over the list, make a job from the highlighted routine. See [Jobs](jobs.md). |
-| `x` | Over the list, delete the highlighted routine and every job that points into it, after a popup. |
+| `o` | Open the options menu of the row the focused pane highlights. |
 | `tab` | Switch focus between the routine list and the tasks pane. |
-| `o` | Over the tasks pane, open the highlighted task in your editor. |
 | `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
 
-The tab reads the routine folders again each time you switch to it, so a routine saved with `s`
-a moment ago is already listed. It starts each visit fresh, with nothing ticked.
+The options menu follows focus the same way it does on the queue screen, and is titled with the
+highlighted row's name:
+
+| Item | Listed on | What it does |
+|---|---|---|
+| `new job` | A routine. | Make a job from the routine. See [Jobs](jobs.md). |
+| `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
+| `open` | A task in the tasks pane. | Open the task in your editor. |
+
+The tab reads the routine folders again each time you switch to it, so a routine saved with
+`save as routine` a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.
 
-Press `s` on a pending group to save it as a routine. The panel is prefilled with the group's
+Pick `save as routine` from a pending group's options menu to save it as a routine. The panel is prefilled with the group's
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
 run are removed on the way. A folder that already holds tasks is refused.
 
-Press `x` on a routine to delete it. The popup names the routine, its task count, and every
+Pick `delete` from a routine's options menu to delete it. The popup names the routine, its task count, and every
 job whose routine path is that folder or a task inside it. Each job is listed beside its
 store, `user` or `project`. Its one answer is `delete`: `enter` deletes those jobs first, then
 the folder. `esc` keeps everything. The folder leaves disk without touching git, so only git can bring it back. A job
 store that will not read refuses the delete before anything is removed, naming the store and
 `spoolway doctor`.
 
-A job queues a routine on a cron schedule. Press `n` on a routine to make one: it opens the
-jobs tab's own schedule and pipeline panels for the highlighted routine, and `enter` on the
-pipeline panel saves it. `esc` on either panel cancels and writes nothing. See [Jobs](jobs.md).
+A job queues a routine on a cron schedule. Pick `new job` from a routine's options menu to make
+one: it opens the jobs tab's own schedule and pipeline panels for that routine, and `enter` on
+the pipeline panel saves it. `esc` on either panel cancels and writes nothing. See [Jobs](jobs.md).
 
 ## Closing a plan out
 

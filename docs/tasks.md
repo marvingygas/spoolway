@@ -70,7 +70,7 @@ as JSON.
 | `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
 | `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and paused the task. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. |
 | `parked_by_stop` | the dispatcher | Set when the dispatch tab's stop popup's `interrupt them now` answer is what parked this task. The next start resumes it on its own and clears the flag; `spoolway resume` and `r` clear it too. |
-| `skip`, `trial`, `trial_group` | the queue screen's `t` picker | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
+| `skip`, `trial`, `trial_group` | the queue screen's `trial` menu item | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
 
 Keys not in this table are kept as they are, so a project can add its own metadata.

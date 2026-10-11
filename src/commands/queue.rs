@@ -3347,14 +3347,14 @@ enum Mode {
     Filter,
     /// Choosing a step off the highlighted task's own pipeline: `cursor`
     /// into [`gate_steps`], the steps the task will run, and `dependents`,
-    /// the count those steps were judged against — read once when `g`
-    /// opened the picker, by [`gate_dependents`].
+    /// the count those steps were judged against — read once when the
+    /// options menu's gate opened the picker, by [`gate_dependents`].
     Gate {
         cursor: usize,
         dependents: usize,
     },
-    /// Forking a whole group once per ticked pipeline — `t`'s own two
-    /// screens, ticking the pipelines and then choosing what each one
+    /// Forking a whole group once per ticked pipeline — the options menu's
+    /// trial, on two screens: ticking the pipelines and then choosing what each one
     /// skips. The whole of what was picked lives on the [`TrialState`] it
     /// carries, not split across `ScreenState` fields the way `gates` is: a
     /// trial never touches the outer selection, and `esc` off the first
@@ -3415,9 +3415,10 @@ enum Mode {
     /// the two tabs never share a visit. The folders and tasks themselves
     /// live in `run_screen`'s own `routines`, read fresh on every visit to
     /// the tab, the same way `groups` is read once up front rather than
-    /// carried on the mode, and read again after `x` deletes one.
+    /// carried on the mode, and read again after delete removes one.
     Routines(RoutineNav),
-    /// `x`'s own popup over the routines pane `nav` describes: the routine
+    /// The options menu's delete popup over the routines pane `nav`
+    /// describes: the routine
     /// and every job that points into it, deleted together on `enter` on its
     /// one answer, `delete` — see [`delete_routine`] — and all kept on
     /// `esc`. Every other key does nothing, so a stray keystroke can neither
@@ -3426,16 +3427,16 @@ enum Mode {
         nav: RoutineNav,
         target: RoutineDelete,
     },
-    /// `n`'s schedule and pipeline popups over the routines pane `nav`
-    /// describes, writing a job for the routine highlighted when `n` was
-    /// pressed. The popups, their keys and the save are the jobs tab's own —
+    /// The options menu's new job schedule and pipeline popups over the
+    /// routines pane `nav` describes, writing a job for the routine
+    /// highlighted when new job was picked. The popups, their keys and the save are the jobs tab's own —
     /// see [`super::jobs::NewJobWalk`] — so `esc` on either comes back here
     /// having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
     },
-    /// What `n` saved, over the routines pane — [`super::jobs::saved_notice`].
+    /// What new job saved, over the routines pane — [`super::jobs::saved_notice`].
     /// Apart from [`Mode::Outcome`] only in its key line, which names the one
     /// key the popup reads rather than the pane's under it. `enter` closes it
     /// back onto the pane.
@@ -3443,16 +3444,81 @@ enum Mode {
         nav: RoutineNav,
         notice: Notice,
     },
-    /// `s`'s own panel, over the pending screen: saving the named group's
-    /// tasks into `.spoolway/routines/<name>/`, `name` typed and edited
-    /// the same way `Mode::Filter`'s query is. `group` is fixed at the
-    /// moment `s` was pressed, so moving the cursor underneath this panel
+    /// The options menu's save as routine panel, over the pending screen:
+    /// saving the named group's tasks into `.spoolway/routines/<name>/`,
+    /// `name` typed and edited the same way `Mode::Filter`'s query is.
+    /// `group` is fixed at the moment save as routine was picked, so moving the cursor underneath this panel
     /// — which nothing here lets happen, but the field says so regardless —
     /// could never save the wrong group's tasks.
     SaveRoutine {
         group: GroupKey,
         name: String,
     },
+    /// `o`'s menu over the row the focused pane highlights — see
+    /// [`OptionsMenu`]. The arrows move its cursor, `enter` runs the item
+    /// under it and `esc` closes it onto the screen it was opened over.
+    Options(OptionsMenu),
+}
+
+/// [`Mode::Options`]'s state: the row `o` was pressed on, the items it
+/// could take then, and which of them the cursor is on.
+///
+/// `row` is that row's own key — a task's [`TaskKey`] or a group's
+/// [`GroupKey`] on the pending screen, a routine's or a routine task's
+/// path on the routines pane. The queue reader can re-read the groups while
+/// the menu is open, and [`adopt_groups`] keeps the cursor on a group by its
+/// key but not on a task, so `enter` checks the highlighted row is still
+/// this one before acting, rather than run gate on whichever task slid
+/// under the cursor.
+///
+/// `routines` is the routines pane the menu was opened over, when it was:
+/// that pane stays drawn under it, and `esc` goes back there.
+#[derive(Debug, Clone)]
+struct OptionsMenu {
+    title: String,
+    row: String,
+    items: Vec<RowOption>,
+    cursor: usize,
+    routines: Option<RoutineNav>,
+}
+
+impl OptionsMenu {
+    /// The screen the menu was opened over, as it was.
+    fn closed(&self) -> Mode {
+        match &self.routines {
+            Some(nav) => Mode::Routines(nav.clone()),
+            None => Mode::Browsing,
+        }
+    }
+}
+
+/// One thing the queue and routines screens' options menu can do to the
+/// focused row. Each runs what its own key used to: `o` open, `g` gate,
+/// `t` trial, `s` save as routine, and the routines tab's `n` new job and
+/// `x` delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowOption {
+    Open,
+    Gate,
+    Trial,
+    SaveRoutine,
+    NewJob,
+    Delete,
+}
+
+impl RowOption {
+    /// The item's line in the menu: its verb alone, since the menu's own
+    /// title already names the row.
+    fn label(self) -> &'static str {
+        match self {
+            RowOption::Open => "open",
+            RowOption::Gate => "gate",
+            RowOption::Trial => "trial",
+            RowOption::SaveRoutine => "save as routine",
+            RowOption::NewJob => "new job",
+            RowOption::Delete => "delete",
+        }
+    }
 }
 
 /// A [`Mode::Outcome`] over the pending screen.
@@ -3834,7 +3900,7 @@ fn selectable(group: &Group) -> bool {
 ///
 /// The folders themselves are not here — it lives in `run_screen`'s own
 /// `routines`, read fresh on every visit to the routines tab and again
-/// after `x` deletes one, the same read
+/// after delete removes one, the same read
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
 ///
@@ -3862,8 +3928,8 @@ impl RoutineNav {
     }
 }
 
-/// [`Mode::Trial`]'s two screens, in the order `t` walks a person through
-/// them.
+/// [`Mode::Trial`]'s two screens, in the order trial walks a person
+/// through them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrialStage {
     /// Ticking which of the project's pipelines the group is tried under —
@@ -3874,7 +3940,7 @@ enum TrialStage {
     ChooseSkips,
 }
 
-/// [`Mode::Trial`]'s own state: the group `t` was pressed over, fixed for as
+/// [`Mode::Trial`]'s own state: the group trial was picked on, fixed for as
 /// long as this mode stays open — the same reason [`Mode::SaveRoutine`]
 /// fixes its own group rather than reading `state.group_cursor` live, since
 /// nothing here lets the cursor move underneath this panel but the field
@@ -3900,7 +3966,7 @@ struct TrialState {
 }
 
 impl TrialState {
-    /// Opened by `t`: every pipeline one of the group's own tasks names
+    /// Opened by trial: every pipeline one of the group's own tasks names
     /// starts ticked, so the run a person was already going to make is one
     /// of the arms without a key pressed. Only a name the project still has
     /// is ticked — a stale `pipeline:` would otherwise be a tick with no row
@@ -4226,8 +4292,8 @@ pub(crate) fn queue_tab(
 /// holds. Answers the [`Leave`] that ended it.
 ///
 /// The routine folders are read here, once per visit — and again only
-/// after `x` deletes one, see [`after_routine_delete`] — so a routine saved
-/// with `s` on the queue tab is listed the moment `→` reaches this one. Each
+/// after delete removes one, see [`after_routine_delete`] — so a routine
+/// saved with save as routine on the queue tab is listed the moment `→` reaches this one. Each
 /// visit also starts on a fresh [`RoutineNav`], with nothing ticked and both
 /// cursors at the top, the same as the queue tab starts each visit fresh.
 ///
@@ -4596,39 +4662,15 @@ fn run_screen_from(
                         &mut |_| {},
                     );
                 }
-                // `x` over the list: the popup naming the routine and every
-                // job that goes with it. Read only on the list, so the tasks
-                // pane has no delete — see `begin_routine_delete`.
-                Key::Char('x') if nav.focus == Focus::Groups => {
-                    state.mode = begin_routine_delete(repo, &routines, nav);
-                }
-                // `n` over the list: a job for the highlighted routine,
-                // through the jobs tab's schedule and pipeline popups. Read
-                // only on the list, so the tasks pane does not make one.
-                Key::Char('n') if nav.focus == Focus::Groups => {
-                    if let Some(folder) = highlighted_routine_folder(&routines, nav)
-                        && let Some(walk) = super::jobs::NewJobWalk::for_routine(
-                            pipelines,
-                            &folder.path,
-                            &routines_dir,
-                        )
-                    {
-                        state.mode = Mode::NewJob {
-                            nav: nav.clone(),
-                            walk,
-                        };
+                // `o`: the menu for whichever row the focused pane
+                // highlights — see `routine_options`. Read here rather than
+                // in `handle_routine_key`, which is never handed the
+                // pipelines and the routines directory `new job` is checked
+                // against.
+                Key::Char('o') => {
+                    if let Some(menu) = routine_options(pipelines, &routines, &routines_dir, nav) {
+                        state.mode = Mode::Options(menu);
                     }
-                }
-                // `o` over the tasks pane: open the highlighted task
-                // in an editor pane, the same shape `open_highlighted` gives
-                // the pending screen — see `open_highlighted_routine`. Gated
-                // the same way the pending screen's own `o` is: live only
-                // with a task actually under the cursor to open.
-                Key::Char('o')
-                    if nav.focus == Focus::Tasks
-                        && highlighted_routine_task(&routines, nav).is_some() =>
-                {
-                    state.mode = open_highlighted_routine(repo, &routines, nav);
                 }
                 _ => {
                     let mut nav = nav.clone();
@@ -4667,6 +4709,27 @@ fn run_screen_from(
                 // keystroke can neither delete nor dismiss it.
                 _ => {}
             },
+            Mode::Options(menu) => match key {
+                Key::Esc => state.mode = menu.closed(),
+                Key::Enter => {
+                    if let Some(&item) = menu.items.get(menu.cursor) {
+                        let menu = menu.clone();
+                        let picked = Picked {
+                            repo,
+                            pipelines,
+                            routines_dir: &routines_dir,
+                        };
+                        state.mode = picked.run(&groups, &routines, &state, &menu, item);
+                    }
+                    // An empty menu offers nothing to confirm; it stays
+                    // open until `esc`, as its key row says.
+                }
+                _ => {
+                    let mut menu = menu.clone();
+                    menu.cursor = crate::screen::move_cursor(menu.cursor, menu.items.len(), key);
+                    state.mode = Mode::Options(menu);
+                }
+            },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
                 // through — nothing is drawn in between but the
@@ -4687,39 +4750,6 @@ fn run_screen_from(
                         &mut |_| {},
                     );
                     known_reading = known_reading.max(reader.started_count());
-                }
-                // `g`: the gate picker on the highlighted task. Read here
-                // rather than in `handle_browse_key`, which is never handed
-                // the repository: whether a `last:` step runs for a pending
-                // task depends on the open queue as well as the pending set,
-                // and that is read once, now, rather than on every key the
-                // picker then takes.
-                Key::Char('g')
-                    if state.focus == Focus::Tasks
-                        && highlighted_task_key(&groups, &state).is_some() =>
-                {
-                    state.mode = Mode::Gate {
-                        cursor: 0,
-                        dependents: gate_dependents(repo, &groups, &state),
-                    };
-                }
-                // Gated exactly the way `g` is, since a task only exists to
-                // open when the tasks pane is focused on one.
-                Key::Char('o')
-                    if state.focus == Focus::Tasks
-                        && highlighted_task_key(&groups, &state).is_some() =>
-                {
-                    state.mode = open_highlighted(repo, &groups, &state);
-                }
-                // `t`: open the trial picker on whichever group the cursor
-                // sits on — see `trial_target`. Needs `pipelines`, which
-                // `handle_browse_key` is not handed, so this is one of the
-                // keys `run_screen_from` reads before falling through to it,
-                // the same way `o` and `g` are.
-                Key::Char('t') => {
-                    if let Some(group) = trial_target(&groups, &state) {
-                        state.mode = Mode::Trial(TrialState::new(pipelines, group));
-                    }
                 }
                 _ => handle_browse_key(&groups, &mut state, key),
             },
@@ -5005,25 +5035,178 @@ fn highlighted_tasks<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a
         .map(|group| group.tasks.as_slice())
 }
 
-/// The group a `t` press forks: whichever one sits under the cursor right
-/// now, in either pane, filtered or not — `shown` already does the narrowing
-/// for one case and ignores it for the other. `None` with nothing under the
-/// cursor at all, or a group with no tasks to assign a pipeline to, the same
-/// case `s`'s own gate already checks for.
+/// The group trial forks and save as routine saves: whichever one sits
+/// under the cursor right now, filtered or not — `shown` already does the
+/// narrowing for one case and ignores it for the other. `None` with nothing
+/// under the cursor at all, or a group with no tasks to assign a pipeline
+/// to or for a routine to hold. The options menu offers both items only
+/// where this finds a group.
 fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Group> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     (!group.tasks.is_empty()).then_some(group)
 }
 
-/// One key while browsing: moving, focus and selection.
+/// `o` on the pending screen: the menu for the row the focused pane
+/// highlights, titled with that row's name. Over the tasks pane a task
+/// offers open and then gate. Over the groups pane a group offers trial and
+/// then save as routine, both only where [`trial_target`] allows them, so a
+/// group with no tasks opens the menu with nothing in it. `None`, and no
+/// menu, when the focused pane highlights no row at all: an empty pending
+/// directory, a filter that matched nothing, or a tasks pane with no tasks.
+fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let (title, row, items) = match state.focus {
+        Focus::Tasks => {
+            let task = group.tasks.get(state.task_cursor)?;
+            let items = vec![RowOption::Open, RowOption::Gate];
+            (task.id.clone(), task_key(task), items)
+        }
+        Focus::Groups => {
+            let items = match trial_target(groups, state) {
+                Some(_) => vec![RowOption::Trial, RowOption::SaveRoutine],
+                None => Vec::new(),
+            };
+            (group.name.clone(), group_key(group), items)
+        }
+    };
+    Some(OptionsMenu {
+        title,
+        row,
+        items,
+        cursor: 0,
+        routines: None,
+    })
+}
+
+/// The key of the row the focused pane highlights on the pending screen,
+/// the same key [`pending_options`] gives a menu opened on it.
+fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    match state.focus {
+        Focus::Tasks => group.tasks.get(state.task_cursor).map(task_key),
+        Focus::Groups => Some(group_key(group)),
+    }
+}
+
+/// `o` on the routines pane: the menu for the row the focused pane
+/// highlights, titled with that row's name. A routine offers new job and
+/// then delete; new job only where [`super::jobs::NewJobWalk::for_routine`]
+/// can point a job at the folder, the same check `n` made. A routine's task
+/// offers open. `None`, and no menu, with no routine or no task under the
+/// focused pane's cursor.
+fn routine_options(
+    pipelines: &Pipelines,
+    routines: &[RoutineFolder],
+    routines_dir: &std::path::Path,
+    nav: &RoutineNav,
+) -> Option<OptionsMenu> {
+    let (title, row, items) = match nav.focus {
+        Focus::Groups => {
+            let folder = highlighted_routine_folder(routines, nav)?;
+            let walk = super::jobs::NewJobWalk::for_routine(pipelines, &folder.path, routines_dir);
+            let items = [
+                walk.is_some().then_some(RowOption::NewJob),
+                Some(RowOption::Delete),
+            ];
+            (
+                folder.name.clone(),
+                &folder.path,
+                items.into_iter().flatten().collect(),
+            )
+        }
+        Focus::Tasks => {
+            let task = highlighted_routine_task(routines, nav)?;
+            (task.id.clone(), &task.path, vec![RowOption::Open])
+        }
+    };
+    Some(OptionsMenu {
+        title,
+        row: row.display().to_string(),
+        items,
+        cursor: 0,
+        routines: Some(nav.clone()),
+    })
+}
+
+/// What an item picked off [`Mode::Options`] runs against, bundled to keep
+/// [`Picked::run`] inside the argument count this module keeps to.
+struct Picked<'a> {
+    repo: &'a Repo,
+    pipelines: &'a Pipelines,
+    routines_dir: &'a std::path::Path,
+}
+
+impl Picked<'_> {
+    /// `item` picked off `menu`: exactly what its old key ran, through that
+    /// key's own check, so an item whose row no longer allows it does
+    /// nothing. On the pending screen the menu's row must also still be the
+    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
+    /// having done nothing.
+    fn run(
+        &self,
+        groups: &[Group],
+        routines: &[RoutineFolder],
+        state: &ScreenState,
+        menu: &OptionsMenu,
+        item: RowOption,
+    ) -> Mode {
+        let closed = menu.closed();
+        if let Some(nav) = &menu.routines {
+            return match item {
+                RowOption::Open => open_highlighted_routine(self.repo, routines, nav),
+                RowOption::Delete => begin_routine_delete(self.repo, routines, nav),
+                RowOption::NewJob => highlighted_routine_folder(routines, nav)
+                    .and_then(|folder| {
+                        super::jobs::NewJobWalk::for_routine(
+                            self.pipelines,
+                            &folder.path,
+                            self.routines_dir,
+                        )
+                    })
+                    .map_or(closed, |walk| Mode::NewJob {
+                        nav: nav.clone(),
+                        walk,
+                    }),
+                // The pending screen's items are never put on a routine's
+                // menu.
+                RowOption::Gate | RowOption::Trial | RowOption::SaveRoutine => closed,
+            };
+        }
+        if pending_row(groups, state).as_deref() != Some(menu.row.as_str()) {
+            return closed;
+        }
+        match item {
+            RowOption::Open => open_highlighted(self.repo, groups, state),
+            RowOption::Gate => Mode::Gate {
+                cursor: 0,
+                dependents: gate_dependents(self.repo, groups, state),
+            },
+            RowOption::Trial => trial_target(groups, state).map_or(closed, |group| {
+                Mode::Trial(TrialState::new(self.pipelines, group))
+            }),
+            RowOption::SaveRoutine => {
+                trial_target(groups, state).map_or(closed, |group| Mode::SaveRoutine {
+                    group: group_key(group),
+                    name: group.name.clone(),
+                })
+            }
+            // The routines tab's items are never put on the pending
+            // screen's menu.
+            RowOption::NewJob | RowOption::Delete => closed,
+        }
+    }
+}
+
+/// One key while browsing: moving, focus, selection and opening the options
+/// menu.
 ///
-/// None of the keys that need the repo are handled here — `enter` needs the
-/// repo and the pipelines to submit, `o` needs the repo to open an editor,
-/// `g` needs the repo to count the pending task's dependents across the
-/// pending set and the open queue, and `t` needs the pipelines to seed the
-/// trial picker's first screen — so `run_screen_from` reads all four first, and
-/// nothing this reads can leave the screen or reach outside it. `q` reaches
-/// this function like any other unrecognised character and does nothing.
+/// `enter` is the one key that needs the repo — it needs the repo and the
+/// pipelines to submit — so `run_screen_from` reads it first, and nothing
+/// this reads can leave the screen or reach outside it. `o` only opens the
+/// menu; what an item picked off it needs is handed to it then, by
+/// [`Picked`]. `q` reaches this function like any other unrecognised
+/// character and does nothing, and so do `g`, `t` and `s`, which used to
+/// run what the menu's gate, trial and save as routine now do.
 ///
 /// `tab` is the one key that moves focus between the two panes. `←` and `→`
 /// used to as well, but inside bare `spoolway` they move between tabs, and
@@ -5080,19 +5263,12 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
                 }
             }
         }
-        // `s`: save the highlighted group as a routine. Gated on the group
-        // itself, not on which pane has focus — the same way `enter` reads
-        // `state.selected` regardless of `state.focus`, and the same target
-        // `t` forks — since a group with nothing in it has nothing for a
-        // routine to hold. `t` itself is `run_screen`'s own business: it
-        // needs the pipelines to seed the trial picker, which this function
-        // is never handed.
-        Key::Char('s') => {
-            if let Some(group) = trial_target(groups, state) {
-                state.mode = Mode::SaveRoutine {
-                    group: group_key(group),
-                    name: group.name.clone(),
-                };
+        // `o`: the menu for the row the focused pane highlights — see
+        // `pending_options`. A pane with no row under its cursor opens
+        // nothing.
+        Key::Char('o') => {
+            if let Some(menu) = pending_options(groups, state) {
+                state.mode = Mode::Options(menu);
             }
         }
         // Every other key — including a stray newline a scripted input file
@@ -5123,10 +5299,10 @@ pub(super) fn highlighted_routine_task<'a>(
 }
 
 /// One key over the routines pane — everything but `esc` over the tasks
-/// pane, `enter` on a selected folder, `space` over the tasks pane, `x`
-/// over the list and `o` over a highlighted task, which all need the repo to act on or change
-/// this mode outright, so `run_screen` reads those first and only falls through to this for the
-/// rest, the same split it makes for `handle_browse_key`. `q` is part of
+/// pane, `enter` on a selected folder, `space` over the tasks pane and
+/// `o`, which all need the repo or the pipelines or change this mode
+/// outright, so `run_screen` reads those first and only falls through to
+/// this for the rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
 ///
 /// `tab` is the only key that moves between the two panes. `←` and `→`
@@ -5228,13 +5404,13 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
     Some(task_key(group.tasks.get(state.task_cursor)?))
 }
 
-/// `o`: open the highlighted task in an editor, in a pane the
-/// multiplexer opens — gated the same as `g`: live only with the tasks pane
-/// focused and a task actually highlighted under it, which is checked by the
-/// caller before this is reached. Never blocks: the pane runs the editor on
-/// its own, and the screen keeps redrawing and reading keys while it is
-/// open, the same non-blocking shape the board's `open_task` uses — this calls
-/// through `crate::status::editor_command` rather than resolving
+/// The pending screen's open: open the highlighted task in an editor, in a
+/// pane the multiplexer opens — offered, as gate is, only with the tasks
+/// pane focused on a task, which the options menu checks before this is
+/// reached. Never blocks: the pane runs the editor on its own, and the
+/// screen keeps redrawing and reading keys while it is open, the same
+/// non-blocking shape the board's `open_task` uses — this calls through
+/// `crate::status::editor_command` rather than resolving
 /// `$VISUAL`/`$EDITOR` a second time.
 ///
 /// A queued group's task reads from the queue directory rather than
@@ -5243,8 +5419,8 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 ///
 /// A backend with no pane to open one in — headless, which refuses the way
 /// `Mux::open_command`'s default does — is surfaced through [`Mode::Outcome`] rather
-/// than lost: an `Err` this discarded would leave a person pressing `o` on a
-/// headless run with no sign the key did anything at all.
+/// than lost: an `Err` this discarded would leave a person picking open on
+/// a headless run with no sign it did anything at all.
 fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode {
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return Mode::Browsing;
@@ -5263,14 +5439,14 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     }
 }
 
-/// `o` over the routines pane's own tasks pane: open the highlighted
+/// Open over the routines pane's own tasks pane: open the highlighted
 /// task in an editor pane — the same shape [`open_highlighted`] gives
 /// the pending screen, including the same [`Mode::Outcome`] a backend with
 /// no pane to open one in is surfaced through — drawn over this pane, and
 /// closed back onto it. Returns to [`Mode::Routines`]
-/// with `nav` exactly as it was rather than [`Mode::Browsing`], since this
-/// key never leaves the pane the way the pending screen's `o` has nothing to
-/// stay in.
+/// with `nav` exactly as it was rather than [`Mode::Browsing`], since
+/// picking open here never leaves the pane, where the pending screen's open
+/// has no pane of this kind to stay in.
 fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNav) -> Mode {
     let Some(task) = highlighted_routine_task(routines, nav) else {
         return Mode::Routines(nav.clone());
@@ -6278,20 +6454,24 @@ pub(super) fn two_pane_frame(
 /// tab and over the routines tab's pane, and those two lines name it there.
 ///
 /// The ordinary line follows focus. It always leads with `space select`
-/// then `enter queue`, and the pane's own keys come after them. `g` and `o`
-/// act only on a task under the tasks pane's cursor, so they are named only
-/// while that pane has focus, first among the pane's own keys, since they
-/// are what the pane is for. `tab` is named in both panes as the pane it
+/// then `enter queue`, and the pane's own keys come after them, `o options`
+/// first: every action on a row is in that menu, which acts on the row the
+/// focused pane highlights. `tab` is named in both panes as the pane it
 /// leads to — the one way into the tasks pane inside bare `spoolway`, where
-/// `←`/`→` switch tabs instead.
+/// `←`/`→` switch tabs instead — and the one way to a group's actions from
+/// the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::NewJob`] — none of the ordinary line's
-/// keys is read, so this draws the picker's own key row instead, the same keys its popup names. A
-/// notice is different: it reads only `enter` to close it, which its own
-/// popup says, and the line under the frame stays the one the screen will
-/// read again once it is closed — all but [`Mode::JobSaved`], which the
-/// routines tab's mockup draws over its own `[enter] confirm` line.
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::NewJob`] — none
+/// of the ordinary line's keys is read, so this draws the picker's own key
+/// row instead, the same keys its popup names. A notice is different: it
+/// reads only `enter` to close it, which its own popup says, and the line
+/// under the frame stays the one the screen will read again once it is
+/// closed — all but [`Mode::JobSaved`], which the routines tab's mockup
+/// draws over its own `[enter] confirm` line. [`Mode::Options`] keeps the
+/// ordinary line too: the menu names its own keys in its popup, and is one
+/// step on the way to an action the line under it already names as
+/// `o options`.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of the ordinary line's keys is read while the filter box has
@@ -6314,21 +6494,20 @@ fn footer(state: &ScreenState) -> String {
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
         },
         // Its own screen, not an overlay over the pending one — so its own
-        // line, naming exactly the keys `handle_routine_key`,
-        // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
-        // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
-        // which apply here. One line per pane, as the pending screen's is:
-        // `n` and `x` only over the list, the one pane that makes a job of
-        // a routine or deletes one, and `o` only where a task is under the
-        // cursor. No `esc`: over the list
-        // it does nothing, since this pane is the routines tab's whole
-        // screen, and over the tasks pane it goes back to the list, which
-        // `tab` already names. The same line under a notice drawn over the
-        // pane.
+        // line, naming exactly the keys `handle_routine_key` and
+        // `run_screen`'s own `Mode::Routines` arm read, rather than the
+        // ordinary line's `f` and `h`, neither of which applies here. One
+        // line per pane, as the pending screen's is, each naming the menu
+        // for its own row: new job and delete over the list, open over the
+        // tasks pane — see `routine_options`. No `esc`: over the list it
+        // does nothing, since this pane is the routines tab's whole screen,
+        // and over the tasks pane it goes back to the list, which `tab`
+        // already names. The same line under a notice or the options menu
+        // drawn over the pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("n", "new job"), ("x", "delete"), ("tab", "tasks")],
-                Focus::Tasks => &[("o", "open task"), ("tab", "routines")],
+                Focus::Groups => &[("o", "options"), ("tab", "tasks")],
+                Focus::Tasks => &[("o", "options"), ("tab", "routines")],
             };
             key_hint(
                 &[
@@ -6347,18 +6526,13 @@ fn footer(state: &ScreenState) -> String {
             // `q` only inside bare `spoolway`'s queue tab, the one place it
             // quits — see `crate::screen::shell::quit_hint`.
             let pane: &[(&str, &str)] = match state.focus {
-                Focus::Groups => &[("f", "find"), ("tab", "tasks")],
-                Focus::Tasks => &[
-                    ("g", "gate"),
-                    ("o", "open task"),
-                    ("tab", "groups"),
-                    ("f", "find"),
-                ],
+                Focus::Groups => &[("o", "options"), ("f", "find"), ("tab", "tasks")],
+                Focus::Tasks => &[("o", "options"), ("tab", "groups"), ("f", "find")],
             };
             let keys = [
                 [("space", "select"), ("enter", "queue")].as_slice(),
                 pane,
-                [("t", "trial"), ("s", "save as routine"), ("h", hide)].as_slice(),
+                [("h", hide)].as_slice(),
                 crate::screen::shell::quit_hint(),
             ]
             .concat();
@@ -6419,8 +6593,8 @@ fn fit_keys(row: String, width: usize) -> String {
 }
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
-/// notice opened from it, `x`'s delete popup, `n`'s job popups and the
-/// notice they end on, or the tool-requirements gate or the issue question
+/// notice opened from it, the options menu opened on it, delete's popup,
+/// new job's popups and the notice they end on, or the tool-requirements gate or the issue question
 /// a routine submit stopped at. `None` for everything drawn over
 /// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
@@ -6442,6 +6616,10 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             then: Resume::Routines(nav) | Resume::RoutineTask(nav),
             ..
         }
+        | Mode::Options(OptionsMenu {
+            routines: Some(nav),
+            ..
+        })
         | Mode::DeleteRoutine { nav, .. }
         | Mode::NewJob { nav, .. }
         | Mode::JobSaved { nav, .. } => Some(nav),
@@ -6541,6 +6719,10 @@ fn popup(
         }
         Mode::IssueQuestion { body, cursor, .. } => Some(issue_question_panel(body, *cursor)),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
+        Mode::Options(menu) => {
+            let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
+            Some(crate::screen::options(&menu.title, &items, menu.cursor))
+        }
         Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
     }
 }
@@ -6954,7 +7136,7 @@ fn choose_skips_panel(
 }
 
 /// The trial picker, on whichever of its two screens `trial.stage` names.
-/// `None` when the group `t` was pressed over is no longer among `groups` at
+/// `None` when the group trial was picked on is no longer among `groups` at
 /// all, or has been emptied of every task — which nothing on this screen can
 /// actually cause, since the picker only opens over a group that already has
 /// at least one, but a reload racing an open picker is handled the same
@@ -6989,8 +7171,8 @@ fn popup_height(layout: Layout) -> Option<usize> {
 }
 
 /// The save panel: the folder `name` would save under, and how many
-/// tasks it would copy there unchanged — `None` when the group `s` was
-/// pressed over is no longer among `groups` at all, which nothing on this
+/// tasks it would copy there unchanged — `None` when the group save as
+/// routine was picked on is no longer among `groups` at all, which nothing on this
 /// screen can actually make happen since the panel only opens with one under
 /// the cursor, but a stale key kept past a reload is handled the same
 /// careful way [`gate_panel`] and [`trial_panel`] handle it.
@@ -7371,7 +7553,7 @@ const DROPPED_PASSTHROUGH_FIELDS: &[&str] = &["epic", "ticket", "slug", "url"];
 /// slot, not `extra`, and is dropped by construction — there is no second
 /// list of stamped names to forget to update alongside it.
 ///
-/// This is where `s` and `t` make a task handed to them from `queue/` or
+/// This is where save as routine and trial make a task handed to them from `queue/` or
 /// `archive/` — carrying every key spoolway stamped on its earlier run —
 /// safe to hand to `save_routine` and `build_trial_arm`: both go on to call
 /// `parse_submission`, which rightly refuses a task that sets a reserved
@@ -7563,7 +7745,7 @@ fn mint_trial_group(
 /// or refused with nothing touched. Mirrors [`begin_submission`], but over a
 /// group forked whole rather than chosen piece by piece, and the source
 /// tasks are never deleted: they were templates for the arms, not
-/// themselves submitted, and stay in whichever directory `t` found them in
+/// themselves submitted, and stay in whichever directory trial found them in
 /// exactly as it found them.
 ///
 /// Each copy gets its own group because a group must be one chain: two
@@ -7700,7 +7882,7 @@ fn finish_trial(repo: &Repo, mut arms: Vec<Task>) -> Result<()> {
 
 // ============================= The routines pane ===========================
 
-/// `s`'s own write: copy `group`'s tasks into `.spoolway/routines/<name>/`,
+/// Save as routine's own write: copy `group`'s tasks into `.spoolway/routines/<name>/`,
 /// each reset with [`reset_for_reuse`] so a task that came from `queue/`
 /// or `archive/` saves the way a producer would have written it fresh —
 /// refusing a folder that already holds any, the one non-goal this whole
@@ -7797,10 +7979,10 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
     )
 }
 
-/// What `x`'s popup asked about, fixed at the moment `x` was pressed: the
-/// routine's folder, and every job pointing into it with the store it lives
-/// in. `enter` deletes exactly what the popup named, never a list read
-/// again behind the person's back.
+/// What delete's popup asked about, fixed at the moment delete was picked:
+/// the routine's folder, and every job pointing into it with the store it
+/// lives in. `enter` deletes exactly what the popup named, never a list
+/// read again behind the person's back.
 #[derive(Debug, Clone)]
 struct RoutineDelete {
     name: String,
@@ -7825,7 +8007,7 @@ fn jobs_into<'a>(
         .collect()
 }
 
-/// `x` over the routine list: the popup naming the highlighted routine and
+/// Delete over the routine list: the popup naming the highlighted routine and
 /// the jobs [`jobs_into`] finds for it.
 ///
 /// A job store that will not read hides which jobs point in, so the delete
@@ -7864,7 +8046,7 @@ fn begin_routine_delete(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNa
     }
 }
 
-/// `x`'s popup: the routine, what deleting it means, and the jobs that go
+/// Delete's popup: the routine, what deleting it means, and the jobs that go
 /// with it, each beside its store. The jobs lines are left out when there
 /// are none.
 fn delete_routine_panel(target: &RoutineDelete) -> Vec<String> {
@@ -7892,14 +8074,15 @@ fn delete_routine_panel(target: &RoutineDelete) -> Vec<String> {
     crate::screen::ask("delete this routine", &body, &["delete".to_string()], 0)
 }
 
-/// `enter` on `x`'s popup: every job the popup named, then the folder and
+/// `enter` on delete's popup: every job the popup named, then the folder and
 /// everything under it — in that order, so a failure part way leaves at
 /// worst a routine nothing fires, never a job firing at a folder that is
 /// gone. Nothing is staged: the folder leaves the working tree, and git is
 /// the way back, the same as [`save_routine`] writes without touching git.
 ///
-/// Both stores are read again first, and a store broken since `x` refuses
-/// the delete with nothing removed, the same refusal `x` itself gives. Each
+/// Both stores are read again first, and a store broken since delete was
+/// picked refuses the delete with nothing removed, the same refusal picking
+/// it gives. Each
 /// job is then removed from its own store alone, so a failure is only ever
 /// that job's, and the jobs listed before it really are gone.
 ///
@@ -7935,7 +8118,7 @@ fn delete_routine(repo: &Repo, target: &RoutineDelete) -> std::result::Result<()
     }
     match std::fs::remove_dir_all(&target.path) {
         Ok(()) => Ok(()),
-        // Gone already, by another hand between `x` and `enter`: the disk
+        // Gone already, by another hand between delete and `enter`: the disk
         // already says what this was asked to make it say.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => {
@@ -10669,16 +10852,16 @@ mod tests {
     }
 
     /// The same bug, one key deep in the gate picker instead of on the
-    /// group list: opening the picker with `g` already pays for a process
-    /// per key, and moving inside it with `j` is one more — `handle_gate_key`
+    /// group list: opening the picker through the options menu already pays
+    /// for a process per key, and moving inside it with `j` is one more — `handle_gate_key`
     /// itself reads nothing, so this isolates the cost `run_screen_from`'s
     /// own loop adds around it.
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
         let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\tg");
+            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\r");
         let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\tgj");
+            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\rj");
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -10915,19 +11098,18 @@ mod tests {
     }
 
     /// The key line follows focus: hosted, both lines lead with `space` then
-    /// `enter`; the groups pane's line names the way into the tasks pane and
-    /// no `g` or `o`; the tasks pane's line puts them first among its own
-    /// keys and names the way back; `esc` brings the first line back.
+    /// `enter` and then `o` options; the groups pane's line names the way
+    /// into the tasks pane, the tasks pane's names the way back, and neither
+    /// names a row key the menu took over; `esc` brings the first line back.
     #[test]
     fn hosted_the_key_line_follows_focus_between_the_two_panes() {
         use crate::screen::shell::{Hosting, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
-        let groups_line = "[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial   \
-                           [s] save as routine   [h] show done tasks   [q] quit";
-        let tasks_line = "[space] select   [enter] queue   [g] gate   [o] open task   [tab] groups   \
-                          [f] find   [t] trial   [s] save as routine   \
+        let groups_line = "[space] select   [enter] queue   [o] options   [f] find   [tab] tasks   \
+                           [h] show done tasks   [q] quit";
+        let tasks_line = "[space] select   [enter] queue   [o] options   [tab] groups   [f] find   \
                           [h] show done tasks   [q] quit";
 
         // `key_hint` opens every key line on one column of indent.
@@ -10940,14 +11122,166 @@ mod tests {
 
         let drawn = screen(&repo, listed(&repo), "\t");
         let last = crate::status::strip_ansi(last_frame(&drawn));
-        assert!(
-            last.contains("[g] gate   [o] open task   [tab] groups"),
-            "{last}"
-        );
+        assert!(last.contains("[o] options   [tab] groups"), "{last}");
         let drawn = screen(&repo, listed(&repo), "\t\x1b");
         let last = crate::status::strip_ansi(last_frame(&drawn));
-        assert!(last.contains("[f] find   [tab] tasks"), "{last}");
-        assert!(!last.contains("[g] gate"), "{last}");
+        assert!(
+            last.contains("[o] options   [f] find   [tab] tasks"),
+            "{last}"
+        );
+    }
+
+    /// `o` lists what the focused row can do, titled with its name: over
+    /// the tasks pane a task offers open then gate, over the groups pane a
+    /// group offers trial then save as routine. A group with no tasks has
+    /// neither and opens the menu with nothing in it, and a pane with no
+    /// row under its cursor opens no menu at all.
+    #[test]
+    fn the_options_menu_lists_what_the_focused_row_can_do() {
+        let (repo, _root_guard) = fixture("screen-options-lists");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.title, "a");
+        assert_eq!(menu.items, [RowOption::Trial, RowOption::SaveRoutine]);
+        state.focus = Focus::Tasks;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.title, "wire");
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+
+        // `list_groups` never hands back an empty group, so one is made by
+        // hand: the case `trial_target` refuses.
+        groups[0].tasks.clear();
+        assert!(pending_options(&groups, &state).is_none(), "no task row");
+        state.focus = Focus::Groups;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.title, "a");
+        assert!(menu.items.is_empty(), "{:?}", menu.items);
+        state.mode = Mode::Options(menu);
+        let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
+        assert!(
+            panel
+                .iter()
+                .any(|row| row.contains(crate::screen::NOTHING_TO_DO)),
+            "{panel:#?}"
+        );
+
+        assert!(pending_options(&[], &ScreenState::new()).is_none());
+    }
+
+    /// The menu draws over the screen titled with the focused row, the
+    /// cursor on its first item, and the ordinary key line stays under the
+    /// frame.
+    #[test]
+    fn the_options_menu_draws_over_the_focused_row() {
+        let (repo, _root_guard) = fixture("screen-options-draws");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+
+        let last = last_frame(&screen(&repo, listed(&repo), "\to")).to_string();
+        assert!(last.contains(&format!("{TOP_LEFT}─ wire ")), "{last}");
+        assert!(last.contains("│  > open  "), "{last}");
+        assert!(last.contains("│    gate  "), "{last}");
+        assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
+        assert!(last.contains("[o] options   [tab] groups"), "{last}");
+
+        let last = last_frame(&screen(&repo, listed(&repo), "o")).to_string();
+        assert!(last.contains(&format!("{TOP_LEFT}─ cart ")), "{last}");
+        assert!(last.contains("│  > trial  "), "{last}");
+        assert!(last.contains("│    save as routine  "), "{last}");
+
+        let closed = last_frame(&screen(&repo, listed(&repo), "o\x1b")).to_string();
+        let opening = last_frame(&screen(&repo, listed(&repo), "")).to_string();
+        assert_eq!(closed, opening, "esc closes the menu having done nothing");
+    }
+
+    /// `g`, `t` and `s` read nothing on the queue screen any more, from
+    /// either pane: gate, trial and save as routine are the menu's.
+    #[test]
+    fn g_t_and_s_do_nothing_on_the_queue_screen() {
+        let (repo, _root_guard) = fixture("screen-removed-row-keys");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+
+        for (input, before) in [
+            ("g", ""),
+            ("t", ""),
+            ("s", ""),
+            ("\tg", "\t"),
+            ("\tt", "\t"),
+            ("\ts", "\t"),
+        ] {
+            let pressed = last_frame(&screen(&repo, listed(&repo), input)).to_string();
+            let unpressed = last_frame(&screen(&repo, listed(&repo), before)).to_string();
+            assert_eq!(pressed, unpressed, "{input:?} drew something");
+        }
+        assert!(repo.pending_dir().join("wire.md").exists());
+        assert!(!repo.routines_dir().join("a").exists());
+    }
+
+    /// An item acts on the row its menu was opened on: once a fresh
+    /// reading slides another task under the cursor, picking gate closes
+    /// the menu rather than open the picker on the wrong task.
+    #[test]
+    fn a_menu_item_does_nothing_once_its_row_has_moved() {
+        let (repo, _root_guard) = fixture("screen-options-row-moved");
+        write_pending_two(
+            &repo,
+            "left",
+            &task_text("left", "group: one\n", BODY),
+            "right",
+            &task_text("right", "group: one\n", BODY),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &repo.routines_dir(),
+        };
+        let mut state = on_pending_task(&groups, "left");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        let mode = picked.run(&groups, &[], &state, &menu, RowOption::Gate);
+        assert!(matches!(mode, Mode::Gate { .. }), "{mode:?}");
+
+        state.task_cursor = 1 - state.task_cursor;
+        let mode = picked.run(&groups, &[], &state, &menu, RowOption::Gate);
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+    }
+
+    /// On the routines tab, `o` over the list offers new job then delete,
+    /// titled with the routine; over the tasks pane it offers open, titled
+    /// with the task.
+    #[test]
+    fn the_routine_options_menu_lists_what_the_focused_row_can_do() {
+        let (repo, _root_guard) = fixture("routine-options-lists");
+        seed_two_routines(&repo);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut nav = RoutineNav::new();
+
+        let menu = routine_options(&pipelines, &routines, &repo.routines_dir(), &nav).unwrap();
+        assert_eq!(menu.title, "maintenance");
+        assert_eq!(menu.items, [RowOption::NewJob, RowOption::Delete]);
+        nav.focus = Focus::Tasks;
+        let menu = routine_options(&pipelines, &routines, &repo.routines_dir(), &nav).unwrap();
+        assert_eq!(menu.title, "prune");
+        assert_eq!(menu.items, [RowOption::Open]);
+        assert!(routine_options(&pipelines, &[], &repo.routines_dir(), &nav).is_none());
+
+        let last = last_frame(&routines_screen(&repo, "o")).to_string();
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ maintenance ")),
+            "{last}"
+        );
+        assert!(last.contains("│  > new job  "), "{last}");
+        assert!(last.contains("│    delete  "), "{last}");
+        assert!(last.contains("[o] options   [tab] tasks"), "{last}");
+        let last = last_frame(&routines_screen(&repo, "\to")).to_string();
+        assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
+        assert!(last.contains("│  > open  "), "{last}");
+        assert!(last.contains("[o] options   [tab] routines"), "{last}");
     }
 
     /// Hosted, the arrows leave for the neighbouring tab from the tasks pane
@@ -11006,7 +11340,7 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
             last_frame(&drawn)
-                .contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
+                .contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
             "{drawn}"
         );
         assert!(last_frame(&drawn).contains("[ROUTINES]"), "{drawn}");
@@ -11019,8 +11353,8 @@ mod tests {
     }
 
     /// A popup over the routines tab keeps `←`, `→` and `q` for itself, the
-    /// rule the queue tab keeps: here the headless refusal `o` opens over
-    /// the tasks pane, which reads nothing but `enter`.
+    /// rule the queue tab keeps: here the headless refusal that picking open
+    /// off the tasks pane's menu opens, which reads nothing but `enter`.
     #[test]
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
@@ -11034,7 +11368,7 @@ mod tests {
         );
         let _hosting = Hosting::open(Tab::Routines);
 
-        let (exit, drawn) = routines_exit(&repo, "\to\x1b[C\x1b[Dq");
+        let (exit, drawn) = routines_exit(&repo, "\to\r\x1b[C\x1b[Dq");
         assert_eq!(exit, ScreenExit::Quit, "the input ran out under the popup");
         assert!(
             last_frame(&drawn).contains(&format!("{TOP_LEFT}─ open task ")),
@@ -12759,7 +13093,7 @@ mod tests {
         );
     }
 
-    /// `t`'s own first screen: every project pipeline, its own row, in the
+    /// Trial's own first screen: every project pipeline, its own row, in the
     /// order `trial_pipeline_names` gives — and only the pipelines the
     /// group's own tasks name start ticked. A task naming none ticks
     /// nothing. The arm count under the list multiplies the ticks by the
@@ -12868,9 +13202,9 @@ mod tests {
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
 
-        // `t` opens with `default` ticked (the cursor on it), `space`
+        // Trial opens with `default` ticked (the cursor on it), `space`
         // unticks it, and two `enter`s would otherwise reach the write.
-        let drawn = screen(&repo, groups, "t \r\r");
+        let drawn = screen(&repo, groups, "o\r \r\r");
 
         assert!(repo.queue_dir().read_dir().unwrap().next().is_none());
         let frame = last_frame(&drawn);
@@ -12906,7 +13240,7 @@ mod tests {
         assert!(trial.skip["bugfix"].contains("checks"));
     }
 
-    /// `t`'s own second screen: one ticked pipeline to a page, its steps one
+    /// Trial's own second screen: one ticked pipeline to a page, its steps one
     /// per row, and a title row naming the page and counting only its own
     /// skips. `→` and `←` turn the page, wrapping round at either end, and a
     /// tick made on one page never reaches another's — each pipeline keeps
@@ -13590,12 +13924,17 @@ mod tests {
         // `groups_pane_lines` rather than through a real frame.
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
-            opening.contains("[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial"),
+            opening.contains(
+                "[space] select   [enter] queue   [o] options   [f] find   [tab] tasks   \
+                 [h] show done tasks"
+            ),
             "the groups pane's line must lead with `space` and `enter`:\n{opening}"
         );
         assert!(
-            !opening.contains("[g] gate") && !opening.contains("[o] open task"),
-            "`g` and `o` do nothing over the groups pane, so its line names neither:\n{opening}"
+            ["[g] gate", "[t] trial", "[s] save as routine"]
+                .iter()
+                .all(|key| !opening.contains(key)),
+            "every row action is in the menu, so the line names none:\n{opening}"
         );
         assert!(
             opening.contains("[h] show done tasks"),
@@ -13730,8 +14069,8 @@ mod tests {
         assert!(queued(&repo, "right").front.depends_on.is_empty());
     }
 
-    /// A gate chosen from the screen — `g`, down onto the second step, enter
-    /// to pick it — reaches the queued task file without ever rewriting the
+    /// A gate chosen from the screen — gate off the task's menu, down onto
+    /// the second step, enter to pick it — reaches the queued task file without ever rewriting the
     /// task it came from.
     #[test]
     fn a_gate_chosen_on_the_screen_reaches_the_queued_task() {
@@ -13743,10 +14082,10 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto tasks, space to select, g to open the gate picker, down
-        // onto the pipeline's second step (`review`), enter to pick it,
-        // enter to submit.
-        screen(&repo, groups, "\t g\x1b[B\r\r");
+        // Tab onto tasks, space to select, o, down onto gate and enter to
+        // open the gate picker, down onto the pipeline's second step
+        // (`review`), enter to pick it, enter to submit.
+        screen(&repo, groups, "\t o\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
@@ -13756,7 +14095,7 @@ mod tests {
         );
     }
 
-    /// `t` on a group forks the whole group once per ticked pipeline, each
+    /// Trial on a group forks the whole group once per ticked pipeline, each
     /// copy in its own `<group>-<pipeline>` group, ids numbered in the order
     /// the pipelines are listed — and a skip ticked in one pipeline's block
     /// reaches only that pipeline's arms. The source task, never itself
@@ -13778,12 +14117,12 @@ mod tests {
             .position(|s| s.id == "handover")
             .unwrap();
 
-        // `t` opens the picker with `default` — what `solo` names — ticked
+        // Trial opens the picker with `default` — what `solo` names — ticked
         // and under the cursor. `↑` onto `bugfix`, `space` ticks it, `enter`
         // advances to the skip screen, whose first block is `bugfix`'s;
         // `handover_at` more `↓` walks onto its `handover`, `space` ticks
         // it, `enter` launches.
-        let keys = format!("t\x1b[A \r{} \r", "\x1b[B".repeat(handover_at));
+        let keys = format!("o\r\x1b[A \r{} \r", "\x1b[B".repeat(handover_at));
         screen(&repo, groups, &keys);
 
         let first = queued(&repo, "solo-1");
@@ -13851,10 +14190,10 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `t` opens with nothing ticked and the cursor on `bugfix`, the
+        // Trial opens with nothing ticked and the cursor on `bugfix`, the
         // first row; `space` ticks it, `enter` advances to the skips
         // screen, `enter` launches with nothing skipped.
-        screen(&repo, groups, "t \r\r");
+        screen(&repo, groups, "o\r \r\r");
 
         let arm = queued(&repo, "solo-1");
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
@@ -13878,7 +14217,7 @@ mod tests {
 
         // Tick `bugfix` and `default`, skip bugfix's second step, turn the
         // page, skip default's third.
-        screen(&repo, groups, "t j \rj \x1b[Cjj \r");
+        screen(&repo, groups, "o\r j \rj \x1b[Cjj \r");
 
         assert_eq!(queued(&repo, "solo-1").front.skip, vec!["fix".to_string()]);
         assert_eq!(
@@ -13902,9 +14241,9 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `t` (default ticked), `↑` onto bugfix, `space` ticks it, `enter`
+        // Trial (default ticked), `↑` onto bugfix, `space` ticks it, `enter`
         // twice past both screens.
-        screen(&repo, groups, "t\x1b[A \r\r");
+        screen(&repo, groups, "o\r\x1b[A \r\r");
 
         let trial = queued(&repo, "alpha-1").front.trial;
         assert!(trial.is_some());
@@ -13940,7 +14279,7 @@ mod tests {
         already_done(&repo, "older", "audits-default-2");
         let groups = listed(&repo);
 
-        screen(&repo, groups, "t\r\r");
+        screen(&repo, groups, "o\r\r\r");
 
         assert_eq!(
             queued(&repo, "solo-1").front.group.as_deref(),
@@ -14028,13 +14367,13 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-trial-two-launches-a");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "t\r\r");
+        screen(&repo, groups, "o\r\r\r");
         let first_trial = queued(&repo, "solo-1").front.trial;
 
         let (repo, _root_guard) = fixture("screen-trial-two-launches-b");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "t\r\r");
+        screen(&repo, groups, "o\r\r\r");
         let second_trial = queued(&repo, "solo-1").front.trial;
 
         assert!(first_trial.is_some() && second_trial.is_some());
@@ -14061,8 +14400,8 @@ mod tests {
         .unwrap();
         let groups = listed(&repo);
 
-        // `t`, `enter` twice past both screens.
-        screen(&repo, groups, "t\r\r");
+        // Trial off the group's menu, `enter` twice past both screens.
+        screen(&repo, groups, "o\r\r\r");
 
         assert!(
             repo.queue_dir().join("solo-3.md").exists(),
@@ -14088,9 +14427,9 @@ mod tests {
         let groups = listed(&repo);
 
         // `h` shows the done groups, where the archived group actually
-        // lists; `t` opens the picker on it, `enter` twice past both
-        // screens.
-        screen(&repo, groups, "ht\r\r");
+        // lists; trial off its menu opens the picker on it, `enter` twice
+        // past both screens.
+        screen(&repo, groups, "ho\r\r\r");
 
         let arm = queued(&repo, "finished-1");
         assert_eq!(
@@ -14115,9 +14454,10 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `t`, `enter` twice past both screens — the task keeps its own
+        // Trial off the group's menu, `enter` twice past both screens — the
+        // task keeps its own
         // default assignment.
-        screen(&repo, groups, "t\r\r");
+        screen(&repo, groups, "o\r\r\r");
 
         assert!(
             repo.queue_dir().read_dir().unwrap().next().is_some(),
@@ -14665,39 +15005,41 @@ mod tests {
 
     // ----------------------------------------------------------- the open key
 
-    /// `o` is gated exactly the way `g` is: with the groups pane focused it
-    /// does nothing at all, rather than opening whatever the group cursor
+    /// With the groups pane focused, `o` opens the group's menu, which
+    /// offers no open, rather than opening whatever task the group cursor
     /// happens to sit on. Never touches a multiplexer, so this passes
     /// whatever backend the fixture's default config names.
     #[test]
-    fn o_does_nothing_while_the_groups_pane_has_focus() {
+    fn o_over_the_groups_pane_opens_the_groups_menu_not_a_task() {
         let (repo, _root_guard) = fixture("screen-open-groups-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        let drawn = screen(&repo, groups, "o");
+        let drawn = screen(&repo, groups, "o\r");
 
         assert!(
             !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the groups pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
+        assert!(!drawn.contains("> open"), "{drawn}");
+        assert!(drawn.contains("> trial"), "{drawn}");
     }
 
-    /// `o` on a headless run has no pane to open an editor in — headless
+    /// Open on a headless run has no pane to open an editor in — headless
     /// refuses it the way `Mux::open_command`'s default does — and the refusal is
     /// surfaced through `Mode::Outcome` rather than lost: an `Err` this
-    /// discarded would leave a person pressing `o` on a headless run with no
-    /// sign the key did anything at all.
+    /// discarded would leave a person picking open on a headless run with no
+    /// sign it did anything at all.
     #[test]
-    fn pressing_o_with_no_multiplexer_surfaces_the_refusal() {
+    fn picking_open_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("screen-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        // `Tab` moves focus onto the tasks pane, where `o` is gated live —
-        // see `open_highlighted`'s own doc comment.
-        let drawn = screen(&repo, groups, "\to");
+        // `Tab` moves focus onto the tasks pane, whose menu offers open
+        // first — see `pending_options`.
+        let drawn = screen(&repo, groups, "\to\r");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -14913,24 +15255,22 @@ mod tests {
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
         assert!(
-            last.contains(
-                "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks"
-            ),
+            last.contains("[space] select   [enter] queue   [o] options   [tab] tasks"),
             "{last}"
         );
         assert!(!last.contains("[esc] back"), "{last}");
         assert!(
-            !last.contains("[o] open task"),
-            "no task under the cursor: {last}"
+            !last.contains("[n] new job") && !last.contains("[x] delete"),
+            "new job and delete are in the menu, not on the line: {last}"
         );
         assert!(!last.contains("r pending"), "{last}");
     }
 
-    /// `o` does nothing while the folders pane has focus — a folder has no
-    /// task of its own to open — the same gate [`open_highlighted`]
-    /// gives the pending screen's own `o`.
+    /// With the folders pane focused, `o` opens the routine's menu, which
+    /// offers no open — a folder has no task of its own to open — the same
+    /// rule the pending screen's groups pane keeps.
     #[test]
-    fn o_does_nothing_while_the_folders_pane_has_focus_in_routines() {
+    fn o_over_the_folders_pane_opens_the_routines_menu_not_a_task() {
         let (repo, _root_guard) = fixture("routines-open-folders-focus");
         write_routine(
             &repo,
@@ -14945,14 +15285,16 @@ mod tests {
             !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
+        assert!(!drawn.contains("> open"), "{drawn}");
+        assert!(drawn.contains("> new job"), "{drawn}");
     }
 
-    /// `o` on a headless run has no pane to open an editor in, in the
+    /// Open on a headless run has no pane to open an editor in, in the
     /// routines pane exactly as it does on the pending screen — see
     /// `open_highlighted_routine`'s own doc comment — and staying in
     /// `Mode::Routines` afterwards, not falling back to `Mode::Browsing`.
     #[test]
-    fn pressing_o_in_routines_with_no_multiplexer_surfaces_the_refusal() {
+    fn picking_open_in_routines_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("routines-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
@@ -14962,9 +15304,9 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        // `tab` focuses the tasks pane on `audit-deps`, `o` tries to open
-        // it.
-        let drawn = routines_screen(&repo, "\to");
+        // `tab` focuses the tasks pane on `audit-deps`, and open off its
+        // menu tries to open it.
+        let drawn = routines_screen(&repo, "\to\r");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -15068,7 +15410,7 @@ mod tests {
         let tasks = last_frame(&routines_screen(&repo, "\t")).to_string();
         assert!(
             tasks.contains(
-                " [space] select   [enter] queue   [o] open task   [tab] routines   [q] quit"
+                " [space] select   [enter] queue   [o] options   [tab] routines   [q] quit"
             ),
             "{tasks}"
         );
@@ -15078,7 +15420,7 @@ mod tests {
         assert!(back.contains("─ routines ─"), "still in the view: {back}");
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
+            back.contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
             "{back}"
         );
     }
@@ -15199,12 +15541,12 @@ mod tests {
         );
     }
 
-    /// A store broken between `x` and `enter` refuses the delete with
+    /// A store broken between picking delete and `enter` refuses the delete with
     /// nothing removed: the listed job is still in its own store, the folder
     /// is still there, and the popup text sends the person to `spoolway
     /// doctor`.
     #[test]
-    fn a_store_broken_after_x_refuses_with_nothing_removed() {
+    fn a_store_broken_after_delete_is_picked_refuses_with_nothing_removed() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-delete-store-broken");
         seed_two_routines(&repo);
@@ -15216,7 +15558,7 @@ mod tests {
             tasks: 2,
             jobs: vec![("whole".to_string(), Scope::User)],
         };
-        // Broken after `x` read the stores, the way a hand edit between the
+        // Broken after delete read the stores, the way a hand edit between the
         // popup and `enter` would break it.
         std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
         std::fs::write(repo.jobs_file(), "[jobs.single\n").unwrap();
@@ -15334,11 +15676,11 @@ mod tests {
         assert!(left.contains("folder .spoolway/routines/nightly"), "{text}");
     }
 
-    /// `x` opens the popup the mockup draws: the routine, its task count,
+    /// Delete opens the popup the mockup draws: the routine, its task count,
     /// and every job that goes with it beside its store — with the popup's
     /// own keys on the line under the frame.
     #[test]
-    fn x_names_the_routine_and_every_job_pointing_into_it() {
+    fn delete_names_the_routine_and_every_job_pointing_into_it() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-delete-popup");
         seed_two_routines(&repo);
@@ -15346,7 +15688,7 @@ mod tests {
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
-        let drawn = routines_screen(&repo, "jx");
+        let drawn = routines_screen(&repo, "jo\x1b[B\r");
         let last = last_frame(&drawn);
 
         assert!(last.contains("─ delete this routine "), "{last}");
@@ -15367,11 +15709,11 @@ mod tests {
 
     /// With no job pointing in, the popup leaves the jobs lines out.
     #[test]
-    fn x_on_a_routine_no_job_points_into_leaves_the_jobs_lines_out() {
+    fn delete_on_a_routine_no_job_points_into_leaves_the_jobs_lines_out() {
         let (repo, _root_guard) = fixture("routine-delete-no-jobs");
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "x")).to_string();
+        let last = last_frame(&routines_screen(&repo, "o\x1b[B\r")).to_string();
 
         assert!(last.contains("maintenance · 1 task"), "{last}");
         assert!(!last.contains("these jobs are deleted with it:"), "{last}");
@@ -15379,17 +15721,17 @@ mod tests {
 
     /// `esc` keeps everything, and every other key leaves the popup open.
     #[test]
-    fn x_then_esc_keeps_the_routine_and_its_jobs() {
+    fn delete_then_esc_keeps_the_routine_and_its_jobs() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-delete-esc");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
 
-        let held = last_frame(&routines_screen(&repo, "jxynq ")).to_string();
+        let held = last_frame(&routines_screen(&repo, "jo\x1b[B\rynq ")).to_string();
         assert!(held.contains("─ delete this routine "), "{held}");
         assert!(repo.routines_dir().join("nightly").is_dir());
 
-        let last = last_frame(&routines_screen(&repo, "jx\x1b")).to_string();
+        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\r\x1b")).to_string();
         assert!(!last.contains("delete this routine"), "{last}");
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(repo.routines_dir().join("nightly").is_dir());
@@ -15400,7 +15742,7 @@ mod tests {
     /// the cursor on a row that is still there and drops the routine from
     /// the ticked set — and stages nothing.
     #[test]
-    fn x_then_enter_deletes_the_routine_and_its_jobs() {
+    fn delete_then_enter_deletes_the_routine_and_its_jobs() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-delete-enter");
         seed_two_routines(&repo);
@@ -15408,7 +15750,7 @@ mod tests {
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
-        let last = last_frame(&routines_screen(&repo, "j x\r")).to_string();
+        let last = last_frame(&routines_screen(&repo, "j o\x1b[B\r\r")).to_string();
 
         assert!(!repo.routines_dir().join("nightly").exists());
         assert_eq!(job_names(&repo), vec!["weekly-prune"]);
@@ -15424,16 +15766,16 @@ mod tests {
     /// A job store that will not parse refuses the delete before anything
     /// is removed, naming the store and `spoolway doctor`.
     #[test]
-    fn x_refuses_while_a_job_store_will_not_parse() {
+    fn delete_refuses_while_a_job_store_will_not_parse() {
         let (repo, _root_guard) = fixture("routine-delete-bad-store");
         seed_two_routines(&repo);
         std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
         std::fs::write(repo.jobs_file(), "[jobs.broken\n").unwrap();
 
-        let last = last_frame(&routines_screen(&repo, "jx\r")).to_string();
+        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\r\r")).to_string();
         assert!(repo.routines_dir().join("nightly").is_dir());
 
-        let refused = last_frame(&routines_screen(&repo, "jx")).to_string();
+        let refused = last_frame(&routines_screen(&repo, "jo\x1b[B\r")).to_string();
         assert!(refused.contains("routine not deleted"), "{refused}");
         assert!(refused.contains("jobs.toml"), "{refused}");
         assert!(refused.contains("spoolway doctor"), "{refused}");
@@ -15443,29 +15785,35 @@ mod tests {
         );
     }
 
-    /// `x` reads only over the routine list: over the tasks pane it does
-    /// nothing, and the key line there does not name it.
+    /// `x` and `n` read nothing on either pane any more — delete and new
+    /// job are the routine list's menu items — and neither key line names
+    /// them.
     #[test]
-    fn x_over_the_tasks_pane_does_nothing_and_is_not_named() {
+    fn x_and_n_do_nothing_on_either_pane_and_are_not_named() {
         let (repo, _root_guard) = fixture("routine-delete-tasks-pane");
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "\tx")).to_string();
-
-        assert!(!last.contains("delete this routine"), "{last}");
-        assert!(!last.contains("[x] delete"), "{last}");
-        assert!(last.contains("[o] open task"), "{last}");
+        for input in ["x", "n", "\tx", "\tn"] {
+            let last = last_frame(&routines_screen(&repo, input)).to_string();
+            assert!(!last.contains("delete this routine"), "{input:?}: {last}");
+            assert!(!last.contains("when does"), "{input:?}: {last}");
+            assert!(!last.contains("[x] delete"), "{input:?}: {last}");
+            assert!(!last.contains("[n] new job"), "{input:?}: {last}");
+            assert!(last.contains("[o] options"), "{input:?}: {last}");
+        }
+        assert!(repo.routines_dir().join("maintenance").exists());
+        assert!(job_names(&repo).is_empty());
     }
 
-    /// `n` over the list opens the jobs tab's schedule popup, titled for
+    /// New job over the list opens the jobs tab's schedule popup, titled for
     /// the highlighted routine, with its keys on the line under the frame —
     /// and writes nothing yet.
     #[test]
-    fn n_opens_the_schedule_popup_for_the_highlighted_routine() {
+    fn new_job_opens_the_schedule_popup_for_the_highlighted_routine() {
         let (repo, _root_guard) = fixture("routine-new-job-open");
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "jn")).to_string();
+        let last = last_frame(&routines_screen(&repo, "jo\r")).to_string();
 
         assert!(last.contains("─ when does nightly run "), "{last}");
         assert_eq!(
@@ -15476,17 +15824,26 @@ mod tests {
         assert!(job_names(&repo).is_empty());
     }
 
-    /// `n` reads only over the routine list: over the tasks pane it opens
-    /// nothing, and the key line there does not name it.
+    /// New job is offered only over the routine list: the tasks pane's menu
+    /// does not list it, and `down` then `enter` there still picks open, its
+    /// one item, rather than a schedule popup. Headless, so open surfaces
+    /// its refusal instead of opening an editor pane in a real multiplexer.
     #[test]
-    fn n_over_the_tasks_pane_does_nothing_and_is_not_named() {
-        let (repo, _root_guard) = fixture("routine-new-job-tasks-pane");
+    fn the_tasks_panes_menu_offers_no_new_job() {
+        let (mut repo, _root_guard) = fixture("routine-new-job-tasks-pane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "\tn")).to_string();
+        let last = last_frame(&routines_screen(&repo, "\to")).to_string();
+        assert!(!last.contains("new job"), "{last}");
 
+        let last = last_frame(&routines_screen(&repo, "\to\x1b[B\r")).to_string();
         assert!(!last.contains("when does"), "{last}");
-        assert!(!last.contains("[n] new job"), "{last}");
+        assert!(last.contains("o:"), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ open task ")),
+            "open, in a popup: {last}"
+        );
     }
 
     /// `esc` on either popup goes back to the routine list and writes
@@ -15496,7 +15853,7 @@ mod tests {
         let (repo, _root_guard) = fixture("routine-new-job-esc");
         seed_two_routines(&repo);
 
-        for input in ["n0 3 * * *\x1b", "n0 3 * * *\r\x1b"] {
+        for input in ["o\r0 3 * * *\x1b", "o\r0 3 * * *\r\x1b"] {
             let last = last_frame(&routines_screen(&repo, input)).to_string();
             assert!(!last.contains("when does"), "{input:?}: {last}");
             assert!(!last.contains("which pipeline"), "{input:?}: {last}");
@@ -15511,12 +15868,12 @@ mod tests {
     /// routine, and the "job saved" popup over its own `[enter] confirm`
     /// line. `enter` closes it onto the routine list.
     #[test]
-    fn n_walks_the_schedule_and_pipeline_and_saves_a_user_job() {
+    fn new_job_walks_the_schedule_and_pipeline_and_saves_a_user_job() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-new-job-save");
         seed_two_routines(&repo);
 
-        let saved = last_frame(&routines_screen(&repo, "n0 3 * * 1-5\rbug\r")).to_string();
+        let saved = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r")).to_string();
 
         let jobs = crate::jobs::load(&repo).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -15545,25 +15902,25 @@ mod tests {
             saved.contains(&key_hint(&[("enter", "confirm")])),
             "{saved}"
         );
-        assert!(!saved.contains("[n] new job"), "{saved}");
+        assert!(!saved.contains("[o] options"), "{saved}");
 
         std::fs::remove_file(repo.user_jobs_file()).unwrap();
-        let back = last_frame(&routines_screen(&repo, "n0 3 * * 1-5\rbug\r\r")).to_string();
+        let back = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r\r")).to_string();
         assert!(!back.contains("job saved"), "{back}");
         assert!(back.contains("> [ ] maintenance"), "{back}");
-        assert!(back.contains("[n] new job"), "{back}");
+        assert!(back.contains("[o] options   [tab] tasks"), "{back}");
     }
 
     /// A routine whose job name is taken is refused at the save with the
     /// jobs tab's own message, and the job already there is left as it was.
     #[test]
-    fn n_on_a_routine_whose_job_name_is_taken_is_refused() {
+    fn new_job_on_a_routine_whose_job_name_is_taken_is_refused() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-new-job-taken");
         seed_two_routines(&repo);
         write_job(&repo, Scope::Project, "nightly", "maintenance");
 
-        let last = last_frame(&routines_screen(&repo, "jn0 4 * * *\r\r")).to_string();
+        let last = last_frame(&routines_screen(&repo, "jo\r0 4 * * *\r\r")).to_string();
 
         assert!(last.contains("─ not saved "), "{last}");
         assert!(
@@ -15819,11 +16176,11 @@ mod tests {
         );
     }
 
-    /// `s` on a highlighted pending group opens the save panel, and `enter`
+    /// Save as routine on a highlighted pending group opens the save panel, and `enter`
     /// there copies its tasks into `.spoolway/routines/<name>/`
     /// unchanged, same ids.
     #[test]
-    fn s_saves_a_pending_group_into_routines_unchanged() {
+    fn save_as_routine_saves_a_pending_group_into_routines_unchanged() {
         let (repo, _root_guard) = fixture("routines-save");
         write_pending(
             &repo,
@@ -15832,7 +16189,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let drawn = screen(&repo, groups, "s");
+        let drawn = screen(&repo, groups, "o\x1b[B\r");
         let panel = last_frame(&drawn);
         assert!(panel.contains("save nightly as a routine"), "{panel}");
         assert!(
@@ -15852,7 +16209,7 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups2 = listed(&repo2);
-        let drawn2 = screen(&repo2, groups2, "s\r");
+        let drawn2 = screen(&repo2, groups2, "o\x1b[B\r\r");
         let last2 = last_frame(&drawn2);
         assert!(last2.contains("saved 1 task"), "{last2}");
 
@@ -15877,7 +16234,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let drawn = screen(&repo, groups, "sq");
+        let drawn = screen(&repo, groups, "o\x1b[B\rq");
         let last = last_frame(&drawn);
 
         assert!(
@@ -15889,9 +16246,9 @@ mod tests {
     /// The name is typed, so it can be typed as a path — and `join` would
     /// happily follow a `..` straight out of `.spoolway/routines/` and
     /// write a routine somewhere the routines tab never reads back. One plain
-    /// folder name is all `s` accepts.
+    /// folder name is all save as routine accepts.
     #[test]
-    fn s_refuses_a_name_that_is_not_a_plain_folder_name() {
+    fn save_as_routine_refuses_a_name_that_is_not_a_plain_folder_name() {
         let (repo, _root_guard) = fixture("routines-save-refuses-a-path");
         write_pending(
             &repo,
@@ -15905,7 +16262,7 @@ mod tests {
         let drawn = screen(
             &repo,
             groups,
-            "s\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}../escaped\r",
+            "o\x1b[B\r\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}../escaped\r",
         );
         let last = last_frame(&drawn);
         assert!(last.contains("is not a folder name"), "{last}");
@@ -15920,11 +16277,11 @@ mod tests {
         );
     }
 
-    /// The non-goal this feature draws a hard line at: `s` refuses to save
-    /// into a folder that already holds tasks, rather than merging into
-    /// it.
+    /// The non-goal this feature draws a hard line at: save as routine
+    /// refuses to save into a folder that already holds tasks, rather than
+    /// merging into it.
     #[test]
-    fn s_refuses_a_folder_that_already_holds_tasks() {
+    fn save_as_routine_refuses_a_folder_that_already_holds_tasks() {
         let (repo, _root_guard) = fixture("routines-save-refuses-merge");
         write_pending(
             &repo,
@@ -15939,7 +16296,7 @@ mod tests {
             &task_text("already-here", "group: nightly\n", BODY),
         );
 
-        let drawn = screen(&repo, groups, "s\r");
+        let drawn = screen(&repo, groups, "o\x1b[B\r\r");
         let last = last_frame(&drawn);
         assert!(last.contains("already holds tasks"), "{last}");
         assert!(
@@ -17301,7 +17658,7 @@ group_description: audit
             #[test]
             fn a_trial_never_asks_and_opens_no_tickets() {
                 let (repo, _root_guard) = cart("issue-question-trial");
-                let drawn = screen(&repo, listed(&repo), "t\r\r");
+                let drawn = screen(&repo, listed(&repo), "o\r\r\r");
                 assert!(!drawn.contains("issue tracking"), "{drawn}");
                 assert!(hook_calls(&repo).is_empty());
                 assert_eq!(repo.queued_ids().len(), 2, "{:?}", repo.queued_ids());
@@ -18707,7 +19064,7 @@ body\n";
         state
     }
 
-    /// The `g` picker leaves out a step the pending task will walk past,
+    /// The gate picker leaves out a step the pending task will walk past,
     /// under `first:` and `last:` — `last:` judged against a dependent that
     /// is only pending — and its cursor walks the same list: one `j` from
     /// `build` and `enter` gates `announce`, not `check`.

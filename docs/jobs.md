@@ -70,7 +70,8 @@ Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edit
 deleted. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
 `details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
-The routines tab writes a job too, with its own `n`. See [Routines](planning.md#routines).
+The routines tab writes a job too, with `new job` in a routine's options menu. See
+[Routines](planning.md#routines).
 
 | Key | What it does |
 |---|---|
@@ -94,8 +95,8 @@ The routines tab writes a job too, with its own `n`. See [Routines](planning.md#
 3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
-The routines tab's own `n` starts on the schedule panel, for the routine highlighted there, then
-walks the same pipeline panel and save.
+The routines tab's `new job` starts on the schedule panel, for the routine its options menu was
+opened on, then walks the same pipeline panel and save.
 
 ### What the screen decides for you
 

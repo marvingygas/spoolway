@@ -3,9 +3,9 @@
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
 //! are the only thing that write a job — the jobs tab walks the routine, the
 //! cron expression and the pipeline, then saves through
-//! [`crate::jobs::write`]; the routines tab's `n` skips the routine and goes
-//! through the same last two and the same save, [`NewJobWalk`]. No `jobs
-//! add`, no config key. A job only schedules: nothing here queues its
+//! [`crate::jobs::write`]; the routines tab's new job skips the routine and
+//! goes through the same last two and the same save, [`NewJobWalk`]. No
+//! `jobs add`, no config key. A job only schedules: nothing here queues its
 //! routine, which fires when the dispatcher's clock crosses the schedule —
 //! running a routine now is the routines tab's `enter`.
 
@@ -412,9 +412,9 @@ impl Draft {
 
 /// The schedule popup and then the pipeline popup, and the save at the end
 /// of them — the part of writing a job that both the jobs tab's walk and the
-/// routines tab's `n` go through. Each tab keeps its own way in (the jobs tab
-/// picks a routine first, the routines tab uses the highlighted one) and its
-/// own way out; what happens between the two lives only here, so the two tabs
+/// routines tab's new job go through. Each tab keeps its own way in (the jobs
+/// tab picks a routine first, the routines tab uses the highlighted one) and
+/// its own way out; what happens between the two lives only here, so the two tabs
 /// cannot drift apart on what a schedule or a pipeline accepts, or on which
 /// names a save refuses.
 #[derive(Debug, Clone)]
@@ -450,7 +450,7 @@ impl NewJobWalk {
         NewJobWalk::Schedule(draft)
     }
 
-    /// The routines tab's `n`: a new job over the routine folder at
+    /// The routines tab's new job: a new job over the routine folder at
     /// `folder`, for the user store, named after the folder's leaf exactly
     /// as the jobs tab's own `n` names one. `None` for a folder outside
     /// `routines_dir`, which no job can point at.
@@ -967,7 +967,7 @@ fn picked_task(
 /// including the same [`JobMode::Outcome`] a backend with no pane to open
 /// one in is surfaced through. Returns to [`JobMode::PickRoutine`] with
 /// `nav` and `draft` exactly as they were rather than [`JobMode::List`],
-/// since this key never leaves the walk the way the queue screen's `o` has
+/// since this key never leaves the walk the way the queue screen's open has
 /// nothing of its own to stay in.
 fn open_highlighted_job_routine(
     repo: &Repo,

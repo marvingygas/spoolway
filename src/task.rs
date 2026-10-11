@@ -412,7 +412,7 @@ pub struct Frontmatter {
     /// this field, letting a queued task walk past the steps that reach
     /// outside the worktree in one pass; that command is gone, and the field
     /// is kept only so an old task file written under it still parses and
-    /// round-trips. Its one writer now is the queue screen's `t` picker,
+    /// round-trips. Its one writer now is the queue screen's trial picker,
     /// which stamps a trial arm's own ticked steps here so a throwaway run
     /// never pushes a branch or opens a pull request — see
     /// `commands::queue::build_trial_arm`.
@@ -420,7 +420,7 @@ pub struct Frontmatter {
     pub skip: Vec<String>,
 
     /// The trial this task is one arm of, minted once per trial and stamped
-    /// on every arm the queue screen's `t` picker forks — see
+    /// on every arm the queue screen's trial picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
     /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
     /// together in the ledger: a trial forks a whole group once per ticked

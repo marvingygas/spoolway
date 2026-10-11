@@ -269,15 +269,15 @@ routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
 
 A routine is a saved task or group of tasks that you can queue again. It lives in
 `.spoolway/routines/`.
-Press `s` on a group in the queue screen to save it there, and `r` to browse and queue what is
-saved.
+On the queue screen, press `o` on a group and pick `save as routine` to save it there, and `r`
+to browse and queue what is saved.
 
 ## Trials
 
-A trial answers one question: which pipeline fits this group best? Press `t` on a group in the
-queue screen, tick any number of pipelines to compare, and tick any steps to skip. Each ticked
-pipeline gets one full copy of the whole group, and all arms share one trial id. Compare them
-with `spoolway eval --by task --trial <id>`, or open the trial from the eval tab's trials
+A trial answers one question: which pipeline fits this group best? On the queue screen, press
+`o` on a group and pick `trial`, tick any number of pipelines to compare, and tick any steps to
+skip. Each ticked pipeline gets one full copy of the whole group, and all arms share one trial
+id. Compare them with `spoolway eval --by task --trial <id>`, or open the trial from the eval tab's trials
 table. An arm never pushes a branch or opens a pull request. When the last arm finishes, every
 arm's copy is removed. The source group and the ledger rows stay.
 

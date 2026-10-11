@@ -105,8 +105,8 @@ with a `// covers:` line.
 | `forge` | The `gh` test double, including an empty change |
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
-| `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
-| `routines` | The routines tab, and the `s` save panel on the queue screen |
+| `trials` | The `trial` item of the queue screen's options menu, the arms it queues, and their cleanup |
+| `routines` | The routines tab, and the `save as routine` panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | Bare `spoolway`'s jobs tab writing, pausing and deleting a job |
 | `screen` | Bare `spoolway`: the five-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting a dispatcher, the warnings popup naming the prompt of a pipeline added after the screen opened, and, behind the stop popup, `enter` stopping it, `→` from the queue tab reaching the routines tab, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, the grouped help off a terminal, its raw output opening and closing on the alternate screen, a full board in a 30-row pane scrolling its task table under a marker row and keeping its key line, a full board in a 120-column pty leaving column 0 and the last column empty, and a walk through all five tabs and back that draws no frame with a full-screen erase |

@@ -275,7 +275,7 @@ directory table; it is read from the screen only.
 ## The trials table
 
 A second `[tab]` from the directory table opens the trials table, one row per trial that
-banked a lane in the window, newest first. A trial groups the arms a `t` on a group forked, one
+banked a lane in the window, newest first. A trial groups the arms the `trial` item on a group forked, one
 per ticked pipeline, under one trial id. See [Trials](planning.md#trials).
 
 | Column | What it is |

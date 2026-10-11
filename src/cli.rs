@@ -578,7 +578,7 @@ pub struct EvalArgs {
     /// One trial's arms only. With `--by task`, one row per arm and a delta
     /// line per arm against the first, on pass rate, cost and time — the
     /// comparison a trial exists to answer. Named by the trial id every arm
-    /// banks, minted once when the queue screen's `t` picker forks the arms;
+    /// banks, minted once when the queue screen's trial picker forks the arms;
     /// see `commands::queue::begin_trial`.
     #[arg(long, value_name = "ID")]
     pub trial: Option<String>,

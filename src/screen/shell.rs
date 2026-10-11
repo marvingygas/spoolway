@@ -332,7 +332,8 @@ fn host(
                     crate::commands::queue_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
                 // Its routine folders are read again on every visit, so a
-                // routine saved with `s` on the queue tab is already listed.
+                // routine saved with save as routine on the queue tab is
+                // already listed.
                 Tab::Routines => {
                     crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
@@ -1360,8 +1361,8 @@ mod tests {
     }
 
     // `→` from the queue tab opens routines, reading the routine folders on
-    // that visit: a routine saved with `s` a moment earlier on the queue tab
-    // is already listed. `→` again moves on to jobs.
+    // that visit: a routine saved with save as routine a moment earlier on
+    // the queue tab is already listed. `→` again moves on to jobs.
     #[test]
     fn right_from_queue_opens_routines_with_a_routine_just_saved_then_jobs() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
@@ -1371,9 +1372,10 @@ mod tests {
         )
         .unwrap();
 
-        // `s` opens the save panel named after the group, `enter` saves it,
+        // `o` opens the group's options menu, `↓` `enter` picks save as
+        // routine, whose panel is named after the group; `enter` saves it,
         // `enter` closes the notice, `→` opens routines.
-        let frames = drive_host(&repo, "s\r\r\x1b[C");
+        let frames = drive_host(&repo, "o\x1b[B\r\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
             last.contains("DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL"),
@@ -1382,7 +1384,7 @@ mod tests {
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
+            last.contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
             "{last}"
         );
 
