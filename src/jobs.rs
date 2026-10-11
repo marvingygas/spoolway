@@ -77,6 +77,12 @@ pub struct JobSpec {
     /// A paused job is listed but never fired. Absent means enabled.
     #[serde(default = "enabled_default")]
     pub enabled: bool,
+    /// The branch every task of the routine is cut from, unless the task
+    /// names its own `base:`. Absent means the job has none, and a task
+    /// without its own is refused: the checked-out branch is never a
+    /// fallback, since it changes with whatever work is in progress.
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 pub(crate) fn enabled_default() -> bool {
@@ -122,6 +128,14 @@ pub(crate) const JOB_KEYS: &[JobKey] = &[
         text: "Absent means enabled. Write `enabled = false` to pause a job — it is still \
                listed but never fires; resuming it removes the key rather than writing the \
                default back.",
+    },
+    JobKey {
+        name: "base",
+        required: false,
+        text: "The branch every task this job queues is cut from, for a routine task that \
+               sets no `base:` of its own. Absent means no default: a routine with such a \
+               task queues nothing, siblings included, and the job is named once for its \
+               due minute. The branch the checkout has out is never used.",
     },
 ];
 
@@ -334,6 +348,12 @@ pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()
     } else {
         entry["enabled"] = toml_edit::value(false);
     }
+    // Only ever set, never removed: the screen that calls this has no field
+    // for `base`, so an absent one means "not edited", and removing it would
+    // drop a base a person wrote by hand.
+    if let Some(base) = &spec.base {
+        entry["base"] = toml_edit::value(base.as_str());
+    }
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -504,14 +524,9 @@ pub fn fire_due(
 
     let now = Local::now().naive_local();
     let minute = now.format(MINUTE_FMT).to_string();
-    // Only a pass with an enabled job reads the branch and the queue; a
-    // project whose jobs are all off would otherwise pay for both every pass.
+    // Only a pass with an enabled job reads the queue; a project whose jobs
+    // are all off would otherwise pay for it every pass.
     let any_enabled = jobs.iter().any(|job| job.spec.enabled);
-    let base = if any_enabled {
-        repo.branch().unwrap_or_else(|_| "main".to_string())
-    } else {
-        String::new()
-    };
     let queued = if any_enabled {
         repo.queued_ids()
     } else {
@@ -596,7 +611,7 @@ pub fn fire_due(
         match crate::commands::queue_routine_target(
             repo,
             pipelines,
-            &base,
+            job.spec.base.as_deref(),
             &target,
             &job.spec.pipeline,
         ) {
@@ -613,7 +628,21 @@ pub fn fire_due(
                     ids.join(", ")
                 ));
             }
-            Err(err) => problems.push(format!("job {}: {err:#}", job.name)),
+            Err(err) => {
+                // Only a base problem is recorded like the unknown-key case:
+                // a job with no base it can resolve fails the same way on
+                // every pass, and naming it each time buries the
+                // dispatcher's own output. Any other failure may be gone on
+                // the next pass (a hook that failed once, a write that
+                // raced, `origin` out of reach when the base lives only
+                // there), so it stays unrecorded and the minute is retried.
+                // A later due minute tries a base problem again.
+                if err.downcast_ref::<crate::commands::BaseProblem>().is_some() {
+                    record.skipped_minute = Some(minute.clone());
+                    dirty = true;
+                }
+                problems.push(format!("job {}: {err:#}", job.name));
+            }
         }
     }
 
@@ -1059,6 +1088,7 @@ mod tests {
             pipeline: "impl".to_string(),
             routine: "nightly".to_string(),
             enabled: true,
+            base: None,
         }
     }
 
@@ -1113,6 +1143,7 @@ mod tests {
                 pipeline: "impl".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -1373,13 +1404,24 @@ mod tests {
     }
 
     /// A routine folder with one queueable task, and a job pointing at it
-    /// on `pipeline` with an expression that matches every minute.
+    /// on `pipeline` with an expression that matches every minute. The job
+    /// sets `base = "plan/demo"`, a branch the fixture has.
     fn every_minute_job(repo: &Repo, routine: &str, pipeline: &str) {
         scheduled_job(repo, routine, pipeline, "* * * * *");
     }
 
     /// [`every_minute_job`] on any expression.
     fn scheduled_job(repo: &Repo, routine: &str, pipeline: &str, schedule: &str) {
+        routine_job(repo, routine, pipeline, schedule, Some("plan/demo"));
+    }
+
+    /// [`every_minute_job`] with no `base` key, for the tests that pin what a
+    /// job with no base does.
+    fn every_minute_job_without_base(repo: &Repo, routine: &str, pipeline: &str) {
+        routine_job(repo, routine, pipeline, "* * * * *", None);
+    }
+
+    fn routine_job(repo: &Repo, routine: &str, pipeline: &str, schedule: &str, base: Option<&str>) {
         let dir = repo.routines_dir().join(routine);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1387,10 +1429,11 @@ mod tests {
             "---\nid: audit\ntitle: audit, done\ngroup: demo\n---\n## Goal\n\nDo it.\n",
         )
         .unwrap();
+        let base = base.map_or(String::new(), |base| format!("base = \"{base}\"\n"));
         write_user_store(
             repo,
             &format!(
-                "[jobs.nightly]\nschedule = \"{schedule}\"\npipeline = \"{pipeline}\"\nroutine = \"{routine}\"\n"
+                "[jobs.nightly]\nschedule = \"{schedule}\"\npipeline = \"{pipeline}\"\nroutine = \"{routine}\"\n{base}"
             ),
         );
     }
@@ -1698,6 +1741,244 @@ mod tests {
         assert!(
             !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
             "no task was queued"
+        );
+    }
+
+    /// Whether the job `nightly` has its due minute recorded as skipped. The
+    /// tests read this rather than fire a second pass and expect silence:
+    /// that holds only when both passes land in one wall-clock minute.
+    fn skipped(repo: &Repo) -> bool {
+        read_state(repo)
+            .get("nightly")
+            .is_some_and(|record| record.skipped_minute.is_some())
+    }
+
+    /// Put the main checkout on `experiment/local-only`, one local commit
+    /// ahead of `plan/demo`, or on a detached HEAD.
+    fn check_out_another_branch(repo: &Repo, detached: bool) {
+        let git = |args: &[&str]| crate::repo::run(&repo.checkout, "git", args).unwrap();
+        if detached {
+            git(&["checkout", "-q", "--detach"]);
+        } else {
+            git(&["checkout", "-q", "-b", "experiment/local-only"]);
+            git(&[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "local work in progress",
+            ]);
+        }
+    }
+
+    /// A job whose routine task names no `base:` has no base to cut from, so
+    /// it does not fire, whatever branch the main checkout has out. The
+    /// problem is named with the job once for the due minute, and a second
+    /// pass in the same minute stays quiet.
+    #[test]
+    fn a_job_with_no_base_does_not_fire_from_the_checked_out_branch() {
+        let (repo, _root_guard) = fixture("jobs-base-checked-out");
+        every_minute_job_without_base(&repo, "nightly", "default");
+        check_out_another_branch(&repo, false);
+
+        let (actions, problems) = fire(&repo);
+        assert!(
+            actions.is_empty(),
+            "the job must not fire from the branch the checkout has out: {actions:?}"
+        );
+        assert!(
+            !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
+            "no task was queued"
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("nightly") && problems[0].contains("base"),
+            "the problem names the job and the base: {problems:?}"
+        );
+        assert!(
+            skipped(&repo),
+            "the due minute is recorded, so later passes in it stay quiet"
+        );
+    }
+
+    /// On a detached HEAD a job with no base is named once for its due
+    /// minute, rather than on every pass, and queues nothing.
+    #[test]
+    fn a_job_with_no_base_on_a_detached_head_is_named_once_per_due_minute() {
+        let (repo, _root_guard) = fixture("jobs-base-detached");
+        every_minute_job_without_base(&repo, "nightly", "default");
+        check_out_another_branch(&repo, true);
+
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("nightly") && problems[0].contains("base"),
+            "the problem names the job and the base: {problems:?}"
+        );
+        assert!(
+            skipped(&repo),
+            "the due minute is recorded, so later passes in it stay quiet"
+        );
+        assert!(!repo.queued_ids().iter().any(|id| id.starts_with("audit-")));
+    }
+
+    /// A job whose `base` names a branch the repository lacks is a base
+    /// problem too: it fails the same way until someone fixes the job, so it
+    /// is named once per due minute.
+    #[test]
+    fn a_job_whose_base_branch_is_missing_is_named_once_per_due_minute() {
+        let (repo, _root_guard) = fixture("jobs-base-missing");
+        routine_job(
+            &repo,
+            "nightly",
+            "default",
+            "* * * * *",
+            Some("no/such-branch"),
+        );
+
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("no/such-branch"), "{problems:?}");
+        assert!(skipped(&repo), "the due minute is recorded");
+    }
+
+    /// A base git itself refuses, a leading `-` or a name that is no branch
+    /// name, fails the same way on every pass, so each is a base problem
+    /// that is named once per due minute.
+    #[test]
+    fn a_job_base_that_is_not_a_branch_name_is_named_once_per_due_minute() {
+        for (n, base) in ["-x", "a..b"].into_iter().enumerate() {
+            let (repo, _root_guard) = fixture(&format!("jobs-base-refused-{n}"));
+            routine_job(&repo, "nightly", "default", "* * * * *", Some(base));
+
+            let (actions, problems) = fire(&repo);
+            assert!(actions.is_empty(), "{base}: {actions:?}");
+            assert_eq!(problems.len(), 1, "{base}: {problems:?}");
+            assert!(problems[0].contains(base), "{base}: {problems:?}");
+            assert!(skipped(&repo), "{base}: the due minute is recorded");
+        }
+    }
+
+    /// When `origin` cannot be asked, the base may well exist there, so the
+    /// firing fails without recording the minute and the next pass asks
+    /// again. A remote that is not there stands in for offline.
+    #[test]
+    fn a_base_that_origin_cannot_be_asked_about_is_retried_within_the_minute() {
+        let (repo, _root_guard) = fixture("jobs-base-offline");
+        crate::repo::run(
+            &repo.checkout,
+            "git",
+            &["remote", "add", "origin", "/nonexistent/spoolway-origin"],
+        )
+        .unwrap();
+        routine_job(
+            &repo,
+            "nightly",
+            "default",
+            "* * * * *",
+            Some("only/on-origin"),
+        );
+
+        for pass in 1..=2 {
+            let (actions, problems) = fire(&repo);
+            assert!(actions.is_empty(), "pass {pass}: {actions:?}");
+            assert_eq!(problems.len(), 1, "pass {pass}: {problems:?}");
+            assert!(
+                problems[0].contains("could not be asked"),
+                "pass {pass}: {problems:?}"
+            );
+            assert!(!skipped(&repo), "pass {pass}: the minute stays open");
+        }
+    }
+
+    /// A failure that is not about the base may be gone on the next pass, so
+    /// it is not recorded as skipped: the minute is retried and the problem
+    /// shows again. An empty routine folder stands in for any such failure.
+    #[test]
+    fn a_failure_unrelated_to_the_base_is_retried_within_the_minute() {
+        let (repo, _root_guard) = fixture("jobs-retry-other");
+        every_minute_job(&repo, "nightly", "default");
+        std::fs::remove_file(repo.routines_dir().join("nightly").join("audit.md")).unwrap();
+
+        for pass in 1..=2 {
+            let (actions, problems) = fire(&repo);
+            assert!(actions.is_empty(), "pass {pass}: {actions:?}");
+            assert_eq!(problems.len(), 1, "pass {pass}: {problems:?}");
+            assert!(problems[0].contains("holds no tasks"), "{problems:?}");
+            assert!(!skipped(&repo), "pass {pass}: the minute stays open");
+        }
+    }
+
+    /// A routine task that names its own `base:` is cut from it, whatever
+    /// branch the main checkout has out.
+    #[test]
+    fn a_routine_task_with_its_own_base_is_cut_from_it_not_from_the_checkout() {
+        let (repo, _root_guard) = fixture("jobs-base-own");
+        every_minute_job_without_base(&repo, "nightly", "default");
+        let audit = repo.routines_dir().join("nightly").join("audit.md");
+        std::fs::write(
+            &audit,
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\nbase: plan/demo\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        check_out_another_branch(&repo, false);
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions.iter().any(|line| line.contains("fired")),
+            "{actions:?}"
+        );
+        let minted: Vec<String> = repo
+            .queued_ids()
+            .into_iter()
+            .filter(|id| id.starts_with("audit-"))
+            .collect();
+        assert_eq!(minted.len(), 1, "{minted:?}");
+        assert_eq!(
+            repo.task(&minted[0]).unwrap().front.base.as_deref(),
+            Some("plan/demo")
+        );
+    }
+
+    /// A job's own `base` is what its tasks are cut from, whatever branch the
+    /// main checkout has out.
+    #[test]
+    fn a_job_with_a_base_cuts_its_tasks_from_it_not_from_the_checkout() {
+        let (repo, _root_guard) = fixture("jobs-base-key");
+        every_minute_job(&repo, "nightly", "default");
+        check_out_another_branch(&repo, false);
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions.iter().any(|line| line.contains("fired")),
+            "{actions:?}"
+        );
+        let minted: Vec<String> = repo
+            .queued_ids()
+            .into_iter()
+            .filter(|id| id.starts_with("audit-"))
+            .collect();
+        assert_eq!(
+            repo.task(&minted[0]).unwrap().front.base.as_deref(),
+            Some("plan/demo")
+        );
+    }
+
+    /// The problem for a job with no base names the job's own `base` key,
+    /// not `--base`, which a job cannot pass.
+    #[test]
+    fn the_no_base_problem_names_the_jobs_own_key() {
+        let (repo, _root_guard) = fixture("jobs-base-advice");
+        every_minute_job_without_base(&repo, "nightly", "default");
+
+        let (_, problems) = fire(&repo);
+        assert!(
+            problems[0].contains("`base`") && !problems[0].contains("--base"),
+            "{problems:?}"
         );
     }
 

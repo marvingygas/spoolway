@@ -342,16 +342,12 @@ impl Repo {
     /// process has no terminal to answer for must fail outright rather than
     /// hang a queue submission or a dispatcher start on a password nobody
     /// is there to type.
-    pub fn remote_branch_exists(&self, branch: &str) -> bool {
-        self.remote_branch_answer(branch).unwrap_or(false)
-    }
-
-    /// [`Repo::remote_branch_exists`] with the failure kept apart from the
-    /// answer: `Some` when `origin` really answered, `None` when it could not
-    /// be asked — offline, a refused credential, a timeout. A caller that
-    /// acts on "it does not exist" (pausing a task for a person) must not act
-    /// on that. A repository with no `origin` answers `Some(false)`: there is
-    /// nothing to ask.
+    ///
+    /// The failure is kept apart from the answer: `Some` when `origin` really
+    /// answered, `None` when it could not be asked — offline, a refused
+    /// credential, a timeout. A caller that acts on "it does not exist"
+    /// (pausing a task for a person) must not act on that. A repository with
+    /// no `origin` answers `Some(false)`: there is nothing to ask.
     pub fn remote_branch_answer(&self, branch: &str) -> Option<bool> {
         if !self.has_remote() {
             return Some(false);
@@ -4821,18 +4817,18 @@ mod tests {
     /// accepted at all, and a name neither place has answers `false`
     /// exactly the same way.
     #[test]
-    fn remote_branch_exists_asks_origin_directly_rather_than_a_local_fetch() {
+    fn remote_branch_answer_asks_origin_directly_rather_than_a_local_fetch() {
         let (origin, work, _base_guard) = fixture("remote-branch-exists");
         git(&work, &["push", "-q", "origin", "plan/x:main"]);
         git(&origin, &["branch", "task/remote-only", "main"]);
         let (repo, _home) = discover_registered(&work).unwrap();
 
         assert!(
-            repo.remote_branch_exists("task/remote-only"),
+            repo.remote_branch_answer("task/remote-only") == Some(true),
             "origin has the branch, even though this checkout never fetched it"
         );
         assert!(
-            !repo.remote_branch_exists("task/nowhere"),
+            repo.remote_branch_answer("task/nowhere") == Some(false),
             "neither place has this one"
         );
     }
@@ -4844,17 +4840,20 @@ mod tests {
     /// `refs/heads/<branch>` pattern instead, which only ever matches the
     /// exact ref (review finding 1).
     #[test]
-    fn remote_branch_exists_does_not_match_a_real_branchs_own_suffix() {
+    fn remote_branch_answer_does_not_match_a_real_branchs_own_suffix() {
         let (origin, work, _base_guard) = fixture("remote-branch-suffix");
         git(&work, &["push", "-q", "origin", "plan/x:main"]);
         git(&origin, &["branch", "task/gh-412-checkout", "main"]);
         let (repo, _home) = discover_registered(&work).unwrap();
 
         assert!(
-            !repo.remote_branch_exists("gh-412-checkout"),
+            repo.remote_branch_answer("gh-412-checkout") == Some(false),
             "`gh-412-checkout` is a suffix of the real branch, not the branch itself"
         );
-        assert!(repo.remote_branch_exists("task/gh-412-checkout"));
+        assert_eq!(
+            repo.remote_branch_answer("task/gh-412-checkout"),
+            Some(true)
+        );
     }
 
     /// A workspace holds this checkout's repository when any of its clone

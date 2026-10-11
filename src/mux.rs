@@ -2553,7 +2553,7 @@ fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
     // fails this fetch, and the fall-through below, naming `base` bare, is
     // exactly what the ordinary `git worktree add` error already told a
     // person about it before this function existed at all. The prompt is
-    // turned off for the same reason `Repo::remote_branch_exists` turns it
+    // turned off for the same reason `Repo::remote_branch_answer` turns it
     // off: this must fail outright rather than hang the dispatcher waiting
     // on a password (review finding 5).
     //

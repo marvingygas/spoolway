@@ -61,6 +61,7 @@ cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 schedule = "* * * * *"
 pipeline = "default"
 routine = "nightly"
+base = "plan/live"
 
 [jobs.release-readiness]
 schedule = "0 8 * * 1"
@@ -81,6 +82,15 @@ says "jobs contract names the project store" '.spoolway/jobs.toml' \
   "$SPOOLWAY" jobs contract
 says "and the user store" "$USER_STORE_DISPLAY" \
   "$SPOOLWAY" jobs contract
+
+# The main checkout is put on a branch of its own, one local commit ahead, for
+# the firing: a job's tasks are cut from its configured `base`, never from
+# whatever branch the checkout happens to have out.
+ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+must "the main checkout moves to a branch of its own" \
+  git checkout -q -b experiment/local-only
+must "with a local commit on it" \
+  git commit -q --allow-empty -m "local work in progress"
 
 # A dispatcher pass against a matching minute fires the job.
 dispatcher_start
@@ -103,6 +113,10 @@ has "and is put on the job's pipeline" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
 has "its depends_on is remapped onto the sibling's minted id" "audit-deps-1" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
+has "it is cut from the job's base, not the branch the checkout has out" \
+  "base: plan/live" "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
+lacks "and never from that branch" "experiment/local-only" \
+  "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
 
 works "the routine tree is left exactly where it was" \
   test -f .spoolway/routines/nightly/audit-deps.md
@@ -110,6 +124,8 @@ has "unminted, unmodified" "id: audit-deps" \
   .spoolway/routines/nightly/audit-deps.md
 
 dispatcher_stop
+must "the main checkout goes back to the branch it started on" \
+  git checkout -q "$ORIGINAL_BRANCH"
 
 # ------------- a job firing under a hook with an unmet tool requirement
 # A job fires with nobody watching, so the tool-requirements gate must not
@@ -144,6 +160,7 @@ cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 schedule = "* * * * *"
 pipeline = "default"
 routine = "gated"
+base = "plan/live"
 TOML
 
 GATED_LOG="$LIVE/gated-dispatch.out"

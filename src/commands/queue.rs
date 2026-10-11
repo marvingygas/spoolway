@@ -1373,32 +1373,52 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
 /// The leading `-` is refused before git sees the value at all: what
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
 /// as a flag, the same reason `branch:` is refused outright.
-fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+    if check_task_base_locally(repo, name, base)? {
+        return Ok(());
+    }
+    match repo.remote_branch_answer(base) {
+        Some(true) => Ok(()),
+        Some(false) => Err(BaseProblem::error(format!(
+            "{name}: `base: {base}` names a branch this repository does not have locally or on \
+             `origin` — create or fetch it first, or name one it already has"
+        ))),
+        // Not a `BaseProblem`: offline, a refused credential or a timeout
+        // says nothing about whether the branch exists, and the next try
+        // may get an answer.
+        None => bail!(
+            "{name}: `base: {base}` is not a branch this repository has locally, and `origin` \
+             could not be asked whether it has it — fetch the branch first, or try again when \
+             `origin` can be reached"
+        ),
+    }
+}
+
+/// [`check_task_base`] without asking `origin`: refuses a base git would
+/// read as a flag or that is no branch name, and says whether the branch
+/// exists in this repository. `Ok(false)` means it is not a local branch and
+/// only `origin` could still have it. A caller on a path that must not reach
+/// the network (`doctor`'s pre-run warnings) stops there.
+pub(crate) fn check_task_base_locally(repo: &Repo, name: &str, base: &str) -> Result<bool> {
     if base.starts_with('-') {
-        bail!(
+        return Err(BaseProblem::error(format!(
             "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
              branch instead"
-        );
+        )));
     }
     if repo.git(&["check-ref-format", "--branch", base]).is_err() {
-        bail!("{name}: `base: {base}` is not a valid branch name — name a branch instead");
+        return Err(BaseProblem::error(format!(
+            "{name}: `base: {base}` is not a valid branch name — name a branch instead"
+        )));
     }
-    if repo
+    Ok(repo
         .git(&[
             "rev-parse",
             "--verify",
             "--quiet",
             &format!("refs/heads/{base}"),
         ])
-        .is_err()
-        && !repo.remote_branch_exists(base)
-    {
-        bail!(
-            "{name}: `base: {base}` names a branch this repository does not have locally or on \
-             `origin` — create or fetch it first, or name one it already has"
-        );
-    }
-    Ok(())
+        .is_ok())
 }
 
 /// A task in a batch that queueing leaves out because it cannot start, and
@@ -8011,6 +8031,32 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
         .collect()
 }
 
+/// A refusal that comes from a task's base itself and that only an edit to
+/// the task or the job, or creating the branch, will lift: a task with no
+/// `base:` under a job with no `base` key, a base git would read as a flag,
+/// a name that is not a branch name, or a branch the repository and
+/// `origin` both lack. A job's firing fails the same way on every pass until
+/// then, so `jobs::fire_due` tells it apart from a transient failure (a
+/// hook that failed once, a write that raced, `origin` unreachable) by
+/// downcasting to this type, and retries only the latter within a due
+/// minute.
+#[derive(Debug)]
+pub(crate) struct BaseProblem(String);
+
+impl BaseProblem {
+    fn error(text: String) -> anyhow::Error {
+        anyhow::Error::new(BaseProblem(text))
+    }
+}
+
+impl std::fmt::Display for BaseProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BaseProblem {}
+
 /// Queue a routine target the way the routines tab does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
@@ -8027,7 +8073,7 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
-    base: &str,
+    base: Option<&str>,
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
@@ -8055,7 +8101,19 @@ pub(crate) fn queue_routine_target(
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let mut tasks = validate_batch(repo, pipelines, Some(base), &submitted)?;
+    let mut tasks = validate_batch(repo, pipelines, base, &submitted).map_err(|err| {
+        // `parse_submission` tells a person at `queue add` to pass `--base`,
+        // which a job has no way to do. Name the job's own key instead, so
+        // the advice works.
+        let text = format!("{err:#}");
+        match text.split_once("sets no `base:` and no --base was given") {
+            Some((name, _)) => BaseProblem::error(format!(
+                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
+                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
+            )),
+            None => err,
+        }
+    })?;
     // No task to write ids back into — see `open_and_prefix`. The
     // dispatcher firing a job has no screen and nobody to answer it, even
     // when its own stdin and stdout happen to be a terminal (a dispatcher
@@ -15116,6 +15174,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: routine.to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -16570,7 +16629,7 @@ mod tests {
             let tasks = queue_routine_target(
                 &repo,
                 &Pipelines::builtin(),
-                "plan/demo",
+                Some("plan/demo"),
                 &repo.routines_dir().join("nightly"),
                 "bugfix",
             )
@@ -16625,7 +16684,7 @@ mod tests {
             let err = queue_routine_target(
                 &repo,
                 &Pipelines::builtin(),
-                "plan/demo",
+                Some("plan/demo"),
                 &repo.routines_dir().join("nightly"),
                 "bugfix",
             )
