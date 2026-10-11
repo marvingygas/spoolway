@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     /// Taken by every test in this module that sets `SPOOLWAY_WORKTREE` —
-    /// the same reasoning as `usage::tests::AMBIENT_ENV`: the environment is
+    /// the same reasoning as `usage::lane_env::AMBIENT_ENV`: the environment is
     /// the process's, not the test's, so two tests setting and restoring it
     /// at once race each other rather than themselves.
     static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

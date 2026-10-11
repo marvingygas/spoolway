@@ -9298,6 +9298,68 @@ mod screen_tests {
         root
     }
 
+    /// An eval load against a home the size of the one this was found slow
+    /// on — about 2,000 transcripts and 6,000 ledger lines over 2,200 lane
+    /// sessions — finishes in under two seconds. Runs in every build, because
+    /// the debug build is the one the gate and CI run, and the bound holds
+    /// there too.
+    ///
+    /// Some sessions have no transcript, the way a ledger outlives the files
+    /// an agent prunes. The sweep must still find the rest in one walk and not
+    /// search the store again for each session it cannot find.
+    #[test]
+    fn a_load_at_the_size_of_a_real_machine_takes_under_two_seconds() {
+        use crate::usage::lane_env::{AMBIENT_ENV, out_of_lane};
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        const SESSIONS: usize = 2_200;
+        const TRANSCRIPTS: usize = 2_000;
+        const LEDGER_LINES: usize = 6_132;
+
+        let (repo, _guard) = fixture("eval-load-bound");
+        let root = crate::scratch::root("eval-load-bound-home");
+        let project = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&project).unwrap();
+        for i in 0..TRANSCRIPTS {
+            std::fs::write(
+                project.join(format!("lane-{i:04}.jsonl")),
+                perf_lines(&format!("lane-{i:04}"), 20),
+            )
+            .unwrap();
+        }
+        let old = chrono::Utc::now() - chrono::Duration::seconds(600);
+        for line in 0..LEDGER_LINES {
+            let session = format!("lane-{:04}", line % SESSIONS);
+            let at = old - chrono::Duration::seconds((LEDGER_LINES - line) as i64);
+            crate::usage::append(
+                &repo,
+                &Entry {
+                    ts: at.to_rfc3339(),
+                    kind: "claude".into(),
+                    agent: "claude".into(),
+                    model: "claude-opus-5".into(),
+                    session,
+                    ..lane_entry("demo", "implement")
+                },
+            )
+            .unwrap();
+        }
+
+        let elapsed = crate::platform::test_home::with_home(&root, || {
+            out_of_lane(|| {
+                let start = std::time::Instant::now();
+                let loaded = load(&repo, &no_filters()).unwrap();
+                assert!(!loaded.entries.is_empty());
+                start.elapsed()
+            })
+        });
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "an eval load over {SESSIONS} sessions and {LEDGER_LINES} ledger lines took \
+             {elapsed:?}, not under two seconds"
+        );
+    }
+
     /// `load` must locate and read each session's transcript once, and each
     /// subagent's once, not several times over and not by scanning the whole
     /// `dirs` list for every session — see the task's own account of `load`'s

@@ -3184,7 +3184,7 @@ impl<'a> Dispatcher<'a> {
         // Read before the harvest, and used verbatim as the line's `ts` below.
         // A record appended to the transcript between the harvest reaching EOF
         // and a clock read *after* it would land with a file mtime older than
-        // that reading — and `usage::catch_up_settled_lane` gates a later
+        // that reading — and `usage::catch_up_with_facts` gates a later
         // sweep on exactly that mtime against this line's `ts`, so a `ts`
         // chosen after the read would strand the unread tail forever.
         let banked_at = chrono::Utc::now();

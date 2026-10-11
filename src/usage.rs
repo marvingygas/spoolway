@@ -2219,6 +2219,13 @@ fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> 
     best.map(|(_, path)| path)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`transcripts_matching`] has walked a store on this
+    /// thread, for the test that holds a sweep to one walk per kind.
+    static STORE_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The shared walk under [`newest_matching`]: every
 /// `.jsonl` under `root` whose stem `keep` accepts and whose mtime is
 /// readable is handed to `visit`, in no particular order.
@@ -2227,6 +2234,8 @@ fn transcripts_matching(
     keep: impl Fn(&str) -> bool,
     visit: &mut impl FnMut(std::time::SystemTime, PathBuf),
 ) {
+    #[cfg(test)]
+    STORE_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -3074,7 +3083,7 @@ pub(crate) fn reported_spend_moved(cost: Option<f64>, reported: Option<f64>) -> 
 /// **before** harvesting the transcript — not from a clock read here, after.
 /// A record appended between the harvest reaching EOF and a later clock
 /// reading would land with a file mtime older than that reading, and
-/// [`catch_up_settled_lane`] gates a future sweep on exactly that mtime
+/// [`catch_up_with_facts`] gates a future sweep on exactly that mtime
 /// against this line's `ts`: a `ts` chosen after the read would make every
 /// later sweep skip the unread tail. Stamping the line no later than the
 /// moment the harvest observed the file keeps the mtime of anything it missed
@@ -3148,23 +3157,56 @@ fn bank_lane_at(
     Some(entry)
 }
 
-/// Catch one settled lane session up to its transcript.
-fn catch_up_settled_lane(
-    repo: &Repo,
-    kind: &str,
-    session: &str,
-    ledger: &[Entry],
-) -> Option<Entry> {
-    let path = session_file(kind, session)?;
-    // Taken before the gate and the harvest below read the file — see
-    // [`bank_lane_at`] for why a stamp chosen after the read loses a racing
-    // tail.
-    let banked_at = chrono::Utc::now();
-    catch_up_settled_lane_at(repo, kind, session, &path, banked_at, ledger)
+/// What the ledger says about one session, for [`catch_up_with_facts`]'s gate
+/// and the line it banks.
+struct LaneFacts<'a> {
+    /// The newest parseable `ts` of any line naming the session.
+    last_banked: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session's most recent lane line, whose columns a catch-up line
+    /// inherits.
+    carry: Option<&'a Entry>,
+    /// Whether any line for the session is a hand line — the negation of
+    /// [`lane_owns_subagents`].
+    hand: bool,
 }
 
-/// [`catch_up_settled_lane`] against a transcript already located, so a test
-/// drives it without a home directory full of sessions.
+/// Every session's [`LaneFacts`], from one pass over the ledger.
+///
+/// A sweep asks the same three questions of each of the ledger's sessions, and
+/// asking each by scanning the whole ledger is a scan per session: thousands of
+/// sessions over thousands of lines. One pass answers all of them, with the
+/// same rules the per-session scans had — a line counts for a session whatever
+/// its `kind`, the carry is the last lane line in ledger order, and a line
+/// whose `ts` does not parse never sets the gate's watermark.
+fn lane_facts(ledger: &[Entry]) -> HashMap<&str, LaneFacts<'_>> {
+    let mut facts: HashMap<&str, LaneFacts<'_>> = HashMap::new();
+    for entry in ledger {
+        let fact = facts.entry(entry.session.as_str()).or_insert(LaneFacts {
+            last_banked: None,
+            carry: None,
+            hand: false,
+        });
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) {
+            let ts = ts.with_timezone(&chrono::Utc);
+            if fact.last_banked.is_none_or(|seen| ts > seen) {
+                fact.last_banked = Some(ts);
+            }
+        }
+        if entry.is_lane() {
+            fact.carry = Some(entry);
+        }
+        fact.hand |= entry.hand;
+    }
+    facts
+}
+
+/// [`catch_up_with_facts`] for one session against a transcript already
+/// located, so a test drives it without a home directory full of sessions.
+///
+/// Groups the whole ledger to answer for one session, which is why only the
+/// tests use it: [`sweep`] groups once and calls [`catch_up_with_facts`] for
+/// each session instead.
+#[cfg(test)]
 fn catch_up_settled_lane_at(
     repo: &Repo,
     kind: &str,
@@ -3173,6 +3215,29 @@ fn catch_up_settled_lane_at(
     banked_at: chrono::DateTime<chrono::Utc>,
     ledger: &[Entry],
 ) -> Option<Entry> {
+    let facts = lane_facts(ledger);
+    catch_up_with_facts(
+        repo,
+        kind,
+        session,
+        path,
+        banked_at,
+        ledger,
+        facts.get(session)?,
+    )
+}
+
+/// Catch one settled lane session up to its transcript, given what the
+/// ledger already says about it.
+fn catch_up_with_facts(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    path: &Path,
+    banked_at: chrono::DateTime<chrono::Utc>,
+    ledger: &[Entry],
+    facts: &LaneFacts<'_>,
+) -> Option<Entry> {
     // The gate: read the transcript only if it has moved since this session's
     // most recent banked line. `spoolway eval` sweeps on every invocation,
     // and a lane the dispatcher banked at teardown and never
@@ -3180,21 +3245,13 @@ fn catch_up_settled_lane_at(
     // largest file in every finished run each time buys nothing. A tie reads:
     // a line banked in the same second the last turn landed is no proof
     // nothing came after it.
-    let last_banked = ledger
-        .iter()
-        .filter(|entry| entry.session == session)
-        .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.ts).ok())
-        .map(|ts| ts.with_timezone(&chrono::Utc))
-        .max()?;
+    let last_banked = facts.last_banked?;
     // The lane's most recent line, whose columns the catch-up line inherits.
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
-    let carry = ledger
-        .iter()
-        .rev()
-        .find(|entry| entry.session == session && entry.is_lane())?;
+    let carry = facts.carry?;
     // See [`lane_owns_subagents`]: a hand session's subagents are the sweep's.
-    let subagents_are_ours = lane_owns_subagents(ledger, session);
+    let subagents_are_ours = !facts.hand;
     let touched = if subagents_are_ours {
         // A subagent can finish after the root transcript's last write, so its
         // file moves the gate too.
@@ -3230,7 +3287,7 @@ fn catch_up_settled_lane_at(
 /// Catch the settled lane sessions this ledger names up to their transcripts,
 /// and return what that appended.
 ///
-/// Through [`catch_up_settled_lane`], one line for the turns that landed in a
+/// Through [`catch_up_with_facts`], one line for the turns that landed in a
 /// lane's transcript after the dispatcher tore it down. A lane
 /// [`crate::dispatch::live_lane_sessions`] still names is left out — it is the
 /// dispatcher's to bank at teardown — and a lane whose transcript has not
@@ -3239,7 +3296,7 @@ fn catch_up_settled_lane_at(
 /// kind whose row was removed under a ledger that still holds its old lines —
 /// since there is then no transcript format to read it back in.
 ///
-/// Idempotent: [`catch_up_settled_lane`] banks only the delta since this
+/// Idempotent: [`catch_up_with_facts`] banks only the delta since this
 /// session was last banked, and the read is gated on the transcript's mtime
 /// as well.
 ///
@@ -3287,9 +3344,51 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         }
     }
 
+    let facts = lane_facts(&ledger);
+    let home = home_dir();
+    // One walk of each kind's store, however many sessions the ledger names.
+    // A kind stored in a home of its own per session has no id to read off a
+    // filename, so it is looked up per session below, as it always was.
+    let mut by_kind: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (kind_name, session) in &lane_sessions {
+        by_kind.entry(kind_name).or_default().push(session);
+    }
+    let located: HashMap<&str, BTreeMap<String, PathBuf>> = match &home {
+        Some(home) => by_kind
+            .into_iter()
+            .map(|(kind_name, sessions)| {
+                (
+                    kind_name,
+                    lane_session_files_in(home, kind_name, sessions.into_iter()),
+                )
+            })
+            .collect(),
+        None => HashMap::new(),
+    };
+
     let mut appended = Vec::new();
-    for (kind, session) in lane_sessions {
-        if let Some(entry) = catch_up_settled_lane(repo, kind, session, &ledger) {
+    for (kind_name, session) in lane_sessions {
+        let path = match located.get(kind_name).and_then(|found| found.get(session)) {
+            Some(path) => path.clone(),
+            // Not found by the one walk: either the transcript is not on
+            // disk, or the kind is of the `OwnHome` shape, which that walk
+            // cannot index and which keeps its own per-session lookup.
+            None if is_own_home(kind_name) => match session_file(kind_name, session) {
+                Some(path) => path,
+                None => continue,
+            },
+            None => continue,
+        };
+        let Some(fact) = facts.get(session) else {
+            continue;
+        };
+        // Taken before the gate and the harvest read the file — see
+        // [`bank_lane_at`] for why a stamp chosen after the read loses a
+        // racing tail.
+        let banked_at = chrono::Utc::now();
+        if let Some(entry) =
+            catch_up_with_facts(repo, kind_name, session, &path, banked_at, &ledger, fact)
+        {
             appended.push(entry);
         }
     }
@@ -3311,7 +3410,7 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
 /// never be banked twice under a different name. That includes a session
 /// this same function banked on an earlier sweep: a hand session found in a
 /// task's worktree is banked below through [`bank_lane_at`] — the same call
-/// [`catch_up_settled_lane`] makes for a settled lane — which makes
+/// [`catch_up_with_facts`] makes for a settled lane — which makes
 /// [`Entry::is_lane`] true for it from then on, so the very check just
 /// described is what keeps a later sweep from banking it a second time as a
 /// directory line instead.
@@ -3411,7 +3510,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             }
 
             // Taken before the gate and the harvest below read the file, and
-            // for the same reason [`catch_up_settled_lane`] does — see
+            // for the same reason [`catch_up_with_facts`]'s caller does — see
             // [`bank_lane_at`]'s own paragraph on why a stamp chosen after
             // the read would make a future sweep's mtime gate skip a tail
             // that landed during this harvest.
@@ -4185,6 +4284,64 @@ pub fn read_sessions<'a>(
     out
 }
 
+/// Whether `kind_name` keeps each session in a home of its own, which no walk
+/// of the store can index by file name — see [`FileShape::OwnHome`].
+fn is_own_home(kind_name: &str) -> bool {
+    kind(kind_name).is_some_and(|a| matches!(a.store, Store::Transcript(FileShape::OwnHome { .. })))
+}
+
+/// [`session_file_in`]'s answer for every one of `sessions`, from one walk of
+/// the store, for a kind that is not of the `OwnHome` shape. A session with no
+/// transcript, and every session of an `OwnHome` kind, is left out.
+///
+/// Matches the way [`session_file_in`] does rather than the way
+/// [`session_files_in`] does: a file belongs to a session when its name ends
+/// in the id (after an underscore, for `AfterUnderscore`), not only when the
+/// name is the id. So a subagent's `agent-<id>` file is a hit for `<id>`,
+/// exactly as the per-session lookup finds it, and the sweep banks the same
+/// lines it did when it looked sessions up one at a time. Every suffix of a
+/// file name is tried against the wanted ids, which costs the length of the
+/// name and not the number of sessions. Ties go to the most recently modified
+/// file, the first met on a tie, as [`newest_matching`] does.
+fn lane_session_files_in<'a>(
+    home: &Path,
+    kind_name: &str,
+    sessions: impl Iterator<Item = &'a str>,
+) -> BTreeMap<String, PathBuf> {
+    let mut out = BTreeMap::new();
+    let Some(accounting) = kind(kind_name) else {
+        return out;
+    };
+    let Store::Transcript(shape) = accounting.store;
+    let after_underscore = match shape {
+        FileShape::Exact => false,
+        FileShape::AfterUnderscore => true,
+        FileShape::OwnHome { .. } => return out,
+    };
+    let wanted: BTreeSet<&str> = sessions.collect();
+    if wanted.is_empty() {
+        return out;
+    }
+    let mut newest: BTreeMap<&str, std::time::SystemTime> = BTreeMap::new();
+    let root = home.join(accounting.sessions_dir);
+    transcripts_matching(&root, |_| true, &mut |at, path| {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        for (start, _) in stem.char_indices() {
+            if after_underscore && !stem[..start].ends_with('_') {
+                continue;
+            }
+            let Some(&session) = wanted.get(&stem[start..]) else {
+                continue;
+            };
+            if newest.get(session).is_none_or(|prev| at > *prev) {
+                newest.insert(session, at);
+                out.insert(session.to_string(), path.clone());
+            }
+        }
+    });
+    out
+}
+
 /// Every one of `sessions`' transcript files for `kind_name`, from one walk
 /// of the store rather than one per session.
 ///
@@ -4255,8 +4412,46 @@ pub fn read_project(root: &Path) -> Vec<Entry> {
     entries
 }
 
+/// The two things a test needs to run [`sweep`] for real, shared with the tests
+/// of the modules that reach it — `crate::eval::load` sweeps first.
+#[cfg(test)]
+pub(crate) mod lane_env {
+    /// Taken by every test that sweeps or swaps the home directory out from
+    /// under it, including those in other modules. Tests in `stack` and the
+    /// registry tests here keep locks of their own for variables only they
+    /// touch, and those are not serialised against this one.
+    ///
+    /// The environment belongs to the process, not to a test, so two of these
+    /// running at once read each other's values and each other's restores —
+    /// which is a failure in whichever one happened to look while the other was
+    /// putting the variable back, and never in the one at fault. There is no
+    /// per-test environment to hand out, so they take turns instead.
+    ///
+    /// Poison is stepped over deliberately: a test that failed while holding
+    /// this has already reported itself, and failing the others as well would
+    /// bury it.
+    pub(crate) static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `SPOOLWAY_STEP` out of the environment, so [`sweep`] does
+    /// not take its `in_lane` early return — this test binary is itself run
+    /// inside a lane as often as not. Restores whatever was there. The caller
+    /// holds [`AMBIENT_ENV`], which is what serialises this against every other
+    /// test that reaches for the same variable.
+    pub(crate) fn out_of_lane<T>(f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(crate::dispatch::ENV_STEP);
+        crate::platform::remove_test_env(crate::dispatch::ENV_STEP);
+        let result = f();
+        match previous {
+            Some(value) => crate::platform::set_test_env(crate::dispatch::ENV_STEP, value),
+            None => crate::platform::remove_test_env(crate::dispatch::ENV_STEP),
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::lane_env::{AMBIENT_ENV, out_of_lane};
     use super::*;
     use crate::platform::PathExt;
 
@@ -4278,22 +4473,6 @@ mod tests {
         ledger: &[Entry],
     ) -> Option<Entry> {
         catch_up_settled_lane_at(repo, kind, session, path, chrono::Utc::now(), ledger)
-    }
-
-    /// Run `f` with `SPOOLWAY_STEP` out of the environment, so [`sweep`] does
-    /// not take its `in_lane` early return — this test binary is itself run
-    /// inside a lane as often as not. Restores whatever was there. The caller
-    /// holds [`AMBIENT_ENV`], which is what serialises this against every other
-    /// test that reaches for the same variable.
-    fn out_of_lane<T>(f: impl FnOnce() -> T) -> T {
-        let previous = std::env::var_os(crate::dispatch::ENV_STEP);
-        crate::platform::remove_test_env(crate::dispatch::ENV_STEP);
-        let result = f();
-        match previous {
-            Some(value) => crate::platform::set_test_env(crate::dispatch::ENV_STEP, value),
-            None => crate::platform::remove_test_env(crate::dispatch::ENV_STEP),
-        }
-        result
     }
 
     fn prices() -> BTreeMap<String, ModelPrice> {
@@ -6357,20 +6536,6 @@ mod tests {
         out
     }
 
-    /// Taken by every test that touches a variable the process environment
-    /// carries or swaps the home directory out from under.
-    ///
-    /// The environment belongs to the process, not to a test, so two of these
-    /// running at once read each other's values and each other's restores —
-    /// which is a failure in whichever one happened to look while the other was
-    /// putting the variable back, and never in the one at fault. There is no
-    /// per-test environment to hand out, so they take turns instead.
-    ///
-    /// Poison is stepped over deliberately: a test that failed while holding
-    /// this has already reported itself, and failing the others as well would
-    /// bury it.
-    static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn fixture(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("skill-{name}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -6661,6 +6826,151 @@ mod tests {
         let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
         assert!(again.is_empty(), "idempotent");
 
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A home with `n` claude transcripts, `perf-<i>.jsonl`, one per lane
+    /// session, and `extra_lines + 1` ledger lines for each, all banked well
+    /// before the transcript was written, so every session is caught up.
+    fn many_lane_sessions(
+        name: &str,
+        repo: &Repo,
+        n: usize,
+        extra_lines: usize,
+    ) -> crate::scratch::ScratchRoot {
+        let root = crate::scratch::root(&format!("usage-many-{name}"));
+        let project = root.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::seconds(600);
+        for i in 0..n {
+            let session = format!("perf-{i:04}");
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                transcript(&[("", 100), ("", 500)]),
+            )
+            .unwrap();
+            for line in 0..=extra_lines {
+                let at = old - chrono::Duration::seconds((extra_lines - line) as i64);
+                append(
+                    repo,
+                    &Entry {
+                        ts: at.to_rfc3339(),
+                        task: "demo".into(),
+                        step: "implement".into(),
+                        session: session.clone(),
+                        tokens: Tokens {
+                            output: 100,
+                            ..Tokens::default()
+                        },
+                        ..plain_entry()
+                    },
+                )
+                .unwrap();
+            }
+        }
+        root
+    }
+
+    /// However many sessions the ledger names, one sweep walks the claude
+    /// store once for the lane catch-up. Looking each session up on its own
+    /// walked the whole store once per session. `sweep_dirs` walks the stores
+    /// too, for a count of its own that does not depend on the ledger, so the
+    /// number of walks over many sessions is held to the number over one.
+    /// Every session is still caught up, so the one walk finds what the many
+    /// did.
+    #[test]
+    fn sweep_walks_the_store_once_however_many_sessions_the_ledger_names() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let walks_for = |name: &str, sessions: usize| {
+            let (repo, _, _root_guard) = fixture(name);
+            let home = many_lane_sessions(name, &repo, sessions, 2);
+            let (appended, walks) = crate::platform::test_home::with_home(&home, || {
+                out_of_lane(|| {
+                    let before = STORE_WALKS.with(|walks| walks.get());
+                    let appended = sweep(&repo);
+                    (appended, STORE_WALKS.with(|walks| walks.get()) - before)
+                })
+            });
+            assert_eq!(appended.len(), sessions, "every session caught up");
+            std::fs::remove_dir_all(&home).ok();
+            walks
+        };
+
+        let one = walks_for("sweep-walks-one", 1);
+        let many = walks_for("sweep-walks-many", 40);
+        assert_eq!(
+            many, one,
+            "{many} walks for 40 sessions against {one} for one: the catch-up \
+             walks the store once per session"
+        );
+    }
+
+    /// The one walk finds a transcript the way the per-session lookup does: by
+    /// the end of its name. A file `agent-<id>.jsonl` is the lookup's answer
+    /// for `<id>`, so the sweep banks from it as it always has.
+    #[test]
+    fn the_one_walk_matches_a_session_by_the_end_of_a_file_name() {
+        let home = crate::scratch::root("usage-lane-files-suffix");
+        let project = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("agent-aaaa.jsonl"), "x").unwrap();
+        std::fs::write(project.join("bbbb.jsonl"), "x").unwrap();
+        std::fs::write(project.join("unrelated.jsonl"), "x").unwrap();
+
+        let found = lane_session_files_in(&home, "claude", ["aaaa", "bbbb", "cccc"].into_iter());
+        assert_eq!(
+            found.get("aaaa"),
+            session_file_in(&home, "claude", "aaaa").as_ref()
+        );
+        assert_eq!(
+            found.get("bbbb"),
+            session_file_in(&home, "claude", "bbbb").as_ref()
+        );
+        assert!(found.contains_key("aaaa"), "found by the end of the name");
+        assert!(!found.contains_key("cccc"), "no transcript, no entry");
+        assert_eq!(found.len(), 2);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The `AfterUnderscore` shape (pi) matches a file only when the id
+    /// follows an underscore, as the per-session lookup does. An id that
+    /// merely ends a longer word in the name is no hit.
+    #[test]
+    fn the_one_walk_matches_an_id_after_an_underscore_for_pi() {
+        let home = crate::scratch::root("usage-lane-files-pi");
+        let project = home.join(".pi/agent/sessions/--work--");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("2026-08-04T06-14-15-743Z_aaaa.jsonl"), "x").unwrap();
+        std::fs::write(project.join("x_abbbb.jsonl"), "x").unwrap();
+
+        let found = lane_session_files_in(&home, "pi", ["aaaa", "bbbb"].into_iter());
+        assert_eq!(
+            found.get("aaaa"),
+            session_file_in(&home, "pi", "aaaa").as_ref()
+        );
+        assert!(found.contains_key("aaaa"), "found after the underscore");
+        assert_eq!(
+            found.get("bbbb"),
+            session_file_in(&home, "pi", "bbbb").as_ref()
+        );
+        assert!(
+            !found.contains_key("bbbb"),
+            "an id after any other character is no hit"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A kind stored in a home per session is not found by file name, so the
+    /// one walk leaves it out and `sweep` looks it up the way it always did.
+    #[test]
+    fn the_one_walk_leaves_out_a_kind_stored_in_a_home_per_session() {
+        let session = "0198e2c0-aaaa-4000-8000-00000000000a";
+        let home = home_with("codex", session, "x");
+        assert!(lane_session_files_in(&home, "codex", [session].into_iter()).is_empty());
+        assert!(is_own_home("codex"));
+        assert!(!is_own_home("claude"));
         std::fs::remove_dir_all(&home).ok();
     }
 
