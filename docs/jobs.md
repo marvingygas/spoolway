@@ -77,19 +77,27 @@ The routines tab writes a job too, with `new job` in a routine's options menu. S
 |---|---|
 | `↑` `↓` | Move. |
 | `n` | Write a new job. |
-| `e` | Edit the highlighted job. |
-| `space` | Pause or resume it. |
-| `x` | Delete it, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
+| `o` | Open the options menu of the highlighted job, titled with its name. With no jobs it does nothing. |
 | `ctrl-c` | Leave the screen. |
+
+The options menu offers these items, in this order. `↑` `↓` move the cursor, `enter` runs the
+item under it, and `esc` closes the menu.
+
+| Item | What it does |
+|---|---|
+| `edit` | Edit the job. |
+| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it. |
+| `delete` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
 
 ### The three choices
 
-`n` and `e` walk three panels. `esc` on any of them writes nothing.
+`n` and the options menu's `edit` walk three panels. `esc` on any of them writes nothing.
 
 1. The routine. This is the same routines browser as the routines tab, listing one
    row per routine. `space` ticks a routine and `enter` picks it. `tab` moves focus onto the
-   tasks pane, where `space` picks the highlighted task and `o` opens it in your editor. `esc`
-   cancels the picker from either pane.
+   tasks pane, where `space` picks the highlighted task. There, `o` opens a menu titled with the
+   task's id whose one item, `open`, opens the task in your editor. `esc` cancels the picker from
+   either pane.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as

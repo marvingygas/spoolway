@@ -567,9 +567,15 @@ the right pane is titled `new job`.
 | Key | What it does |
 |---|---|
 | `n` | Write a new job: pick the routine, type the schedule, pick the pipeline |
-| `e` | Edit the highlighted job through the same three panels |
-| `space` | Pause or resume the highlighted job |
-| `x` | Delete the highlighted job, after a popup whose one answer is `delete` |
+| `o` | Open the options menu of the highlighted job, titled with its name |
+
+The options menu offers these items for the highlighted job, in this order:
+
+| Item | What it does |
+|---|---|
+| `edit` | Edit the job through the same three panels |
+| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it |
+| `delete` | Delete the job, after a popup whose one answer is `delete` |
 
 See [Jobs](jobs.md).
 

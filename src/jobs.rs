@@ -1103,7 +1103,7 @@ mod tests {
              pipeline = \"impl\"\nroutine = \"nightly\"\nnotify = \"slack\"\n",
         );
 
-        // Re-save with a changed schedule, the way `e` does.
+        // Re-save with a changed schedule, the way the jobs tab's edit does.
         write(
             &repo,
             Scope::User,
