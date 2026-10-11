@@ -66,7 +66,7 @@ jobs:
           # build it documents, so it skips the suite the same way a commit
           # already covered by the daily run does below. The file list is
           # fetched into its own variable, outside the `code=` pipeline, so a
-          # failed `gh pr diff` stops the step under `set -e` instead of
+          # failed lookup stops the step under `set -e` instead of
           # feeding grep an empty stream that reads as "no code files
           # changed" — a lookup failure must run the tests, never skip them,
           # the same rule the `verify` job below keeps with
@@ -75,7 +75,11 @@ jobs:
           # changed file matched `-v`'s exclusion, which `|| true` turns back
           # into a legitimate zero.
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            files=$(gh pr diff "$PR" --name-only)
+            # The files endpoint, not `gh pr diff`: the diff is refused
+            # outright past 20,000 lines, which a merge pushed onto a pull
+            # request's branch easily reaches, while the file list is served
+            # up to 3,000 files.
+            files=$(gh api --paginate "repos/$GH_REPO/pulls/$PR/files" --jq '.[].filename')
             code=$(printf '%s\n' "$files" \
               | grep -vcE '^(docs/|site/|README\.md$|DOCS\.md$|log\.md$)' || true)
             if [ "$code" -eq 0 ]; then
