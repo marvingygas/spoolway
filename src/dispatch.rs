@@ -276,7 +276,8 @@ pub(crate) struct LaneRecord {
     pub(crate) last_progress: i64,
     output_hash: u64,
     /// Seconds this lane has been `LaneStatus::Working` since the last time
-    /// it was actually banked — a running total this pass's own
+    /// it was actually banked, plus the last stretch a pass banks when it
+    /// first finds the lane `Done` — a running total this pass's own
     /// [`Dispatcher::accrue_busy_time`] adds to, and [`Dispatcher::record_usage`]
     /// reads as the line's `wall_s`. Unlike tokens, whose delta is re-read
     /// from `usage_banked` on every call, this is not zeroed by
@@ -295,10 +296,20 @@ pub(crate) struct LaneRecord {
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     busy_s: i64,
     /// The pass `busy_s` was last measured up to. `None` until
-    /// `accrue_busy_time` first sees this lane, so the interval before a
-    /// dispatcher noticed it existed is never guessed at and never counted.
+    /// `accrue_busy_time` first sees this lane, which then measures from
+    /// `started_at`: a lane that is already over by its first pass still ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     busy_polled_at: Option<i64>,
+    /// The last pass that could tell found this lane `Done`. For a lane that
+    /// is neither held nor kept, that pass also banked the span up to it into
+    /// `busy_s`; a held or kept lane has the flag set without banking
+    /// anything. A lane that is over stays `Done` on every pass until it is
+    /// freed or kept, and its span must be counted once, not once per pass.
+    /// Cleared by a pass that finds it `Working`, `Idle` or `Blocked`, so a
+    /// lane that works again and finishes again counts its second stretch
+    /// too. A pass that reads `Unknown` cannot tell, and leaves it as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    done_banked: bool,
     /// When this lane was last sent the report contract again, in
     /// `last_progress`'s own clock. `None` until the first reminder.
     ///
@@ -412,6 +423,17 @@ pub(crate) struct LaneRecord {
     /// nothing is ever typed into the dialog.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     opening: Vec<String>,
+    /// The report this lane made, copied off the task while the lane was
+    /// still waiting to be freed.
+    ///
+    /// A task keeps only its newest report. Only set on a backend with no
+    /// pane to keep, where a lane that has reported can stay busy for
+    /// several passes, and the next step may report before it is freed,
+    /// which replaces the report this lane made. `record_usage` falls back
+    /// to this copy so the ledger line still carries the lane's own
+    /// verdict. `None` until the lane is seen to have reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verdict: Option<crate::task::LastReport>,
 }
 
 impl LaneRecord {
@@ -437,6 +459,7 @@ impl LaneRecord {
             output_hash: 0,
             busy_s: 0,
             busy_polled_at: None,
+            done_banked: false,
             reminded_at: None,
             reminders: 0,
             session: String::new(),
@@ -451,6 +474,7 @@ impl LaneRecord {
             child_since: None,
             launch_grace_since: None,
             opening: Vec::new(),
+            verdict: None,
         }
     }
 
@@ -2561,7 +2585,8 @@ impl<'a> Dispatcher<'a> {
     /// Add this pass's own interval to every owned lane's `busy_s`, for
     /// whichever of them the multiplexer just reported `Working` — the one
     /// status that means mid-turn and spending, as opposed to idle, settled,
-    /// or parked on a permission prompt. Read once per pass, ahead of
+    /// or parked on a permission prompt — and once for a lane it first
+    /// reports `Done`, whose last stretch no pass saw. Read once per pass, ahead of
     /// anything this pass might bank, so a lane freed or first held this
     /// same pass carries this interval into that bank rather than losing it.
     ///
@@ -2574,11 +2599,18 @@ impl<'a> Dispatcher<'a> {
     /// `Working` between this pass and the next is credited to it only once
     /// this or a later pass actually looks, so the true first fraction of a
     /// turn — before the first pass that finds it `Working` — and the true
-    /// last fraction — after the last pass that still does — are never
-    /// banked. At `PROBE_INTERVAL`'s rate that is on the order of ten
-    /// seconds under-counted at each end of a turn, which is the honest
-    /// price of measuring "was it working" pass by pass rather than timing
-    /// the turn itself.
+    /// last fraction — after the last pass that still does — are not banked
+    /// by the `Working` rule once a lane has been polled. At
+    /// `PROBE_INTERVAL`'s rate that is on the order of ten seconds
+    /// under-counted at each end of a turn, which is the honest price of
+    /// measuring "was it working" pass by pass rather than timing the turn
+    /// itself. Two things narrow that. A lane's first sighting, `Working` or
+    /// `Done`, measures from `started_at`, so the first fraction is banked
+    /// when the first pass finds the lane working. And the pass that first
+    /// finds a lane `Done` banks the span since the previous poll, so a lane
+    /// that ran and finished between two passes is not banked as `0s`. That
+    /// can over-count by up to one `PROBE_INTERVAL`, the time between the
+    /// lane finishing and that pass looking.
     fn accrue_busy_time(&mut self, owned: &[(String, String, &Lane)]) {
         // The ledger is read lazily, one lane at a time, and only for a name
         // this dispatcher has no record of yet — the ordinary case is every
@@ -2594,8 +2626,34 @@ impl<'a> Dispatcher<'a> {
                 );
             }
             let record = self.lanes.get_mut(&lane.name).expect("just inserted above");
-            let since = record.busy_polled_at.unwrap_or(now);
-            if lane.status == LaneStatus::Working {
+            // A lane that starts and finishes between two passes must still
+            // bank the seconds it ran, whichever pass finds it over. That
+            // pass may be the lane's first sighting, `Working` or `Done`,
+            // measured from `started_at`, or a later one: a launch reports
+            // `moved`, so the next pass follows at once and polls the lane at
+            // about its start time, long before it finishes. Measuring a
+            // `Done` lane from its last poll banks the span it spent
+            // finishing, and `done_banked` keeps the passes that go on
+            // finding it `Done` from banking it again. A lane seen `Blocked`
+            // or `Idle` may have spent the interval waiting, and the gh-378
+            // rule is not to bank a wait as work. A record held for a person
+            // is skipped for the same reason, and a kept one has already been
+            // banked by `finish_lane`.
+            let since = record.busy_polled_at.unwrap_or(record.started_at);
+            let counts = match lane.status {
+                LaneStatus::Working => true,
+                LaneStatus::Done => !record.done_banked && !record.held_for_block && !record.kept,
+                _ => false,
+            };
+            // `Unknown` leaves the flag alone: the multiplexer reads it
+            // whenever a row's status is absent, which says nothing about
+            // whether the lane worked. Clearing it there would let a lane
+            // resting `Done` that flaps through `Unknown` bank the whole
+            // interval again on the next `Done` pass, a wait banked as work.
+            if lane.status != LaneStatus::Unknown {
+                record.done_banked = lane.status == LaneStatus::Done;
+            }
+            if counts {
                 // Clamped: `busy_polled_at` is written to `lanes.json` and so
                 // survives a restart, and an ordinary pass is at most
                 // `PROBE_INTERVAL` apart (sooner, on a wake). A gap wider
@@ -2700,6 +2758,24 @@ impl<'a> Dispatcher<'a> {
             // pass after the prompt is answered.
             let busy = matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked);
             let current = tasks.iter().find(|t| t.id() == task_id);
+
+            // Copied before the busy skip below: a lane that is skipped may
+            // not be freed until after the next step has reported, and the
+            // task keeps only the newest report. The lane's own start time
+            // keeps an earlier lane's report on the same step from being
+            // taken for this one's. Only where the skip applies: a backend
+            // that keeps its panes frees a lane on the pass after its
+            // report, and a kept lane's later ledger lines must stay as
+            // they were.
+            let resident = self.mux.resident_while_waiting();
+            if let Some(record) = self.lanes.get_mut(&lane.name).filter(|_| !resident) {
+                let own = current
+                    .and_then(|t| t.front.last_report.as_ref())
+                    .filter(|r| r.step == *step_id && r.at > record.started_at);
+                if let Some(r) = own {
+                    record.verdict = Some(r.clone());
+                }
+            }
 
             if parked {
                 if !busy {
@@ -3062,8 +3138,12 @@ impl<'a> Dispatcher<'a> {
         let report = task
             .and_then(|t| t.front.last_report.as_ref())
             .filter(|report| report.step == step_id);
-        let outcome = report.map(|report| report.outcome.clone());
-        let blocked = report.is_some_and(|report| report.blocked);
+        // The task's report is the newest word; the copy on the record is
+        // what the lane said when the task has since moved on.
+        let (outcome, blocked) = match report.or(record.verdict.as_ref()) {
+            Some(report) => (Some(report.outcome.clone()), report.blocked),
+            None => (None, false),
+        };
 
         let entry = crate::usage::Entry {
             ts: banked_at.to_rfc3339(),
@@ -3078,8 +3158,9 @@ impl<'a> Dispatcher<'a> {
             round: task.map(|t| t.steps_at(step_id)).unwrap_or(0),
             // The delta since this lane was last banked, the same shape as
             // `tokens` above — `accrue_busy_time` is what fills `busy_s`,
-            // pass by pass, and only while the multiplexer reports the lane
-            // `Working`. A lane held for a person and freed hours later
+            // pass by pass, while the multiplexer reports the lane `Working`
+            // and once for the stretch it finishes in. A lane held for a
+            // person and freed hours later
             // spent none of that wait, so this reads 0 across it rather
             // than the whole elapsed span — see gh-378 / issue #380.
             wall_s: record.busy_s,
@@ -4516,6 +4597,7 @@ impl<'a> Dispatcher<'a> {
                             output_hash: 0,
                             busy_s: 0,
                             busy_polled_at: None,
+                            done_banked: false,
                             reminded_at: None,
                             reminders: 0,
                             session: started.session,
@@ -4530,6 +4612,7 @@ impl<'a> Dispatcher<'a> {
                             child_since: None,
                             launch_grace_since: None,
                             opening: started.opening,
+                            verdict: None,
                         },
                     );
                     // Written now, not left for the end of the pass: the unsent
@@ -12683,6 +12766,70 @@ mod tests {
         );
     }
 
+    /// A backend that keeps its panes frees a lane on the pass after its
+    /// report, so a kept lane's closing line at done is banked as it always
+    /// was: with no verdict, not the one the lane reported when its step moved
+    /// on.
+    #[test]
+    fn a_kept_lane_closing_line_does_not_borrow_the_verdict_it_reported_earlier() {
+        let (mut repo, _root_guard) = fixture("kept-lane-no-late-verdict");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.branch = Some("task/demo".into());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: now_secs() + 5,
+                at_ms: 0,
+                blocked: false,
+            });
+        });
+        let session = "kept-verdict-s1";
+        let kind = local_kind(&repo);
+        let mut lanes = load_lane_records(&repo);
+        lanes.insert(
+            "demo · implement".into(),
+            LaneRecord {
+                session: session.into(),
+                kind,
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(now_secs())
+            },
+        );
+        save_lane_records(&repo, &lanes).unwrap();
+
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        // A person types into the kept pane; the next step has reported.
+        let mut task = reload(&path);
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() + 10,
+            at_ms: 0,
+            blocked: false,
+        });
+        task.set_stage("done", None);
+        task.save().unwrap();
+        let home = pi_home_with(session, 7_500);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 2, "{banked:?}");
+        assert_eq!(lines[1].outcome, None, "{:?}", lines[1]);
+    }
+
     /// A kept pane nobody typed into has spent nothing since it was banked, so
     /// closing it at done adds no empty row to the ledger.
     #[test]
@@ -15441,6 +15588,242 @@ mod tests {
             record.busy_s, busy_after_working,
             "a permission prompt is a person's turn, not the lane's — it must add nothing"
         );
+    }
+
+    /// A lane that starts and finishes between two dispatcher passes was
+    /// still working for those seconds, so its ledger line carries them as
+    /// `wall_s`. No pass ever saw it `Working`, which must not leave `eval`
+    /// showing `0s` in `TIME` for a step that ran for several seconds.
+    #[test]
+    fn a_lane_that_ran_between_two_passes_banks_the_time_it_worked() {
+        let (mut repo, _root_guard) = fixture("short-lane-wall-time");
+        repo.config.dispatch.keep_finished_lanes = false;
+        priced(&mut repo, "priced-model");
+        let worktree = a_checkout("dispatch-short-lane-wall-time");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let session = "short-lane-wall";
+        let kind = local_kind(&repo);
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind,
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                // Launched 8s ago and never polled: the first pass to look
+                // at it finds the step already over. Not yet kept: that is
+                // what the pass banking it does, after counting its time.
+                kept: false,
+                ..kept_record(session, now_secs() - 8)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(session, 6_000);
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Done,
+            "w1:p7",
+        )]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert!(
+            (7..=10).contains(&lines[0].wall_s),
+            "the lane ran for about 8s, so its line should say so: {banked:?}"
+        );
+    }
+
+    /// The pass a launch triggers is followed at once by another, so the
+    /// lane's record already carries a poll from about its start by the
+    /// time it finishes, and the pass that finds it `Done` is not its first
+    /// sighting. The seconds it ran since that poll must still be banked.
+    #[test]
+    fn a_lane_polled_at_launch_and_next_seen_done_banks_the_time_it_worked() {
+        let (mut repo, _root_guard) = fixture("polled-at-launch-wall-time");
+        repo.config.dispatch.keep_finished_lanes = false;
+        priced(&mut repo, "priced-model");
+        let worktree = a_checkout("dispatch-polled-at-launch-wall-time");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let session = "polled-at-launch-wall";
+        let kind = local_kind(&repo);
+        let started = now_secs() - 8;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind,
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                // The pass right after the launch polled it, so the next
+                // sighting is not the first.
+                busy_polled_at: Some(started),
+                kept: false,
+                ..kept_record(session, started)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(session, 6_000);
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Done,
+            "w1:p7",
+        )]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert!(
+            (7..=10).contains(&lines[0].wall_s),
+            "the lane ran for about 8s since its launch poll: {banked:?}"
+        );
+    }
+
+    /// A lane that exited without reporting stays `Done` on every pass until
+    /// it is handled, and its last stretch is banked into `busy_s` once, not
+    /// once per pass.
+    #[test]
+    fn a_lane_found_done_on_every_pass_banks_its_last_stretch_once() {
+        let (repo, _root_guard) = fixture("done-banked-once");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                session: "s1".into(),
+                kind: "pi".into(),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                busy_polled_at: Some(now_secs() - 8),
+                ..LaneRecord::adopted(now_secs() - 8)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+        let first = load_lane_records(&repo)
+            .get("demo · implement")
+            .expect("the unreported lane keeps its record")
+            .busy_s;
+        assert!(
+            (7..=10).contains(&first),
+            "the first Done pass banks the 8s since the last poll: {first}"
+        );
+
+        run_pass(&repo, &mux);
+        let second = load_lane_records(&repo)
+            .get("demo · implement")
+            .unwrap()
+            .busy_s;
+        assert_eq!(second, first, "a second Done pass must bank nothing more");
+    }
+
+    /// A pass that reads `Unknown` cannot tell whether the lane worked, so a
+    /// lane resting `Done` that flaps through it must not bank the interval
+    /// again on its next `Done` pass.
+    #[test]
+    fn a_done_lane_that_reads_unknown_for_a_pass_banks_its_stretch_once() {
+        let (repo, _root_guard) = fixture("done-unknown-done");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                session: "s1".into(),
+                kind: "pi".into(),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                busy_polled_at: Some(now_secs() - 8),
+                ..LaneRecord::adopted(now_secs() - 8)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let busy_s = || {
+            load_lane_records(&repo)
+                .get("demo · implement")
+                .expect("the unreported lane keeps its record")
+                .busy_s
+        };
+
+        let done = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &done);
+        let first = busy_s();
+        assert!(
+            (7..=10).contains(&first),
+            "the first Done pass banks the 8s since the last poll: {first}"
+        );
+
+        let unknown = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Unknown)]);
+        run_pass(&repo, &unknown);
+        // Passes in a test run back to back, so push the last poll back to
+        // where a real pass interval would have left it.
+        let mut records = load_lane_records(&repo);
+        records
+            .get_mut("demo · implement")
+            .expect("the Unknown pass keeps the record")
+            .busy_polled_at = Some(now_secs() - 8);
+        save_lane_records(&repo, &records).unwrap();
+        run_pass(&repo, &done);
+        assert_eq!(
+            busy_s(),
+            first,
+            "an Unknown pass between two Done passes is no evidence of work"
+        );
+    }
+
+    /// A kept lane has already been banked by `finish_lane`. Resting `Done`
+    /// with `done_banked` unset, as every kept lane is on the first pass
+    /// after an upgrade, it must not bank its span into `busy_s` again: the
+    /// done-time bank would write a second ledger row carrying that time.
+    #[test]
+    fn a_kept_done_lane_banks_no_busy_time() {
+        let (repo, _root_guard) = fixture("kept-done-no-busy-time");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                busy_polled_at: Some(now_secs() - 8),
+                ..kept_record("s1", now_secs() - 8)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+        let after = load_lane_records(&repo);
+        let record = after
+            .get("demo · implement")
+            .expect("a kept lane keeps its record");
+        assert_eq!(record.busy_s, 0, "a kept lane's span was banked already");
     }
 
     /// A stop banks a running lane and then writes its record straight back
@@ -23789,5 +24172,191 @@ exit 0"#,
             branches.trim().is_empty(),
             "a worktree whose checkout is already gone must still get its branch cleaned up: {branches:?}"
         );
+    }
+
+    /// A lane's ledger line carries the verdict that lane reported, even when
+    /// the backend frees the lane only after the task's next step has reported
+    /// too. A headless lane's process can outlive its own report, and a task
+    /// keeps just its newest report, so the line must not be read from
+    /// whatever the task holds at the moment the lane is freed.
+    #[test]
+    fn a_headless_lane_freed_after_the_next_step_reported_is_banked_with_its_own_verdict() {
+        const SESSION: &str = "headless-verdict-session";
+        let (mut repo, _root_guard) = fixture("headless-verdict-race");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: now_secs() - 60,
+                at_ms: 0,
+                blocked: false,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        // The implement lane has reported, but its process is still taking
+        // its last turn, so a backend with no pane to keep leaves it alone.
+        let busy =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &busy);
+        });
+
+        // The next step reports before the implement lane is freed.
+        let mut task = reload(&path);
+        task.front.stage = "document".into();
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() - 30,
+            at_ms: 0,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let settled =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &settled);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(
+            lines[0].outcome.as_deref(),
+            Some("pass"),
+            "the lane's own verdict, not an absent one: {:?}",
+            lines[0]
+        );
+    }
+
+    /// A lane that never reported is banked with no verdict, never with the
+    /// verdict a neighbouring step left on the task.
+    #[test]
+    fn a_lane_that_never_reported_is_banked_without_a_verdict() {
+        const SESSION: &str = "headless-verdict-session";
+        let (mut repo, _root_guard) = fixture("headless-no-verdict");
+        priced(&mut repo, "priced-model");
+        add_task_with(&repo, "demo", "document", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "review".into(),
+                outcome: "pass".into(),
+                at: now_secs() - 30,
+                at_ms: 0,
+                blocked: false,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(lines[0].outcome, None, "{:?}", lines[0]);
+        assert!(!lines[0].blocked);
+    }
+
+    /// A report an earlier lane left on the same step is not the verdict of
+    /// the lane that runs there next. A task resumed to a step after a block
+    /// keeps that block as its report, so a headless lane started after it
+    /// must not copy it onto its own record and bank it once the task has
+    /// moved on.
+    #[test]
+    fn a_headless_lane_does_not_bank_the_report_an_earlier_lane_left_on_its_step() {
+        const SESSION: &str = "headless-stale-report-session";
+        let (mut repo, _root_guard) = fixture("headless-stale-report");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "block".into(),
+                at: now_secs() - 300,
+                at_ms: 0,
+                blocked: true,
+            });
+        });
+        let started_at = now_secs() - 120;
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                started_at,
+                last_progress: started_at,
+                session: SESSION.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(started_at)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = pi_home_with(SESSION, 6_000);
+
+        // The resumed lane is still working and has reported nothing.
+        let busy =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &busy);
+        });
+
+        // The task moves on before the lane is freed.
+        let mut task = reload(&path);
+        task.front.stage = "document".into();
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "pass".into(),
+            at: now_secs() - 30,
+            at_ms: 0,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let settled =
+            FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]).detached();
+        with_home(&home, || {
+            run_pass(&repo, &settled);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.step == "implement").collect();
+        assert_eq!(lines.len(), 1, "banked once: {banked:?}");
+        assert_eq!(lines[0].outcome, None, "{:?}", lines[0]);
+        assert!(!lines[0].blocked, "{:?}", lines[0]);
     }
 }
