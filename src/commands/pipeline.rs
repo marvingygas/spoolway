@@ -836,7 +836,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
                     pipeline.private_file.is_some(),
                     step.prompt_name(),
                     &format!("`{}`/`{}`", pipeline.name, step.id),
-                    "run `spoolway init` or write it",
+                    crate::prompt::missing_prompt_fix(step.prompt_name()),
                 ));
             }
 

@@ -277,9 +277,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // The parse error the last reload reported, so a config that stays broken
     // is announced on the pass that found it and not on every pass after.
     let mut reload_error: Option<String> = None;
+    // The same for a record of the last good config that cannot be written.
+    let mut record_error: Option<String> = None;
 
     loop {
-        reload_config(&mut live, &mut reload_error);
+        reload_config(&mut live, &mut reload_error, &mut record_error);
         let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref());
 
         let mut spent_out = None;
@@ -427,13 +429,21 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
 /// Re-read `config.toml` and the config override into `live`, so an edit such
 /// as a raised `agents.claude.concurrency` governs the next pass without a
-/// restart. This is the same load `spoolway config get` does, which is why the
-/// two agree.
+/// restart. This is the load `spoolway config get` does, except that a
+/// `config.toml` that has gone missing is a failed reload here, where
+/// `config get` shows the defaults.
 ///
-/// A config that does not parse leaves `live` on the last good one: a typo
-/// typed mid-run must not stop the dispatcher or send it back to defaults.
+/// A config that does not parse, or a `config.toml` that has gone missing,
+/// leaves `live` on the last good one: a typo typed mid-run must not stop the
+/// dispatcher or send it back to defaults.
 /// The error is printed when it first appears, or when it changes, and a
 /// successful reload clears it so the same breakage later is announced again.
+///
+/// Every good load is also recorded in the project home for a lane's
+/// `report` and a `spoolway stack` step to fall back on — see
+/// `crate::pipeline_snapshot::record_config`. A record that cannot be
+/// written is announced the same way as a reload error, once per distinct
+/// message in `record_reported`.
 ///
 /// Pipelines are not reloaded here. They follow the rule for pipeline files:
 /// the dispatcher keeps what it loaded at start. See `crate::pipeline_snapshot`.
@@ -444,9 +454,30 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 /// the pipelines when they load; `unattended.enabled` is settled once into
 /// the lock; `dispatch.backend` picks the multiplexer once. A change to any
 /// of them needs a restart.
-fn reload_config(live: &mut Repo, reported: &mut Option<String>) {
-    match crate::config::Config::load(&live.root) {
+fn reload_config(
+    live: &mut Repo,
+    reported: &mut Option<String>,
+    record_reported: &mut Option<String>,
+) {
+    match crate::config::Config::load_present(&live.root) {
         Ok(config) => {
+            match crate::pipeline_snapshot::record_config(live, &config) {
+                Ok(()) => *record_reported = None,
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    if record_reported.as_deref() != Some(message.as_str()) {
+                        let problem = format!(
+                            "the last good config could not be recorded: {message}. A lane's \
+                             `spoolway report` or a `spoolway stack` step that meets a broken \
+                             config.toml will stop instead of running on it. Make the project \
+                             home writable; the next pass tries again"
+                        );
+                        crate::problem_log::append(live, &problem);
+                        println!("  ! {problem}");
+                        *record_reported = Some(message);
+                    }
+                }
+            }
             live.config = config;
             *reported = None;
         }
@@ -1237,19 +1268,27 @@ pub(crate) fn check_backend_checkout(
 /// for a test double to get right for no reason a real backend needs.
 fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
     if mux.name() == "headless" {
-        if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
-            bail!(
-                "backend = headless is spoolway's own test backend — nothing draws it \
-                 anywhere a person can see, so only the end-to-end harness runs it, with \
-                 {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
-                 herdr",
-                crate::headless::TEST_BACKEND_ENV
-            );
-        }
-        return Ok(());
+        return check_headless_marker();
     }
     if !mux.in_own_pane() {
         bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
+    }
+    Ok(())
+}
+
+/// Refuse `backend = headless` unless the end-to-end harness's marker is
+/// exported. Split out of [`check_dispatcher_visible`] so `doctor`'s "lanes
+/// can be started" row gives the very reason a start gives, rather than
+/// passing a backend `dispatch` then refuses.
+pub(crate) fn check_headless_marker() -> Result<()> {
+    if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
+        bail!(
+            "backend = headless is spoolway's own test backend — nothing draws it \
+             anywhere a person can see, so only the end-to-end harness runs it, with \
+             {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
+             herdr",
+            crate::headless::TEST_BACKEND_ENV
+        );
     }
     Ok(())
 }
@@ -1347,6 +1386,37 @@ mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
     use crate::screen::corner::TOP_LEFT;
+
+    /// A record of the last good config that cannot be written is announced
+    /// once, not on every pass, and the next good record clears it so the
+    /// same failure later is announced again. Without a lock file,
+    /// `record_config` fails, which stands in for any unwritable home.
+    #[test]
+    fn a_record_that_cannot_be_written_is_announced_once() {
+        let (mut repo, _root) = fixture("reload-record-dedupe");
+        std::fs::create_dir_all(crate::config::setup_dir_in(&repo.root)).unwrap();
+        std::fs::write(crate::config::Config::path_in(&repo.root), "").unwrap();
+        let (mut reported, mut record_reported) = (None, None);
+        let said = |repo: &Repo| {
+            std::fs::read_to_string(crate::problem_log::path(repo))
+                .unwrap_or_default()
+                .matches("could not be recorded")
+                .count()
+        };
+
+        reload_config(&mut repo, &mut reported, &mut record_reported);
+        reload_config(&mut repo, &mut reported, &mut record_reported);
+        assert_eq!(said(&repo), 1, "the same failure was written twice");
+        assert!(record_reported.is_some());
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        reload_config(&mut repo, &mut reported, &mut record_reported);
+        assert!(
+            record_reported.is_none(),
+            "a good record clears the failure"
+        );
+        assert_eq!(said(&repo), 1);
+    }
 
     /// The dispatch tab's step-30 popup body, from the ceiling a pass
     /// reports: the key's own figures, not the run log's long sentence.

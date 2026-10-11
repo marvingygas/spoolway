@@ -259,7 +259,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
     let mut report = Report::default();
-    report.record_all(config_checks(repo, None, config));
+    report.record_all(config_checks(repo, None, config, Some(pipelines)));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
@@ -430,7 +430,7 @@ pub fn doctor(
                 "pipelines load",
                 pipelines_load_outcome(&repo.checkout, err),
             );
-            report.record_all(config_checks(repo, config_error, &config));
+            report.record_all(config_checks(repo, config_error, &config, None));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
@@ -450,7 +450,7 @@ pub fn doctor(
     // the only symptom is tasks that quietly never start.
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
-    report.record_all(config_checks(repo, config_error, &config));
+    report.record_all(config_checks(repo, config_error, &config, Some(pipelines)));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
@@ -582,8 +582,10 @@ fn home_unavailable_findings(
     findings
 }
 
-/// `doctor` on a checkout whose own `config.toml` does not parse — `err` is
-/// [`Config::load`]'s failure against `repo.checkout`, not `repo.root`.
+/// `doctor` on a checkout whose config does not load — `err` is
+/// [`Config::load`]'s failure against `repo.checkout`, not `repo.root`. The
+/// file that failed is either the tracked `config.toml` or the override
+/// layer's; [`broken_config_note`] says which.
 ///
 /// Reporting the parse error is most of the value here: it is one line, it
 /// names the file and the line in it, and until it is fixed nothing else in
@@ -622,13 +624,34 @@ fn doctor_unconfigured(
         Some(pid) => report.note(format!("a dispatcher is running (pid {pid})")),
         None => report.note_verbose("no dispatcher running"),
     }
-    report.note(format!(
-        "{} does not parse ({})",
-        relative(&repo.checkout, &Config::path_in(&repo.checkout)),
-        config_owner_label(repo),
-    ));
+    report.note(broken_config_note(repo));
 
     finish(&report, verbose, json)
+}
+
+/// The note naming the config file that failed to load.
+///
+/// The failure is the merged load's, and the only place it says which file it
+/// was is its message text, which this does not parse. Reading the tracked
+/// file alone settles it instead: when that parses, the override layer's
+/// `config.toml` is the broken one, and naming the tracked file would send a
+/// person to edit a file that is fine. When the tracked file does not parse
+/// the tracked file is named, whether or not the layer is broken too, since
+/// the load stops there before it reads the layer.
+fn broken_config_note(repo: &Repo) -> String {
+    if Config::load_tracked(&repo.checkout).is_ok() {
+        format!(
+            "{} does not parse (the override layer); \
+             `spoolway override drop config.toml` removes it",
+            crate::overrides::config_patch_path(&repo.overrides_dir()).display(),
+        )
+    } else {
+        format!(
+            "{} does not parse ({})",
+            relative(&repo.checkout, &Config::path_in(&repo.checkout)),
+            config_owner_label(repo),
+        )
+    }
 }
 
 /// Whether this checkout's stamp and its home's own record of it agree.
@@ -723,6 +746,54 @@ pub(crate) fn config_value_checks(config: &Config) -> Vec<Finding> {
     findings
 }
 
+/// One failing check per value in `config.toml` that loads but cannot be run
+/// on, each naming the value and the file it is in.
+///
+/// `config set` and the override layer deliberately look past these, so that
+/// one wrong line does not switch off every other edit; this is where a
+/// person learns the line is there.
+///
+/// `config` must be the tracked file's own, not the override-merged one: the
+/// check names `path`, and a layer key that corrects a bad tracked value
+/// would otherwise hide it while the file still holds it.
+///
+/// A bad `permission_mode` is also failed by [`agent_checks`], but only for
+/// an agent a pipeline uses (`checked_agents`), and only while no layer key
+/// corrects it, since that check reads the `merged` config. It is left to
+/// that check when both hold, so it is failed once; for any other profile, or
+/// once a layer key has corrected it, nothing else would report the file's
+/// value, so it is failed here.
+fn hand_written_value_checks(
+    path: &Path,
+    tracked: &Config,
+    merged: &Config,
+    checked_agents: &[&str],
+) -> Vec<Finding> {
+    let merged_problems = crate::confkv::value_problems(merged);
+    let left_to_agent_checks = |problem: &crate::confkv::ValueProblem| {
+        problem.field == "permission_mode"
+            && merged_problems.contains(problem)
+            && problem
+                .scope
+                .strip_prefix("agents.")
+                .is_some_and(|agent| checked_agents.contains(&agent))
+    };
+    crate::confkv::value_problems(tracked)
+        .into_iter()
+        .filter(|problem| !left_to_agent_checks(problem))
+        .map(|problem| {
+            Finding::Check(
+                format!("{} holds a valid value", problem.scope),
+                Err(anyhow::anyhow!(
+                    "{} (in {}; correct it with `spoolway config edit`)",
+                    problem.message,
+                    path.display()
+                )),
+            )
+        })
+        .collect()
+}
+
 /// What `spoolway doctor` would fail on after `key` was set, one warning line
 /// per failing check, for `spoolway config set` to print.
 ///
@@ -756,10 +827,14 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
 /// those are two different questions. Order matches `doctor`'s own: the
 /// checkout's parse, the project's parse (only when it failed), then the one
 /// setting an unattended run cannot start without.
+///
+/// `pipelines` is `None` when they did not load, so [`agent_checks`] will not
+/// run and every bad `permission_mode` is failed here.
 fn config_checks(
     repo: &Repo,
     config_error: Option<anyhow::Error>,
     config: &Config,
+    pipelines: Option<&Pipelines>,
 ) -> Vec<Finding> {
     // `home_error` is never `Some` by the time `config_checks` runs: `doctor`
     // takes a distinct path the moment it has one, before `Config::load` (or
@@ -794,6 +869,19 @@ fn config_checks(
     }
     findings.extend(unknown_key_notes(&repo.checkout));
     findings.extend(config_value_checks(config));
+    let tracked_path = Config::path_in(&repo.checkout);
+    findings.extend(match Config::load_tracked(&repo.checkout) {
+        Ok(tracked) => {
+            let checked_agents: Vec<&str> = pipelines
+                .map(|p| p.referenced_agents().into_keys().collect())
+                .unwrap_or_default();
+            hand_written_value_checks(&tracked_path, &tracked, config, &checked_agents)
+        }
+        Err(err) => vec![Finding::Check(
+            "the tracked config's values".into(),
+            Err(err.context(tracked_path.display().to_string())),
+        )],
+    });
     if let Some(note) = current_price_table_age_note(config.housekeeping.price_max_age_days) {
         findings.push(Finding::Note(note));
     }
@@ -1553,12 +1641,18 @@ fn branch_and_forge_checks(
 
 /// Whether a lane can be started at all — the one check that never depends on
 /// the pipeline or the config, only on whether the terminal multiplexer this
-/// machine has is one spoolway knows how to drive.
+/// machine has is one spoolway knows how to drive, and whether `dispatch`
+/// would accept it: `headless` is available everywhere but refused outside
+/// the end-to-end harness, and a pass here must not contradict that.
 fn mux_check(mux: &dyn Mux) -> Finding {
     Finding::Check(
         "lanes can be started".into(),
         if mux.is_available() {
-            Ok(Some(mux.name().into()))
+            if mux.name() == "headless" {
+                crate::commands::dispatch::check_headless_marker().map(|()| Some(mux.name().into()))
+            } else {
+                Ok(Some(mux.name().into()))
+            }
         } else {
             Err(anyhow::anyhow!("{}", mux.unavailable()))
         },
@@ -1788,7 +1882,13 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
         // run — long after whoever set it has stopped watching.
         let permissions = config
             .agent(agent)
-            .and_then(|profile| profile.permission_mode_status());
+            .and_then(|profile| profile.permission_mode_status())
+            .map_err(|err| {
+                err.context(format!(
+                    "`agents.{agent}.permission_mode` in {}",
+                    Config::path_in(&repo.checkout).display()
+                ))
+            });
         findings.push(Finding::Check(
             format!("agent `{agent}` permission mode"),
             permissions,
@@ -2098,8 +2198,9 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
                 Ok(None)
             } else {
                 Err(anyhow::anyhow!(
-                    "{} is missing, but {steps:?} run it — run `spoolway init`",
-                    path.display()
+                    "{} is missing, but {steps:?} run it — {}",
+                    path.display(),
+                    crate::prompt::missing_prompt_fix(prompt)
                 ))
             },
         ));
@@ -2315,7 +2416,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
             crate::sync::Outcome::Wrote { path, .. }
             | crate::sync::Outcome::Migrated { path, .. }
             | crate::sync::Outcome::Removed { path, .. } => {
-                if !behind.contains(&path.as_str()) {
+                if !crate::sync::is_version_marker(path) && !behind.contains(&path.as_str()) {
                     behind.push(path);
                 }
             }
@@ -2595,6 +2696,52 @@ mod tests {
             &[("logs", None), ("garbled", Some("not [ toml".into()))],
         );
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A hand-written pair `config set` looks past is still a failed check,
+    /// naming the value and the file it is in.
+    #[test]
+    fn a_bad_hand_written_pair_fails_a_check_naming_value_and_file() {
+        let mut config = Config::default();
+        let claude = config.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+        let findings =
+            hand_written_value_checks(Path::new("/p/config.toml"), &config, &config, &["claude"]);
+        let [Finding::Check(_, Err(err))] = findings.as_slice() else {
+            panic!("expected one failed check");
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("(15) must be above"), "{text}");
+        assert!(text.contains("/p/config.toml"), "{text}");
+        assert!(
+            hand_written_value_checks(
+                Path::new("/p"),
+                &Config::default(),
+                &Config::default(),
+                &["claude"]
+            )
+            .is_empty()
+        );
+
+        // A bad mode the merged config also holds, on an agent a pipeline
+        // uses, is `agent_checks`' row, so it is not failed twice. One a layer
+        // key corrected, or one on a profile no pipeline uses (which
+        // `agent_checks` never looks at), is failed here.
+        let mut config = Config::default();
+        config.agents.get_mut("claude").unwrap().permission_mode = "nonsense".into();
+        let merged = Config::default();
+        assert!(
+            hand_written_value_checks(Path::new("/p"), &config, &config, &["claude"]).is_empty()
+        );
+        assert_eq!(
+            hand_written_value_checks(Path::new("/p"), &config, &merged, &["claude"]).len(),
+            1
+        );
+        assert_eq!(
+            hand_written_value_checks(Path::new("/p"), &config, &config, &["codex"]).len(),
+            1
+        );
     }
 
     /// No layer at all is nothing to say: `override_layer_note` must not add
@@ -3014,6 +3161,54 @@ mod tests {
         assert!(!notes[0].contains("`worker`"), "{}", notes[0]);
     }
 
+    /// A missing prompt `init` ships is still met with "run `spoolway init`";
+    /// one it does not ship names the path to write instead, since `init`
+    /// would leave the row failing.
+    #[test]
+    fn a_missing_prompt_advises_init_only_when_init_ships_it() {
+        let (repo, _root_guard) = scratch_repo("missing-prompt-advice");
+        let shipped = crate::assets::PROMPTS[0].name;
+        let pipelines = single_step_pipelines(&format!(
+            "  - id: build\n    agent: pi\n    prompt: {shipped}\n    model: m\n    \
+             on_pass: unblock\n  - id: unblock\n    agent: pi\n    prompt: unblock-v2\n    \
+             model: m\n    on_pass: done\n"
+        ));
+
+        let reasons: std::collections::BTreeMap<String, String> = prompt_checks(&repo, &pipelines)
+            .into_iter()
+            .filter_map(|f| match f {
+                Finding::Check(label, Err(err)) => Some((label, format!("{err:#}"))),
+                _ => None,
+            })
+            .collect();
+
+        let ours = &reasons[&format!("prompt `{shipped}`")];
+        assert!(ours.contains("run `spoolway init`"), "{ours}");
+        let custom = &reasons["prompt `unblock-v2`"];
+        assert!(!custom.contains("run `spoolway init`"), "{custom}");
+        assert!(custom.contains("write it yourself"), "{custom}");
+        assert!(custom.contains("unblock-v2"), "{custom}");
+    }
+
+    /// `headless` answers as available everywhere, but `dispatch` refuses it
+    /// outside the end-to-end harness, so the row must fail with that
+    /// refusal unless the marker is exported.
+    #[test]
+    fn lanes_row_fails_for_headless_unless_the_test_marker_is_set() {
+        let (repo, _root_guard) = scratch_repo("headless-row");
+        let mux = crate::headless::Headless::new(&repo.root, &repo.home, repo.root.join("lanes"));
+        let marker = crate::headless::TEST_BACKEND_ENV;
+
+        let finding = mux_check(&mux);
+        let Finding::Check(_, Err(err)) = finding else {
+            panic!("headless without the marker must fail the row");
+        };
+        assert!(format!("{err:#}").contains(marker), "{err:#}");
+
+        let finding = crate::platform::test_env::with_env(marker, "1", || mux_check(&mux));
+        assert!(matches!(finding, Finding::Check(_, Ok(Some(name))) if name == "headless"));
+    }
+
     #[test]
     fn names_key_reads_whichever_directory_it_is_given() {
         let (root, checkout, _base_guard) = two_configs(
@@ -3185,6 +3380,39 @@ mod tests {
             },
             checkout,
         )
+    }
+
+    /// `doctor`'s note names the file that failed: the override layer's
+    /// `config.toml` when only that is broken, and the tracked one whenever
+    /// the tracked one is, the layer broken or not. A note that always named
+    /// the layer, or always the tracked file, fails one of the three.
+    #[test]
+    fn the_broken_config_note_names_the_file_that_failed() {
+        let (repo, _scratch) = scratch_repo("broken-config-note");
+        let tracked = Config::path_in(&repo.checkout);
+        let layer = crate::overrides::config_patch_path(&repo.overrides_dir());
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(layer.parent().unwrap()).unwrap();
+        let broken = "[dispatch\nlane_quiet = \"7m\"\n";
+        let layer_name = layer.display().to_string();
+
+        std::fs::write(&tracked, "[dispatch]\n").unwrap();
+        std::fs::write(&layer, broken).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(&layer_name), "{note}");
+        assert!(
+            note.contains("spoolway override drop config.toml"),
+            "{note}"
+        );
+
+        std::fs::write(&tracked, broken).unwrap();
+        std::fs::remove_file(&layer).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(".spoolway/config.toml"), "{note}");
+
+        std::fs::write(&layer, broken).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(".spoolway/config.toml"), "{note}");
     }
 
     #[test]
@@ -4094,6 +4322,34 @@ mod tests {
             !dir.exists(),
             "live_pane left its scratch directory behind: {}",
             dir.display()
+        );
+    }
+
+    /// The version marker `sync` writes beside a stale file is not a second
+    /// file behind: one stale skill reads as one.
+    #[test]
+    fn the_version_marker_is_not_counted_as_a_file_behind() {
+        use crate::sync::Outcome;
+        let outcomes = vec![
+            Outcome::Wrote {
+                path: ".claude/skills/spoolway-config/SKILL.md".into(),
+                detail: "rewritten".into(),
+            },
+            Outcome::Wrote {
+                path: ".spoolway/spoolway-version".into(),
+                detail: "spoolway version recorded".into(),
+            },
+            Outcome::Wrote {
+                path: "~/.claude/skills/.spoolway-version".into(),
+                detail: "spoolway version recorded".into(),
+            },
+        ];
+
+        assert_eq!(
+            sync_notes(&outcomes, true),
+            vec![
+                "1 file(s) are behind this spoolway — run spoolway sync to apply them".to_string()
+            ]
         );
     }
 

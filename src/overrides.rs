@@ -1019,10 +1019,19 @@ pub(crate) fn promote_pipeline_patch(
 }
 
 /// Promote `overrides/config.toml` into the tracked file, one key at a time,
-/// through the same [`crate::confkv::set`] / `Config::save_key` pair
+/// through the same [`crate::confkv::set`] / `Config::edit_key` pair
 /// `spoolway config set` already writes through — so every comment in
 /// `config.toml` survives, exactly as it would if a person had typed
 /// `config set` once per key by hand.
+///
+/// All or nothing. Every key is set on an in-memory config and edited into an
+/// in-memory copy of the tracked text, and the file is written once, after
+/// the last key, with the same atomic write `config set` uses. A key the
+/// tracked config refuses therefore leaves the file untouched, and so does a
+/// process killed partway: otherwise the earlier keys would be written while
+/// the layer, kept because the promote failed, still held them all. A
+/// tracked file that does not exist yet is written whole from the config, as
+/// `config set` does.
 ///
 /// Returns the promoted keys and their new values, for
 /// `commands::override_promote` to print.
@@ -1037,18 +1046,47 @@ pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>>
         bail!("{} must be a table of settings", path.display());
     };
 
+    let tracked_path = Config::path_in(root);
+    let mut text = match std::fs::read_to_string(&tracked_path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("reading {}", tracked_path.display()));
+        }
+    };
     let mut config = Config::load_tracked(root)?;
     let mut changes = Vec::new();
-    promote_config_table(&mut config, root, &table, &mut String::new(), &mut changes)?;
+    for_each_config_leaf(&table, &mut String::new(), &mut |key, input| {
+        config = crate::confkv::set(&config, key, input)?;
+        if let Some(text) = text.as_mut() {
+            *text = config.edit_key(text, key, &tracked_path)?;
+        }
+        changes.push((key.to_string(), input.to_string()));
+        Ok(())
+    })
+    .with_context(|| {
+        format!(
+            "nothing was written to the tracked config; fix or drop the key in {}",
+            path.display()
+        )
+    })?;
+
+    match text {
+        Some(text) => crate::task::write_atomic(&tracked_path, &text)
+            .with_context(|| format!("writing {}", tracked_path.display()))?,
+        None => config.save(root)?,
+    }
     Ok(changes)
 }
 
-fn promote_config_table(
-    config: &mut Config,
-    root: &Path,
+/// Call `apply(dotted key, rendered value)` for every leaf of `table`, in
+/// order, and stop at the first error. `confkv::set`'s own error names a key
+/// the tracked config refuses; a value that cannot be rendered as text is
+/// named here, since its error does not.
+fn for_each_config_leaf(
     table: &toml::value::Table,
     prefix: &mut String,
-    changes: &mut Vec<(String, String)>,
+    apply: &mut dyn FnMut(&str, &str) -> Result<()>,
 ) -> Result<()> {
     for (key, value) in table {
         let mark = prefix.len();
@@ -1057,14 +1095,10 @@ fn promote_config_table(
         }
         prefix.push_str(key);
         match value {
-            toml::Value::Table(nested) => {
-                promote_config_table(config, root, nested, prefix, changes)?
-            }
+            toml::Value::Table(nested) => for_each_config_leaf(nested, prefix, apply)?,
             other => {
                 let input = render_config_leaf(other).with_context(|| format!("`{prefix}`"))?;
-                *config = crate::confkv::set(config, prefix, &input)?;
-                config.save_key(root, prefix)?;
-                changes.push((prefix.clone(), input));
+                apply(prefix, &input)?;
             }
         }
         prefix.truncate(mark);
@@ -1565,7 +1599,7 @@ agent: pi
         assert!(overrides.is_dir());
     }
 
-    /// `promote_config_patch` writes through `confkv::set`/`Config::save_key`,
+    /// `promote_config_patch` writes through `confkv::set`/`Config::edit_key`,
     /// so a comment beside the promoted key survives — the same guarantee
     /// `spoolway config set` already gives, extended to a whole patch.
     #[test]
@@ -1605,6 +1639,66 @@ agent: pi
         });
     }
 
+    /// A layer holding a key the tracked config refuses writes nothing: the
+    /// valid key ahead of the typo stays out of the tracked file, and the
+    /// error names the typo. Before, the valid key was already saved by the
+    /// time the typo stopped the promote.
+    #[test]
+    fn promote_config_patch_writes_nothing_when_a_key_is_refused() {
+        let root = crate::scratch::root("overrides-promote-config-refused");
+        let home = crate::scratch::root("overrides-promote-config-refused-home");
+        let _ = std::fs::remove_dir_all(&root);
+        crate::scratch::stamped(&root);
+        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        let tracked = "[dispatch]\nauto_commit = false\n";
+        std::fs::write(Config::path_in(&root), tracked).unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                config_patch_path(&overrides),
+                "[dispatch]\nauto_commit = true\nlane_quite = \"7m\"\n",
+            )
+            .unwrap();
+
+            let err = format!("{:#}", promote_config_patch(&root).unwrap_err());
+            assert!(err.contains("lane_quite"), "{err}");
+            assert_eq!(err.matches("lane_quite").count(), 1, "named once: {err}");
+            assert_eq!(
+                std::fs::read_to_string(Config::path_in(&root)).unwrap(),
+                tracked
+            );
+            assert!(config_patch_path(&overrides).is_file());
+        });
+    }
+
+    /// A project with no tracked `config.toml` yet still promotes: the file is
+    /// created from the config the layer produces, as `config set` creates
+    /// it, and the layer is left for the caller to clear.
+    #[test]
+    fn promote_config_patch_creates_a_missing_tracked_file() {
+        let root = crate::scratch::root("overrides-promote-config-absent");
+        let home = crate::scratch::root("overrides-promote-config-absent-home");
+        let _ = std::fs::remove_dir_all(&root);
+        crate::scratch::stamped(&root);
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                config_patch_path(&overrides),
+                "[dispatch]\nauto_commit = false\n",
+            )
+            .unwrap();
+            assert!(!Config::path_in(&root).exists());
+
+            let changes = promote_config_patch(&root).unwrap();
+            assert_eq!(changes.len(), 1);
+            assert!(!Config::load_tracked(&root).unwrap().dispatch.auto_commit);
+        });
+    }
+
     /// Dropping an entry that was never there is refused by name, not a
     /// silent no-op — the same courtesy `override promote` gets from the
     /// same check.
@@ -1614,5 +1708,30 @@ agent: pi
         let _ = std::fs::remove_dir_all(&overrides);
         let err = remove_pipeline_patch(&overrides, "impl").unwrap_err();
         assert!(format!("{err:#}").contains("no override"), "{err:#}");
+    }
+
+    /// One bad value already in the tracked config affects only itself: an
+    /// override key that touches neither field of a hand-written
+    /// `session_blocked_ctx` / `session_reuse_ctx` pair still applies, and
+    /// nothing is reported as ignored.
+    #[test]
+    fn an_override_key_still_applies_beside_a_bad_hand_written_session_pair() {
+        let overrides = crate::scratch::root("overrides-bad-pair-beside");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            config_patch_path(&overrides),
+            "[agents.claude]\nconcurrency = 2\n",
+        )
+        .unwrap();
+
+        let mut tracked = Config::default();
+        let claude = tracked.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+
+        let (patched, ignored) = apply_config_patch(tracked, &overrides).unwrap();
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(patched.agents["claude"].concurrency, 2);
     }
 }

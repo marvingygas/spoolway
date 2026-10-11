@@ -363,6 +363,105 @@ says "and names the events a hook script runs on" \
   "SPOOLWAY_EVENT" \
   "$SPOOLWAY" hook contract
 
+# ----------------------------- one bad hand-written value stays its own
+# A `session_blocked_ctx` at or under `session_reuse_ctx`, typed into the
+# tracked file by hand, used to fail every override key and every `config set`
+# with a sentence about a pair neither touched.
+CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
+TRACKED_CONFIG=.spoolway/config.toml
+must "make the tracked pair wrong by hand: blocked 15 under reuse 20" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^session_blocked_ctx = .*/session_blocked_ctx = 15/' \
+  "$TRACKED_CONFIG"
+
+# Before the layer exists, so the bad pair is the only thing `config set` has
+# to cope with.
+works "config set of an unrelated key succeeds beside the bad pair" \
+  "$SPOOLWAY" config set dispatch.lane_quiet 5m
+refuses "a set that itself breaks the pair is still refused" \
+  "must be above" \
+  "$SPOOLWAY" config set agents.claude.session_reuse_ctx 30
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[agents.claude]\nconcurrency = 2\n' > "$CONFIG_LAYER"
+says "the override key beside the bad pair still applies" \
+  "agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+silent_about "and is not listed as ignored" \
+  "ignored  agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+# The note an ignored override key prints carries the same sentence on the old
+# code, so the assertion is on the check's own row.
+says "doctor fails a check for the bad value" \
+  "FAIL  agents.claude holds a valid value" \
+  "$SPOOLWAY" doctor --no-live
+says "and the file it is in" \
+  "$TRACKED_CONFIG" \
+  "$SPOOLWAY" doctor --no-live
+
+# A layer key that corrects the pair hides it from the merged config, not from
+# the file: doctor reads the tracked one, so it still fails.
+printf '[agents.claude]\nconcurrency = 2\nsession_reuse_ctx = 10\n' > "$CONFIG_LAYER"
+says "doctor still fails the tracked pair when a layer key corrects it" \
+  "FAIL  agents.claude holds a valid value" \
+  "$SPOOLWAY" doctor --no-live
+
+# The same for a mode the kind does not accept: the layer's valid mode wins in
+# the merged config, so the per-agent row passes and only the new check can
+# say the file still holds the bad one.
+must "make the tracked permission_mode wrong by hand" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^permission_mode = .*/permission_mode = "nonsense"/' \
+  "$TRACKED_CONFIG"
+printf '[agents.claude]\npermission_mode = "auto"\n' > "$CONFIG_LAYER"
+says "doctor still fails a tracked permission_mode a layer key corrects" \
+  "\`agents.claude.permission_mode\`: " \
+  "$SPOOLWAY" doctor --no-live
+
+# ------------------------------------- config set beside an active layer
+# `config set` used to build from the override-merged config, so with a layer
+# key present it refused every other key, and for the layer's own key it
+# printed a value that was not the one in effect.
+must "restore the tracked pair the cases above broke" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^session_blocked_ctx = .*/session_blocked_ctx = 40/; /^\[agents.claude\]/,/^\[/ s/^permission_mode = .*/permission_mode = "auto"/' \
+  "$TRACKED_CONFIG"
+printf '[dispatch]\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+works "config set of an unrelated key succeeds beside a layer key" \
+  "$SPOOLWAY" config set dispatch.auto_commit false
+has "and lands in the tracked file" "auto_commit = false" "$TRACKED_CONFIG"
+lacks "without the layer's value" "lane_quiet = \"7m\"" "$TRACKED_CONFIG"
+says "setting the layered key says the layer still sets it" \
+  "still sets \`dispatch.lane_quiet\`" \
+  "$SPOOLWAY" config set dispatch.lane_quiet 20m
+has "and writes the new value to the tracked file" "lane_quiet = \"20m\"" "$TRACKED_CONFIG"
+must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
+
+# ------------------------------------ a broken layer, and a refused promote
+# A layer that does not parse used to stop `override drop` before it ran, and
+# `doctor` named the tracked file for it. A layer holding a key the tracked
+# config refuses used to be promoted halfway.
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+says "doctor names the layer's file when that is the one that does not parse" \
+  "$CONFIG_LAYER does not parse" \
+  "$SPOOLWAY" doctor --no-live
+works "a bare override drop removes a layer that does not parse" \
+  "$SPOOLWAY" override drop
+works "and the broken file is gone" test ! -e "$CONFIG_LAYER"
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+works "override drop config.toml removes a layer that does not parse" \
+  "$SPOOLWAY" override drop config.toml
+works "and that file is gone too" test ! -e "$CONFIG_LAYER"
+
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch]\nauto_commit = true\nlane_quite = "7m"\n' > "$CONFIG_LAYER"
+cp "$TRACKED_CONFIG" "$LIVE/config.before"
+refuses "promote of a layer holding a typo'd key names the key" \
+  "lane_quite" \
+  "$SPOOLWAY" override promote config.toml
+works "and leaves the tracked config as it was" \
+  cmp "$TRACKED_CONFIG" "$LIVE/config.before"
+has "and keeps the layer as it was" "lane_quite" "$CONFIG_LAYER"
+must "clean up: drop the typo'd layer" "$SPOOLWAY" override drop config.toml
+
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
 # `install` before the rename has the old directory on disk, and `sync`

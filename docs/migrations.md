@@ -32,6 +32,13 @@ spoolway whats-new --since <your-current-version>
 The [changelog](https://github.com/marvingygas/spoolway/blob/main/CHANGELOG.md) is the complete
 release record. This guide collects only the steps that may require action.
 
+## Syncing with an older spoolway
+
+`spoolway sync` records the spoolway version in `.spoolway/spoolway-version` and in each
+user-level skills folder. A binary older than that version refuses to write the folder and names
+the newer version. Update the binary, or delete the marker file to take the older copies. See
+[Files a newer spoolway wrote](installation.md#files-a-newer-spoolway-wrote).
+
 ## Windows
 
 The last native Windows release is 0.4.x. `@spoolway/win32-x64` was published up to 0.4.0, and

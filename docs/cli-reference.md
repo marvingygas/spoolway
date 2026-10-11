@@ -1134,8 +1134,8 @@ spoolway config edit
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
 | `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
-| `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. See [Configuration](configuration.md#what-config-set-checks) |
-| `edit` | Open the file in `$EDITOR` and validate it on save |
+| `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
+| `edit` | Open the file in `$EDITOR` and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
 and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each
@@ -1176,8 +1176,8 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree |
-| `drop [<target>]` | Remove one entry, or the whole layer when none is named |
+| `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree. `promote config.toml` writes every key or none |
+| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
@@ -1336,6 +1336,12 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
 | `--force` | | Overwrite existing config, pipeline and prompt files. Keeps the project's provider, tracker and project key unless `--provider` or `--tracker` is passed. In a home-mode clone, names the other clones that share that config before rewriting it |
 
+A project whose `.spoolway/spoolway-version` names a newer spoolway than the one you run is
+refused before `init` writes anything, `--force` included. In home mode the agent's user-level
+marker is checked too. The error names the version. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote). A run that writes the marker lists it as a
+`wrote` row, such as `wrote    .spoolway/spoolway-version`.
+
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes
 nothing: with no `--provider`, it keeps the provider already configured rather than falling
@@ -1369,8 +1375,13 @@ skills](installation.md#the-pipeline-skills).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--force` | | Overwrite files that already exist |
+| `--force` | | Overwrite files that already exist. Does not override a version marker naming a newer spoolway |
 | `--user` | | Install into the agent's user folder instead of the project's |
+
+When the folder's version marker names a newer spoolway than the one you run, `install` writes
+nothing and fails, naming the version and the marker file. A run that writes the marker lists it
+as a `wrote` row. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote).
 
 ### `spoolway update`
 
@@ -1424,6 +1435,12 @@ for the messages.
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
 
+`sync` also refuses to write a scope whose version marker names a newer spoolway than the one
+you run. The scopes are the project's setup folder with its skills, and each agent's user-level
+skills folder. A refused scope is left as it is, and the report names the newer version. A sync
+that writes anything also writes the marker. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote).
+
 The report lists refused files first. It then lists each file written or removed, and a line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings
 it kept, and each group of retired settings it dropped. See
@@ -1448,7 +1465,8 @@ spoolway whats-new --since 0.1.0
 ### `spoolway doctor`
 
 Check that everything the configured pipeline needs is present. It still runs when the config
-or a pipeline file does not parse. One check opens a throwaway pane and runs a command in it
+or a pipeline file does not parse. When the config does not parse, it names the file at fault:
+the tracked `.spoolway/config.toml`, or the override layer's `config.toml`. One check opens a throwaway pane and runs a command in it
 to prove a lane can start.
 
 ```
@@ -1480,6 +1498,9 @@ its event, task, exit code, remedy and log path.
 
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
+
+The `lanes can be started` check fails for `dispatch.backend = "headless"` unless
+`SPOOLWAY_TEST_BACKEND` is set. It gives the same reason `spoolway dispatch` gives.
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it

@@ -68,6 +68,55 @@ warning: no agent `ghost` in [agents] yet — `spoolway doctor` fails until one 
 The checks on `issue_tracking.*` look for `acli` and `jq` on `PATH`. They also run
 `<tool> --version` for each tool a hook declares.
 
+`config set` also checks the agent profiles. It refuses a `permission_mode` the profile's `kind`
+does not accept. It refuses a `session_reuse_ctx` or `session_blocked_ctx` outside `0` to `100`.
+It refuses a `session_blocked_ctx` that is not above `session_reuse_ctx`.
+
+Only a wrong value that the command itself introduces is refused. A wrong value already in the
+file does not stop `config set` from changing another key. The same holds for each key of the
+overrides layer.
+
+### With an active overrides layer
+
+`config set` writes the tracked `config.toml` and checks the new value against the other tracked
+values. A key in `overrides/config.toml` never reaches the tracked file. It does not make
+`config set` refuse another key.
+
+The warnings above are judged on the config the project runs on, which is the tracked file
+merged with the layer. `spoolway doctor` judges the same config.
+
+When the layer still decides the value in effect for the key just set, `config set` prints a
+note on stderr. The note names the value in effect. A layer value that fails to apply is
+dropped on load, so it draws no note.
+
+```
+$ spoolway config set dispatch.lane_quiet 20m
+dispatch.lane_quiet = 20m
+note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quiet`, so the value in effect is 5m.
+  Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
+```
+
+### Wrong values written by hand
+
+A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
+on. This covers the three agent-profile values above. Two commands report each such value:
+
+| Command | What it shows |
+|---|---|
+| `spoolway doctor` | A failed check that gives the value and the path of `config.toml`. |
+| `spoolway config edit` | An error that lists the values, after the file loads. |
+
+Both read the tracked `config.toml`, not the file merged with the overrides layer. A layer key
+that corrects the value does not hide it.
+
+```
+$ spoolway doctor --no-live
+  FAIL  agents.claude holds a valid value: `session_blocked_ctx` (15) must be above `session_reuse_ctx` (20) (in .spoolway/config.toml; correct it with `spoolway config edit`)
+
+$ spoolway config edit
+spoolway: .spoolway/config.toml parses, but holds 1 value(s) spoolway cannot run on: `session_blocked_ctx` (15) must be above `session_reuse_ctx` (20) — reopen it with `spoolway config edit`
+```
+
 ## Runtime state
 
 This section describes repo mode, where the checkout itself holds the tracked files. A
@@ -162,7 +211,9 @@ merged, for example a step that already runs a command and gets `agent:` added o
 stale entry is left out of the merge. The step stays exactly as the tracked file wrote it, and
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
-applied. A prompt override for a prompt the checkout no longer has is left out too. A pipeline
+applied. A wrong value already in the tracked config does not stop a layer key from applying; see
+[Wrong values written by hand](#wrong-values-written-by-hand). A prompt override for a prompt the
+checkout no longer has is left out too. A pipeline
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
@@ -188,6 +239,18 @@ unchanged. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
 The popup's `[x]` hides it until the layer changes or the set of ignored entries changes. An
 entry that stops fitting with no override file touched, such as a step a pull renamed, brings the
 popup back.
+
+### A layer file that does not parse
+
+While `overrides/config.toml` is not valid TOML, commands that load the config stop with an
+error. Two commands still work. `spoolway doctor` names the layer file as the one that does not parse, with the
+command that removes it. `spoolway override drop` removes the file, so a bare drop or
+`spoolway override drop config.toml` clears the layer. When the tracked `.spoolway/config.toml`
+is the file that does not parse, `doctor` names that file instead.
+
+`spoolway override promote config.toml` writes every key of the layer into the tracked file,
+or none. A key the tracked config refuses stops the promote with an error naming that key. The
+tracked file stays as it was, and the layer keeps all its keys.
 
 ### When an override takes effect
 
@@ -702,5 +765,28 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 
 ## When the config will not parse
 
-Every command stops on a config error except `spoolway doctor`. It prints the error with its
-line and still runs the checks that read no settings.
+Every command stops on a config error except `spoolway doctor`, `spoolway report` and
+`spoolway stack`.
+
+`spoolway doctor` prints the error with its line and still runs the checks that read no
+settings.
+
+A lane's `spoolway report` and a `spoolway stack` step run while a dispatcher is running, so
+they can start while `config.toml` or `overrides/config.toml` is being edited. Both use the last
+good config that the dispatcher recorded. Each prints a note naming the file it could not read:
+
+```
+note: running on the last good config, because it cannot be read now: …
+```
+
+Both stop with an error naming the file in these cases:
+
+- No dispatcher is running and the file does not parse.
+- The dispatcher has not recorded a good config yet.
+- The recorded config cannot be read.
+- `config.toml` is missing while a dispatcher is running.
+
+A task that stops this way carries on when you run the command again after fixing the file.
+
+A missing `config.toml` is also an error when the whole `.spoolway/` directory is gone because
+the main checkout is on a branch that does not carry it. Check out the branch that carries it.

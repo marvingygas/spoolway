@@ -1,12 +1,14 @@
 //! A running dispatcher re-reads `config.toml` on every pass, driven through the
-//! real binary on the headless test backend with a stand-in agent that never
-//! reports.
+//! real binary on the headless test backend with a stand-in agent that only
+//! reports when asked to.
 //!
-//! Three tasks in separate groups compete for one `claude` slot. Raising
+//! Four tasks in separate groups compete for one `claude` slot. Raising
 //! `agents.claude.concurrency` to 2 mid-run must start the second without a
 //! restart. A config that stops parsing must leave the run on the last good
 //! one, which the third task's wait line shows by still reading `(2/2)`, and
-//! must say so once.
+//! must say so once. A lane that reports while the file is broken must still
+//! land its report, and so must the dispatcher over a `config.toml` that has
+//! been moved aside.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,7 +44,12 @@ impl Project {
         fs::write(
             &stand_in,
             "#!/bin/sh\necho \"$SPOOLWAY_TASK\" >> \"$STAND_IN_LOG\"\n\
-             while [ ! -e \"$STAND_IN_STOP\" ]; do sleep 1; done\n",
+             while [ ! -e \"$STAND_IN_STOP\" ]; do\n\
+             if [ -e \"$STAND_IN_STOP.report.$SPOOLWAY_TASK\" ]; then\n\
+             \"$SPOOLWAY_UNDER_TEST\" report --pass -m done \
+             2> \"$STAND_IN_STOP.stderr.$SPOOLWAY_TASK\"\n\
+             echo $? > \"$STAND_IN_STOP.status.$SPOOLWAY_TASK\"\n\
+             break\nfi\nsleep 1\ndone\n",
         )
         .expect("write stand-in agent");
         make_executable(&stand_in);
@@ -86,11 +93,14 @@ impl Project {
             .env("PATH", path)
             .env("SPOOLWAY_TEST_BACKEND", "1")
             .env("STAND_IN_LOG", self.log())
-            .env("STAND_IN_STOP", self.base().join("stop"));
+            .env("STAND_IN_STOP", self.base().join("stop"))
+            .env("SPOOLWAY_UNDER_TEST", env!("CARGO_BIN_EXE_spoolway"));
         // A test run from inside a lane inherits that lane's identity, and
         // the binary then refuses to mutate the queue.
         for (key, _) in std::env::vars() {
-            if key.starts_with("SPOOLWAY_") && key != "SPOOLWAY_TEST_BACKEND"
+            if key.starts_with("SPOOLWAY_")
+                && key != "SPOOLWAY_TEST_BACKEND"
+                && key != "SPOOLWAY_UNDER_TEST"
                 || key.starts_with("HERDR_")
             {
                 command.env_remove(key);
@@ -122,6 +132,19 @@ impl Project {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Has the stand-in for `task` report while the config is in whatever
+    /// state the caller left it, and answer its exit status and stderr.
+    fn report_from_lane(&self, task: &str) -> (String, String) {
+        let stop = self.base().join("stop");
+        let marker = |kind: &str| PathBuf::from(format!("{}.{kind}.{task}", stop.display()));
+        fs::write(marker("report"), "").expect("ask the lane to report");
+        self.wait_for("the lane's report to finish", |_| marker("status").exists());
+        (
+            fs::read_to_string(marker("status")).unwrap_or_default(),
+            fs::read_to_string(marker("stderr")).unwrap_or_default(),
+        )
     }
 
     fn dispatch_text(&self) -> String {
@@ -168,7 +191,7 @@ impl Project {
         fs::write(prompt.join("PROMPT.md"), "do it\n").expect("write prompt");
         self.git(&["add", "-A"]);
         self.git(&["commit", "-qm", "configure"]);
-        for (id, group) in [("ta", "ga"), ("tb", "gb"), ("tc", "gc")] {
+        for (id, group) in [("ta", "ga"), ("tb", "gb"), ("tc", "gc"), ("td", "gd")] {
             let file = self.base().join(format!("{id}.md"));
             fs::write(&file, self.task(id, group)).expect("write task");
             self.run(&[
@@ -267,6 +290,70 @@ fn raising_concurrency_mid_run_starts_the_second_lane_and_a_bad_config_is_report
         1,
         "the same error must not be printed every pass:\n{}",
         project.dispatch_text()
+    );
+
+    // A lane reporting over the broken file runs on the last good config
+    // instead of dying before it records anything.
+    // Its slot goes to the next waiting task, which keeps the cap full for
+    // the fourth to be held against.
+    let (status, stderr) = project.report_from_lane("ta");
+    assert_eq!(
+        status.trim(),
+        "0",
+        "report failed over a broken config:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("last good config"),
+        "report did not say which config it ran on:\n{stderr}"
+    );
+
+    // `spoolway stack` reads the config the same way. The task it is handed
+    // does not exist, so it fails after the config is settled — the note on
+    // stderr is the proof it got that far on the last good one.
+    let stack = project
+        .command()
+        .args(["stack", "no-such-task"])
+        .output()
+        .expect("run spoolway stack");
+    let stack_said = String::from_utf8_lossy(&stack.stderr).into_owned();
+    assert!(
+        stack_said.contains("running on the last good config"),
+        "stack did not fall back over a broken config:\n{stack_said}"
+    );
+
+    // The file gone altogether is the same kind of failure, not the defaults.
+    fs::remove_file(&config).expect("move config aside");
+    let missing = "does not exist";
+    project.wait_for("the missing file to be reported", |p| {
+        p.dispatch_text().contains(missing)
+    });
+    let passes_before = project.dispatch_text().matches("next pass in").count();
+    project.wait_for("two more passes without the file", |p| {
+        p.dispatch_text().matches("next pass in").count() >= passes_before + 2
+    });
+    let text = project.dispatch_text();
+    let after_missing = &text[text.rfind(missing).expect("problem was printed")..];
+    assert!(
+        after_missing.contains("td: waiting for a `claude` slot (2/2)"),
+        "a missing config sent the run back to defaults:\n{text}"
+    );
+    assert_eq!(
+        project.started(),
+        ["ta", "tb", "tc"],
+        "no lane beyond the cap"
+    );
+
+    // A lane reporting while the file is gone runs on the last good config
+    // too, and names the file it could not find.
+    let (status, stderr) = project.report_from_lane("tb");
+    assert_eq!(
+        status.trim(),
+        "0",
+        "report failed over a missing config:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("last good config") && stderr.contains("does not exist"),
+        "report did not say the file was missing:\n{stderr}"
     );
     fs::write(&config, good).expect("restore config");
 }

@@ -631,6 +631,7 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
 /// edit that would produce an invalid config fails here rather than at the
 /// next dispatch pass.
 pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
+    let current = config.clone();
     let mut value = Value::try_from(config).context("rendering config")?;
 
     // `[models]` is the one section that ships empty and is meant to be filled
@@ -696,13 +697,9 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         config.migrate();
     }
 
-    // Cross-field checks serde cannot make, at the one moment a person is
-    // typing the value and can fix it. Everything else here is caught by
-    // deserialising, but a permission mode is only wrong relative to the `kind`
-    // beside it, so it would otherwise be written happily and fail much later.
-    // Not a cross-field check: a file edited by hand to a `compact_ctx` over
-    // 100 still loads, so `set` refuses it on the next edit rather than
-    // writing it back out.
+    // Not a cross-field check, and not exempted by the comparison further down: a file
+    // edited by hand to a `compact_ctx` over 100 still loads, so `set` refuses
+    // it on the next edit rather than writing it back out.
     for (glob, price) in &config.models {
         if price.compact_ctx > 100 {
             bail!(
@@ -713,22 +710,78 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
             );
         }
     }
+    // Cross-field checks serde cannot make, at the one moment a person is
+    // typing the value and can fix it. Only a problem this edit introduced
+    // refuses it: one already in the file, written there by hand, would
+    // otherwise fail every unrelated `set` and every override key with a
+    // sentence about a value neither touched. `doctor` and `config edit`
+    // report those instead.
+    let before = value_problems(&current);
+    if let Some(problem) = value_problems(&config)
+        .into_iter()
+        .find(|problem| !before.contains(problem))
+    {
+        bail!("{}", problem.message);
+    }
+
+    Ok(config)
+}
+
+/// One value in a config that is wrong relative to its own range or to the
+/// field beside it, found by [`value_problems`].
+///
+/// `scope` names the table the value lives in, so two profiles holding the
+/// same wrong number stay two problems when [`set`] compares before and after.
+/// `field` is the key inside it that is wrong, for a caller that already
+/// reports one field by another route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueProblem {
+    pub scope: String,
+    pub field: &'static str,
+    pub message: String,
+}
+
+/// Every value in `config` that serde accepts but spoolway cannot run on.
+///
+/// A permission mode is only wrong relative to the `kind` beside it, and a
+/// reuse threshold only relative to the ceiling. [`set`] refuses an edit that
+/// adds one of these, while `doctor` and `config edit` report the ones a
+/// hand-written file already holds.
+pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
+    let mut problems = Vec::new();
     for (name, profile) in &config.agents {
-        profile
-            .permission_mode_status()
-            .with_context(|| format!("`agents.{name}.permission_mode`"))?;
+        let scope = format!("agents.{name}");
+        let mut add = |field: &'static str, message: String| {
+            problems.push(ValueProblem {
+                scope: scope.clone(),
+                field,
+                message,
+            })
+        };
+        if let Err(err) = profile.permission_mode_status() {
+            add(
+                "permission_mode",
+                format!("`agents.{name}.permission_mode`: {err:#}"),
+            );
+        }
         if profile.session_reuse_ctx != 0 && !(1..=100).contains(&profile.session_reuse_ctx) {
-            bail!(
-                "`agents.{name}.session_reuse_ctx` must be 0 (off) or between 1 and 100 \
+            add(
+                "session_reuse_ctx",
+                format!(
+                    "`agents.{name}.session_reuse_ctx` must be 0 (off) or between 1 and 100 \
                  (1..=100), got {}",
-                profile.session_reuse_ctx
+                    profile.session_reuse_ctx
+                ),
             );
         }
         if profile.session_blocked_ctx != 0 && !(1..=100).contains(&profile.session_blocked_ctx) {
-            bail!(
-                "`agents.{name}.session_blocked_ctx` must be 0 (off) or between 1 and 100 \
+            add(
+                "session_blocked_ctx",
+                format!(
+                    "`agents.{name}.session_blocked_ctx` must be 0 (off) or between 1 and 100 \
                  (1..=100), got {}",
-                profile.session_blocked_ctx
+                    profile.session_blocked_ctx
+                ),
             );
         }
         // Both directions of the same rule, caught wherever the edit landed:
@@ -741,16 +794,17 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
             && profile.session_blocked_ctx != 0
             && profile.session_blocked_ctx <= profile.session_reuse_ctx
         {
-            bail!(
-                "`session_blocked_ctx` ({}) must be above `session_reuse_ctx` ({}) — a task \
+            add(
+                "session_blocked_ctx",
+                format!(
+                    "`session_blocked_ctx` ({}) must be above `session_reuse_ctx` ({}) — a task \
                  blocked below the reuse threshold carries the same session back and re-blocks",
-                profile.session_blocked_ctx,
-                profile.session_reuse_ctx,
+                    profile.session_blocked_ctx, profile.session_reuse_ctx,
+                ),
             );
         }
     }
-
-    Ok(config)
+    problems
 }
 
 /// Refuse a value a person typed that can never be right, naming what is
@@ -1786,5 +1840,58 @@ mod tests {
         assert!(set(&config, "models.m.above_100k_tokens", "2").is_err());
         let err = set(&config, "models.m.above_200k_tokens.input", "1").unwrap_err();
         assert!(format!("{err:#}").contains("one price tier"), "{err:#}");
+    }
+
+    /// `set` checks the value it was handed, not every value already in the
+    /// file: a hand-written `session_blocked_ctx` at or below
+    /// `session_reuse_ctx` does not stop an unrelated key being set.
+    #[test]
+    fn set_of_an_unrelated_key_succeeds_beside_a_bad_hand_written_session_pair() {
+        let mut config = Config::default();
+        let claude = config.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+
+        let updated = set(&config, "dispatch.lane_quiet", "5m").unwrap();
+        assert_eq!(
+            updated.dispatch.lane_quiet,
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    /// A set that itself leaves the pair wrong is still refused, and so is one
+    /// that adds a bad `permission_mode`, even beside a pre-existing bad pair.
+    #[test]
+    fn set_still_refuses_what_the_edit_itself_breaks() {
+        let mut config = Config::default();
+        let claude = config.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 40;
+
+        let err = set(&config, "agents.claude.session_reuse_ctx", "50").unwrap_err();
+        assert!(format!("{err:#}").contains("must be above"), "{err:#}");
+        let err = set(&config, "agents.claude.permission_mode", "nonsense").unwrap_err();
+        assert!(format!("{err:#}").contains("permission_mode"), "{err:#}");
+
+        // The same refusal when another profile already holds a bad pair.
+        let other = config.agents.get_mut("codex").unwrap();
+        other.session_reuse_ctx = 20;
+        other.session_blocked_ctx = 15;
+        let err = set(&config, "agents.claude.session_reuse_ctx", "50").unwrap_err();
+        assert!(format!("{err:#}").contains("must be above"), "{err:#}");
+    }
+
+    /// `value_problems` names every wrong value once, with the table it is in.
+    #[test]
+    fn value_problems_names_a_hand_written_bad_pair() {
+        let mut config = Config::default();
+        assert!(value_problems(&config).is_empty());
+        let claude = config.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 15;
+        let problems = value_problems(&config);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].scope, "agents.claude");
+        assert!(problems[0].message.contains("(15) must be above"));
     }
 }

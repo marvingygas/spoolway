@@ -1728,6 +1728,42 @@ impl Config {
         setup_dir_in(root).join(CONFIG_FILE)
     }
 
+    /// [`Config::load`] for a reader that must not take a missing file for
+    /// the built-in defaults: the dispatcher's reload and
+    /// [`crate::repo::Repo::discover_live`] both treat a `config.toml` that
+    /// has gone as a failed load, the same as one that does not parse, so
+    /// the caps the run started with are not dropped without a word.
+    pub fn load_present(root: &Path) -> Result<Config> {
+        if !Config::path_in(root).exists() {
+            return Err(Config::missing_error(root));
+        }
+        Config::load(root)
+    }
+
+    /// Why `root` has no `config.toml`, and what to do about it. When the
+    /// whole `.spoolway/` directory is gone the checkout is on a branch that
+    /// does not carry it, and checking the branch back out is the fix: a
+    /// `spoolway sync` from there is refused, and one that did run would
+    /// write defaults over the caps the file held.
+    pub fn missing_error(root: &Path) -> anyhow::Error {
+        let path = Config::path_in(root);
+        if setup_dir_in(root).is_dir() {
+            anyhow::anyhow!(
+                "{} does not exist (restore it from git, or run `spoolway sync` to write a \
+                 fresh one, which holds the defaults and none of the settings the old file had)",
+                path.display()
+            )
+        } else {
+            anyhow::anyhow!(
+                "{} does not exist because `.spoolway/` is not on branch `{}`, the one checked \
+                 out in {} (check out the branch that carries it)",
+                path.display(),
+                crate::repo::branch_or_detached(root),
+                root.display()
+            )
+        }
+    }
+
     /// Load config from a directory holding `.spoolway/`, falling back to
     /// defaults if absent, with `overrides/config.toml` merged onto it by
     /// dotted key — see [`crate::overrides`]. See [`Self::path_in`] for
@@ -1738,9 +1774,9 @@ impl Config {
     }
 
     /// [`Config::load`], with no patch layer applied — for a caller that
-    /// must see only the tracked file: `commands::override_promote`'s own
-    /// read of it, ahead of writing each patched key through
-    /// [`Config::save_key`].
+    /// edits the tracked file through [`Config::save_key`] and must compare
+    /// against that file alone: `override promote`, `config set` and
+    /// `init --tracker`.
     pub fn load_tracked(root: &Path) -> Result<Config> {
         Config::load_impl(root, None)
     }
@@ -2035,6 +2071,19 @@ impl Config {
             return self.save(root);
         };
 
+        let edited = self.edit_key(&text, key, &path)?;
+        crate::task::write_atomic(&path, &edited)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The text of `save_key`'s edit, without the write: `text` with `key`
+    /// brought to what `self` holds, checked against `self` before it is
+    /// returned. `path` only names the file in an error.
+    ///
+    /// Split out so a caller setting several keys can carry the text from one
+    /// edit to the next in memory and write the file once, rather than leaving
+    /// it half-edited if the process dies between two writes.
+    pub(crate) fn edit_key(&self, text: &str, key: &str, path: &Path) -> Result<String> {
         let parts = crate::confkv::parts(self, key);
         let value = toml::Value::try_from(self).context("serialising config")?;
 
@@ -2044,9 +2093,9 @@ impl Config {
         // putting `= 0` back would be the file disagreeing with the struct it
         // was rendered from, and `agrees_with` below would refuse it anyway.
         let edited = match crate::confdoc::at(&value, &parts) {
-            Some(new) => crate::confdoc::set(&text, &parts, new, crate::confkv::note(key))
+            Some(new) => crate::confdoc::set(text, &parts, new, crate::confkv::note(key))
                 .with_context(|| format!("editing {}", path.display()))?,
-            None => crate::confdoc::remove(&text, &parts)
+            None => crate::confdoc::remove(text, &parts)
                 .with_context(|| format!("editing {}", path.display()))?,
         };
 
@@ -2057,9 +2106,7 @@ impl Config {
                 path.display()
             )
         })?;
-
-        crate::task::write_atomic(&path, &edited)
-            .with_context(|| format!("writing {}", path.display()))
+        Ok(edited)
     }
 
     /// Does `text`, read as a config file, mean exactly what `self` means?

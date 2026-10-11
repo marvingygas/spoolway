@@ -1063,6 +1063,22 @@ mod tests {
         });
     }
 
+    /// A layer that is not valid TOML can still be dropped, by name or bare:
+    /// the removal only deletes the file and never parses it. That `main`
+    /// reaches this with a `Repo` at all is covered where discovery is, in
+    /// `an_override_layer_that_does_not_parse_stops_discovery_only_for_the_strict_path`.
+    #[test]
+    fn override_drop_removes_a_config_layer_that_does_not_parse() {
+        with_repo("drop-broken", |repo| {
+            let path = crate::overrides::config_patch_path(&repo.overrides_dir());
+            for target in [Some("config.toml"), None] {
+                write_atomic(&path, "[dispatch\nlane_quiet = \"7m\"\n").unwrap();
+                override_drop(repo, target).unwrap();
+                assert!(!path.is_file(), "{target:?}");
+            }
+        });
+    }
+
     #[test]
     fn override_drop_with_no_target_clears_the_whole_layer() {
         with_repo("drop-all", |repo| {
