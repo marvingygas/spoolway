@@ -775,7 +775,24 @@ impl Mux for Headless {
                  somebody else's worktree"
             );
         }
-        self.git(&["worktree", "remove", "--force", &path.display().to_string()])?;
+        let args = ["worktree", "remove", "--force", &path.display().to_string()];
+        if crate::fault::wants(crate::fault::TEARDOWN_DURING_REMOVE) {
+            // Fires once any top-level entry has been deleted, so the
+            // dispatcher shoots itself with the checkout partly removed; how
+            // much is gone depends on the order the filesystem lists
+            // entries in.
+            let entries = |p: &Path| std::fs::read_dir(p).map_or(0, |d| d.count());
+            let before = entries(&path);
+            crate::fault::run_killing_at(
+                &self.root,
+                crate::fault::TEARDOWN_DURING_REMOVE,
+                &self.root,
+                &args,
+                || entries(&path) < before,
+            )?;
+        } else {
+            self.git(&args)?;
+        }
         Ok(())
     }
 

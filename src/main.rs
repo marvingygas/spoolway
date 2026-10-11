@@ -20,6 +20,7 @@ mod confkv;
 mod cron;
 mod dispatch;
 mod eval;
+mod fault;
 mod fmt;
 mod gitignore;
 mod graph;

@@ -196,6 +196,8 @@ impl<'a> Dispatcher<'a> {
             }
         }
 
+        crate::fault::kill_at(&self.repo.root, crate::fault::TEARDOWN_AFTER_COMMIT);
+
         // Past the turn-back, the task is going for good: every lane it has run
         // stops, its pane closes, and its spend is banked once, after it stops.
         // Nothing is banked earlier. A task held at `blocked` above stays live
@@ -235,6 +237,7 @@ impl<'a> Dispatcher<'a> {
         }
 
         self.tear_down_checkout(task, report);
+        crate::fault::kill_at(&self.repo.root, crate::fault::TEARDOWN_BEFORE_ARCHIVE);
 
         // The lock spans the currency check, the rename and the append: the
         // rename moves the folder's modification time, and without the lock

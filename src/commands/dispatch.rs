@@ -171,6 +171,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // found and killed by hand once it is already spending. No exemption —
     // not an environment override, not a per-platform carve-out.
     check_dispatcher_visible(mux.as_ref())?;
+    // The test-only kill hook is armed for this process alone, and a bad
+    // `SPOOLWAY_TEST_KILL_AT` name is refused here, before anything is spent.
+    crate::fault::arm()?;
 
     // The last two things a person sees before anything is spawned or
     // written: the overrides gate, since a layer changes what runs without

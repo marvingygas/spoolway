@@ -2427,8 +2427,18 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
             ]
         }
     };
-    run(repo, "git", &args)
-        .with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
+    let cut = if crate::fault::wants(crate::fault::CUT_DURING_ADD) {
+        // The checkout has started once anything but the `.git` link is in
+        // it. Watched from here because the dispatcher shoots itself while
+        // git is still writing, which a plain `run` cannot be interrupted at.
+        crate::fault::run_killing_at(repo, crate::fault::CUT_DURING_ADD, repo, &args, || {
+            std::fs::read_dir(path)
+                .is_ok_and(|mut entries| entries.any(|e| e.is_ok_and(|e| e.file_name() != ".git")))
+        })
+    } else {
+        run(repo, "git", &args)
+    };
+    cut.with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
     Ok(())
 }
 
