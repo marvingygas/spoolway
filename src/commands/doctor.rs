@@ -222,8 +222,9 @@ pub(crate) enum Warning {
 
 /// Doctor's note- and failure-level findings, from the checks that never
 /// reach the network or open a pane — the same rows [`doctor`] itself would
-/// print, minus the two that shell out to `git ls-remote`/`gh auth status`
-/// and the live pane check, and minus every passing [`Row::Ok`], which the
+/// print, minus the checks that shell out to `git ls-remote` (one per base,
+/// and a job's base that is not a local branch) or `gh auth status`, minus
+/// the live pane check, and minus every passing [`Row::Ok`], which the
 /// warnings screen has no room for.
 ///
 /// Called by `commands::dispatch::warnings_gate_with` so a run says before it
@@ -285,7 +286,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     doctor_sync(repo, &mut report);
     let sync_end = report.rows.len();
     report.record_all(prompt_checks(repo, pipelines));
-    report.record_all(jobs_checks(repo, pipelines));
+    report.record_all(jobs_checks(repo, pipelines, false));
 
     warnings_from_rows(report.rows, sync_start..sync_end)
 }
@@ -491,7 +492,7 @@ pub fn doctor(
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines));
-    report.record_all(jobs_checks(repo, pipelines));
+    report.record_all(jobs_checks(repo, pipelines, true));
 
     // A dispatcher that is running is a fact about this moment that changes
     // what a person should do next. Its absence is the ordinary case, and says
@@ -2230,9 +2231,17 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// Cron jobs: one whose table carries a key no job reads, one that names a
-/// routine that is gone, one whose expression will not parse, one whose pipeline is not defined. A store that will not
-/// load at all — a name in both, malformed TOML — is a single finding.
-fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
+/// routine that is gone, one whose expression will not parse, one whose
+/// pipeline is not defined, one whose `base` is not a branch this repository
+/// can cut from. A store that will not load at all — a name in both,
+/// malformed TOML — is a single finding.
+///
+/// `ask_origin` is whether a base that is not a local branch may be looked
+/// up on `origin`, which is a `git ls-remote`. [`doctor`] passes `true`.
+/// [`cheap_findings`] passes `false`: nothing on `dispatch`'s pre-run path
+/// may reach the network, so there a base only `origin` could have draws no
+/// row, and only a base that is plainly refused does.
+fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let jobs = match crate::jobs::load(repo) {
@@ -2298,6 +2307,24 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
                 ))
             },
         ));
+
+        // The same rule a firing applies, so a base that every due minute
+        // would refuse is named here first. A job with no `base` key has
+        // nothing to check: its routine tasks may each set their own.
+        if let Some(base) = &job.spec.base {
+            let who = format!("job `{name}`");
+            let result = if ask_origin {
+                super::queue::check_task_base(repo, &who, base)
+            } else {
+                // Not a local branch is left unjudged: only `origin` could
+                // say, and this path may not ask it.
+                super::queue::check_task_base_locally(repo, &who, base).map(|_| ())
+            };
+            findings.push(Finding::Check(
+                format!("job `{name}` base exists"),
+                result.map(|()| None),
+            ));
+        }
     }
 
     findings
@@ -2979,7 +3006,7 @@ mod tests {
         )
         .unwrap();
 
-        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin());
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin(), true);
         let check = |label: &str| {
             findings.iter().find_map(|f| match f {
                 Finding::Check(l, result) if l == label => Some(result),
@@ -2996,6 +3023,44 @@ mod tests {
                 .expect("the check exists")
                 .is_ok()
         );
+    }
+
+    /// A job's `base` is checked with the rule a firing applies: one the
+    /// repository lacks fails its check naming the job and the branch, one it
+    /// has passes, and a job with no `base` key draws no check at all.
+    #[test]
+    fn a_job_base_the_repository_lacks_fails_its_doctor_check() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-job-base");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.gone]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\nbase = \"no/such-branch\"\n\
+             [jobs.real]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\nbase = \"plan/demo\"\n\
+             [jobs.bare]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\n",
+        )
+        .unwrap();
+
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin(), true);
+        let check = |label: &str| {
+            findings.iter().find_map(|f| match f {
+                Finding::Check(l, result) if l == label => Some(result),
+                _ => None,
+            })
+        };
+        let failure = check("job `gone` base exists")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("a base the repository lacks must fail the check");
+        assert!(
+            format!("{failure:#}").contains("no/such-branch"),
+            "{failure:#}"
+        );
+        assert!(
+            check("job `real` base exists")
+                .expect("the check exists")
+                .is_ok()
+        );
+        assert!(check("job `bare` base exists").is_none());
     }
 
     /// A step whose profile blocks at or below its model's `compact_ctx` is
@@ -4968,6 +5033,45 @@ mod tests {
                     && !text(w).contains("a lane really starts")
             }),
             "no network or live-pane check may appear on this path: {warnings:?}"
+        );
+    }
+
+    /// A job's `base` that is not a local branch is left unjudged on the
+    /// pre-run path, which may not reach `origin`: with an `origin` that
+    /// cannot be reached, a network look-up would draw a "could not be asked"
+    /// row, so none appearing shows none was made. A base that is plainly
+    /// refused still draws its row, since that needs no network.
+    #[test]
+    fn cheap_findings_judges_a_job_base_without_asking_origin() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-job-base");
+        crate::repo::run(
+            &repo.checkout,
+            "git",
+            &["remote", "add", "origin", "/nonexistent/spoolway-origin"],
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.remote]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\nbase = \"only/on-origin\"\n\
+             [jobs.flag]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\nbase = \"-x\"\n",
+        )
+        .unwrap();
+
+        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+        let texts: Vec<&str> = warnings
+            .iter()
+            .map(|w| match w {
+                Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) => t.as_str(),
+            })
+            .collect();
+        assert!(
+            texts.iter().all(|t| !t.contains("could not be asked")),
+            "no look-up on origin may happen here: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("starts with `-`")),
+            "a base that is plainly refused is still named: {texts:?}"
         );
     }
 

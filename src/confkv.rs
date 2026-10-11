@@ -163,9 +163,10 @@ pub const REFERENCE: &[Reference] = &[
         default: "30",
         sentence: "How long system-prompts/, commands/, tracking/, headless/ (its logs/ \
                     included) and scratch/ keep an entry before it is deleted; 0 keeps \
-                    everything forever. archive/ is governed by \
-                    housekeeping.archive_retention_days instead. queue/, pending/, \
-                    worktrees/ and plans/ are never swept.",
+                    everything forever. scratch/, headless/, commands/ and tracking/ keep \
+                    an entry for as long as its task is still in queue/. archive/ is \
+                    governed by housekeeping.archive_retention_days instead. queue/, \
+                    pending/, worktrees/ and plans/ are never swept.",
     },
     Reference {
         key: "housekeeping.archive_retention_days",

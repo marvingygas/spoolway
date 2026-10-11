@@ -3797,8 +3797,20 @@ fn build_rows(
                     (State::Paused, next, resumable)
                 }
             }
+            // A task held at `done` for a background check that can still
+            // fail is not finished. The hold lasts up to the step's
+            // `timeout:`, and a row reading "finished" that neither archives
+            // nor moves would explain nothing for that long.
             None if task.stage() == crate::pipeline::DONE => {
-                (State::Queued, "finished".to_string(), false)
+                let keys = runs.keys_for_task(task.id());
+                match crate::dispatch::awaited_check(pipeline, &runs, task.id(), &keys) {
+                    Some(step_id) => (
+                        State::Waiting,
+                        format!("waiting on background `{step_id}`"),
+                        false,
+                    ),
+                    None => (State::Queued, "finished".to_string(), false),
+                }
             }
             None => (
                 State::Unknown,
@@ -6479,6 +6491,47 @@ mod tests {
         assert!(matches!(rows[0].state, State::Finished));
         assert_eq!(rows[0].next, "moves on when dispatching starts");
         assert!(rows[0].lane_time.is_some(), "an exited run keeps its time");
+    }
+
+    /// A task at `done` held for a background check that can still fail does
+    /// not read "finished": its row names the check, and goes back to
+    /// "finished" once the run is over.
+    #[test]
+    fn a_task_at_done_held_for_a_background_check_names_it_on_the_board() {
+        let (repo, _root_guard) = fixture("board-done-held");
+        let mut pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::DONE));
+        let tasks = repo.tasks().unwrap();
+        let name = pipelines.for_task(&tasks[0]).unwrap().name.clone();
+        let check = pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "handover")
+            .unwrap();
+        check.background = true;
+        check.on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{key}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        assert!(matches!(rows[0].state, State::Waiting));
+        assert_eq!(rows[0].next, "waiting on background `handover`");
+
+        std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        assert_eq!(rows[0].next, "finished", "an ended check holds nothing");
     }
 
     /// A stopped header counts the steps still working, singular for one and

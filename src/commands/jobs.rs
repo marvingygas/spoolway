@@ -166,12 +166,12 @@ fn build_jobs_contract(repo: &Repo) -> JobsContractOut {
                 name: key.name,
                 default: if key.required {
                     "required".to_string()
-                } else {
-                    // `enabled` is the only optional key today; its default
-                    // is read off `enabled_default` itself so this can
-                    // never print a value the parser does not actually
-                    // default to.
+                } else if key.name == "enabled" {
+                    // Read off `enabled_default` itself so this can never
+                    // print a value the parser does not actually default to.
                     crate::jobs::enabled_default().to_string()
+                } else {
+                    "none".to_string()
                 },
                 text: key.text.replace("{routines_dir}", &routines_dir),
             })
@@ -913,6 +913,9 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         pipeline: draft.pipeline,
         routine: draft.routine,
         enabled: draft.enabled,
+        // The screen has no field for it yet; `jobs::write` leaves a `base`
+        // already in the store alone.
+        base: None,
     };
 
     jobs::write(repo, draft.scope, &name, &spec).map_err(|err| {
@@ -1908,6 +1911,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -1932,6 +1936,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -1953,6 +1958,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -1974,6 +1980,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -2007,6 +2014,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -2143,6 +2151,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -2373,6 +2382,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: "nightly".to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();

@@ -61,6 +61,7 @@ cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 schedule = "* * * * *"
 pipeline = "default"
 routine = "nightly"
+base = "plan/live"
 
 [jobs.release-readiness]
 schedule = "0 8 * * 1"
@@ -81,6 +82,15 @@ says "jobs contract names the project store" '.spoolway/jobs.toml' \
   "$SPOOLWAY" jobs contract
 says "and the user store" "$USER_STORE_DISPLAY" \
   "$SPOOLWAY" jobs contract
+
+# The main checkout is put on a branch of its own, one local commit ahead, for
+# the firing: a job's tasks are cut from its configured `base`, never from
+# whatever branch the checkout happens to have out.
+ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+must "the main checkout moves to a branch of its own" \
+  git checkout -q -b experiment/local-only
+must "with a local commit on it" \
+  git commit -q --allow-empty -m "local work in progress"
 
 # A dispatcher pass against a matching minute fires the job.
 dispatcher_start
@@ -103,6 +113,10 @@ has "and is put on the job's pipeline" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
 has "its depends_on is remapped onto the sibling's minted id" "audit-deps-1" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
+has "it is cut from the job's base, not the branch the checkout has out" \
+  "base: plan/live" "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
+lacks "and never from that branch" "experiment/local-only" \
+  "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
 
 works "the routine tree is left exactly where it was" \
   test -f .spoolway/routines/nightly/audit-deps.md
@@ -110,6 +124,131 @@ has "unminted, unmodified" "id: audit-deps" \
   .spoolway/routines/nightly/audit-deps.md
 
 dispatcher_stop
+must "the main checkout goes back to the branch it started on" \
+  git checkout -q "$ORIGINAL_BRANCH"
+
+# ------------- a job firing under a hook with an unmet tool requirement
+# A job fires with nobody watching, so the tool-requirements gate must not
+# wait on a key for it, even when the dispatcher's own stdin is a terminal —
+# a dispatcher running in a terminal pane. The firing prints the gate's notice
+# once, queues its task with `tracking: off`, and records the minute as fired.
+#
+# The dispatcher runs under a real pty here (`script`), its stdin the pty
+# rather than the pipe or `/dev/null` every other dispatcher in this suite
+# has. Nothing ever types into it: a gate that waits on a key waits forever,
+# and the task never reaches the queue.
+mkdir -p .spoolway/hooks .spoolway/routines/gated
+cat > .spoolway/hooks/needs-tool.sh <<'EOF'
+#!/usr/bin/env bash
+# spoolway-requires: nosuchtool >= 1.0
+case "$SPOOLWAY_EVENT" in
+  fetch) exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x .spoolway/hooks/needs-tool.sh
+must "the hook that requires a missing tool is named" \
+  "$SPOOLWAY" config set issue_tracking.hook needs-tool.sh
+must "with a project key, so doctor has no complaint about the pair" \
+  "$SPOOLWAY" config set issue_tracking.project_key E2E
+must "and no ticket slug in names, which the hook would have to write" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names false
+task_doc .spoolway/routines/gated/gated-audit.md gated-audit "$BODY" "group: gated"
+
+cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
+[jobs.gated-job]
+schedule = "* * * * *"
+pipeline = "default"
+routine = "gated"
+base = "plan/live"
+TOML
+
+GATED_LOG="$LIVE/gated-dispatch.out"
+GATED_PID="$LIVE/gated-dispatch.pid"
+GATED_FIFO="$LIVE/gated-dispatch.keys"
+: > "$GATED_LOG"
+rm -f "$GATED_PID" "$GATED_FIFO"
+mkfifo "$GATED_FIFO"
+# Held open read-write on fd 8, so `script` never reads EOF off its stdin.
+exec 8<>"$GATED_FIFO"
+env SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_BIN="$SPOOLWAY" E2E_PIDFILE="$GATED_PID" \
+  setsid script -qfec 'stty cols 160 rows 50; echo $$ >"$E2E_PIDFILE"; exec "$E2E_BIN" dispatch' \
+  "$GATED_LOG" <"$GATED_FIFO" >/dev/null 2>&1 &
+disown
+poll_until 10 test -s "$GATED_PID" || bad "the pty dispatcher never started"
+# On a terminal `dispatch` first asks doctor's start gate. `x` answers it by
+# hiding what it shows, and is not a key the tool gate's own prompt takes, so
+# a firing that waits on a key is not answered by it.
+poll_until 10 grep -qaF "[x] hide until" "$GATED_LOG" && printf x >&8
+
+gated_queued() {
+  compgen -G "$SPOOLWAY_PROJECT_HOME/queue/gated-audit-*.md" >/dev/null \
+    || compgen -G "$SPOOLWAY_PROJECT_HOME/archive/gated-audit-*.md" >/dev/null
+}
+if poll_until 20 gated_queued; then
+  ok "a job firing under a hook with an unmet tool queued its task without waiting on a key"
+else
+  bad "the job never queued its task: the pass is waiting on a key (dispatcher output follows)"
+  sed 's/^/        /' "$GATED_LOG" | tail -30
+fi
+
+GATED_TASK=$(ls "$SPOOLWAY_PROJECT_HOME"/queue/gated-audit-*.md \
+  "$SPOOLWAY_PROJECT_HOME"/archive/gated-audit-*.md 2>/dev/null | head -1)
+has "the task is queued with issue tracking off" "tracking: off" "${GATED_TASK:-/nonexistent}"
+has "the dispatcher named the missing tool" "nosuchtool >= 1.0" "$GATED_LOG"
+has "and said issue tracking is not supported for the firing" \
+  "issue tracking is not supported." "$GATED_LOG"
+lacks "without offering a key to press" "queue anyway" "$GATED_LOG"
+# The job's own record, not any `fired_minute` in the file: the first section's
+# job left one there that `fire_due` never prunes.
+gated_minute() {
+  jq -r '."gated-job".fired_minute // empty' "$SPOOLWAY_PROJECT_HOME/jobs.state.json" 2>/dev/null
+}
+# `fire_due` writes the state file only after its loop over jobs ends, which is
+# after the task is saved, so the record can trail the task file by a moment.
+gated_minute_recorded() { [ -n "$(gated_minute)" ]; }
+poll_until 10 gated_minute_recorded
+FIRED_MINUTE=$(gated_minute)
+works "the minute is recorded as fired for the gated job itself" test -n "$FIRED_MINUTE"
+
+# A later pass in the same minute finds the job already fired: the notice is
+# named once for the minute, not again on every pass. `dispatch` draws no
+# frame on a pass; it prints "next pass in" only when a pass ends idle. The
+# firing pass may print one itself, so two after the firing line mean a later
+# pass ran too. A fixed `sleep` could not show that.
+passes_after_firing() {
+  sed -n '/job gated-job · fired/,$p' "$GATED_LOG" | grep -ac "next pass in"
+}
+two_passes_after_firing() { [ "$(passes_after_firing)" -ge 2 ]; }
+if poll_until 40 two_passes_after_firing; then
+  ok "a later pass ran after the firing"
+else
+  bad "no later pass ended after the firing, so the once-per-minute check proves nothing"
+fi
+if [ "$(gated_minute)" = "$FIRED_MINUTE" ]; then
+  works "the unmet tool is named once for the minute" \
+    bash -c '[ "$(grep -ac "nosuchtool >= 1.0" "$1")" = 1 ]' _ "$GATED_LOG"
+else
+  # The clock crossed into the next minute, where the job legitimately fires
+  # and names the tool again; one notice per recorded firing is the claim.
+  works "the unmet tool is named once for each minute fired" \
+    bash -c '[ "$(grep -ac "nosuchtool >= 1.0" "$1")" = 2 ]' _ "$GATED_LOG"
+fi
+
+# Stopped the way `dispatcher_stop` stops one: the board section below starts
+# its own dispatcher, which is refused while this one holds the lock.
+kill -TERM -- "-$(cat "$GATED_PID")" 2>/dev/null
+poll_while 5 kill -0 -- "-$(cat "$GATED_PID")"
+kill -KILL -- "-$(cat "$GATED_PID")" 2>/dev/null
+poll_while 5 kill -0 -- "-$(cat "$GATED_PID")" \
+  || bad "the pty dispatcher would not stop"
+exec 8>&-
+rm -f "$SPOOLWAY_PROJECT_HOME"/queue/gated-audit-*.md
+must "the hook is cleared again for the rest of the suite" \
+  "$SPOOLWAY" config set issue_tracking.hook ""
+must "and the project key" "$SPOOLWAY" config set issue_tracking.project_key ""
+must "and ticket slugs in names are back on, their default" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names true
 
 # ------------- the dispatcher board's job ledger, busy and empty
 # Every enabled job is on the board's own ledger — beneath the slot lines,

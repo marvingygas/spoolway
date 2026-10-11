@@ -64,11 +64,7 @@ impl RunFiles {
     /// [`crate::lock::is_same_process`] whether the live process there is the
     /// one that wrote the file, or it acts on a stranger.
     pub(crate) fn read_run(&self, key: &str) -> Option<(u32, String)> {
-        let raw = std::fs::read_to_string(self.pid_path(key)).ok()?;
-        let mut lines = raw.lines();
-        let pid = lines.next()?.trim().parse().ok()?;
-        let recorded = lines.next().unwrap_or_default().trim().to_string();
-        Some((pid, recorded))
+        read_run_at(&self.pid_path(key))
     }
 
     /// The exit file's content, parsed as a code — `None` while there is
@@ -120,6 +116,16 @@ impl RunFiles {
         disown(&self.pid_path(key))?;
         Ok(())
     }
+}
+
+/// [`RunFiles::read_run`] for any file written in the pid file's format, so a
+/// copy of one kept under another name reads exactly as the original did.
+pub(crate) fn read_run_at(path: &Path) -> Option<(u32, String)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut lines = raw.lines();
+    let pid = lines.next()?.trim().parse().ok()?;
+    let recorded = lines.next().unwrap_or_default().trim().to_string();
+    Some((pid, recorded))
 }
 
 /// Leave nothing at `path` that a later read could believe.

@@ -319,6 +319,7 @@ stateDiagram-v2
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
+| `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
@@ -774,6 +775,23 @@ A checkout under `worktrees/` is never marked `borrowed` for a task that has sta
 checkout that a person locked for another reason is never removed.
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
+
+A base that only `origin` has is fetched before the worktree is cut. The dispatcher runs
+`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. It runs this
+fetch twice for each cut, so a pass can wait up to about 22 seconds. The fetch uses your own
+`core.sshCommand`.
+
+When the fetch does not finish in 10 seconds, the dispatcher stops it and the transport it
+started. The cut then uses the base name as written in the task. If your checkout has that branch,
+the task starts. If it does not, the cut fails and the failure names the fetch:
+
+```
+could not cut a worktree for `task/cart-totals` at <path>; `git fetch origin task/gh-412-checkout` did not finish within 10s and was stopped, so `task/gh-412-checkout` may exist on origin but not here. Run `git fetch origin task/gh-412-checkout` in the repository yourself, then resume the task
+```
+
+The failure counts toward the launch-failure ceiling described under [Restarts, laps and
+escalation](#restarts-laps-and-escalation). A dispatcher that is killed while it waits leaves
+the fetch running.
 
 When a task reaches `done`:
 

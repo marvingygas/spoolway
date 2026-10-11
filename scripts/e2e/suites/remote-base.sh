@@ -21,6 +21,11 @@
 # person writes `starts_from: main` into its front matter and resumes it. A
 # dependent queued after the branch is gone is refused by `queue add` instead,
 # with the same advice, and queues once `starts_from: main` is written.
+#
+# The last case is a fetch that hangs. The cut of a remote-only base runs
+# `git fetch origin <base>` inside the dispatcher's pass, so a transport stuck
+# on a prompt used to hold every other task back with nothing printed. The
+# fetch is now given up on after a bound, and an unrelated task still starts.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -175,5 +180,64 @@ says "and queues it once starts_from: main is written" "queued after" \
   "$SPOOLWAY" queue add --from "$LIVE/after.md"
 says "the queued task starts from main" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/after.md"
+
+# A fetch that hangs. `origin` is pointed at an ssh url whose transport is the
+# person's own `core.sshCommand`, a script that serves every call from the
+# real bare repo except a fetch, which it holds. Pushes keep going to the real
+# bare repo through `pushurl`. Both tasks are queued first, because `queue add`
+# itself asks `origin` whether the base exists and is not what this case is
+# about. The stuck task's base is an `origin` branch nothing here has fetched,
+# so its cut fetches. The other task's base is local, so its cut does not, and
+# it must start long before the transport would answer.
+dispatcher_stop
+HUNG_BASE=task/gh-415-hung
+must "a branch made only in the bare origin for the stuck fetch" \
+  git -C "$FORGE/origin.git" branch "$HUNG_BASE" main
+echo hang > "$CTL/stuck"
+echo hang > "$CTL/free"
+task_doc "$LIVE/stuck.md" stuck "$BODY" "group: stuck" "base: $HUNG_BASE"
+task_doc "$LIVE/free.md" free "$BODY" "group: free" "base: plan/live"
+must "a task on the remote-only base queues" \
+  "$SPOOLWAY" queue add --from "$LIVE/stuck.md"
+must "an unrelated task on a local base queues" \
+  "$SPOOLWAY" queue add --from "$LIVE/free.md"
+
+ORIGIN_URL=$(git remote get-url origin)
+# The transport answers `git ls-remote`, which the dispatcher runs to check a
+# start branch exists, by serving the real origin itself. It holds `git fetch`,
+# which is the call this case is about, for longer than the fetch's bound, and
+# first writes down the process group it is held in, so the cleanup below can
+# end that group and nothing else. `ps` rather than /proc, which macOS does
+# not have.
+cat > "$LIVE/hung-ssh.sh" <<SH
+#!/bin/sh
+if ps -o args= -p \$PPID | grep -q ' fetch '; then
+  ps -o pgid= -p \$\$ | tr -d ' ' > '$LIVE/hung-group'
+  sleep 40
+fi
+exec git-upload-pack '$FORGE/origin.git'
+SH
+chmod +x "$LIVE/hung-ssh.sh"
+must "fetches go to an ssh url" \
+  git remote set-url origin ssh://spoolway-e2e.invalid/nowhere.git
+must "pushes still go to the real origin" \
+  git remote set-url --push origin "$ORIGIN_URL"
+must "the person's own ssh command is one that hangs on a fetch" \
+  git config core.sshCommand "$LIVE/hung-ssh.sh"
+
+if drive free implement 60; then
+  ok "an unrelated task starts while another task's fetch hangs"
+else
+  bad "an unrelated task starts while another task's fetch hangs (at \`$(stage_of free)\`)"
+fi
+dispatcher_stop
+# The fetch runs in a process group of its own, so stopping the dispatcher
+# does not reach one still in flight. That group holds git, the script and its
+# `sleep`, and ending it takes them together.
+if [ -s "$LIVE/hung-group" ]; then
+  kill -TERM -- "-$(cat "$LIVE/hung-group")" 2>/dev/null
+fi
+git config --unset core.sshCommand
+git remote set-url origin "$ORIGIN_URL"
 
 finish

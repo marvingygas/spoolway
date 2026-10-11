@@ -695,6 +695,59 @@ touch "$SCRATCH_HOLD"
 
 forget scratch-fail
 
+# ------------------------------------------------- background, on_fail, at done
+# The same promise, kept when the task reaches `done` before the check ends:
+# cleanup used to stop the run unread and archive the task as if it had
+# passed. `late` fails only once told to, so the task is provably at `done`,
+# and still in the queue, when the failure lands.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+LATE_FAIL="$LIVE/late-fail-now"
+rm -f "$LATE_FAIL"
+{
+  printf '\n  - id: late\n'
+  printf '    description: A background step that fails after its task is done.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; exit 1\n' "$LATE_FAIL"
+  printf '    background: true\n'
+  printf '    on_pass: review\n'
+  printf '    on_fail: blocked\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: late/" .spoolway/pipelines/default.yml
+works "a background step checked after its task is done checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart   # the pipeline it is holding has no `late` step in it
+task_doc "$LIVE/late-fail.md" late-fail "$BODY" "group: late-fail"
+must "a task behind a background step that fails after it is done" \
+  "$SPOOLWAY" queue add --from "$LIVE/late-fail.md"
+
+if drive late-fail done 120; then
+  ok "the task reached done while its background check was still running"
+else
+  bad "the task reached done while its background check was still running \
+(at \`$(stage_of late-fail)\`)"
+fi
+# Long enough for several passes: an archive would take one.
+sleep 3
+if [ "$(stage_of late-fail)" = done ]; then
+  ok "and it is not archived while the check is still going"
+else
+  bad "and it is not archived while the check is still going \
+(at \`$(stage_of late-fail)\`)"
+fi
+
+touch "$LATE_FAIL"
+if drive late-fail blocked 120; then
+  ok "the check's failure reached the task waiting at done"
+else
+  bad "the check's failure reached the task waiting at done \
+(at \`$(stage_of late-fail)\`)"
+fi
+# `done` is not a step a resume can go back to, so the block names the check:
+# a resume runs it again rather than falling back to whatever reported last.
+has "blocked_from names the failed check, not done" \
+  "blocked_from: late" $SPOOLWAY_PROJECT_HOME/queue/late-fail.md
+
+forget late-fail
+
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
 # `setsid sh -c`, and macOS ships no `setsid` binary. It now calls
@@ -1756,6 +1809,96 @@ else
 fi
 says "eval --step shows a command step's rows instead of refusing" "redgate" \
   "$SPOOLWAY" eval --by step --step redgate
+
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+
+# ---------------------------------------------------- a process left behind
+# `pipeline check` is not run on these two pipelines: the `walked` task above
+# is still queued, blocked, and names steps these pipelines do not have.
+#
+# A blocking step whose line backgrounds a process and returns: the step passes
+# at once, its exit is routed and its run files are forgotten, and the process
+# is still running in the task's worktree. Cleanup has to find it without those
+# files, or it outlives the task and keeps a deleted directory as its cwd.
+#
+# Held on a release file for the same reason the `bench` case is: the pid this
+# case reads is written under `commands/`, which goes when the task does.
+LEFT_CHILD="$LIVE/left.child"
+LEFT_RELEASE="$LIVE/left.release"
+rm -f "$LEFT_CHILD" "$LEFT_RELEASE"
+add_command_step default left \
+  "(sleep 98 & echo \$! > \"$LEFT_CHILD\") ; true" review
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$LEFT_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+
+dispatcher_restart
+task_doc "$LIVE/left.md" left "$BODY" "group: left"
+must "a task whose command step leaves a process running" \
+  "$SPOOLWAY" queue add --from "$LIVE/left.md"
+
+if poll_until 120 test -s "$LEFT_CHILD"; then
+  ok "the command left a process running behind its own exit"
+else
+  bad "the command left a process running behind its own exit"
+fi
+LEFT_PID=$(cat "$LEFT_CHILD" 2>/dev/null)
+touch "$LEFT_RELEASE"
+if drive left gone 300; then
+  ok "the task reached done with a process still running behind its step"
+else
+  bad "the task reached done with a process still running behind its step (at \`$(stage_of left)\`)"
+fi
+if [ -n "$LEFT_PID" ] && poll_while 20 kill -0 "$LEFT_PID"; then
+  ok "cleanup stops a process a finished command step left behind"
+else
+  bad "cleanup stops a process a finished command step left behind (pid $LEFT_PID)"
+  [ -n "$LEFT_PID" ] && kill "$LEFT_PID" 2>/dev/null
+fi
+
+# ------------------------------------------------------- a killed wrapper
+# Only the wrapper is killed, with SIGKILL, so the command under it carries on.
+# The run reads as interrupted and the command starts again, and the first run
+# must be gone by then: two runs of one command side by side share a worktree.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+KILLED_RUNS="$LIVE/killed.runs"
+KILLED_RELEASE="$LIVE/killed.release"
+rm -f "$KILLED_RUNS" "$KILLED_RELEASE"
+add_command_step default killed \
+  "sleep 15 & echo \$! >> \"$KILLED_RUNS\"; wait" review
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$KILLED_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+
+dispatcher_restart
+task_doc "$LIVE/killed.md" killed "$BODY" "group: killed"
+must "a task whose command step will lose its wrapper" \
+  "$SPOOLWAY" queue add --from "$LIVE/killed.md"
+
+KILLED_PIDFILE="$SPOOLWAY_PROJECT_HOME/commands/killed · killed.pid"
+poll_until 120 test -s "$KILLED_RUNS"
+FIRST_CHILD=$(head -n1 "$KILLED_RUNS" 2>/dev/null)
+WRAPPER=$(head -n1 "$KILLED_PIDFILE" 2>/dev/null)
+if [ -n "$WRAPPER" ] && kill -9 "$WRAPPER" 2>/dev/null; then
+  ok "the wrapper alone was killed"
+else
+  bad "the wrapper alone was killed (pid $WRAPPER)"
+fi
+# A function, because `poll_until` runs a command and the count has to be read
+# again on every try.
+runs_started() { [ "$(wc -l < "$KILLED_RUNS")" -ge 2 ]; }
+if poll_until 60 runs_started; then
+  ok "the command started again"
+else
+  bad "the command started again"
+fi
+if [ -n "$FIRST_CHILD" ] && ! kill -0 "$FIRST_CHILD" 2>/dev/null; then
+  ok "and the first run was gone by the time the second started"
+else
+  bad "and the first run was gone by the time the second started (pid $FIRST_CHILD)"
+fi
+touch "$KILLED_RELEASE"
+drive killed gone 300 || true
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 

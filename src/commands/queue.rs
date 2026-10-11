@@ -779,12 +779,18 @@ fn queue_unqueue_forced(
         let _ = mux.interrupt_lane(&name);
         println!("interrupted lane {stage}/{id}");
     }
+    // Every run the task left, not only the step it is on: a background step
+    // started earlier is still going, and a `.group` record names a process a
+    // finished step backgrounded. The worktree comes down below, and anything
+    // left running would keep its cwd in a directory that is gone — the same
+    // reason `Dispatcher::clean_up` stops them all.
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
-    for run in crate::status::running_command_steps(repo, &tasks, pipelines)
-        .into_iter()
-        .filter(|run| run.task == id)
-    {
-        runs.stop(&crate::command_step::Runs::key(&run.step, &run.task));
+    for key in runs.keys_for_task(id) {
+        if let Some(pane) = runs.pane(&key) {
+            let _ = mux.close_pane(&pane);
+            runs.forget_pane(&key);
+        }
+        runs.stop(&key);
     }
 
     let mut task = repo.task(id)?;
@@ -1423,32 +1429,52 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
 /// The leading `-` is refused before git sees the value at all: what
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
 /// as a flag, the same reason `branch:` is refused outright.
-fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+    if check_task_base_locally(repo, name, base)? {
+        return Ok(());
+    }
+    match repo.remote_branch_answer(base) {
+        Some(true) => Ok(()),
+        Some(false) => Err(BaseProblem::error(format!(
+            "{name}: `base: {base}` names a branch this repository does not have locally or on \
+             `origin` — create or fetch it first, or name one it already has"
+        ))),
+        // Not a `BaseProblem`: offline, a refused credential or a timeout
+        // says nothing about whether the branch exists, and the next try
+        // may get an answer.
+        None => bail!(
+            "{name}: `base: {base}` is not a branch this repository has locally, and `origin` \
+             could not be asked whether it has it — fetch the branch first, or try again when \
+             `origin` can be reached"
+        ),
+    }
+}
+
+/// [`check_task_base`] without asking `origin`: refuses a base git would
+/// read as a flag or that is no branch name, and says whether the branch
+/// exists in this repository. `Ok(false)` means it is not a local branch and
+/// only `origin` could still have it. A caller on a path that must not reach
+/// the network (`doctor`'s pre-run warnings) stops there.
+pub(crate) fn check_task_base_locally(repo: &Repo, name: &str, base: &str) -> Result<bool> {
     if base.starts_with('-') {
-        bail!(
+        return Err(BaseProblem::error(format!(
             "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
              branch instead"
-        );
+        )));
     }
     if repo.git(&["check-ref-format", "--branch", base]).is_err() {
-        bail!("{name}: `base: {base}` is not a valid branch name — name a branch instead");
+        return Err(BaseProblem::error(format!(
+            "{name}: `base: {base}` is not a valid branch name — name a branch instead"
+        )));
     }
-    if repo
+    Ok(repo
         .git(&[
             "rev-parse",
             "--verify",
             "--quiet",
             &format!("refs/heads/{base}"),
         ])
-        .is_err()
-        && !repo.remote_branch_exists(base)
-    {
-        bail!(
-            "{name}: `base: {base}` names a branch this repository does not have locally or on \
-             `origin` — create or fetch it first, or name one it already has"
-        );
-    }
-    Ok(())
+        .is_ok())
 }
 
 /// A task in a batch that queueing leaves out because it cannot start, and
@@ -1932,9 +1958,11 @@ pub(crate) enum ToolGate {
     /// someone is there, reads the answer — a caller with no screen at all:
     /// `queue add --from`, or the dispatcher firing a job on its schedule.
     ///
-    /// `interactive` is that caller's own `crate::ask::interactive()`, whether
-    /// anyone is really there to answer. Such a caller holds no terminal
-    /// guard of its own, so the gate takes one before it reads a key.
+    /// `interactive` says whether anyone is really there to answer.
+    /// `queue add --from` passes its own `crate::ask::interactive()`. A job
+    /// firing passes `false`, since nobody is there when it fires. A caller
+    /// holds no terminal guard of its own, so the gate takes one before it
+    /// reads a key.
     Print { interactive: bool },
     /// A screen has asked already, as a popup over its own tab — the queue
     /// screen's [`Mode::ToolGate`] — and
@@ -1952,9 +1980,9 @@ pub(crate) enum ToolGate {
 /// refusal: `esc` means "go back", not "here is what went wrong". Only a
 /// caller with no screen at all ever sees it — `queue_add_tasks`, which
 /// catches it and exits clean the way `dispatch::overrides_gate`'s own `esc`
-/// does, and `queue_routine_target` under a job the dispatcher fires. The
-/// queue screen asks the gate in a popup of its own instead, whose `esc`
-/// goes back without an error at all.
+/// does; a job firing never asks, so it never sees it. The queue screen
+/// asks the gate in a popup of its own instead, whose `esc` goes back
+/// without an error at all.
 #[derive(Debug)]
 struct GateCancelled;
 
@@ -8173,6 +8201,32 @@ pub(crate) fn routine_target_refusal(target: &std::path::Path) -> Option<String>
     super::routines::read_folder_at(target).ok()?.refusal()
 }
 
+/// A refusal that comes from a task's base itself and that only an edit to
+/// the task or the job, or creating the branch, will lift: a task with no
+/// `base:` under a job with no `base` key, a base git would read as a flag,
+/// a name that is not a branch name, or a branch the repository and
+/// `origin` both lack. A job's firing fails the same way on every pass until
+/// then, so `jobs::fire_due` tells it apart from a transient failure (a
+/// hook that failed once, a write that raced, `origin` unreachable) by
+/// downcasting to this type, and retries only the latter within a due
+/// minute.
+#[derive(Debug)]
+pub(crate) struct BaseProblem(String);
+
+impl BaseProblem {
+    fn error(text: String) -> anyhow::Error {
+        anyhow::Error::new(BaseProblem(text))
+    }
+}
+
+impl std::fmt::Display for BaseProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BaseProblem {}
+
 /// Queue a routine target the way the routines tab does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
@@ -8184,12 +8238,12 @@ pub(crate) fn routine_target_refusal(target: &std::path::Path) -> Option<String>
 /// a caller can record which ids it minted. The source tasks under
 /// `.spoolway/routines/` are never touched.
 ///
-/// Asks the tool-requirements gate printed, as a caller with no screen does
-/// — the dispatcher's scheduled firing is the only one.
+/// Runs the tool-requirements gate printed and never asks: nobody is there
+/// to press a key when a job fires, whatever the dispatcher's terminal is.
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
-    base: &str,
+    base: Option<&str>,
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
@@ -8220,26 +8274,36 @@ pub(crate) fn queue_routine_target(
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let mut tasks = validate_batch(repo, pipelines, Some(base), &submitted)?;
+    let mut tasks = validate_batch(repo, pipelines, base, &submitted).map_err(|err| {
+        // `parse_submission` tells a person at `queue add` to pass `--base`,
+        // which a job has no way to do. Name the job's own key instead, so
+        // the advice works.
+        let text = format!("{err:#}");
+        match text.split_once("sets no `base:` and no --base was given") {
+            Some((name, _)) => BaseProblem::error(format!(
+                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
+                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
+            )),
+            None => err,
+        }
+    })?;
     // No task to write ids back into — see `open_and_prefix`. The
-    // dispatcher firing a job has no screen, so this passes
-    // `ToolGate::Print`, which asks `crate::ask` whether anyone is really
-    // there and takes its own terminal, the same way `queue_add_tasks`
-    // does. `esc`'s `GateCancelled` is left to propagate as an ordinary
-    // `Err` rather than caught here: `jobs::fire_due` treats any `Err` as
-    // "did not fire" and neither marks the job fired nor records queued
-    // ids, which is the one honest answer for a run a person actually
-    // declined. Turning it into a fake empty success here would let the
-    // dispatcher believe this minute's firing already happened.
+    // dispatcher firing a job has no screen and nobody to answer it, even
+    // when its own stdin and stdout happen to be a terminal (a dispatcher
+    // in a pane). So this passes `ToolGate::Print { interactive: false }`
+    // whatever `crate::ask` says: the gate prints its notice naming the
+    // unmet tool and goes on with tracking off. Asking would block the
+    // whole dispatcher pass on a key, and `esc` would leave the minute
+    // unrecorded so the next pass asked again. Because the firing
+    // returns `Ok`, `jobs::fire_due` marks the minute fired and the notice
+    // prints once for it.
     //
     // `submitted` is `&[]` — nothing here is ever written back into — but
     // `task_files` is not: a routine's own task is a real file under
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
     let task_files = readable_task_files(&submitted);
-    let gate = ToolGate::Print {
-        interactive: crate::ask::interactive(),
-    };
+    let gate = ToolGate::Print { interactive: false };
     open_and_prefix(
         repo,
         &[],
@@ -10036,6 +10100,51 @@ mod tests {
         let said = format!("{err:#}");
         assert!(!said.contains("--force\n"), "{said}");
         assert!(said.contains("Unqueue `child` first"), "{said}");
+    }
+
+    /// A forced unqueue brings the worktree down, so a process a finished
+    /// command step backgrounded — recorded only in a `.group` file — has to
+    /// be stopped first, or it keeps its cwd in a directory that is gone.
+    #[test]
+    fn a_forced_unqueue_stops_what_a_finished_command_step_backgrounded() {
+        let (repo, _root_guard) = fixture("unqueue-forced-group");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.save().unwrap();
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("check", "solo");
+        let child_file = repo.root.join("child.pid");
+        runs.start(
+            &key,
+            &format!("(sleep 60 & echo $! >{})", child_file.display()),
+            &repo.root,
+            &Default::default(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let child = loop {
+            let text = std::fs::read_to_string(&child_file).unwrap_or_default();
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+            assert!(started.elapsed().as_secs() < 20, "the child never started");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        while runs.state(&key) != crate::command_step::RunState::Exited(0) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        runs.forget(&key).unwrap();
+        assert!(crate::headless::alive(child));
+
+        queue_unqueue_forced(&repo, &pipelines, "solo", "implement", None).unwrap();
+
+        assert!(
+            !crate::headless::alive(child),
+            "the backgrounded process outlived the unqueue"
+        );
     }
 
     #[test]
@@ -15481,6 +15590,7 @@ mod tests {
                 pipeline: "bugfix".to_string(),
                 routine: routine.to_string(),
                 enabled: true,
+                base: None,
             },
         )
         .unwrap();
@@ -16935,7 +17045,7 @@ mod tests {
             let tasks = queue_routine_target(
                 &repo,
                 &Pipelines::builtin(),
-                "plan/demo",
+                Some("plan/demo"),
                 &repo.routines_dir().join("nightly"),
                 "bugfix",
             )
@@ -16981,9 +17091,14 @@ mod tests {
             write_routine(&repo, "nightly", "broken", "no fence here\n");
             let folder = repo.routines_dir().join("nightly");
 
-            let err =
-                queue_routine_target(&repo, &Pipelines::builtin(), "plan/demo", &folder, "bugfix")
-                    .unwrap_err();
+            let err = queue_routine_target(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &folder,
+                "bugfix",
+            )
+            .unwrap_err();
 
             assert!(format!("{err:#}").contains("broken.md"), "{err:#}");
             assert!(repo.tasks().unwrap().is_empty(), "nothing was queued");
@@ -17012,7 +17127,7 @@ mod tests {
             let err = queue_routine_target(
                 &repo,
                 &Pipelines::builtin(),
-                "plan/demo",
+                Some("plan/demo"),
                 &repo.routines_dir().join("nightly"),
                 "bugfix",
             )

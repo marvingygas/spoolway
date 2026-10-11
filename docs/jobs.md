@@ -31,7 +31,9 @@ flowchart LR
   H -- yes --> I[name it, skip, record it] --> E
   H -- no --> C{previous run<br/>still queued?}
   C -- yes --> D[skip, record it] --> E
-  C -- no --> F[queue the routine<br/>on the job's pipeline] --> G[record the minute] --> E
+  C -- no --> J{every task has<br/>a usable base?}
+  J -- no --> K[name it, queue nothing,<br/>record it] --> E
+  J -- yes --> F[queue the routine<br/>on the job's pipeline] --> G[record the minute] --> E
 ```
 
 A folder routine is queued as one batch with fresh ids. A single `.md` routine is queued alone
@@ -45,6 +47,10 @@ was off for. A job whose previous run is still in the queue skips its window.
 
 A job whose routine folder holds a `*.md` file that does not parse fires nothing. The dispatcher
 names each such file once per matching minute.
+
+A job never waits on a key. If the issue hook names a tool that is missing or too old, the
+dispatcher names the tool once for that minute and queues the job's tasks with `tracking: off`.
+See [Configuration](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
 
 A job table may only hold the keys in the example under [Where a job lives](#where-a-job-lives).
 A job whose table holds any other key, such as `enable = false`, never fires. The dispatcher
@@ -102,6 +108,10 @@ walks the same pipeline panel and save.
 
 ### What the screen decides for you
 
+The screen has no field for `base`. A job written on the screen has no `base` key, so add it to
+the store file by hand when the routine's tasks set no `base:`. Editing a job on the screen keeps
+a `base` already in the file.
+
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
 gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. This is the same
 whether the walk started on the jobs tab or the routines tab. A job in the project store is
@@ -139,7 +149,24 @@ schedule = "0 3 * * 1-5"
 pipeline = "impl_fast"
 routine  = "nightly"     # a folder or a single .md under .spoolway/routines/
 enabled  = true          # optional; absent means enabled
+base     = "plan/demo"   # optional; the branch the routine's tasks are cut from
 ```
+
+### Where a job's base comes from
+
+A task a job queues is cut from its own `base:` when the routine task sets one. Otherwise it is
+cut from the job's `base` key. The branch the main checkout has out never decides the base, and
+neither does a detached HEAD.
+
+A task with neither is a problem for the whole routine: nothing from it is queued, including a
+sibling task that sets its own `base:`. A base that starts with `-`, is not a valid branch name,
+or names a branch that neither the repository nor `origin` has is a problem in the same way.
+The dispatcher names the job once for that minute, and tries again at the next due minute.
+
+If `origin` cannot be reached to look up a base, nothing is recorded for that minute. The job is
+tried again on the next pass.
+
+`spoolway jobs contract` lists the `base` key.
 
 One name in both stores is refused. A key outside this table is an unknown key.
 
@@ -190,7 +217,11 @@ not parse.
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
+| job `<name>` base exists | `base` is set, and it starts with `-`, is not a valid branch name, or names a branch that neither the repository nor `origin` has. |
 | job stores load | A name is in both stores, or a store is malformed TOML. |
+
+The warnings the dispatcher shows before it starts run the base check without asking `origin`.
+A base that is not a local branch is not judged there.
 
 ## Reference
 
