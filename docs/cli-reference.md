@@ -252,9 +252,9 @@ A `--from` path under this project's own pending directory is deleted once the b
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
-unmet one prints the same gate the queue screen draws and proceeds without a ticket, writing
-`tracking: off` onto every task instead, since there is no key to wait on. Otherwise it opens a
-ticket per task. See
+unmet one prints the same gate the queue screen draws. At a terminal it waits for `enter` to
+queue with `tracking: off` written onto every task, or `esc` to back out. With no terminal it
+proceeds the same way without waiting. Otherwise it opens a ticket per task. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`

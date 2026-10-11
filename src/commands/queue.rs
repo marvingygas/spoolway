@@ -1882,9 +1882,11 @@ pub(crate) enum ToolGate {
     /// someone is there, reads the answer — a caller with no screen at all:
     /// `queue add --from`, or the dispatcher firing a job on its schedule.
     ///
-    /// `interactive` is that caller's own `crate::ask::interactive()`, whether
-    /// anyone is really there to answer. Such a caller holds no terminal
-    /// guard of its own, so the gate takes one before it reads a key.
+    /// `interactive` says whether anyone is really there to answer.
+    /// `queue add --from` passes its own `crate::ask::interactive()`. A job
+    /// firing passes `false`, since nobody is there when it fires. A caller
+    /// holds no terminal guard of its own, so the gate takes one before it
+    /// reads a key.
     Print { interactive: bool },
     /// A screen has asked already, as a popup over its own tab — the queue
     /// screen's [`Mode::ToolGate`] — and
@@ -1902,9 +1904,9 @@ pub(crate) enum ToolGate {
 /// refusal: `esc` means "go back", not "here is what went wrong". Only a
 /// caller with no screen at all ever sees it — `queue_add_tasks`, which
 /// catches it and exits clean the way `dispatch::overrides_gate`'s own `esc`
-/// does, and `queue_routine_target` under a job the dispatcher fires. The
-/// queue screen asks the gate in a popup of its own instead, whose `esc`
-/// goes back without an error at all.
+/// does; a job firing never asks, so it never sees it. The queue screen
+/// asks the gate in a popup of its own instead, whose `esc` goes back
+/// without an error at all.
 #[derive(Debug)]
 struct GateCancelled;
 
@@ -8020,8 +8022,8 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 /// a caller can record which ids it minted. The source tasks under
 /// `.spoolway/routines/` are never touched.
 ///
-/// Asks the tool-requirements gate printed, as a caller with no screen does
-/// — the dispatcher's scheduled firing is the only one.
+/// Runs the tool-requirements gate printed and never asks: nobody is there
+/// to press a key when a job fires, whatever the dispatcher's terminal is.
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -8055,24 +8057,22 @@ pub(crate) fn queue_routine_target(
 
     let mut tasks = validate_batch(repo, pipelines, Some(base), &submitted)?;
     // No task to write ids back into — see `open_and_prefix`. The
-    // dispatcher firing a job has no screen, so this passes
-    // `ToolGate::Print`, which asks `crate::ask` whether anyone is really
-    // there and takes its own terminal, the same way `queue_add_tasks`
-    // does. `esc`'s `GateCancelled` is left to propagate as an ordinary
-    // `Err` rather than caught here: `jobs::fire_due` treats any `Err` as
-    // "did not fire" and neither marks the job fired nor records queued
-    // ids, which is the one honest answer for a run a person actually
-    // declined. Turning it into a fake empty success here would let the
-    // dispatcher believe this minute's firing already happened.
+    // dispatcher firing a job has no screen and nobody to answer it, even
+    // when its own stdin and stdout happen to be a terminal (a dispatcher
+    // in a pane). So this passes `ToolGate::Print { interactive: false }`
+    // whatever `crate::ask` says: the gate prints its notice naming the
+    // unmet tool and goes on with tracking off. Asking would block the
+    // whole dispatcher pass on a key, and `esc` would leave the minute
+    // unrecorded so the next pass asked again. Because the firing
+    // returns `Ok`, `jobs::fire_due` marks the minute fired and the notice
+    // prints once for it.
     //
     // `submitted` is `&[]` — nothing here is ever written back into — but
     // `task_files` is not: a routine's own task is a real file under
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
     let task_files = readable_task_files(&submitted);
-    let gate = ToolGate::Print {
-        interactive: crate::ask::interactive(),
-    };
+    let gate = ToolGate::Print { interactive: false };
     open_and_prefix(
         repo,
         &[],

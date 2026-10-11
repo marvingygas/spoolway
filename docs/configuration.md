@@ -454,8 +454,10 @@ shape in the line is reported as unreadable rather than interpreted.
 Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a job the
 dispatcher fires — checks the same lines before it opens any ticket. A tool below its floor,
 or missing from PATH, gates the submission. On a screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written
-onto every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait
-on, it prints the same notice and proceeds the same way. See
+onto every task, `esc` backs out. `spoolway queue add --from` at a terminal prints the notice and
+asks for the same two keys. Anywhere else it prints the same notice and proceeds the same way.
+A job the dispatcher fires never asks, even when the dispatcher runs in a terminal. It prints the
+notice once for that minute and queues its tasks with `tracking: off`. See
 [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 Both shipped scripts run under `bash`, with `set -eE` and an ERR trap. A command that fails
