@@ -262,4 +262,18 @@ works "and the store keeps the one job" \
   bash -c '[ "$(grep -c "^\[jobs.release\]" "$1")" = 1 ] && grep -qF "schedule = \"0 3 * * 1-5\"" "$1"' \
   _ "$USER_STORE"
 
+# A routine folder holding a file that will not parse is refused whole, and
+# the refusal names the file: queueing it any other way would leave the
+# routine a task short without a word. `zz-broken` sorts after every other
+# folder here, so three `j` put the cursor on it.
+mkdir -p .spoolway/routines/zz-broken
+task_doc .spoolway/routines/zz-broken/fine.md zz-fine "$BODY" "group: zz-broken"
+printf 'no frontmatter fence here\n' >.spoolway/routines/zz-broken/torn.md
+BROKEN="$LIVE/routine-unparseable.txt"
+on_screen '\x1b[Cjjj \r' "$BROKEN"
+has "queueing a routine folder with an unparseable file is refused" "queue refused" "$BROKEN"
+has "naming the file" "torn.md" "$BROKEN"
+works "and none of the folder's other tasks was queued" \
+  bash -c '! ls "$1"/queue/zz-fine-* >/dev/null 2>&1' _ "$SPOOLWAY_PROJECT_HOME"
+
 finish

@@ -661,6 +661,19 @@ says "and the long id landed in the queue rather than being refused" "base: main
   "$SPOOLWAY" queue show "$LONG_ID"
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/$LONG_ID.md"
 
+# An id past the file-name budget is refused before anything is written: the
+# lock and the system prompt file built from it would fail with "File name too
+# long" otherwise, after `--dry-run` had said all was well.
+TOO_LONG_ID="a$(printf 'b%.0s' $(seq 1 239))"
+TOO_LONG_DOC="$LIVE/too-long-id.md"
+sed "s/^id: .*/id: $TOO_LONG_ID/" "$LONG_ID_DOC" > "$TOO_LONG_DOC"
+refuses "an over-long task id is refused by queue add --dry-run, naming the limit" \
+  "is 240 characters long, and the limit is 100" \
+  "$SPOOLWAY" queue add --dry-run --from "$TOO_LONG_DOC"
+refuses "and by task contract --from" \
+  "is 240 characters long, and the limit is 100" \
+  "$SPOOLWAY" task contract --from "$TOO_LONG_DOC"
+
 # ------------------------------------------------------ no pipelines/ at all
 # A missing `.spoolway/pipelines/` used to be answered from the pipelines
 # compiled into the binary; an empty one was already a hard `no pipelines
@@ -1214,6 +1227,59 @@ silent_about "config get in the main checkout does not see it" "from-the-worktre
 says "config path in the worktree names its own setup folder, not the project's" \
   "setup:     $WT/.spoolway" "$SPOOLWAY" -C "$WT" config path
 
+# Under `--json` the checkout note goes to stderr, so stdout is one value a
+# script can parse. `jq -e .` on two concatenated values would still pass,
+# so count the values instead.
+for JSON_CMD in "config path" "doctor"; do
+  # shellcheck disable=SC2086
+  JSON_OUT=$("$SPOOLWAY" -C "$WT" $JSON_CMD --json 2>/dev/null)
+  if [ "$(jq -s 'length' <<<"$JSON_OUT" 2>/dev/null)" = "1" ]; then
+    ok "$JSON_CMD --json in a linked worktree prints one JSON value"
+  else
+    bad "$JSON_CMD --json in a linked worktree prints one JSON value"
+    sed 's/^/        /' <<<"$JSON_OUT"
+  fi
+done
+JSON_NOTE=$("$SPOOLWAY" -C "$WT" config path --json 2>&1 >/dev/null)
+if jq -e --arg p "$WT" '.path == $p and .branch == "task/config-diff"' \
+  <<<"$JSON_NOTE" >/dev/null 2>&1; then
+  ok "and stderr still names the checkout's path and branch"
+else
+  bad "and stderr still names the checkout's path and branch"
+  sed 's/^/        /' <<<"$JSON_NOTE"
+fi
+# Every command that refuses `--json` must exit non-zero, say so on stderr
+# and leave stdout empty. The override commands are given arguments that
+# parse, so they reach the refusal and never open an editor.
+while IFS= read -r REFUSED; do
+  # shellcheck disable=SC2086
+  REFUSED_OUT=$("$SPOOLWAY" -C "$WT" $REFUSED --json 2>"$LIVE/refused.err")
+  REFUSED_STATUS=$?
+  if [ "$REFUSED_STATUS" -ne 0 ] && [ -z "$REFUSED_OUT" ] \
+    && grep -qF "has no JSON form" "$LIVE/refused.err"; then
+    ok "$REFUSED --json exits non-zero, prints nothing and says it has no JSON form"
+  else
+    bad "$REFUSED --json exits non-zero, prints nothing and says it has no JSON form"
+    sed 's/^/        /' "$LIVE/refused.err"
+  fi
+done <<'LIST'
+pipeline check
+pipeline override default --set impl.timeout=1
+prompt contract
+prompt list
+prompt override impl
+config show
+config get unattended.blocked_agent
+config contract
+config override
+template contract
+hook contract
+override contract
+group list
+sync
+queue add
+LIST
+
 BEFORE_ROOT=$(cat .spoolway/config.toml)
 BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
 OUT=$("$SPOOLWAY" -C "$WT" config set unattended.blocked_agent "should-not-land" 2>&1)
@@ -1344,6 +1410,19 @@ works "the aged queue entry did not — queue/ is never swept, whatever its age"
 
 must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
+
+# A queue file that will not parse is named by `queue list`, in both forms,
+# rather than left out as if it had never been queued. Placed by hand, as a
+# half-edited file would be.
+TORN_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/torn-queued-task.md"
+printf -- '---\nid: torn-queued-task\nstage: queued\n' >"$TORN_QUEUED"
+says "queue list names a queue file that will not parse" \
+  "torn-queued-task.md" "$SPOOLWAY" queue list
+says "and says the file did not parse" "did not parse" "$SPOOLWAY" queue list
+says "queue list --json names it under unparseable" \
+  "torn-queued-task.md" "$SPOOLWAY" queue list --json
+says "in a key of its own" '"unparseable"' "$SPOOLWAY" queue list --json
+rm -f "$TORN_QUEUED"
 
 # ------------------------------------------------------ config set checks
 # `config set` runs the file-based checks `doctor` runs. A value that can

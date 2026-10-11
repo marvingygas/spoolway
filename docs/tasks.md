@@ -24,7 +24,7 @@ outside the checkout.
 ```markdown
 ---
 id: sessions
-title: feat(auth): add session tokens on top of login
+title: "feat(auth): add session tokens on top of login"
 group: auth
 depends_on:
   - login
@@ -36,6 +36,9 @@ depends_on:
 ## References
 ```
 
+A `title:` that holds `: `, such as `feat(auth): …`, must be in quotes, or YAML refuses the file. A
+UTF-8 byte order mark at the top of a task file is ignored.
+
 ### The frontmatter is spoolway's
 
 Every dispatch decision reads a field here. `spoolway task contract` prints the same contract
@@ -43,7 +46,7 @@ as JSON.
 
 | Field | Set by | Meaning |
 |---|---|---|
-| `id` | you | The task's name. Also the file name and the branch suffix. Required. |
+| `id` | you | The task's name, at most 100 characters. Also the file name and the branch suffix. Required. |
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
@@ -87,7 +90,8 @@ $ spoolway queue add --from mine.md
 mine.md sets `run:`, which spoolway sets on every task itself — remove it from the task
 ```
 
-Every other dispatcher field in a task is dropped.
+Every other dispatcher field in a task is dropped, including `hook_paused` and
+`missing_start_branch`.
 
 A label in `labels:` holding whitespace or a comma is refused, naming the task and the label,
 since a hook reads the whole list comma-joined.
@@ -106,8 +110,11 @@ and `spoolway task contract --from` refuse any other value, naming the task and 
 may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
-digits and hyphens, starting with a letter. No length budget applies. A lane whose name would
-outgrow the multiplexer's own limit gets a short internal alias instead of a refusal.
+digits and hyphens, starting with a letter. A task id may be at most 100 characters and a
+step id at most 64, because spoolway builds file names from the pair and a name past 255 bytes
+fails. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
+refuse a longer id, naming it and the limit. A lane whose name would outgrow the
+multiplexer's own limit gets a short internal alias instead of a refusal.
 
 ### What only holds across a set
 
@@ -213,7 +220,9 @@ step.
 | `spoolway queue resume <task>` | Same as `r` on the board. |
 | `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
 
-A task file that does not parse is skipped. The board names it in amber.
+A queue file that does not parse is skipped. The board names it in amber, `spoolway queue list`
+names it with its reason, and the dispatcher keeps running while it is in the queue. A pending file
+that does not parse is named on the queue screen. See [`spoolway queue list`](cli-reference.md#spoolway-queue-list).
 
 ## Expressing order
 

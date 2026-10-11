@@ -102,6 +102,22 @@ pub use stack::*;
 pub use task::*;
 pub use template::*;
 
+/// Refuse `--json` on a command that only has a prose form.
+///
+/// `--json` is global, so clap accepts it on every command. Without this, a
+/// script that passes it to a prose-only command gets prose on stdout and
+/// fails inside its own JSON parser, far from the cause. An error here
+/// names the command and exits non-zero instead.
+pub fn refuse_json(command: &str, json: bool) -> Result<()> {
+    if json {
+        bail!(
+            "`spoolway {command}` has no JSON form, so `--json` cannot apply to it. Run it \
+             without `--json` to read its text."
+        );
+    }
+    Ok(())
+}
+
 /// Where a program resolves on PATH, if at all.
 ///
 /// Defers to [`crate::platform::which`] rather than repeating it: that one
@@ -120,6 +136,22 @@ pub mod testutil;
 
 #[cfg(test)]
 mod tests {
+    /// A prose-only command must refuse `--json` by name, and stay silent
+    /// without it. Before the refusal existed, `--json` was accepted and
+    /// prose came out on stdout.
+    #[test]
+    fn refuse_json_names_the_command_and_only_fires_under_the_flag() {
+        assert!(super::refuse_json("group list", false).is_ok());
+        let err = super::refuse_json("group list", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`spoolway group list` has no JSON form"),
+            "{err}"
+        );
+        assert!(err.contains("without `--json`"), "{err}");
+    }
+
     /// The invariant behind `init`'s prompt test — see `init.rs` — asserted
     /// where it can actually be enforced.
     ///

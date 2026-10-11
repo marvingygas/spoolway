@@ -8,9 +8,9 @@ use serde::Serialize;
 use super::*;
 
 /// Reads the checkout's own file — see [`config_get`] for why.
-pub fn config_show(repo: &Repo, json: bool) -> Result<()> {
+pub fn config_show(repo: &Repo) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
     }
     let config = Config::load(&repo.checkout)?;
     print!("{}", toml::to_string_pretty(&config)?);
@@ -67,9 +67,9 @@ fn render_config_list(entries: &[crate::confkv::Entry]) -> String {
 /// from `root` once, in `Repo::discover`) would answer for a file that is not
 /// the one in front of the command. In the main checkout the two are the same
 /// directory, so this changes nothing there.
-pub fn config_get(repo: &Repo, key: &str, json: bool) -> Result<()> {
+pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
     }
     let config = Config::load(&repo.checkout)?;
     println!("{}", crate::confkv::get(&config, key)?);
@@ -295,9 +295,9 @@ impl ConfigPaths {
 /// [`crate::confkv::reference_table`], the same register the file's own
 /// header table is written from, so a setting is documented once rather than
 /// copied a second time into this command's own prose.
-pub fn config_contract(repo: &Repo, json: bool) -> Result<()> {
+pub fn config_contract(repo: &Repo) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
     }
     print!("{}", render_config_contract());
     Ok(())
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn config_get_answers_for_the_checkout_not_the_root() {
         let (repo, _root, _base_guard) = worktree_fixture("get");
-        config_get(&repo, "unattended.blocked_agent", false).unwrap();
+        config_get(&repo, "unattended.blocked_agent").unwrap();
         // `config_get` prints to stdout, which a unit test cannot capture
         // cheaply — so this also asserts the lower-level read it goes
         // through, which is the part that actually decides the answer.

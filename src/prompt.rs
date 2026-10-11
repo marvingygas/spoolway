@@ -776,9 +776,9 @@ pub(crate) fn users(pipelines: &Pipelines) -> BTreeMap<String, Vec<String>> {
 }
 
 /// `spoolway prompt list`.
-pub fn list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
+pub fn list(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
     }
     let entries = entries(repo)?;
     if entries.is_empty() {

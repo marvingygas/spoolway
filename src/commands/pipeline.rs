@@ -962,9 +962,9 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
 /// alone for the same reason — the directory wins from the moment it exists, so
 /// nothing is lost by leaving it until its author has read what came out of it.
 /// Validate the pipelines against the config they will actually run with.
-pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> Result<()> {
+pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
     }
 
     // First, and ahead of the load below: a file a person broke mid-run is
@@ -3588,7 +3588,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -3621,7 +3621,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        pipeline_check(&repo, Ok(pipelines), false).expect("pi resumes, so this should pass");
+        pipeline_check(&repo, Ok(pipelines)).expect("pi resumes, so this should pass");
     }
 
     /// `pipeline check` is the command you run to find out which pipeline
@@ -3646,7 +3646,7 @@ mod tests {
             config: Config::default(),
         };
 
-        let err = pipeline_check(&repo, Err(anyhow::anyhow!("unknown field priority")), false)
+        let err = pipeline_check(&repo, Err(anyhow::anyhow!("unknown field priority")))
             .expect_err("a pipeline that will not load is a problem");
         assert!(
             err.to_string().contains("1 problem(s) found"),
@@ -3693,12 +3693,8 @@ mod tests {
             config: Config::default(),
         };
 
-        let err = pipeline_check(
-            &repo,
-            Err(anyhow::anyhow!("stale error, superseded below")),
-            false,
-        )
-        .expect_err("both files still carry a retired shape");
+        let err = pipeline_check(&repo, Err(anyhow::anyhow!("stale error, superseded below")))
+            .expect_err("both files still carry a retired shape");
         let message = err.to_string();
         let count: usize = message.split_whitespace().next().unwrap().parse().unwrap();
         // default.yml: `checks` self-routes and its own `loop:` is a map — two.
@@ -3758,7 +3754,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        pipeline_check(&repo, Ok(pipelines), false)
+        pipeline_check(&repo, Ok(pipelines))
             .expect("a prompt only the embedded bugfix sample needs must not leak in");
     }
 
@@ -3790,7 +3786,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        pipeline_check(&repo, Ok(pipelines), false)
+        pipeline_check(&repo, Ok(pipelines))
             .expect("the private skeleton `myskel` names must satisfy the check");
     }
 
@@ -3835,7 +3831,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -3870,7 +3866,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        pipeline_check(&repo, Ok(pipelines), false)
+        pipeline_check(&repo, Ok(pipelines))
             .expect("a gate with no on_fail is legal — only worth a warning");
     }
 
@@ -3911,7 +3907,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        pipeline_check(&repo, Ok(pipelines), false)
+        pipeline_check(&repo, Ok(pipelines))
             .expect("naming `spoolway report` is a warning, never a problem");
     }
 
@@ -3947,7 +3943,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -3987,7 +3983,7 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
-        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -4030,7 +4026,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
 
         crate::platform::test_home::with_home(&home, || {
-            pipeline_check(&repo, Ok(pipelines), false)
+            pipeline_check(&repo, Ok(pipelines))
                 .expect("a skill spoolway cannot see is not a problem");
         });
     }
@@ -4076,7 +4072,7 @@ mod tests {
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
         task.save().unwrap();
 
-        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -4275,7 +4271,7 @@ mod tests {
             config: Config::default(),
         };
         let pipelines = Pipelines::load(&repo.root, &repo.config).expect("template must load");
-        pipeline_check(&repo, Ok(pipelines), false).expect("template must pass `pipeline check`");
+        pipeline_check(&repo, Ok(pipelines)).expect("template must pass `pipeline check`");
     }
 
     /// Bare `pipeline contract` prints one JSON object carrying every section

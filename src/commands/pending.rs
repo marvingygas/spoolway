@@ -10,7 +10,7 @@
 //! nothing left under `pending_dir` at all, and a task the pipeline ran to
 //! the end moves out of the queue directory into the archive one
 //! (`teardown`). Either way a row is built straight from whichever
-//! directory still holds the task — see [`list_groups`]. Nothing
+//! directory still holds the task — see [`list_groups_and_skipped`]. Nothing
 //! here parses a page, a card or a chip; a task is the unit, and its own
 //! frontmatter is the whole of what this module reads.
 //!
@@ -66,7 +66,7 @@ pub(crate) struct PendingTask {
     pub(crate) doc: String,
     /// Where this task's own id currently sits — see [`TaskState`].
     pub(crate) state: TaskState,
-    /// This task's own `depends_on:` list, read once while [`list_groups`]
+    /// This task's own `depends_on:` list, read once while [`list_groups_and_skipped`]
     /// parses the task's front matter and kept here so [`in_reading_order`]
     /// can sort by it, and so [`super::queue::tasks_pane_lines`] can draw
     /// its `Depends on:` row, without parsing the same doc a second time.
@@ -99,7 +99,7 @@ impl PendingTask {
 }
 
 /// A group's own stage, folded from every task it holds — see
-/// [`group_state`]. `Ord`ered in the order [`list_groups`] sorts by:
+/// [`group_state`]. `Ord`ered in the order [`list_groups_and_skipped`] sorts by:
 /// something still queueable first, then everything queued, then everything
 /// done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -145,11 +145,11 @@ pub(crate) struct Group {
     /// Its tasks, dependencies before dependents — see [`in_reading_order`].
     pub(crate) tasks: Vec<PendingTask>,
     /// This group's own stage — see [`GroupState`] and [`group_state`], which
-    /// is what [`list_groups`] computes this from once every task has been
+    /// is what [`list_groups_and_skipped`] computes this from once every task has been
     /// read.
     pub(crate) state: GroupState,
     /// The newest of its tasks' own birth times, which is what
-    /// [`list_groups`] sorts on: the group somebody just wrote is the one
+    /// [`list_groups_and_skipped`] sorts on: the group somebody just wrote is the one
     /// under the cursor on the first frame. `None` only when no task's
     /// time could be read at all, which sorts the group to the end rather
     /// than refusing the whole listing over one stat failure.
@@ -162,7 +162,7 @@ pub(crate) struct Group {
 /// once (some archived, some still queued, none pending) folds to, since
 /// there is no fourth bucket for it and it is not yet wholly finished.
 ///
-/// An empty group cannot happen through [`list_groups`] — a group only
+/// An empty group cannot happen through [`list_groups_and_skipped`] — a group only
 /// exists because a task named it — but reads `Queueable` rather than
 /// vacuously `Done` if that ever changes, the same way the bare `bool` this
 /// replaced started its own fold at `true` and was corrected the same way.
@@ -176,9 +176,9 @@ fn group_state(tasks: &[PendingTask]) -> GroupState {
     }
 }
 
-/// The order [`list_groups`] sorts by within a queued/unqueued half: newer
-/// before older, and a group whose instant could not be read after every one
-/// that could — a stat that failed on one file is not a reason to refuse the
+/// The order [`list_groups_and_skipped`] sorts by within a queued/unqueued
+/// half: newer before older, and a group whose instant could not be read
+/// after every one that could — a stat that failed on one file is not a reason to refuse the
 /// listing, so that group is still shown, just at the bottom.
 ///
 /// Pure, and taking the two instants rather than the two groups, so a test
@@ -225,7 +225,7 @@ fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
 }
 
 /// Every `.md` file directly inside `dir`, filename order — the listing
-/// [`list_groups`] runs the same way over all three of its own sources.
+/// [`list_groups_and_skipped`] runs the same way over all three of its own sources.
 fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -248,13 +248,18 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 ///
 /// A task with no readable `group:` is skipped, not shown: there is no
 /// row for it to be one of, since a row *is* a `group:` value. It is not
-/// lost — `queue add --from <pending dir>` still reads the whole directory
-/// and refuses that task by name, with the real reason.
+/// lost — [`list_groups_and_skipped`] hands it back for the queue tab to
+/// name, and `queue add --from <pending dir>` still reads the whole
+/// directory and refuses that task by name, with the real reason.
 ///
 /// No "does not exist yet" case to handle: [`Repo::pending_dir`],
 /// [`Repo::queue_dir`] and [`Repo::archive_dir`] all create their directory
 /// silently the moment they are asked for, so a fresh project that has
 /// planned nothing still gets a real, empty directory to read.
+///
+/// The groups come with the pending files that no group could be built from
+/// — see [`list_groups_in`] for what counts as that. The queue tab reads both
+/// from this one call, so naming a broken file costs no second parse.
 ///
 /// A thin wrapper over [`list_groups_in`], which takes a [`ListFrontCache`]
 /// and a parse counter as plain arguments instead of reaching into a
@@ -263,7 +268,7 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// `list_groups_in` directly, with a cache of its own, so it can both avoid
 /// colliding with every other test's fixture in this binary and read back
 /// how many files were actually parsed.
-pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
+pub(crate) fn list_groups_and_skipped(repo: &Repo) -> Result<(Vec<Group>, Vec<PathBuf>)> {
     static CACHE: OnceLock<Mutex<ListFrontCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -303,20 +308,28 @@ pub(crate) fn pending_reads_here_under(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// [`list_groups`]'s own logic, taking its [`list_front_in`] cache and a
-/// freshly-parsed-file counter as plain arguments instead of reaching into
-/// a process-wide static for either — the same split
+/// [`list_groups_and_skipped`]'s own logic, taking its [`list_front_in`]
+/// cache and a freshly-parsed-file counter as plain arguments instead of
+/// reaching into a process-wide static for either — the same split
 /// [`super::status::cached_queue`] and `cached_queue_in` already make, and
 /// for the same two reasons: a test can drive this directly against a
 /// cache of its own, with nothing shared with any other test running in
 /// parallel to race against; and the same call can report back how many
 /// files it actually parsed, which is what the bug this closes is
 /// measured by rather than by timing a reload.
+///
+/// The second half of the answer is the `.md` files under the pending
+/// directory that no group could be built from, in filename order: one that
+/// will not read, has no fence or readable YAML, or lacks a `group:` or an
+/// `id:`. They are collected in this same pass, over the same cached parse,
+/// so telling the person about them never opens a file a second time — the
+/// reload this runs on every second parses nothing for a file whose bytes
+/// have not moved, broken or not.
 pub(crate) fn list_groups_in(
     repo: &Repo,
     front_cache: &mut ListFrontCache,
     parsed: &mut usize,
-) -> Result<Vec<Group>> {
+) -> Result<(Vec<Group>, Vec<PathBuf>)> {
     let dir = repo.pending_dir();
     let queue_dir = repo.queue_dir();
     let archive_dir = repo.archive_dir();
@@ -336,13 +349,15 @@ pub(crate) fn list_groups_in(
     // entry here: it keeps its own, separately-pruned cache — see
     // `archive_tasks`, which reads the archive index instead.
     let mut seen_paths: std::collections::HashSet<PathBuf> = Default::default();
+    // The pending files below that no group could be built from — the
+    // second half of what this returns.
+    let mut skipped: Vec<PathBuf> = Vec::new();
 
     for path in md_files(&dir)? {
         // A file that will not read — held open under an exclusive lock on
         // Windows, a broken symlink — is skipped like an unparsable one, not
-        // propagated: one bad task must not fail the whole listing. The
-        // same file is found again and named by [`unreadable`], which is
-        // what the opening message reports it through.
+        // propagated: one bad task must not fail the whole listing. It goes
+        // into `skipped`, which is how the queue tab names it.
         //
         // Counted here, the one line that actually touches the disk — see
         // [`PENDING_READS`].
@@ -351,6 +366,7 @@ pub(crate) fn list_groups_in(
             reads.push((path.clone(), std::thread::current().id()));
         }
         let Ok(doc) = std::fs::read_to_string(&path) else {
+            skipped.push(path);
             continue;
         };
         seen_paths.insert(path.clone());
@@ -359,12 +375,11 @@ pub(crate) fn list_groups_in(
         // since the last call has nothing left to parse — see
         // `list_front_in`.
         let Some(front) = list_front_in(&path, &doc, front_cache, parsed) else {
+            skipped.push(path);
             continue;
         };
-        let Some(group) = front_str(&front, "group") else {
-            continue;
-        };
-        let Some(id) = front_str(&front, "id") else {
+        let (Some(group), Some(id)) = (front_str(&front, "group"), front_str(&front, "id")) else {
+            skipped.push(path);
             continue;
         };
 
@@ -517,43 +532,23 @@ pub(crate) fn list_groups_in(
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    Ok(groups)
+    Ok((groups, skipped))
 }
 
-/// The `.md` files in the pending directory that [`list_groups`] could not
-/// file under any group: no fence, no readable YAML, or no `group:` at all.
-///
-/// Read separately rather than carried back out of `list_groups`, because
-/// there is exactly one caller and one moment it matters — `queue::
-/// opening_message`, and only when there is no group a person can actually
-/// queue: every one already `queued`, which is also true of an empty list.
-/// A person is otherwise looking at a pane with nothing selectable in it and
-/// a file sitting right there in the directory, unaccounted for. Whenever a
-/// real, queueable group exists too, the task is one row's worth of
-/// nothing among rows that do exist, and `queue add --from <pending dir>` is
-/// what names it and says why.
+/// The groups of [`list_groups_and_skipped`] alone, for the tests that only
+/// want that half — production reads both halves from the one call.
+#[cfg(test)]
+pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
+    list_groups_and_skipped(repo).map(|(groups, _)| groups)
+}
+
+/// The pending files [`list_groups_and_skipped`] passed over, for the tests
+/// that only want that half.
+#[cfg(test)]
 pub(crate) fn unreadable(repo: &Repo) -> Vec<PathBuf> {
-    let dir = repo.pending_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut skipped: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
-        .filter(|path| {
-            let Ok(doc) = std::fs::read_to_string(path) else {
-                return true;
-            };
-            let readable = crate::task::split_fence(&doc)
-                .ok()
-                .and_then(|(yaml, _)| serde_norway::from_str::<serde_norway::Value>(yaml).ok())
-                .and_then(|front| front_str(&front, "group"));
-            readable.is_none()
-        })
-        .collect();
-    skipped.sort();
-    skipped
+    list_groups_and_skipped(repo)
+        .map(|(_, skipped)| skipped)
+        .unwrap_or_default()
 }
 
 /// Whether the queue already holds a task with this id — see [`TaskState`]
@@ -625,9 +620,9 @@ pub(crate) type ListFrontCache = HashMap<PathBuf, (String, Option<serde_norway::
 /// `starts_from:` off.
 ///
 /// [`list_groups_in`] calls this with the cache its own caller handed it,
-/// which is how [`list_groups`] shares one cache across every real reload
-/// while a test can hand in one of its own instead — see [`list_groups`]'s
-/// own comment for why that split exists.
+/// which is how [`list_groups_and_skipped`] shares one cache across every
+/// real reload while a test can hand in one of its own instead — see its own
+/// comment for why that split exists.
 ///
 /// Keyed on the path *and* the bytes, the same pair
 /// [`super::status::cached_queue`]'s own `CachedQueueFile` keys on: content
@@ -744,8 +739,8 @@ pub(crate) fn depends_on(doc: &str) -> Vec<String> {
 /// A poisoned lock falls back to a plain, uncached read, the same
 /// fallback shape `cached_archive` and `cached_queue` take.
 ///
-/// A directory that will not list is an error: [`list_groups`] fails and
-/// `reload` keeps the groups already on screen. Swallowing it into an empty
+/// A directory that will not list is an error: [`list_groups_and_skipped`]
+/// fails and `reload` keeps the groups already on screen. Swallowing it into an empty
 /// listing instead would drop every archive-only group from the screen, and
 /// caching that empty listing under the directory's mtime would keep them
 /// dropped until a task was next filed or swept.
@@ -1142,8 +1137,8 @@ mod tests {
     /// A task that names no `group:`, or whose frontmatter will not
     /// parse at all, has no row to be one of — a row *is* a `group:` value.
     /// It is skipped rather than shown, and `queue add --from` is what
-    /// refuses it by name. [`unreadable`] is what finds the same set again,
-    /// for the one case the screen has to say so out loud.
+    /// refuses it by name. [`list_groups_and_skipped`] hands back the same
+    /// set, for the one case the screen has to say so out loud.
     #[test]
     fn a_task_with_no_readable_group_is_skipped() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("pending-ungrouped");
@@ -1155,11 +1150,10 @@ mod tests {
         .unwrap();
         std::fs::write(repo.pending_dir().join("garbage.md"), "not a task\n").unwrap();
 
-        let groups = list_groups(&repo).unwrap();
+        let (groups, skipped) = list_groups_and_skipped(&repo).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "issue-42");
 
-        let skipped = unreadable(&repo);
         let names: Vec<String> = skipped
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
@@ -1168,7 +1162,7 @@ mod tests {
     }
 
     /// The screen only says anything about skipped tasks when there is
-    /// nothing else to list, so `unreadable` must come back empty on a
+    /// nothing else to list, so the skipped list must come back empty on a
     /// directory where every task reads — otherwise the ordinary case
     /// would be paying for a listing nobody looks at.
     #[test]
@@ -1177,7 +1171,7 @@ mod tests {
         write(&repo, "a.md", &doc("a", "issue-42", ""));
         write(&repo, "b.md", &doc("b", "issue-42", ""));
 
-        assert!(unreadable(&repo).is_empty());
+        assert!(list_groups_and_skipped(&repo).unwrap().1.is_empty());
     }
 
     /// Only `.md` is read. Anything else in the directory is not a task,
@@ -1381,7 +1375,7 @@ mod tests {
 
         let mut warm_cache = HashMap::new();
         let mut parsed = 0;
-        let warm = list_groups_in(&repo, &mut warm_cache, &mut parsed).unwrap();
+        let (warm, _) = list_groups_in(&repo, &mut warm_cache, &mut parsed).unwrap();
         assert_eq!(warm.len(), 1, "one group, `g`, holding both tasks");
         assert_eq!(warm[0].tasks.len(), 2);
 
@@ -1392,11 +1386,11 @@ mod tests {
         write(&repo, "a.md", &doc("a", "h", ""));
 
         let mut parsed_warm = 0;
-        let warm_after = list_groups_in(&repo, &mut warm_cache, &mut parsed_warm).unwrap();
+        let (warm_after, _) = list_groups_in(&repo, &mut warm_cache, &mut parsed_warm).unwrap();
 
         let mut cold_cache = HashMap::new();
         let mut parsed_cold = 0;
-        let cold_after = list_groups_in(&repo, &mut cold_cache, &mut parsed_cold).unwrap();
+        let (cold_after, _) = list_groups_in(&repo, &mut cold_cache, &mut parsed_cold).unwrap();
 
         assert_eq!(
             warm_after, cold_after,
@@ -1450,6 +1444,37 @@ mod tests {
             parsed_third, 1,
             "only the file whose bytes changed is parsed again"
         );
+    }
+
+    /// The files `list_groups_in` passes over come from the same cached
+    /// pass as the groups: a broken file is named on a second reading
+    /// without being parsed again, and a repaired one stops being named.
+    /// Before, a separate scan re-read and re-parsed every pending file on
+    /// each reload, so the second reading here would have counted them.
+    #[test]
+    fn list_groups_in_names_a_broken_file_without_parsing_it_again() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-skipped-cached");
+        write(&repo, "a.md", &doc("a", "g", ""));
+        std::fs::write(repo.pending_dir().join("torn.md"), "no fence here\n").unwrap();
+
+        let mut cache = HashMap::new();
+        let mut parsed = 0;
+        let (_, skipped) = list_groups_in(&repo, &mut cache, &mut parsed).unwrap();
+        assert_eq!(skipped, vec![repo.pending_dir().join("torn.md")]);
+        assert_eq!(parsed, 2, "both files are new, so both are parsed");
+
+        let mut parsed_again = 0;
+        let (_, skipped) = list_groups_in(&repo, &mut cache, &mut parsed_again).unwrap();
+        assert_eq!(skipped, vec![repo.pending_dir().join("torn.md")]);
+        assert_eq!(
+            parsed_again, 0,
+            "a broken file is cached like any other, not retried on every reading"
+        );
+
+        write(&repo, "torn.md", &doc("torn", "g", ""));
+        let (groups, skipped) = list_groups_in(&repo, &mut cache, &mut parsed_again).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(groups[0].tasks.len(), 2);
     }
 
     /// `queue-tab-reads-changed-only`: the archive is read again, not from

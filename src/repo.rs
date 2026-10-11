@@ -661,7 +661,7 @@ impl Repo {
     /// the dispatcher and that task's own `spoolway report` — see
     /// [`crate::lock::TaskLock`]. The caller is responsible for `id` being a
     /// safe single path segment: the dispatcher only ever passes an id that
-    /// has already been through `check_id`, and `spoolway report --task`
+    /// has already been through `check_task_id`, and `spoolway report --task`
     /// joins the same unvalidated id here that `Repo::task` already joins.
     pub fn task_lock_file(&self, id: &str) -> PathBuf {
         self.home().join("task-locks").join(format!("{id}.lock"))
@@ -685,8 +685,9 @@ impl Repo {
     }
 
     /// Every active task in id order, together with the queue files that
-    /// would not parse — for the dispatcher pass, which names the bad file
-    /// where a person will see it rather than leaving it only in the log.
+    /// would not parse — for the readers that name the bad file where a
+    /// person will see it rather than leaving it only in the log: the
+    /// dispatcher pass and its empty-queue checks, and `spoolway queue list`.
     /// The board reads the queue through `status::cached_queue` instead, a
     /// per-file cache over the same [`task::load_dir`] that skips reparsing a
     /// file whose bytes have not moved since the last frame.
@@ -844,9 +845,13 @@ impl CheckoutNote {
     /// mockup exactly. `--json`: the same two facts as one line of JSON,
     /// with the path left absolute — a script reading it has no `$HOME` to
     /// resolve `~` against, and no reason to be handed one that does.
+    ///
+    /// The JSON form goes to stderr. A command's stdout under `--json` must
+    /// be one value a script can parse, and a note printed ahead of it on
+    /// stdout made two.
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string(self)?);
+            eprintln!("{}", serde_json::to_string(self)?);
         } else {
             println!("checkout: {} ({})", shorten_home(&self.path), self.branch);
         }

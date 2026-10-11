@@ -2024,9 +2024,10 @@ pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
 }
 
 /// The move itself, shared with `spoolway queue unqueue`: `task`'s task
-/// written to pending with every reserved key dropped, then its queue file
-/// removed. The caller decides whether `task` may go — the board's `u` and
-/// [`unqueue_task`] only carry a task that has not started, `queue unqueue
+/// written to pending with every reserved key and the dispatcher's pause
+/// records dropped, then its queue file removed and its hook runs under
+/// `tracking/` stopped and reclaimed. The caller decides whether `task` may
+/// go — the board's `u` and [`unqueue_task`] only carry a task that has not started, `queue unqueue
 /// --force` one whose checkout it has just torn down — and holds the task's
 /// lock while it does.
 ///
@@ -2056,6 +2057,11 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         if task.front.run.is_some() || task.front.base_commit.is_some() {
             map.remove("starts_from");
         }
+        // The dispatcher's records of why it paused this task. They describe
+        // the run being left behind, and a copy that kept `hook_paused` would
+        // be sent straight to `done` by its first `resume`.
+        map.remove("hook_paused");
+        map.remove("missing_start_branch");
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
@@ -2067,6 +2073,12 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
     // than lost between the two directories.
     std::fs::remove_file(&task.path)
         .with_context(|| format!("removing {}", task.path.display()))?;
+    // The hook runs belong to the run just left, and one still going is
+    // stopped first (see [`crate::tracking::stop_and_reclaim`]). Kept, the next queue would
+    // find an exit code for `queued` and `started` already on disk, and
+    // `tracking_gate` would read that old code as the new run's answer
+    // without firing the hook again.
+    crate::tracking::stop_and_reclaim(repo, task.id());
     Ok(Some(dest))
 }
 
@@ -2254,8 +2266,18 @@ fn next_cursor_after_chain(ids: &[String], chain: &[ChainEntry]) -> Option<Strin
 /// same answer without the redraw — `spoolway queue list`, above all. Reads the
 /// task files and the live lane list, and writes nothing.
 pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
-    let tasks = repo.tasks()?;
-    let graph = Graph::build(&tasks, &repo.archive_dir());
+    rows_of(repo, pipelines, &repo.tasks()?)
+}
+
+/// [`rows`] over tasks the caller has already read. `spoolway queue list`
+/// reads the queue once, for its rows and for the files that did not parse,
+/// so a file edited between two reads cannot land in neither list or both.
+pub fn rows_of(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+) -> Result<Vec<Row>> {
+    let graph = Graph::build(tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
@@ -2263,7 +2285,7 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
     // see `Board::arrived`.
-    build_rows(repo, &tasks, pipelines, &graph, &lanes, &ledger, None)
+    build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)
 }
 
 /// Everything [`build`] read and computed once, for [`paint`] to draw from
@@ -2368,8 +2390,9 @@ fn build(
     // `cached_queue`, not `repo.tasks_and_problems()`: the board's own
     // per-file byte cache, so a reading over an unchanged queue parses
     // nothing — see `cached_queue`. `tasks_and_problems` stays the
-    // dispatcher pass's own uncached read (`dispatch.rs`), which must see a
-    // just-written file immediately and runs far less often than a reading.
+    // uncached read of the dispatcher pass (`dispatch.rs`) and of `queue list`,
+    // which must see a just-written file immediately and run far less often
+    // than a reading.
     let (tasks, load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;

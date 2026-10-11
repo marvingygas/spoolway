@@ -770,6 +770,22 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
     runs(repo).reclaim_task(task_id);
 }
 
+/// [`reclaim`], after first stopping every hook run of this task that is still
+/// going — what moving a task back to `pending/` calls.
+///
+/// A run left going outlives its files: its wrapper writes `<task> · <event>
+/// .exit` when the hook ends, so the old code would reappear after the files
+/// were removed and [`crate::dispatch::Dispatcher`]'s gate would read it for
+/// the task's next run. With no pid file left, [`fire`] would also see the
+/// event as [`RunState::Fresh`] and start a second copy beside the first.
+pub fn stop_and_reclaim(repo: &Repo, task_id: &str) {
+    let runs = runs(repo);
+    for key in runs.keys_for_task(task_id) {
+        runs.stop(&key);
+    }
+    runs.reclaim_task(task_id);
+}
+
 /// One task hook run whose `.exit` file holds a non-zero code — what
 /// `spoolway doctor`, and through it the "before dispatching" popup, names a
 /// row for. See [`failures`].
@@ -1107,6 +1123,29 @@ mod tests {
         fire(&repo, &t, event, 1).unwrap();
         assert_eq!(settle(&repo, &t, event), RunState::Exited(0));
         assert_eq!(exit_code(&repo, &t, event), Some(0));
+    }
+
+    /// Stopping a task's hook runs before reclaiming their files: a hook
+    /// still going must not write its exit code back after the files are
+    /// gone, and its command must not outlive the move.
+    #[test]
+    fn stop_and_reclaim_ends_a_running_hook_and_leaves_no_files() {
+        let (mut repo, _root_guard) = fixture("stop-and-reclaim");
+        with_hook(&mut repo, "slow.sh", "sleep 60");
+        let t = task("demo", |_| {});
+        let key = Runs::key(crate::pipeline::QUEUED, t.id());
+
+        fire(&repo, &t, crate::pipeline::QUEUED, 1).unwrap();
+        let pid = runs(&repo).read_pid(&key).expect("the hook run has a pid");
+
+        stop_and_reclaim(&repo, t.id());
+
+        assert!(!crate::headless::alive(pid), "the hook outlived the move");
+        let left: Vec<_> = std::fs::read_dir(repo.tracking_dir())
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(left.is_empty(), "files left behind: {left:?}");
     }
 
     /// A hook something kills every time it starts — `systemd-oomd`, a

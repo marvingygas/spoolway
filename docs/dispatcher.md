@@ -58,7 +58,8 @@ own.
 ### When it stops
 
 The run stops when the queue is empty. A `paused` or `blocked` task keeps the run alive,
-because it is waiting on a person. While any job is enabled, the run also stays up on an empty
+because it is waiting on a person. A queue file that does not parse keeps the run alive too. Each
+pass names the file until it is fixed or moved out of the queue. While any job is enabled, the run also stays up on an empty
 queue and prints when the next job fires. See [Jobs](jobs.md).
 
 `ctrl-c` stops the run the same way. A stop tears nothing down. Every worktree, pane, tab and
@@ -122,7 +123,7 @@ weights. The footer counts lanes by the same rule.
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
 from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
-[A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse is skipped and named under the board.
+[A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse is skipped and named under the board. See [When it stops](#when-it-stops).
 
 ## What runs next
 

@@ -1597,7 +1597,7 @@ pub struct UpdateArgs {}
         spoolway sync --dry-run     what it would change, and nothing else\n  \
         spoolway sync               list it, then take it on enter\n\n\
         At a terminal it lists what it would write and waits: enter takes it, esc writes \
-        nothing. With no terminal, `--json` or inside a lane it takes it without asking.\n\n\
+        nothing. With no terminal or inside a lane it takes it without asking.\n\n\
         Everything spoolway writes is tracked in git, so `git diff` is the review.")]
 pub struct SyncArgs {
     /// Print what would change and write nothing.

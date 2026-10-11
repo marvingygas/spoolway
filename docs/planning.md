@@ -215,6 +215,10 @@ highlighted routine's tasks.
 | `o` | Over the tasks pane, open the highlighted task in your editor. |
 | `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
 
+A routine folder that holds a `*.md` file that does not parse is not queued. The popup names each
+such file with a `spoolway task contract --from "<file>"` command that prints the reason, and
+nothing from the folder is queued.
+
 The tab reads the routine folders again each time you switch to it, so a routine saved with `s`
 a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 

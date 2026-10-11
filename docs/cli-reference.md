@@ -28,7 +28,7 @@ checkout: ~/.spoolway/worktrees/checkout-line (task/checkout-line)
 
 In the main checkout nothing extra is printed. A linked worktree whose branch has no
 `.spoolway/` reads the main checkout's setup, and the line names the main checkout. Under `--json` the same line is one JSON
-object:
+object, written to stderr so that stdout stays one JSON value a script can parse:
 
 ```
 {"path":"/home/you/.spoolway/worktrees/checkout-line","branch":"task/checkout-line"}
@@ -36,8 +36,16 @@ object:
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
 override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
-`config show`, `config list`, `config get`, `config path`, `config override`, `doctor` and
-`sync`.
+`config show`, `config list`, `config get`, `config path`, `config override`, `doctor`, `jobs
+list` and `sync`.
+
+## Commands with no JSON form
+
+`--json` is global, but these commands only print text. With `--json` they exit non-zero and
+say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt contract`,
+`prompt list`, `prompt override`, `config show`, `config get`, `config contract`,
+`config override`, `template contract`, `hook contract`, `override contract`, `group list`,
+`sync` and `queue add` without `--from`.
 
 ## Your work
 
@@ -170,6 +178,11 @@ Queueing deletes the group's pending tasks from the pending directory. A sibling
 already in the queue or the archive is left where it is. A group that fails validation is
 refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
 
+A file in the pending directory that does not parse has no row. The screen names it in a popup
+when the tab opens, and again when a file starts to break while the tab is open. A file already
+named is not named again until it is fixed and breaks anew. The popup is titled `tasks not listed`
+beside queueable groups and `nothing to queue` otherwise.
+
 A task whose start branch does not exist is not queued. Neither is any task in the selection that
 depends on it. These tasks stay in the pending directory and the rest of the selection is queued.
 See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
@@ -280,7 +293,10 @@ spoolway queue list
 spoolway queue list --json
 ```
 
-`--json` prints the dispatcher's pid and one object per task.
+`--json` prints the dispatcher's pid, one object per task, and an `unparseable` array.
+
+A file in the queue that does not parse has no row. Under the table, the text output lists each
+such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
 
 ### `spoolway queue show <task>`
 
@@ -339,8 +355,9 @@ A task that is still `queued`, or has a live lane or running command on its step
 
 ### `spoolway queue unqueue <task>`
 
-Carry a not-started task back to the pending directory, with every reserved key
-stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
+Carry a not-started task back to the pending directory, with every reserved key,
+`hook_paused:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
+files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
 carries the same task and every unstarted task that depends on it; this command has no panel
 to list a chain on, so it refuses instead.
 

@@ -43,6 +43,9 @@ back. A window that passes while no dispatcher runs is not caught up when a disp
 starts. A disabled job skips its windows, so enabling it again does not fire the window it
 was off for. A job whose previous run is still in the queue skips its window.
 
+A job whose routine folder holds a `*.md` file that does not parse fires nothing. The dispatcher
+names each such file once per matching minute.
+
 A job table may only hold the keys in the example under [Where a job lives](#where-a-job-lives).
 A job whose table holds any other key, such as `enable = false`, never fires. The dispatcher
 names the job and the key once per matching minute. Remove or correct the key and the job fires

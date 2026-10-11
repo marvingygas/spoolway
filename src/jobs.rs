@@ -593,6 +593,16 @@ pub fn fire_due(
                 continue;
             }
         };
+        // A routine folder holding a file that will not parse is refused
+        // by `queue_routine_target`, and a refusal alone leaves the window
+        // open for the next pass to refuse again. Said once per due minute
+        // instead, the way a skip is.
+        if let Some(refusal) = crate::commands::routine_target_refusal(&target) {
+            record.skipped_minute = Some(minute.clone());
+            dirty = true;
+            problems.push(format!("job {}: {refusal}", job.name));
+            continue;
+        }
         match crate::commands::queue_routine_target(
             repo,
             pipelines,
@@ -1617,6 +1627,42 @@ mod tests {
             "nothing fired the second time: {actions:?}"
         );
         assert_eq!(repo.queued_ids().len(), before, "no new task was queued");
+    }
+
+    /// A routine folder holding a file that will not parse is not fired, and
+    /// the problem is named once for the due minute — a second pass in the
+    /// same minute says nothing more and fires nothing.
+    #[test]
+    fn a_routine_with_an_unparseable_file_is_refused_once_per_due_minute() {
+        let (repo, _root_guard) = fixture("jobs-unparseable-routine");
+        // Waits out the last seconds of a minute, so both `fire` calls below
+        // land in one due minute and the second can be told apart from a new
+        // one.
+        settled_now();
+        every_minute_job(&repo, "nightly", "default");
+        std::fs::write(
+            repo.routines_dir().join("nightly").join("torn.md"),
+            "no fence here\n",
+        )
+        .unwrap();
+
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("job nightly") && problems[0].contains("torn.md"),
+            "{problems:?}"
+        );
+        assert!(
+            !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
+            "the good task was not queued short"
+        );
+
+        let (actions, problems) = fire(&repo);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "{actions:?} {problems:?}"
+        );
     }
 
     #[test]
