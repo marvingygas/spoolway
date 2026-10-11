@@ -416,7 +416,11 @@ forget zz-free
 # ------------------------------- R-11: resume under a live unblocker
 must "unattended, so \`blocked\` is staffed" "$SPOOLWAY" config set unattended.enabled true
 must "by an agent that honours the ctl files" "$SPOOLWAY" config set unattended.blocked_agent pi
+# The unblocker waits out its linger, then leaves a change and passes: the
+# task is cut onto `blocked` without ever having run `implement`, and without a
+# change `handover` refuses it and sends it straight back.
 echo "linger:20" > "$CTL/stuck.blocked"
+echo "work" > "$CTL/stuck"
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/stuck.md" stuck "$BODY" \
   "stage: blocked" "blocked_from: implement" "group: 0-blocked"
 dispatcher_restart
@@ -428,7 +432,6 @@ BEFORE=$(cksum < "$SPOOLWAY_PROJECT_HOME/queue/stuck.md")
 RESUME_OUT=$("$SPOOLWAY" resume stuck 2>&1); RESUME_STATUS=$?
 QUEUE_OUT=$("$SPOOLWAY" queue resume stuck 2>&1); QUEUE_STATUS=$?
 AFTER=$(cksum < "$SPOOLWAY_PROJECT_HOME/queue/stuck.md")
-expect_fail R-11 resume-refusals
 if [ "$RESUME_STATUS" -ne 0 ]; then ok "spoolway resume is refused while the unblocker works"
 else bad "spoolway resume is refused while the unblocker works (it said: $RESUME_OUT)"; fi
 if [ "$QUEUE_STATUS" -ne 0 ]; then ok "spoolway queue resume is refused too"
@@ -436,12 +439,16 @@ else bad "spoolway queue resume is refused too (it said: $QUEUE_OUT)"; fi
 if [ "$BEFORE" = "$AFTER" ]; then ok "and the task file is unchanged"
 else bad "and the task file is unchanged (now at \`$(stage_of stuck)\`)"; fi
 # The unblocker reports once its turn ends. Refused, its lane log says the
-# task has already left the step.
+# task has already left the step. Waited for with `drive`, not `await`: `await`
+# gives up on a task that sits on `blocked`, which is exactly where this one
+# waits for the unblocker's turn to end. `drive` only checks that the queue file
+# is gone, so the archive is tested as well, and a timeout prints the dispatch
+# log and the process group.
 UNBLOCKER_LOG="$SPOOLWAY_PROJECT_HOME/headless/logs/stuck · blocked.log"
-if await stuck gone 90 && [ -s "$UNBLOCKER_LOG" ] && ! grep -q 'already left' "$UNBLOCKER_LOG"; then
+if drive stuck gone 90 && [ -f "$SPOOLWAY_PROJECT_HOME/archive/stuck.md" ] \
+  && [ -s "$UNBLOCKER_LOG" ] && ! grep -q 'already left' "$UNBLOCKER_LOG"; then
   ok "the unblocker's own report still lands"
 else bad "the unblocker's own report still lands"; fi
-expect_fail_end
 dispatcher_stop
 must "attended again" "$SPOOLWAY" config set unattended.enabled false
 forget stuck
