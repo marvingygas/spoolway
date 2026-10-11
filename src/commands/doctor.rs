@@ -582,8 +582,10 @@ fn home_unavailable_findings(
     findings
 }
 
-/// `doctor` on a checkout whose own `config.toml` does not parse — `err` is
-/// [`Config::load`]'s failure against `repo.checkout`, not `repo.root`.
+/// `doctor` on a checkout whose config does not load — `err` is
+/// [`Config::load`]'s failure against `repo.checkout`, not `repo.root`. The
+/// file that failed is either the tracked `config.toml` or the override
+/// layer's; [`broken_config_note`] says which.
 ///
 /// Reporting the parse error is most of the value here: it is one line, it
 /// names the file and the line in it, and until it is fixed nothing else in
@@ -622,13 +624,34 @@ fn doctor_unconfigured(
         Some(pid) => report.note(format!("a dispatcher is running (pid {pid})")),
         None => report.note_verbose("no dispatcher running"),
     }
-    report.note(format!(
-        "{} does not parse ({})",
-        relative(&repo.checkout, &Config::path_in(&repo.checkout)),
-        config_owner_label(repo),
-    ));
+    report.note(broken_config_note(repo));
 
     finish(&report, verbose, json)
+}
+
+/// The note naming the config file that failed to load.
+///
+/// The failure is the merged load's, and the only place it says which file it
+/// was is its message text, which this does not parse. Reading the tracked
+/// file alone settles it instead: when that parses, the override layer's
+/// `config.toml` is the broken one, and naming the tracked file would send a
+/// person to edit a file that is fine. When the tracked file does not parse
+/// the tracked file is named, whether or not the layer is broken too, since
+/// the load stops there before it reads the layer.
+fn broken_config_note(repo: &Repo) -> String {
+    if Config::load_tracked(&repo.checkout).is_ok() {
+        format!(
+            "{} does not parse (the override layer); \
+             `spoolway override drop config.toml` removes it",
+            crate::overrides::config_patch_path(&repo.overrides_dir()).display(),
+        )
+    } else {
+        format!(
+            "{} does not parse ({})",
+            relative(&repo.checkout, &Config::path_in(&repo.checkout)),
+            config_owner_label(repo),
+        )
+    }
 }
 
 /// Whether this checkout's stamp and its home's own record of it agree.
@@ -3357,6 +3380,39 @@ mod tests {
             },
             checkout,
         )
+    }
+
+    /// `doctor`'s note names the file that failed: the override layer's
+    /// `config.toml` when only that is broken, and the tracked one whenever
+    /// the tracked one is, the layer broken or not. A note that always named
+    /// the layer, or always the tracked file, fails one of the three.
+    #[test]
+    fn the_broken_config_note_names_the_file_that_failed() {
+        let (repo, _scratch) = scratch_repo("broken-config-note");
+        let tracked = Config::path_in(&repo.checkout);
+        let layer = crate::overrides::config_patch_path(&repo.overrides_dir());
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(layer.parent().unwrap()).unwrap();
+        let broken = "[dispatch\nlane_quiet = \"7m\"\n";
+        let layer_name = layer.display().to_string();
+
+        std::fs::write(&tracked, "[dispatch]\n").unwrap();
+        std::fs::write(&layer, broken).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(&layer_name), "{note}");
+        assert!(
+            note.contains("spoolway override drop config.toml"),
+            "{note}"
+        );
+
+        std::fs::write(&tracked, broken).unwrap();
+        std::fs::remove_file(&layer).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(".spoolway/config.toml"), "{note}");
+
+        std::fs::write(&layer, broken).unwrap();
+        let note = broken_config_note(&repo);
+        assert!(note.starts_with(".spoolway/config.toml"), "{note}");
     }
 
     #[test]

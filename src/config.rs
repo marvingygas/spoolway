@@ -2020,6 +2020,19 @@ impl Config {
             return self.save(root);
         };
 
+        let edited = self.edit_key(&text, key, &path)?;
+        crate::task::write_atomic(&path, &edited)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The text of `save_key`'s edit, without the write: `text` with `key`
+    /// brought to what `self` holds, checked against `self` before it is
+    /// returned. `path` only names the file in an error.
+    ///
+    /// Split out so a caller setting several keys can carry the text from one
+    /// edit to the next in memory and write the file once, rather than leaving
+    /// it half-edited if the process dies between two writes.
+    pub(crate) fn edit_key(&self, text: &str, key: &str, path: &Path) -> Result<String> {
         let parts = crate::confkv::parts(self, key);
         let value = toml::Value::try_from(self).context("serialising config")?;
 
@@ -2029,9 +2042,9 @@ impl Config {
         // putting `= 0` back would be the file disagreeing with the struct it
         // was rendered from, and `agrees_with` below would refuse it anyway.
         let edited = match crate::confdoc::at(&value, &parts) {
-            Some(new) => crate::confdoc::set(&text, &parts, new, crate::confkv::note(key))
+            Some(new) => crate::confdoc::set(text, &parts, new, crate::confkv::note(key))
                 .with_context(|| format!("editing {}", path.display()))?,
-            None => crate::confdoc::remove(&text, &parts)
+            None => crate::confdoc::remove(text, &parts)
                 .with_context(|| format!("editing {}", path.display()))?,
         };
 
@@ -2042,9 +2055,7 @@ impl Config {
                 path.display()
             )
         })?;
-
-        crate::task::write_atomic(&path, &edited)
-            .with_context(|| format!("writing {}", path.display()))
+        Ok(edited)
     }
 
     /// Does `text`, read as a config file, mean exactly what `self` means?

@@ -1158,8 +1158,8 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree |
-| `drop [<target>]` | Remove one entry, or the whole layer when none is named |
+| `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree. `promote config.toml` writes every key or none |
+| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
@@ -1447,7 +1447,8 @@ spoolway whats-new --since 0.1.0
 ### `spoolway doctor`
 
 Check that everything the configured pipeline needs is present. It still runs when the config
-or a pipeline file does not parse. One check opens a throwaway pane and runs a command in it
+or a pipeline file does not parse. When the config does not parse, it names the file at fault:
+the tracked `.spoolway/config.toml`, or the override layer's `config.toml`. One check opens a throwaway pane and runs a command in it
 to prove a lane can start.
 
 ```

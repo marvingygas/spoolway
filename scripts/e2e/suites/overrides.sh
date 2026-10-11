@@ -433,6 +433,35 @@ says "setting the layered key says the layer still sets it" \
 has "and writes the new value to the tracked file" "lane_quiet = \"20m\"" "$TRACKED_CONFIG"
 must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
 
+# ------------------------------------ a broken layer, and a refused promote
+# A layer that does not parse used to stop `override drop` before it ran, and
+# `doctor` named the tracked file for it. A layer holding a key the tracked
+# config refuses used to be promoted halfway.
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+says "doctor names the layer's file when that is the one that does not parse" \
+  "$CONFIG_LAYER does not parse" \
+  "$SPOOLWAY" doctor --no-live
+works "a bare override drop removes a layer that does not parse" \
+  "$SPOOLWAY" override drop
+works "and the broken file is gone" test ! -e "$CONFIG_LAYER"
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+works "override drop config.toml removes a layer that does not parse" \
+  "$SPOOLWAY" override drop config.toml
+works "and that file is gone too" test ! -e "$CONFIG_LAYER"
+
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch]\nauto_commit = true\nlane_quite = "7m"\n' > "$CONFIG_LAYER"
+cp "$TRACKED_CONFIG" "$LIVE/config.before"
+refuses "promote of a layer holding a typo'd key names the key" \
+  "lane_quite" \
+  "$SPOOLWAY" override promote config.toml
+works "and leaves the tracked config as it was" \
+  cmp "$TRACKED_CONFIG" "$LIVE/config.before"
+has "and keeps the layer as it was" "lane_quite" "$CONFIG_LAYER"
+must "clean up: drop the typo'd layer" "$SPOOLWAY" override drop config.toml
+
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
 # `install` before the rename has the old directory on disk, and `sync`

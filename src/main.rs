@@ -291,20 +291,26 @@ fn run() -> Result<()> {
             commands::config_override(&repo, home_error.as_ref())
         }
         command => {
-            // `sync` is the one command below that has to survive long
-            // enough to reach its own read of `config.toml`, for the same
-            // reason `doctor` and `config edit`/`config override` read
-            // leniently above: `Repo::discover` would otherwise refuse a
-            // file still naming a key this binary retired hard enough that
-            // `Config::load` rejects it outright, before `sync` ever got
-            // the chance to be the one command that brings a file like that
-            // forward (see `crate::sync::config`). A file this lenient
-            // `Repo` still cannot even parse as TOML is a different case:
-            // `sync::config` fails loudly on that one itself, naming the
-            // file, rather than leaving it to look like nothing was wrong.
+            // `sync` and `override drop` are the commands below that have to
+            // survive a config this binary cannot load, for the same reason
+            // `doctor` and `config edit`/`config override` read leniently
+            // above. `sync` must reach its own read of `config.toml`:
+            // `Repo::discover` would otherwise refuse a file still naming a
+            // key this binary retired hard enough that `Config::load`
+            // rejects it outright, before `sync` ever got the chance to be
+            // the one command that brings a file like that forward (see
+            // `crate::sync::config`). A file this lenient `Repo` still cannot
+            // even parse as TOML is a different case: `sync::config` fails
+            // loudly on that one itself, naming the file, rather than
+            // leaving it to look like nothing was wrong. `override drop`
+            // exists to remove an `overrides/config.toml` that does not
+            // parse, and `Repo::discover` would stop on that file first.
             // Every other command reaching this arm, bar `report` and
             // `stack` below, still dies on a config it cannot read.
-            let repo = if matches!(command, Command::Sync(_)) {
+            let repo = if matches!(
+                command,
+                Command::Sync(_) | Command::Override(OverrideCommand::Drop(_))
+            ) {
                 let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
                 // The lenient read is for a config, not a home: a copied
                 // checkout (two carry one id) is refused by every other
@@ -331,14 +337,18 @@ fn run() -> Result<()> {
             // whose config or layout is in question, and a sweep run ahead
             // of them would be one more thing to rule out.
             //
-            // Skipped for the same reason under `sync`: `repo.config` came
-            // from `discover_lenient` above, which is `Config::default()`
-            // — a made-up `retention_days` — on exactly the config `sync`
-            // exists to work on. Sweeping against a fabricated setting
-            // before a person's own project is even readable is the thing
-            // this comment already rules out for every command above; `sync`
-            // reaching this arm at all must not put it back.
-            if !matches!(command, Command::Sync(_)) {
+            // Skipped for the same reason under `sync` and `override drop`:
+            // `repo.config` came from `discover_lenient` above, which is
+            // `Config::default()` — a made-up `retention_days` — whenever the
+            // merged load fails, and those commands exist to work on exactly
+            // that config. Sweeping against a fabricated setting before a
+            // person's own project is even readable is the thing this comment
+            // already rules out for every command above; reaching this arm
+            // at all must not put it back.
+            if !matches!(
+                command,
+                Command::Sync(_) | Command::Override(OverrideCommand::Drop(_))
+            ) {
                 retain::sweep_once(&repo);
             }
 

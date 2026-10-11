@@ -239,6 +239,18 @@ The popup's `[x]` hides it until the layer changes or the set of ignored entries
 entry that stops fitting with no override file touched, such as a step a pull renamed, brings the
 popup back.
 
+### A layer file that does not parse
+
+While `overrides/config.toml` is not valid TOML, commands that load the config stop with an
+error. Two commands still work. `spoolway doctor` names the layer file as the one that does not parse, with the
+command that removes it. `spoolway override drop` removes the file, so a bare drop or
+`spoolway override drop config.toml` clears the layer. When the tracked `.spoolway/config.toml`
+is the file that does not parse, `doctor` names that file instead.
+
+`spoolway override promote config.toml` writes every key of the layer into the tracked file,
+or none. A key the tracked config refuses stops the promote with an error naming that key. The
+tracked file stays as it was, and the layer keeps all its keys.
+
 ### When an override takes effect
 
 | Override | When a running dispatcher uses it |

@@ -4790,6 +4790,33 @@ mod tests {
         );
     }
 
+    /// What lets `override drop` remove an `overrides/config.toml` that does
+    /// not parse: the strict path stops on that file, the lenient one hands
+    /// back a usable `Repo` whose `overrides_dir` holds it, and the error
+    /// names the layer rather than the tracked file.
+    #[test]
+    fn an_override_layer_that_does_not_parse_stops_discovery_only_for_the_strict_path() {
+        let (_origin, work, _base_guard) = fixture("unparsable-layer");
+        let (home, _home_guard) = scratch_home("unparsable-layer");
+        let (strict, lenient) = crate::platform::test_home::with_home(&home, || {
+            let repo = Repo::discover(&work).unwrap();
+            let layer = crate::overrides::config_patch_path(&repo.overrides_dir());
+            std::fs::create_dir_all(layer.parent().unwrap()).unwrap();
+            std::fs::write(&layer, "[dispatch\nlane_quiet = \"7m\"\n").unwrap();
+            (Repo::discover(&work), Repo::discover_lenient(&work))
+        });
+        assert!(strict.is_err(), "every other command dies");
+
+        let (repo, err, home_error) = lenient.unwrap();
+        assert!(home_error.is_none(), "the home itself resolved fine here");
+        let err = format!("{:#}", err.expect("the parse error is handed back"));
+        let layer = crate::overrides::config_patch_path(&repo.overrides_dir());
+        assert!(
+            err.contains(&layer.display().to_string()),
+            "the error names the layer to drop: {err}"
+        );
+    }
+
     /// A real failure resolving a project's stamped home — a permissions
     /// problem reading `spoolway-id`, standing in for one — must not take
     /// `discover_lenient` down with it: `doctor` is the one command whose
