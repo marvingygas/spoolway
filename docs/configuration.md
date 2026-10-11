@@ -478,8 +478,9 @@ the line's floor.
 ### `open` — a fifth event, run by `queue add` itself
 
 `spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
-`ticket:` yet, in dependency order, before it writes anything. The script also gets
-`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`) and
+`ticket:` yet and does not set `tracking: off`, in dependency order, before it writes anything.
+The script also gets `SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`),
+`SPOOLWAY_GROUP_SIZE` (the number of tasks in the group that have or get a ticket) and
 `SPOOLWAY_GROUP_DESCRIPTION` (the group's `group_description:`, blank if no task set one).
 `SPOOLWAY_TASK_FILE` is the task's own path while this hook runs, blank when the task
 has no file of its own, such as a `queue add --from -` stream entry. The hook builds the
@@ -487,7 +488,8 @@ whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's o
 `## Context` and `## Acceptance criteria` sections; spoolway renders nothing into it.
 
 The submission is refused, naming the group, when no task in a group sets
-`group_description:`.
+`group_description:`. A group whose tasks in the submission all set `tracking: off` and name
+no `ticket:` needs none.
 
 On the queue screen, `enter` asks before any of this runs. The question names the tracker,
 the hook script's own file name minus its extension (`github.sh` reads `github`), and lists

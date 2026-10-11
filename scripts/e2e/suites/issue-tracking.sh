@@ -345,6 +345,69 @@ must "the second run over the same batch queues both" \
 has "the resumed run kept the first ticket rather than opening a new one" \
   "ticket: $FIRST_TICKET" "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md"
 
+# A task that sets `tracking: off` itself has opted out of `open` too. Under a
+# hook that fails on every call, it still queues, and the hook is never run
+# for it; a sibling in the same batch that sets no such thing still reaches the
+# hook, which is what refuses the batch here.
+cat > .spoolway/hooks/open-fails.sh <<'EOF'
+#!/bin/sh
+[ "$SPOOLWAY_EVENT" = open ] || exit 0
+echo "$SPOOLWAY_TASK" >>"$(dirname "$SPOOLWAY_OUT")/open-fails.calls"
+exit 9
+EOF
+chmod +x .spoolway/hooks/open-fails.sh
+must "the hook is switched to one that fails every open call"   "$SPOOLWAY" config set issue_tracking.hook open-fails.sh
+task_doc "$LIVE/off-solo.md" off-solo "$BODY" "tracking: off" \
+  "group: off-solo" "group_description: a task that sets tracking off itself"
+must "a tracking: off task queues under a hook that would fail" \
+  "$SPOOLWAY" queue add --from "$LIVE/off-solo.md"
+task_doc "$LIVE/off-quiet.md" off-quiet "$BODY" "tracking: off" \
+  "group: off-quiet" "group_description: a task that sets tracking off itself"
+OFF_QUIET_OUT=$("$SPOOLWAY" queue add --from "$LIVE/off-quiet.md" 2>&1)
+has "a group whose tasks all set tracking: off announces no tickets" "queued" \
+  <(printf '%s\n' "$OFF_QUIET_OUT")
+works "so the output has no opening-tickets header" \
+  bash -c '! printf "%s" "$1" | grep -q "opening tickets"' _ "$OFF_QUIET_OUT"
+has "and it is still stamped tracking: off" "tracking: off" \
+  "$SPOOLWAY_PROJECT_HOME/queue/off-solo.md"
+works "and the open hook was never run for it" \
+  bash -c '! grep -qx off-solo "$1/tracking/open-fails.calls" 2>/dev/null' _ "$SPOOLWAY_PROJECT_HOME"
+task_doc "$LIVE/off-mixed-a.md" off-mixed-a "$BODY" "tracking: off" \
+  "group: off-mixed" "group_description: a batch where one task opts out"
+task_doc "$LIVE/off-mixed-b.md" off-mixed-b "$BODY" "group: off-mixed" \
+  "depends_on: [off-mixed-a]"
+refuses "the sibling that sets no tracking: off still reaches the failing hook" \
+  "off-mixed-b" \
+  "$SPOOLWAY" queue add --from "$LIVE/off-mixed-a.md" --from "$LIVE/off-mixed-b.md"
+works "while the hook was never run for the one that did" \
+  bash -c '! grep -qx off-mixed-a "$1/tracking/open-fails.calls"' _ "$SPOOLWAY_PROJECT_HOME"
+works "and it did run for the sibling" \
+  bash -c 'grep -qx off-mixed-b "$1/tracking/open-fails.calls"' _ "$SPOOLWAY_PROJECT_HOME"
+# A hook whose tool this machine lacks draws the tool gate for a batch that
+# will call it, but not for one whose every task opted out: nothing there will
+# ever run the missing tool.
+cat > .spoolway/hooks/open-needs.sh <<'EOF'
+#!/bin/sh
+# spoolway-requires: nosuchtool >= 1.0
+exit 0
+EOF
+chmod +x .spoolway/hooks/open-needs.sh
+must "the hook is switched to one that needs a tool this machine lacks" \
+  "$SPOOLWAY" config set issue_tracking.hook open-needs.sh
+task_doc "$LIVE/off-gate.md" off-gate "$BODY" "tracking: off" "group: off-gate"
+OFF_GATE_OUT=$("$SPOOLWAY" queue add --from "$LIVE/off-gate.md" </dev/null 2>&1)
+has "a batch of tracking: off tasks is queued" "tracking: off" \
+  "$SPOOLWAY_PROJECT_HOME/queue/off-gate.md"
+works "and draws no gate" \
+  bash -c '! printf "%s" "$1" | grep -q "issue tracking is not supported"' _ "$OFF_GATE_OUT"
+task_doc "$LIVE/on-gate.md" on-gate "$BODY" "group: on-gate" \
+  "group_description: a task that does call the hook"
+ON_GATE_OUT=$("$SPOOLWAY" queue add --from "$LIVE/on-gate.md" </dev/null 2>&1)
+has "while a batch that reaches the hook still draws the gate" \
+  "issue tracking is not supported" <(printf '%s\n' "$ON_GATE_OUT")
+must "the hook is switched back to the one that only answers open" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
+
 # --------------------------------------------- issue_tracking.key_in_names
 # With the flag on and the hook answering a `slug=`, `queue add` writes the
 # prefixed `group:` and `branch:` into each queued document — proven here

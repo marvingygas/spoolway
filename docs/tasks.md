@@ -139,7 +139,8 @@ refused.
 
 When `issue_tracking.hook` is set, one task in a group must set `group_description:`. A
 task already queued in the same group also satisfies it. A submission is refused, naming
-the group, when none does.
+the group, when none does. A group whose tasks in the submission all set `tracking: off` and
+name no `ticket:` needs none.
 
 ### The body is the project's
 

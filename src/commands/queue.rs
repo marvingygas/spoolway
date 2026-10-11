@@ -1303,6 +1303,17 @@ pub(crate) fn validate_batch(
     Ok(tasks)
 }
 
+/// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
+/// itself and names no `ticket:` of its own, so `queue add` neither calls the
+/// hook for it nor reports it `kept`. One rule for every site that reasons
+/// about who reaches the hook — the call loop, the group size handed to it,
+/// the group-description check and the tool gate — so they cannot drift
+/// apart. A task that names a `ticket:` is not opted out: it is reported
+/// `kept`, which is a row the group announces.
+fn opts_out_of_open(task: &Task) -> bool {
+    task.tracking_off() && task.extra_str("ticket").is_empty()
+}
+
 /// Whether `task` itself carries a non-blank `group_description:`.
 fn has_group_description(task: &Task) -> bool {
     task.front
@@ -1344,6 +1355,15 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let mut seen: std::collections::BTreeSet<&str> = Default::default();
     for group in tasks.iter().filter_map(|t| t.front.group.as_deref()) {
         if !seen.insert(group) {
+            continue;
+        }
+        // No issue opens for a group whose every task in this batch has opted
+        // out of `open`, so a description would be text nothing reads.
+        if tasks
+            .iter()
+            .filter(|t| t.front.group.as_deref() == Some(group))
+            .all(opts_out_of_open)
+        {
             continue;
         }
         let in_batch = tasks
@@ -1878,6 +1898,10 @@ fn open_and_prefix(
     // `tool_requirements_gate`. `true` means the gate drew and this
     // submission goes on with issue tracking switched off for it.
     let tracking_off = match gate {
+        // A batch where no task reaches the hook never calls the tool the
+        // gate warns about, so it neither prints the notice nor waits on a
+        // key that could back the whole batch out.
+        ToolGate::Print { .. } if tasks.iter().all(opts_out_of_open) => false,
         ToolGate::Print { interactive } => tool_requirements_gate(repo, interactive)?,
         ToolGate::Answered { tracking_off } => tracking_off,
     };
@@ -2293,8 +2317,9 @@ fn prefix_generated_names(
 }
 
 /// Call the `[issue_tracking]` open hook once for every task in the
-/// batch that does not already name a `ticket:`, before any of them is
-/// queued — a no-op start to finish when no hook is configured at all.
+/// batch that does not already name a `ticket:` and does not set
+/// `tracking: off`, before any of them is queued — a no-op start to
+/// finish when no hook is configured at all.
 ///
 /// Walks the batch in dependency order, so a task's own call always has its
 /// dependencies' ticket ids already in hand for `SPOOLWAY_DEPENDS_TICKETS`,
@@ -2345,7 +2370,14 @@ fn open_tickets(
     let mut group_description: BTreeMap<String, String> = BTreeMap::new();
     for task in tasks.iter() {
         if let Some(group) = &task.front.group {
-            *group_size.entry(group.clone()).or_insert(0) += 1;
+            // Counts every task of the group that has or will have a ticket
+            // — the hook's calls plus the ones reported `kept` — which is
+            // what `SPOOLWAY_GROUP_SIZE` tells it: a hook that opens an epic
+            // only for a group of more than one would otherwise open one over
+            // a single ticket.
+            if !opts_out_of_open(task) {
+                *group_size.entry(group.clone()).or_insert(0) += 1;
+            }
             if let Some(description) = task
                 .front
                 .group_description
@@ -2433,11 +2465,22 @@ fn open_tickets(
 
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
+        let already = tasks[i].extra_str("ticket").to_string();
+
+        // A task that says `tracking: off` has opted out of every hook event,
+        // `open` included. Calling the hook anyway would let a logged-out
+        // tracker refuse a batch that asked for no ticket at all. It is
+        // skipped before the group header is printed, so a group none of
+        // whose tasks reach the hook does not announce tickets that are never
+        // opened. A `ticket:` it already names is still reported `kept`.
+        if opts_out_of_open(&tasks[i]) {
+            continue;
+        }
+
         if printed_header.insert(group.clone()) {
             log.group(&group);
         }
 
-        let already = tasks[i].extra_str("ticket").to_string();
         if !already.is_empty() {
             let epic = tasks[i].extra_str("epic").to_string();
             if !epic.is_empty() {
@@ -2453,6 +2496,9 @@ fn open_tickets(
             .iter()
             .map(|dep| dependency_ticket(repo, tasks, dep))
             .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|ticket| !ticket.is_empty())
+            .collect::<Vec<_>>()
             .join(" ");
         let known_epic = group_epic.get(&group).cloned().unwrap_or_default();
         let known_description = group_description.get(&group).cloned().unwrap_or_default();
@@ -2548,7 +2594,11 @@ fn open_tickets(
             }
         }
     }
-    log.done();
+    // Nothing was announced when every task opted out, so there is no block
+    // for the trailing blank line to close.
+    if !printed_header.is_empty() {
+        log.done();
+    }
     Ok(group_slug)
 }
 
@@ -16900,6 +16950,251 @@ mod tests {
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(true)
             );
+        }
+
+        /// A task that sets `tracking: off` itself is queued without the
+        /// `open` hook being called for it, so a hook that would fail
+        /// (its tool logged out, say) cannot refuse it.
+        #[test]
+        fn a_task_setting_tracking_off_is_queued_without_calling_the_open_hook() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-hook-fails");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'; exit 1"#, calls.display()),
+            );
+            let text = task_text(
+                "release",
+                "group: rel\ngroup_description: a release\ntracking: off\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "release.md", &text);
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "release");
+            assert!(task.tracking_off());
+            assert_eq!(task.extra_str("ticket"), "");
+            assert!(
+                !calls.exists(),
+                "the open hook ran for a task that sets tracking: off"
+            );
+        }
+
+        /// In a batch where only some tasks set `tracking: off`, the `open`
+        /// hook is called for exactly the tasks that do not.
+        #[test]
+        fn the_open_hook_is_still_called_for_the_tasks_of_a_batch_that_do_not_set_tracking_off() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-mixed");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_TASK" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    calls.display()
+                ),
+            );
+            let tracked = write_doc(
+                &repo,
+                "tracked.md",
+                &task_text(
+                    "tracked",
+                    "group: rel\ngroup_description: a release\n",
+                    BODY,
+                ),
+            );
+            let untracked = write_doc(
+                &repo,
+                "untracked.md",
+                &task_text(
+                    "untracked",
+                    "group: rel\ngroup_description: a release\ndepends_on: [tracked]\ntracking: off\n",
+                    BODY,
+                ),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&tracked, &untracked]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let called = std::fs::read_to_string(&calls).unwrap_or_default();
+            assert_eq!(called.trim(), "tracked", "hook calls: {called:?}");
+            assert_eq!(queued(&repo, "tracked").extra_str("ticket"), "PROJ-13");
+            assert_eq!(queued(&repo, "untracked").extra_str("ticket"), "");
+        }
+
+        /// The group size the hook is told counts only the tasks that call
+        /// it: a group of a `tracking: off` task and one tracked task is a
+        /// group of one, so a hook opening an epic only above one opens none.
+        #[test]
+        fn the_group_size_handed_to_the_hook_leaves_out_a_tracking_off_task() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-group-size");
+            let sizes = repo.root.join("sizes.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_GROUP_SIZE" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    sizes.display()
+                ),
+            );
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text(
+                    "off",
+                    "group: rel\ngroup_description: a release\ntracking: off\n",
+                    BODY,
+                ),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: rel\ndepends_on: [off]\n", BODY),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let seen = std::fs::read_to_string(&sizes).unwrap_or_default();
+            assert_eq!(seen.trim(), "1", "group sizes: {seen:?}");
+        }
+
+        /// A group whose every task sets `tracking: off` opens no issue, so
+        /// it is not refused for lacking a `group_description:` under a
+        /// configured hook; a group with one tracked task still is.
+        #[test]
+        fn a_group_of_tracking_off_tasks_needs_no_description() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-no-description");
+            with_hook(&mut repo, "exit 1");
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text("off", "group: rel\ntracking: off\n", BODY),
+            );
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            assert!(queued(&repo, "off").tracking_off());
+
+            let off2 = write_doc(
+                &repo,
+                "off2.md",
+                &task_text("off2", "group: mix\ntracking: off\n", BODY),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: mix\ndepends_on: [off2]\n", BODY),
+            );
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off2, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("sets no `group_description:`"),
+                "{err:#}"
+            );
+        }
+
+        /// `SPOOLWAY_DEPENDS_TICKETS` lists only the dependencies that have a
+        /// ticket: one that opted out of `open` leaves no empty id, and so no
+        /// stray space, in front of the one that did not.
+        #[test]
+        fn depends_tickets_leave_out_a_dependency_with_no_ticket() {
+            let (mut repo, _root_guard) = fixture("open-depends-tickets-no-empty");
+            let seen = repo.root.join("depends.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"[ "$SPOOLWAY_TASK" = on ] && printf '%s' "$SPOOLWAY_DEPENDS_TICKETS" > '{}'; echo "ticket=PROJ-9" >"$SPOOLWAY_OUT""#,
+                    seen.display()
+                ),
+            );
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text(
+                    "off",
+                    "group: rel\ngroup_description: a release\ntracking: off\n",
+                    BODY,
+                ),
+            );
+            let kept = write_doc(
+                &repo,
+                "kept.md",
+                &task_text(
+                    "kept",
+                    "group: rel\ndepends_on: [off]\nticket: PROJ-1\n",
+                    BODY,
+                ),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: rel\ndepends_on: [off, kept]\n", BODY),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off, &kept, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(std::fs::read_to_string(&seen).unwrap(), "PROJ-1");
+        }
+
+        /// Only a task that sets `tracking: off` and names no `ticket:` is
+        /// out of the hook's reach; the tool gate and the group checks all
+        /// read this one answer.
+        #[test]
+        fn opts_out_of_open_needs_tracking_off_and_no_ticket() {
+            let (repo, _root_guard) = fixture("open-opts-out");
+            let parse = |extra: &str| {
+                validate_batch(
+                    &repo,
+                    &Pipelines::builtin(),
+                    Some("plan/demo"),
+                    &[(
+                        "t.md".to_string(),
+                        task_text("t", &format!("group: g\n{extra}"), BODY),
+                    )],
+                )
+                .unwrap()
+                .remove(0)
+            };
+            assert!(opts_out_of_open(&parse("tracking: off\n")));
+            assert!(!opts_out_of_open(&parse("tracking: off\nticket: PROJ-1\n")));
+            assert!(!opts_out_of_open(&parse("")));
         }
 
         /// The mockup this covers verbatim: a hook is configured, and the
