@@ -1295,6 +1295,28 @@ pub fn last_turn(kind: &str, session: &str) -> Option<u64> {
     Some(turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write())
 }
 
+/// When the model last wrote a turn in `session`, in Unix seconds: the
+/// timestamp on the last assistant record that is not a harness's own reply.
+///
+/// This is what tells a lane that answered a reminder from one the harness
+/// answered on its behalf. A usage limit or an API error is written as a
+/// [`SYNTHETIC_MODEL`] turn half a second after the message that provoked it,
+/// and an interrupt as one when a person presses Escape. Each moves the
+/// transcript's modified time exactly as a real answer would. `None` when the transcript cannot be found or no turn
+/// carries a timestamp.
+pub fn last_model_turn(kind: &str, session: &str) -> Option<i64> {
+    let path = session_file(kind, session)?;
+    last_turn_at(kind, &path)?.at.map(|at| at.timestamp())
+}
+
+/// Whether this agent kind writes harness replies into its transcript as
+/// [`SYNTHETIC_MODEL`] turns, so that a changed transcript is not by itself
+/// proof the model spoke. Only Claude Code does; codex and pi write none, and
+/// for them [`last_written`] stays the answer to "did the lane write".
+pub fn writes_synthetic_turns(kind: &str) -> bool {
+    self::kind(kind).is_some_and(|accounting| accounting.format == Format::AnthropicApi)
+}
+
 /// Which clock a session's age was read off. See [`session_age`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgeReading {

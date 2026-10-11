@@ -103,6 +103,17 @@ pub enum State {
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
     Running,
+    /// A live lane that has not answered the last reminder the dispatcher
+    /// sent it, read off its record in `lanes.json` — see
+    /// [`crate::dispatch::LaneRecord::silent_since`]. `secs` is how long ago
+    /// it last spoke, as of the frame that drew it.
+    ///
+    /// The task has not moved: a silent lane is reminded again and never
+    /// escalated, because a usage limit looks exactly like a dead lane. This
+    /// row is the only notice a person gets of the dead kind, which nothing
+    /// clears but a restart. It reads `Running` again once the lane writes a
+    /// turn.
+    Silent { secs: i64 },
     /// The dispatcher has claimed a slot for the task and is booting its
     /// lane, which herdr does not list until the boot is well along — read
     /// off the dispatcher's boot mark, see [`crate::claim`]. The row names
@@ -3597,6 +3608,12 @@ fn build_rows(
     // step it is booting — empty with no dispatcher behind the lock, so a
     // mark a killed one left never pins a row on `starting`.
     let claims = crate::claim::live(repo);
+    // The dispatcher's own record of every lane, read once a frame: whether
+    // a lane's last reminder went unanswered lives here and nowhere the
+    // board can see otherwise, since the board is a separate process. Read
+    // without the dispatcher's own loader, which logs a corrupt file to the
+    // problem log on every call.
+    let lane_records = crate::dispatch::peek_lane_records(repo);
     let mut rows: Vec<Row> = Vec::new();
     for task in tasks {
         if let Some(refusal) = refused.get(task.id()) {
@@ -3847,9 +3864,22 @@ fn build_rows(
                 let mid_handoff = grace
                     .and_then(|arrived| arrived.get(task.id()))
                     .is_some_and(|since| since.elapsed() < HANDOFF_GRACE);
-                let state = match live || command_run.is_some() || mid_handoff {
-                    true => State::Running,
-                    false => State::Queued,
+                // Only a lane herdr calls settled can be silent. The record
+                // is a pass behind the pane, so a lane already back at work
+                // would otherwise read silent until the next pass cleared it.
+                // An `Unknown` lane may be at work too, and the dispatcher
+                // refreshes the flag only for a settled one, so for it the
+                // flag is stale.
+                let silent_since = live_lane
+                    .filter(|l| l.status.is_settled())
+                    .and_then(|_| lane_records.get(&lane))
+                    .and_then(|record| record.silent_since());
+                let state = match (silent_since, live || command_run.is_some() || mid_handoff) {
+                    (Some(since), _) => State::Silent {
+                        secs: (chrono::Utc::now().timestamp() - since).max(0),
+                    },
+                    (None, true) => State::Running,
+                    (None, false) => State::Queued,
                 };
                 (state, onward(task, pipeline, &step.id, dependents), false)
             }
@@ -3987,7 +4017,8 @@ fn header_cells(phase: Phase, finishing: Option<usize>, version: String) -> Vec<
 /// run still in flight. A lane that has settled, or a command run that has
 /// exited, has finished: an exited run already reads `Queued` off
 /// [`build_rows`], since no lane or running run backs it, so that state is
-/// taken here too.
+/// taken here too. A `Silent` lane is a settled one, so it finishes here
+/// like any other: with no dispatcher up, nothing is reminding it either.
 ///
 /// `frozen` is the board's memory of the TIME each finished step read the
 /// first frame it was seen finished, by lane name, so its clock stops there
@@ -4005,7 +4036,10 @@ fn finish_settled(
     let mut working = 0;
     let mut finished: BTreeSet<String> = BTreeSet::new();
     for row in rows.iter_mut() {
-        if !matches!(row.state, State::Running | State::Prompt | State::Queued) {
+        if !matches!(
+            row.state,
+            State::Running | State::Silent { .. } | State::Prompt | State::Queued
+        ) {
             continue;
         }
         let lane = crate::mux::lane_name(&row.stage, &row.id);
@@ -6368,6 +6402,115 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[answered], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
+    }
+
+    /// A settled lane whose record in `lanes.json` holds an unanswered
+    /// reminder reads `Silent`, timed from the model's last turn. The same
+    /// lane reads `Running` with no record, with its reminder answered, the
+    /// moment herdr sees it working again — before any pass has rewritten
+    /// the record — and while herdr cannot tell. A stopped board finishes it
+    /// like any other settled lane.
+    #[test]
+    fn a_lane_with_an_unanswered_reminder_reads_silent_from_its_last_turn() {
+        let (repo, _root_guard) = fixture("silent-lane");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let now = chrono::Utc::now().timestamp();
+        let record = |unanswered: bool, last_model_turn: Option<i64>| {
+            let mut fields = serde_json::json!({
+                "started_at": now - 7200,
+                "last_progress": now - 600,
+                "output_hash": 0,
+                "reminder_unanswered": unanswered,
+            });
+            if let Some(turn) = last_model_turn {
+                fields["last_model_turn"] = turn.into();
+            }
+            let records = serde_json::json!({ "login · implement": fields });
+            std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+        };
+        let state = |status: crate::mux::LaneStatus| {
+            let mut l = lane("login · implement", &repo.root);
+            l.status = status;
+            let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[l], &[], None).unwrap();
+            rows.into_iter().find(|r| r.id == "login").unwrap()
+        };
+        let silent_secs = |row: &Row| match row.state {
+            State::Silent { secs } => secs,
+            _ => panic!("not silent: {}", row.state.word()),
+        };
+        let idle = crate::mux::LaneStatus::Idle;
+
+        // No record at all: a lane never reminded.
+        assert!(matches!(state(idle).state, State::Running));
+
+        record(true, Some(now - 1860));
+        let secs = silent_secs(&state(idle));
+        assert!((1860..1870).contains(&secs), "{secs}");
+
+        // No model turn on the record: it counts from the last write before
+        // the first reminder that drew no answer, not from `last_progress`,
+        // which every reminder sent again moves.
+        record(true, None);
+        let mut records: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(repo.lanes_file()).unwrap()).unwrap();
+        records["login · implement"]["quiet_since"] = (now - 1500).into();
+        std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+        let secs = silent_secs(&state(idle));
+        assert!((1500..1510).contains(&secs), "{secs}");
+
+        // Back at work: the record still says silent, herdr does not.
+        record(true, Some(now - 1860));
+        assert!(matches!(
+            state(crate::mux::LaneStatus::Working).state,
+            State::Running
+        ));
+
+        // herdr cannot tell: the lane may be at work, and the flag is one
+        // the dispatcher has stopped refreshing.
+        assert!(matches!(
+            state(crate::mux::LaneStatus::Unknown).state,
+            State::Running
+        ));
+
+        // Answered: the pass has cleared the flag.
+        record(false, Some(now - 5));
+        assert!(matches!(state(idle).state, State::Running));
+
+        record(true, Some(now - 1860));
+        let mut rows = vec![state(idle)];
+        let mut l = lane("login · implement", &repo.root);
+        l.status = idle;
+        finish_settled(&repo, &mut rows, &[l], &mut BTreeMap::new());
+        assert!(matches!(rows[0].state, State::Finished));
+    }
+
+    /// A `lanes.json` that does not parse draws the row as `Running` and
+    /// leaves the file and the problem log alone. The board reads it every
+    /// frame, so the dispatcher's own loader, which keeps a `.bad` copy and
+    /// logs it, appended the same line once a second while the board stayed
+    /// open.
+    #[test]
+    fn a_corrupt_lane_records_file_is_read_quietly_by_the_board() {
+        let (repo, _root_guard) = fixture("corrupt-lane-records");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        std::fs::write(repo.lanes_file(), "{ not json").unwrap();
+        let mut l = lane("login · implement", &repo.root);
+        l.status = crate::mux::LaneStatus::Idle;
+
+        for _ in 0..2 {
+            let rows =
+                build_rows(&repo, &tasks, &pipelines, &graph, &[l.clone()], &[], None).unwrap();
+            let row = rows.iter().find(|r| r.id == "login").unwrap();
+            assert!(matches!(row.state, State::Running), "{}", row.state.word());
+        }
+        assert!(!repo.lanes_file().with_extension("json.bad").exists());
+        assert!(!crate::problem_log::path(&repo).exists());
     }
 
     /// With no dispatcher up, a lane still in its turn counts — `Working`, a

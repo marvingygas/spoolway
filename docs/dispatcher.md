@@ -78,7 +78,7 @@ flowchart TD
   A[Fire any cron job due this minute] --> B[Reconcile every task]
   B --> B1[A lane settled: read its report, move the stage]
   B --> B2[A queued task whose dependencies are archived: mark it ready]
-  B --> B3[A silent lane: remind or escalate]
+  B --> B3[A lane that ended without reporting: remind, or escalate after three answered reminders]
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
   D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done, and started for a queued task about to launch]
@@ -318,6 +318,7 @@ stateDiagram-v2
 | `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
+| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step from the board with `s`. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
@@ -569,21 +570,38 @@ A lane can end its turn without calling `spoolway report`. A report filed after 
 started counts, however soon after, and the lane is not reminded. If the lane still has opening
 messages to receive, the pass types the next one instead. Otherwise:
 
-1. The next pass sends the report contract into the pane again.
-2. Each later pass where the transcript has grown sends another reminder, up to three.
-3. A lane whose transcript has not grown since the last reminder is escalated, with the last of
-   what the pane said in the task's `## Blocker`. An attended run parks the task on `paused`. An
-   unattended run sends it to `blocked`. `spoolway resume` restarts the step on the same session,
-   unless its last reply is past `prompt_cache_ttl`, in which case it opens fresh.
-4. A fourth due reminder escalates the task instead.
+1. Once the transcript has been quiet for `dispatch.lane_quiet`, the pass sends the report
+   contract into the pane.
+2. A reminder counts as answered when the lane writes a turn after it. On a claude lane the
+   turn must be the model's own. The reply Claude Code writes itself, such as a usage-limit
+   notice, does not answer anything.
+3. A reminder that was not answered is sent again after the next `lane_quiet` of silence. The
+   task stays on its step, in attended and unattended runs alike, and the repeat is not counted.
+   The lane record in `lanes.json` holds whether the last reminder is unanswered and when the
+   model last wrote a turn.
+4. A lane that has answered three reminders and still has not reported is escalated in place of
+   a fourth, with the last of what the pane said in the task's `## Blocker`. An attended run
+   parks the task on `paused`. An unattended run sends it to `blocked`. `spoolway resume`
+   restarts the step on the same session, unless its last reply is past `prompt_cache_ttl`, in
+   which case it opens fresh.
 
 A lane that still holds a process it started, such as a long build, is excused from reminders
-until `dispatch.lane_child_ceiling` (one hour by default), then escalated.
+until `dispatch.lane_child_ceiling` (one hour by default), then escalated the same way.
 
 A lane whose multiplexer reports it `blocked` is on a permission prompt. The board reads this
 live off the lane list every redraw: the row draws `● prompt` with the pane named in NEXT, and
 nothing is sent to it. The task's own stage does not move. Answer the prompt and the row reads
 `running` again on the next redraw.
+
+A lane whose last reminder is unanswered is silent. The board and `spoolway queue list` read
+this from the lane's record in `lanes.json` and draw `● silent · <time>`, for example
+`● silent · 31m`. The time counts from the model's last turn, in whole minutes below an hour.
+A lane with no model turn counts from its last write before the first reminder it left
+unanswered. A repeated reminder does not restart the time.
+The task's own stage does not move. A usage limit clears by itself, and the row
+reads `running` again once the lane writes a turn. A lane that will never answer, such as a
+dead pane or an out-of-date harness, stays silent. Nothing escalates it, so restart the step
+from the board with `s`.
 
 ## A step that carries its own session
 
@@ -616,7 +634,7 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
-| Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
+| Reminder loop | Three answered reminders. A silent lane is reminded again and never counted. | Anything the lane writes to its transcript. On a claude lane, a turn the model wrote. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
 When a loop budget runs out, the task parks on `blocked`.
@@ -629,8 +647,8 @@ or to `paused`, depending on the cause and the run.
 | Cause | Attended run | [Unattended run](pipelines.md#unattended-runs) |
 |---|---|---|
 | A step reported a block, a launch failed, or a loop budget ran out | `blocked` | `blocked` |
-| A lane ended without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
-| The `blocked` lane itself went quiet, or could not be started | `paused` | `paused` |
+| A lane answered three reminders without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
+| The `blocked` lane itself answered three reminders without reporting, or could not be started | `paused` | `paused` |
 
 In an attended run the board marks a `blocked` row amber and names the pane in NEXT. The task
 waits for `spoolway resume`. A task on `paused` waits for `spoolway resume` too.

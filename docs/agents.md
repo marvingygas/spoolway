@@ -277,10 +277,16 @@ step in that state.
 
 No profile carries a timeout. A busy lane runs until its turn ends.
 
-A lane whose turn ended without `spoolway report` is sent the report contract again, up to
-three times, each time it has written something since the last reminder. A lane that stays
-quiet after a reminder is blocked on the next pass. Silence is read off the transcript file,
-not the pane.
+A lane whose turn ended without `spoolway report` is sent the report contract again once it
+has been quiet for `dispatch.lane_quiet`. A lane that answers three reminders and still has
+not reported is escalated in place of a fourth. A reminder the lane does not answer is sent
+again after the next `lane_quiet`, never counted, and never moves the task, so a usage limit
+that silences a lane ends when the harness resumes it. The lane record keeps whether the last
+reminder went unanswered.
+
+On a claude lane only a turn the model wrote counts as an answer. The reply Claude Code writes
+itself, such as a usage-limit notice, does not. Silence is otherwise read off the transcript
+file, not the pane.
 
 ## What confines a profile
 

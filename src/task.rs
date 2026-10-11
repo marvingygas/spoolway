@@ -202,7 +202,7 @@ pub struct Frontmatter {
     /// set. Three gestures set it — a person's own keypress (the
     /// board's `p`), a person's own Escape typed into the pane (see
     /// `Dispatcher::park_after_interrupt`), and a lane `Dispatcher::
-    /// escalate_clock` gave up on for going quiet — and [`Self::escalated`]
+    /// escalate_clock` gave up on — and [`Self::escalated`]
     /// is what tells the last of those apart from the first two once a lane
     /// resumes here. Read back by [`crate::commands::resume`], which puts the
     /// task back on this step rather than treating the stop as a block to

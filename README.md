@@ -154,6 +154,7 @@ Every task on the board is in one of a few states:
 | `starting` | A slot is claimed and the lane is booting. |
 | `running` | An agent is working the task's current step. |
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
+| `silent` | A lane has not answered the last reminder, shown as `● silent · 31m`. The task stays on its step. A lane that never answers needs the step restarted from the board. |
 | `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
 | `blocked` | A step reported a block and needs help. An unattended run hands it to the unblocker prompt. |
 | `done` | Finished: the worktree removed, the task archived. |

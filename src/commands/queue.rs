@@ -148,6 +148,7 @@ fn state_label(state: crate::status::State) -> &'static str {
     match state {
         Paused => "paused",
         Running => "running",
+        Silent { .. } => "silent",
         Starting => "starting",
         Finished => "finished",
         Blocked => "blocked",
@@ -8563,6 +8564,19 @@ mod tests {
         let rendered = serde_json::to_string(&json[1]).unwrap();
         assert!(!rendered.contains("waiting_on_you"), "{rendered}");
         assert!(!rendered.contains("parked"), "{rendered}");
+    }
+
+    /// A silent lane's row is `"state": "silent"` — a plain identifier like
+    /// every other state, with none of the time the table draws after it.
+    #[test]
+    fn queue_json_calls_a_silent_lane_silent() {
+        use crate::status::State;
+        use crate::status::testutil::row;
+
+        let mut silent = row("quiet");
+        silent.state = State::Silent { secs: 1864 };
+        let json = QueueRowJson::from(&silent);
+        assert_eq!(json.state, "silent");
     }
 
     /// A task stranded behind a block is `"state": "queued"` like every

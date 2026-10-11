@@ -477,8 +477,11 @@ pub struct DispatchConfig {
     /// is to wait long enough that silence means something.
     ///
     /// This bounds the wait before *each* reminder, not the whole round trip:
-    /// `MAX_REMINDERS` still caps it at three, so a genuinely dead lane is
-    /// escalated after four of these rather than sitting forever.
+    /// `MAX_REMINDERS` still caps the reminders a lane answers at three, so a
+    /// lane that answers each and never reports is escalated after four of
+    /// these. A lane that answers none is reminded again after each one and
+    /// stays on its step: silence is what a usage limit looks like, and the
+    /// harness recovers from one by itself.
     #[serde(with = "human_duration")]
     pub lane_quiet: Duration,
 
@@ -680,7 +683,9 @@ impl Default for DispatchConfig {
             // minutes the shipped pipelines allow their longest command —
             // `scripts/gate.sh` and `scripts/e2e-pr.sh` both carry
             // `timeout: 45m` — so an agent step running that same gate by hand
-            // is never the thing this catches; a lane that is really dead still
+            // is never the thing this catches. A lane that is really dead is
+            // not escalated: it is reminded again every one of these. Only a
+            // lane that answers `MAX_REMINDERS` reminders and never reports
             // escalates, four of these later.
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),

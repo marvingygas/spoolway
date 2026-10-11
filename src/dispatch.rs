@@ -135,8 +135,9 @@ fn mmss(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// How many times [`Dispatcher::check_unreported`] reminds a settled lane
-/// before giving up and escalating instead of sending a fourth.
+/// How many reminders a settled lane may answer, and still not report, before
+/// [`Dispatcher::check_unreported`] escalates instead of sending a fourth.
+/// A reminder that draws no answer is not counted.
 ///
 /// Not configurable until something asks for that: three is patience enough
 /// for a person genuinely mid-answer, and a ceiling that never bites is the
@@ -313,22 +314,60 @@ pub(crate) struct LaneRecord {
     /// When this lane was last sent the report contract again, in
     /// `last_progress`'s own clock. `None` until the first reminder.
     ///
-    /// The whole rule `check_unreported` runs is one comparison against this:
-    /// due for another reminder exactly when `last_progress` has moved past
-    /// it, which is to say the lane has written something since. Nothing
-    /// resets it early — a lane going back to work and settling again is
-    /// judged the same way the next time, by whether it wrote anything in
+    /// The baseline an answer is measured against: the lane has answered a
+    /// reminder once it has written past this. For a claude lane the write
+    /// that counts is the model's own turn, `last_model_turn`; for every other
+    /// lane it is any write, `last_progress`. Whether a reminder is due again
+    /// is not decided here — see `reminder_unanswered` and `reminder_sent_at`.
+    /// Nothing resets this early: a lane going back to work and settling again
+    /// is judged the same way the next time, by whether it wrote anything in
     /// between.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reminded_at: Option<i64>,
-    /// How many times this lane has been sent the report contract again.
+    /// How many reminders this lane has answered, plus the one in flight.
     ///
     /// Lives beside `reminded_at` and needs no clearing: it counts up for the
     /// life of the record and dies with it, the same way `reminded_at` does.
-    /// `check_unreported` reads it to cap the round trip — a lane genuinely
-    /// waiting on a person gets patience, but not an unbounded amount of it.
+    /// `check_unreported` reads it to cap the round trip — a lane that
+    /// answers and still never reports gets patience, but not an unbounded
+    /// amount of it. A reminder sent again because the last one drew no
+    /// answer does not count a second time, so silence alone never reaches
+    /// the cap.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     reminders: u32,
+    /// Whether the last reminder has drawn no answer yet. Refreshed by
+    /// [`Dispatcher::note_progress`] on every look at a settled lane, so the
+    /// board can read "silent" off the saved record without opening the
+    /// transcript itself.
+    ///
+    /// For a claude lane an answer is a turn the model wrote after the
+    /// reminder — see `last_model_turn`. For every other lane it is any write
+    /// to the transcript, or to the pane for a lane with no transcript.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reminder_unanswered: bool,
+    /// When the last reminder was typed into the lane, in Unix seconds. The
+    /// wait before a reminder that drew no answer is sent again runs from here
+    /// as well as from `last_progress`, which a silent lane never moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reminder_sent_at: Option<i64>,
+    /// When the model last wrote a turn in this lane's transcript, in Unix
+    /// seconds. `None` until [`Dispatcher::note_progress`] reads one, and
+    /// always `None` for a kind whose transcript carries no harness replies,
+    /// where `last_progress` already says as much. The board reads it beside
+    /// `reminder_unanswered` to show how long a lane has been silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model_turn: Option<i64>,
+    /// The lane's last write before the first reminder it left unanswered,
+    /// in Unix seconds, kept while that reminder and every one sent again
+    /// after it stay unanswered, and cleared with `reminder_unanswered`.
+    ///
+    /// What the board's `● silent` counts from when there is no
+    /// `last_model_turn` to count from. `last_progress` cannot stand in: a
+    /// reminder sent again moves it, by changing the pane's hash or by being
+    /// written to the transcript itself, so a lane dead for hours would read
+    /// as quiet for a few minutes after every one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quiet_since: Option<i64>,
     /// Session id handed to this lane's agent, and what its transcript is
     /// found by once the lane settles. Empty for a lane started by a spoolway
     /// that predates the ledger, or by a project whose `args` drop
@@ -447,6 +486,22 @@ impl LaneRecord {
         self.busy_s = 0;
     }
 
+    /// When this lane last spoke, if its last reminder is still unanswered,
+    /// in Unix seconds: the board's `● silent` counts from here. `None` for a
+    /// lane that was never reminded or answered its last reminder.
+    ///
+    /// The model's own last turn where one was read. Otherwise the lane's
+    /// last write before the first reminder it left unanswered — see
+    /// `quiet_since` — and `last_progress` only for a record saved before
+    /// that field existed.
+    pub(crate) fn silent_since(&self) -> Option<i64> {
+        self.reminder_unanswered.then(|| {
+            self.last_model_turn
+                .or(self.quiet_since)
+                .unwrap_or(self.last_progress)
+        })
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and
@@ -462,6 +517,10 @@ impl LaneRecord {
             done_banked: false,
             reminded_at: None,
             reminders: 0,
+            reminder_unanswered: false,
+            reminder_sent_at: None,
+            last_model_turn: None,
+            quiet_since: None,
             session: String::new(),
             kind: String::new(),
             agent: String::new(),
@@ -2721,6 +2780,13 @@ impl<'a> Dispatcher<'a> {
                 record.busy_s += elapsed;
             }
             record.busy_polled_at = Some(now);
+            // A lane at work is not silent, and `note_progress` only runs for
+            // a settled lane, so nothing else would clear a flag set by an
+            // earlier reminder the lane has since got past.
+            if lane.status == LaneStatus::Working {
+                record.reminder_unanswered = false;
+                record.quiet_since = None;
+            }
         }
     }
 
@@ -3309,6 +3375,31 @@ impl<'a> Dispatcher<'a> {
             .filter(|record| !record.session.is_empty() && !record.kind.is_empty())
             .and_then(|record| crate::usage::last_written(&record.kind, &record.session));
 
+        // Only for a kind that writes harness replies into its transcript. The
+        // file's write time cannot tell those from the model's own turns, so
+        // an answer to a reminder is read off the turns themselves.
+        let reads_turns = wrote_at.is_some()
+            && self
+                .lanes
+                .get(&lane.name)
+                .is_some_and(|record| crate::usage::writes_synthetic_turns(&record.kind));
+
+        // Reading them means walking the session directory and parsing the whole
+        // transcript, and a silent lane stays settled for as long as the harness
+        // takes to come back, which can be hours. So the read is skipped while
+        // the file has not been written since a pass that already read it: the
+        // last model turn cannot have moved. `last_progress` is that pass's
+        // mark, because it only ever moves up to the file's write time.
+        let model_turn = self
+            .lanes
+            .get(&lane.name)
+            .filter(|record| {
+                reads_turns
+                    && !(record.last_model_turn.is_some()
+                        && wrote_at.is_some_and(|at| at <= record.last_progress))
+            })
+            .map(|record| crate::usage::last_model_turn(&record.kind, &record.session));
+
         let fallback = match wrote_at {
             Some(_) => None,
             None => Some(hash_of(&self.mux.read(&lane.name, 60).unwrap_or_default())),
@@ -3336,6 +3427,29 @@ impl<'a> Dispatcher<'a> {
                 }
             }
             (None, None) => {}
+        }
+
+        // Whether the reminder in flight has been answered. A claude lane
+        // answers with a turn the model wrote after the reminder; a harness
+        // reply such as a usage limit moves `last_progress` but is not one. The
+        // comparison is strict because the reminder's baseline can be the
+        // write time of the model's own last turn, which is not an answer.
+        if let Some(turn) = model_turn {
+            record.last_model_turn = turn.or(record.last_model_turn);
+        }
+        record.reminder_unanswered = record.reminded_at.is_some_and(|reminded_at| {
+            if reads_turns {
+                record
+                    .last_model_turn
+                    .is_none_or(|turn| turn <= reminded_at)
+            } else {
+                record.last_progress <= reminded_at
+            }
+        });
+        // An answered lane is not silent, and its next silence counts from
+        // the next reminder it leaves unanswered.
+        if !record.reminder_unanswered {
+            record.quiet_since = None;
         }
 
         // A second signal, independent of the transcript above: a lane mid
@@ -3417,12 +3531,12 @@ impl<'a> Dispatcher<'a> {
         ))
     }
 
-    /// Tear a lane down for failing the dispatcher's one remaining check — a
-    /// settled lane that never reported — and hand its task to `blocked` in an
-    /// unattended run, else to `paused`, with `reason` as the whole of what a
-    /// person reads. The busy-lane watchdog
-    /// that used to share this with [`Dispatcher::check_unreported`] is gone:
-    /// a busy lane is never escalated any more, whatever it is doing.
+    /// Tear a lane down for a fault only a person or the unblocker can clear —
+    /// a lane that answered every reminder and still never reported, or one
+    /// holding a process past `dispatch.lane_child_ceiling` — and hand its task
+    /// to `blocked` in an unattended run, else to `paused`, with `reason` as
+    /// the whole of what a person reads. A lane that merely stops writing is
+    /// not one of these: [`Dispatcher::check_unreported`] reminds it again.
     fn escalate_clock(
         &mut self,
         task: &mut Task,
@@ -3596,24 +3710,21 @@ impl<'a> Dispatcher<'a> {
     /// a person's own words through. A lane that forgot acts on it; a lane
     /// genuinely stuck on a question gets a message that costs it nothing.
     ///
-    /// The rule is one comparison: remind a lane that has written to its
-    /// transcript since its last reminder, or has never been reminded at all.
-    /// Capped at three — a lane genuinely waiting on a person deserves
-    /// patience, but not an hour of it purely because its replies count as
-    /// progress. The count lives on the lane record beside `reminded_at` and
-    /// needs no clearing: it dies with the record.
+    /// A lane is reminded when it has never been reminded, or when its last
+    /// reminder was answered, meaning it wrote something since. Capped at
+    /// three answered reminders — a lane genuinely waiting on a person
+    /// deserves patience, but not an hour of it purely because its replies
+    /// count as progress. The count lives on the lane record beside
+    /// `reminded_at` and needs no clearing: it dies with the record.
     ///
-    /// Two exits bound the loop, both counted rather than timed. A lane
-    /// reminded three times and still not reporting is escalated in the
-    /// `due` branch below rather than sent a fourth reminder. And a lane that
-    /// goes fully quiet *after* a reminder — nothing further in its
-    /// transcript — is the dead session a reminder cannot reach, because
-    /// there is no lane left running to act on the message; that is the `not
-    /// due` branch, and it escalates on the very next pass rather than
-    /// waiting out a clock that no longer exists. A lane is due for another
-    /// reminder only once it has written something since the last one, so a
-    /// lane that goes silent right after being reminded is never due again —
-    /// without this exit it would sit on its step forever.
+    /// One exit bounds the loop, and it is counted rather than timed. A lane
+    /// that answers three reminders and still has not reported is escalated in
+    /// place of a fourth. A reminder the lane does not answer is the other
+    /// case, and it is not an exit: the lane stays on its step and is reminded
+    /// again once `dispatch.lane_quiet` has passed, however many times that
+    /// takes, and none of those repeats count toward the three. Whether a
+    /// reminder was answered is [`LaneRecord::reminder_unanswered`], which
+    /// [`Dispatcher::note_progress`] keeps current.
     ///
     /// Runs for every settled lane alike, gated step or not — there is no
     /// exemption left to make here; see the caller. A person taking an hour to
@@ -3631,8 +3742,9 @@ impl<'a> Dispatcher<'a> {
     ) -> Result<()> {
         // A lane sitting on its own kind's usage-limit message reaches here
         // exactly like any other quiet pane — nothing upstream singles it
-        // out any more, so it is reminded and, past `MAX_REMINDERS`,
-        // escalated the same as a lane that simply forgot to report.
+        // out, so it is reminded again every `lane_quiet` and never
+        // escalated for it: the limit's reply is not an answer, and an
+        // unanswered reminder does not count toward `MAX_REMINDERS`.
         let now = now_secs();
         let silent_for = self.note_progress(lane, now);
 
@@ -3662,76 +3774,96 @@ impl<'a> Dispatcher<'a> {
             return Ok(());
         }
 
+        // `dispatch.lane_quiet` before the first reminder, and before every one
+        // after it. `note_progress` reads `last_progress` off the transcript's
+        // own write time rather than off this pass noticing it, so the pass
+        // that first sees a lane settled can already read a few seconds of
+        // silence just from catching up.
+        //
+        // This used to be `dispatch.interval`, which is a different quantity
+        // wearing the same name: how often a pass looks at a lane, not how
+        // long that lane may be quiet. At the shipped ten seconds it meant a
+        // lane had ten seconds to speak or be nudged, and a step whose prompt
+        // runs the end-to-end `pr` tier — which `assets/prompts/e2e` requires,
+        // and which the shipped `suite` step allows 45 minutes — ends its turn
+        // and waits on a background job. Three reminders and an escalation
+        // later, a lane doing exactly what it was told was sitting on `blocked`
+        // inside a minute, having burned a turn answering each nudge.
+        //
+        // After a reminder nobody answered, the wait runs from when that
+        // reminder went out as well. The transcript's write time alone would
+        // leave a lane that stays still due on every pass, since nothing moves
+        // it: a reminder typed into a dead session on each poll.
         let record = self.lanes.get(&lane.name);
-        let last_progress = record.map_or(now, |r| r.last_progress);
-        let due = match record.and_then(|r| r.reminded_at) {
-            None => true,
-            Some(reminded_at) => last_progress > reminded_at,
-        };
-
-        if due {
-            // `dispatch.lane_quiet` before the first reminder, and before
-            // every one after it. `note_progress` reads `last_progress` off
-            // the transcript's own write time rather than off this pass
-            // noticing it, so the pass that first sees a lane settled can
-            // already read a few seconds of silence just from catching up.
-            //
-            // This used to be `dispatch.interval`, which is a different
-            // quantity wearing the same name: how often a pass looks at a
-            // lane, not how long that lane may be quiet. At the shipped ten
-            // seconds it meant a lane had ten seconds to speak or be nudged,
-            // and a step whose prompt runs the end-to-end `pr` tier — which
-            // `assets/prompts/e2e` requires, and which the shipped `suite`
-            // step allows 45 minutes — ends its turn and waits on a
-            // background job. Three reminders and an escalation later, a lane
-            // doing exactly what it was told was sitting on `blocked` inside
-            // a minute, having burned a turn answering each nudge.
-            if silent_for < self.repo.config.dispatch.lane_quiet {
-                return Ok(());
-            }
-
-            // The ceiling: three reminders is the whole of the patience this
-            // extends. A fourth due reminder is not a fourth chance, it is the
-            // same silent lane costing another round — so this escalates in
-            // its place, naming the lane and the pane a person would have to
-            // go look at.
-            let reminders = record.map_or(0, |r| r.reminders);
-            if reminders >= MAX_REMINDERS {
-                let reason = format!(
-                    "reminded {reminders} times and never reported — its pane is `{}`",
-                    lane.pane_id
-                );
-                self.escalate_clock(task, pipeline, step, lane, &reason, report)?;
-                return Ok(());
-            }
-
-            let nudge = crate::compose::reminder_prompt(task, pipeline, step);
-            self.mux.prompt(&lane.name, &nudge)?;
-            // Baselined *after* the nudge lands, not before. A lane with no
-            // session to read its transcript by falls back to hashing the
-            // pane itself, and typing the nudge into that pane is a write by
-            // this dispatcher's own hand — folded in here, rather than left
-            // for the next pass to discover, so it never reads back as the
-            // lane's own and reminds it forever for having said nothing.
-            self.note_progress(lane, now_secs());
-            if let Some(record) = self.lanes.get_mut(&lane.name) {
-                record.reminded_at = Some(record.last_progress);
-                record.reminders += 1;
-            }
-            report.actions.push(format!(
-                "{}: reminded at `{}` to report ({}/{MAX_REMINDERS})",
-                task.id(),
-                step.id,
-                reminders + 1
-            ));
+        let reminders = record.map_or(0, |r| r.reminders);
+        let unanswered = record.is_some_and(|r| r.reminder_unanswered);
+        // Kept from the first reminder that drew no answer while this one is
+        // sent again, or else the last write, read before the nudge below
+        // moves `last_progress` — see `quiet_since`.
+        let quiet_since = record
+            .filter(|r| r.reminder_unanswered)
+            .and_then(|r| r.quiet_since)
+            .or(record.map(|r| r.last_progress));
+        let since_reminder = record
+            .filter(|r| r.reminder_unanswered)
+            .and_then(|r| r.reminder_sent_at)
+            .map(|sent| Duration::from_secs((now - sent).max(0) as u64));
+        if silent_for.min(since_reminder.unwrap_or(silent_for))
+            < self.repo.config.dispatch.lane_quiet
+        {
             return Ok(());
         }
 
-        // Reminded, and nothing since — not a lane declining to report, but
-        // the dead session a reminder cannot help. There is no clock left to
-        // wait out: the pass that finds this pauses it on the spot.
-        let reason = "produced no output since its last reminder".to_string();
-        self.escalate_clock(task, pipeline, step, lane, &reason, report)?;
+        // The ceiling: three answered reminders is the whole of the patience
+        // this extends. A fourth is not a fourth chance, it is the same lane
+        // costing another round without reporting — so this escalates in its
+        // place, naming the lane and the pane a person would have to go look
+        // at. A reminder nobody answered never gets here: silence is what a
+        // usage limit and a dead session both look like, and escalating it
+        // parked a task for six hours that Claude Code resumed by itself.
+        if !unanswered && reminders >= MAX_REMINDERS {
+            let reason = format!(
+                "reminded {reminders} times and never reported — its pane is `{}`",
+                lane.pane_id
+            );
+            self.escalate_clock(task, pipeline, step, lane, &reason, report)?;
+            return Ok(());
+        }
+
+        let nudge = crate::compose::reminder_prompt(task, pipeline, step);
+        self.mux.prompt(&lane.name, &nudge)?;
+        // Baselined *after* the nudge lands, not before. A lane with no
+        // session to read its transcript by falls back to hashing the pane
+        // itself, and typing the nudge into that pane is a write by this
+        // dispatcher's own hand — folded in here, rather than left for the
+        // next pass to discover, so it never reads back as the lane's own and
+        // reminds it forever for having said nothing.
+        self.note_progress(lane, now_secs());
+        if let Some(record) = self.lanes.get_mut(&lane.name) {
+            record.reminded_at = Some(record.last_progress);
+            record.reminder_unanswered = true;
+            record.reminder_sent_at = Some(now_secs());
+            // Set again whatever the `note_progress` above made of it. On a
+            // lane judged by any write, the nudge can move `last_progress`
+            // past the last reminder, which reads there as an answer and
+            // clears this with the flag.
+            record.quiet_since = quiet_since;
+            // The reminder before this one drew no answer, so it never counted
+            // and this one takes its place.
+            if !unanswered {
+                record.reminders += 1;
+            }
+        }
+        let note = if unanswered {
+            "again, the last one drew no answer".to_string()
+        } else {
+            format!("{}/{MAX_REMINDERS}", reminders + 1)
+        };
+        report.actions.push(format!(
+            "{}: reminded at `{}` to report ({note})",
+            task.id(),
+            step.id
+        ));
         Ok(())
     }
 
@@ -4654,6 +4786,10 @@ impl<'a> Dispatcher<'a> {
                             done_banked: false,
                             reminded_at: None,
                             reminders: 0,
+                            reminder_unanswered: false,
+                            reminder_sent_at: None,
+                            last_model_turn: None,
+                            quiet_since: None,
                             session: started.session,
                             kind: pending[i].kind.clone(),
                             agent: pending[i].agent_name.clone(),
@@ -6713,10 +6849,10 @@ fn boot_prompt(mux: &dyn Mux, boot: &Boot, persisted: bool) -> Result<Started> {
     // reads it as a lane hard at work: it is in `herdr agent list`, so no
     // pass re-staffs the step, and the board draws the task as `running`.
     // Nothing corrects that until `dispatch.lane_quiet` runs out — fifteen
-    // minutes, shipped — and what arrives then is three reminders to report,
-    // sent to a session that was never told what to do, followed by an
-    // escalation to `paused`. The better part of an hour, and then a stop
-    // for a person, over a prompt the very next pass would have delivered.
+    // minutes, shipped — and what arrives then is a reminder to report,
+    // sent to a session that was never told what to do, and another every
+    // `lane_quiet` after it. The task sits there indefinitely, over a prompt
+    // the very next pass would have delivered.
     //
     // Torn down here instead, so the step is simply unstaffed again. The
     // task keeps the `attempts` and `launched_at` `finish_launch_bookkeeping`
@@ -7293,7 +7429,10 @@ pub(crate) fn lane_session_in(
     ledger: &[crate::usage::Entry],
     lane: &str,
 ) -> Option<(String, String)> {
-    if let Some(record) = load_lane_records(repo).get(lane)
+    // `peek_lane_records`, not `load_lane_records`: the board calls this for
+    // every live lane on every frame, and a corrupt file must not be logged
+    // to the problem log once a second while it stays open.
+    if let Some(record) = peek_lane_records(repo).get(lane)
         && !record.session.is_empty()
         && !record.kind.is_empty()
     {
@@ -7612,6 +7751,21 @@ pub(crate) fn live_lane_sessions(repo: &Repo) -> HashSet<String> {
         .map(|record| record.session)
         .filter(|session| !session.is_empty())
         .collect()
+}
+
+/// `lanes.json` as it stands, for a reader that never saves it back: the
+/// board, which reads it every frame, and a lookup of one lane's session.
+///
+/// A file that does not parse reads as no records, and nothing is written.
+/// [`load_lane_records`] keeps a `.bad` copy and logs it to the problem log,
+/// which is right once, before a pass overwrites the file. Done by a board on
+/// every frame, it appended the same line once a second for as long as the
+/// board stayed open, about a pass that was not running.
+pub(crate) fn peek_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
+    std::fs::read_to_string(lanes_path(repo))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
@@ -13712,9 +13866,9 @@ mod tests {
     /// failed launch can take, because it does not look like a failure. The
     /// session is up and listed, so every later pass reads the step as
     /// staffed and the board draws the task as running — for the whole of
-    /// `dispatch.lane_quiet`, then three reminders to report sent to a
-    /// session nobody ever told what to do, then `blocked`. Taking the lane
-    /// back here is what turns that hour into one retry.
+    /// `dispatch.lane_quiet`, then a reminder to report sent to a session
+    /// nobody ever told what to do, and another every `lane_quiet` after it.
+    /// Taking the lane back here is what turns that hour into one retry.
     #[test]
     fn a_prompt_that_never_lands_takes_its_lane_back_with_it() {
         let (repo, _root_guard) = fixture("prompt-leak");
@@ -13885,6 +14039,49 @@ mod tests {
         assert!(task.front.escalated, "saved with the move, not after it");
     }
 
+    /// Move only the time the last reminder went out back by `how_long`,
+    /// leaving every other clock on the record where it is — for a lane whose
+    /// transcript carries absolute timestamps that `age_lane` would put out of
+    /// step with the record.
+    fn age_reminder(repo: &Repo, lane: &str, how_long: Duration) {
+        let mut records = load_lane_records(repo);
+        let record = records.get_mut(lane).unwrap();
+        let sent = record.reminder_sent_at.as_mut().expect("reminded before");
+        *sent -= how_long.as_secs() as i64;
+        save_lane_records(repo, &records).unwrap();
+    }
+
+    /// Mark the reminder a lane was last sent as answered, the way a lane
+    /// that wrote after it would have: modelled on the record rather than a
+    /// real transcript, which the lane in these tests does not have.
+    fn answer_reminder(repo: &Repo, lane: &str) {
+        age_lane(repo, lane, Duration::from_secs(20));
+        let mut records = load_lane_records(repo);
+        let record = records.get_mut(lane).unwrap();
+        let reminded_at = record.reminded_at.expect("reminded on the pass before");
+        record.last_progress = reminded_at + 8;
+        save_lane_records(repo, &records).unwrap();
+    }
+
+    /// Run a lane through the one escalation a settled lane still has: it
+    /// answers every reminder and never reports. Returns the pass that
+    /// escalates it.
+    fn run_to_the_reminder_ceiling(
+        repo: &Repo,
+        mux: &FakeMux,
+        lane: &str,
+        pass: impl Fn() -> Report,
+    ) -> Report {
+        pass();
+        for _ in 0..MAX_REMINDERS {
+            age_lane(repo, lane, Duration::from_secs(15));
+            pass();
+            answer_reminder(repo, lane);
+        }
+        mux.clear_calls();
+        pass()
+    }
+
     /// A repo whose runs stop for nobody.
     ///
     /// Set on the config rather than through a lock, because a fixture has no
@@ -13900,9 +14097,9 @@ mod tests {
     /// hand an escalation to, so the task parks on `paused` as an attended
     /// run's would.
     ///
-    /// Driven through the reminder loop, which catches a lane going wrong
-    /// rather than a person being needed, so unlike `loop` and the launch
-    /// ceiling it keeps its teeth in both modes.
+    /// Driven through the reminder loop's ceiling, which catches a lane going
+    /// wrong rather than a person being needed, so unlike `loop` and the
+    /// launch ceiling it keeps its teeth in both modes.
     #[test]
     fn an_unattended_escalation_without_a_blocked_step_pauses() {
         let (repo, _root_guard) = unattended_fixture("unattended-resume");
@@ -13916,17 +14113,9 @@ mod tests {
         // between passes, and the reminder below has to land on the pane it
         // is measured against next, not a fresh empty one.
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
-        run_pass_with(&repo, &mux, &pipelines);
-        // A pass later it is reminded rather than escalated — unattended is no
-        // exception, since it is still the same lane and the same pane.
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-        run_pass_with(&repo, &mux, &pipelines);
-        assert_eq!(reload(&path).stage(), "implement", "reminded, not paused");
-        // Nothing written since that reminder: the dead session a reminder
-        // could not reach. One quiet pass is all it takes now — no clock to
-        // wait out.
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-        run_pass_with(&repo, &mux, &pipelines);
+        run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || {
+            run_pass_with(&repo, &mux, &pipelines)
+        });
 
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
@@ -13953,11 +14142,7 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-        run_pass(&repo, &mux);
+        run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || run_pass(&repo, &mux));
 
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::BLOCKED);
@@ -13986,16 +14171,14 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-        run_pass(&repo, &mux);
+        run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || run_pass(&repo, &mux));
 
         let task = reload(&path);
         let log = task.section("## Status Log").unwrap_or_default();
         assert!(
-            log.contains("produced no output since its last reminder"),
+            log.contains(&format!(
+                "reminded {MAX_REMINDERS} times and never reported"
+            )),
             "{log}"
         );
     }
@@ -14366,20 +14549,20 @@ mod tests {
         assert_eq!(task.front.attempts, 0);
 
         // A day later it is reminded rather than paused outright — an
-        // ungated step that ended its turn without reporting still gets the
-        // same one round of patience any settled lane does.
+        // ungated step that ended its turn without reporting gets the same
+        // reminder any settled lane does.
         age_lane(&repo, "demo · document", Duration::from_secs(86_400));
         mux.clear_calls();
         run_pass(&repo, &mux);
         assert_eq!(reload(&path).stage(), "document", "reminded, not paused");
 
-        // Nothing follows the reminder, and there is no clock left to wait
-        // out: the very next pass pauses it.
+        // Nothing follows the reminder: it is sent again once the lane has
+        // been quiet for `lane_quiet`, and the task stays where it is.
+        age_lane(&repo, "demo · document", Duration::from_secs(700));
         mux.clear_calls();
         run_pass(&repo, &mux);
-        let task = reload(&path);
-        assert_eq!(task.stage(), crate::pipeline::PAUSED);
-        assert_eq!(task.front.parked_from.as_deref(), Some("document"));
+        assert_eq!(reload(&path).stage(), "document", "reminded again");
+        assert_eq!(mux.did("prompt").len(), 1);
     }
 
     /// A gate used to exempt its lane from the silence clock, because the lane
@@ -14387,7 +14570,7 @@ mod tests {
     /// morning was the feature. Nothing holds a question any more: the lane
     /// works, reports and ends, and the waiting happens after it on `paused`. So
     /// a lane still sitting on a gated step is a lane that never reported, and
-    /// it is reminded and then paused exactly like one on any other step.
+    /// it is reminded exactly like one on any other step.
     #[test]
     fn a_gated_lane_that_never_reported_is_clocked_like_any_other() {
         let (repo, _root_guard) = fixture("gate-forever");
@@ -14415,15 +14598,14 @@ mod tests {
             .unwrap();
         assert_eq!(reload(&path).stage(), "release", "reminded, not paused");
 
-        // Nothing follows the reminder, and there is no clock left to wait
-        // out: the very next pass pauses it.
+        // Nothing follows the reminder: it is sent again, and the task stays.
+        age_lane(&repo, "demo · release", Duration::from_secs(700));
         mux.clear_calls();
         Dispatcher::new(&repo, &pipelines, &mux)
             .pass(&mut || {})
             .unwrap();
-        let task = reload(&path);
-        assert_eq!(task.stage(), crate::pipeline::PAUSED);
-        assert_eq!(task.front.parked_from.as_deref(), Some("release"));
+        assert_eq!(reload(&path).stage(), "release", "reminded again");
+        assert_eq!(mux.did("prompt").len(), 1);
     }
 
     /// The shape a project reaching for `gate:` writes: one step that changes
@@ -14521,11 +14703,12 @@ mod tests {
     /// `spoolway report`. The opening prompt asks for it in as many words; a
     /// model that ignores that used to leave its task sitting on the step for the
     /// rest of the day with a live session billing for nothing. Now it is sent
-    /// the report contract again — as often as it takes — and only a lane that
-    /// goes fully quiet *after* a reminder ever reaches `paused`.
+    /// the report contract again — as often as it takes — and a lane that goes
+    /// quiet after a reminder is sent it again rather than moved, since a usage
+    /// limit looks exactly like that.
     // covers: dispatch.lane_quiet — how long a lane may say nothing before it is reminded
     #[test]
-    fn a_lane_that_settles_without_reporting_is_reminded_then_paused_once_it_goes_dead() {
+    fn a_lane_that_settles_without_reporting_is_reminded_and_a_silent_one_again() {
         let (repo, _root_guard) = fixture("unreported");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -14568,40 +14751,44 @@ mod tests {
         );
         mux.clear_calls();
 
-        // Nothing written since that reminder: the dead session no reminder
-        // can reach. One quiet pass is all it takes — there is no clock to
-        // wait out any more.
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-        let report = run_pass(&repo, &mux);
+        // Passes that follow at once are inside the wait the reminder started:
+        // a lane that stays still is not typed into on every poll.
+        for _ in 0..3 {
+            run_pass(&repo, &mux);
+        }
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+        assert_eq!(reload(&path).stage(), "implement");
 
-        let task = reload(&path);
-        assert_eq!(task.stage(), crate::pipeline::PAUSED);
-        assert_eq!(
-            task.front.parked_from.as_deref(),
-            Some("implement"),
-            "resuming has to carry it back onto the step that never reported"
-        );
-        assert!(
-            task.section("## Status Log")
-                .unwrap()
-                .contains("produced no output since its last reminder"),
-            "the log has to say what is actually wrong: {:?}",
-            task.section("## Status Log")
-        );
-        assert!(
-            mux.did("stop").is_empty(),
-            "the session a person now has to read must still be there to read"
-        );
-        assert_eq!(
-            mux.did("focus"),
-            vec!["focus demo · implement"],
-            "and it must be what they are looking at"
-        );
-        assert!(
-            report.actions.iter().any(|line| line.contains("stuck at")),
-            "got {:?}",
-            report.actions
-        );
+        // Nothing written since that reminder, however long it stays so. Each
+        // quiet stretch is another reminder, never a move, and none of them
+        // counts toward the cap of three.
+        for round in 1..=MAX_REMINDERS + 2 {
+            age_lane(&repo, "demo · implement", Duration::from_secs(700));
+            let report = run_pass(&repo, &mux);
+            assert_eq!(reload(&path).stage(), "implement", "round {round}");
+            assert_eq!(
+                mux.did("prompt"),
+                vec!["prompt demo · implement"],
+                "round {round}"
+            );
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|line| line.contains("reminded") && line.contains("no answer")),
+                "round {round}: got {:?}",
+                report.actions
+            );
+            assert!(
+                mux.did("stop").is_empty(),
+                "the session a person may read must still be there"
+            );
+            mux.clear_calls();
+        }
+
+        let record = &load_lane_records(&repo)["demo · implement"];
+        assert_eq!(record.reminders, 1, "unanswered reminders are not counted");
+        assert!(record.reminder_unanswered);
     }
 
     /// A lane sitting in a long, quiet tool call and a lane genuinely idle at
@@ -14736,10 +14923,9 @@ mod tests {
     /// The bound the plan's own mockup was drawn to hold, and the one figure
     /// on the page that was not captured from a real run: a person's own
     /// Escape reaches `● paused` within the pass that finds the lane settled,
-    /// not after `dispatch.lane_quiet` nudges it once and `MAX_REMINDERS`
-    /// escalates it. A single `pass()` call is the whole test — if this
+    /// not after `dispatch.lane_quiet` nudges it. A single `pass()` call is the whole test — if this
     /// needed a second one to land on `paused`, it would already be too
-    /// late, the same fifteen-minute road `a_lane_that_settles_without_reporting_is_reminded_then_blocked_once_it_goes_dead`
+    /// late, the same fifteen-minute road `a_lane_that_settles_without_reporting_is_reminded_and_a_silent_one_again`
     /// walks for an ordinary settled lane right above.
     #[test]
     fn a_hand_interrupted_lane_reaches_paused_within_one_pass() {
@@ -14932,7 +15118,7 @@ mod tests {
     /// The other half of a hand interrupt: a settled lane with no aborted-turn
     /// record in its transcript takes exactly today's road, unaffected by the
     /// new branch ahead of it — reminded once here, the same outcome
-    /// `a_lane_that_settles_without_reporting_is_reminded_then_blocked_once_it_goes_dead`
+    /// `a_lane_that_settles_without_reporting_is_reminded_and_a_silent_one_again`
     /// already covers in full for the eventual escalation.
     #[test]
     fn a_settled_lane_with_no_abort_marker_is_still_reminded_not_parked() {
@@ -14956,7 +15142,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
 
         // A first, settling pass — the same reason
-        // `a_lane_that_settles_without_reporting_is_reminded_then_blocked_once_it_goes_dead`
+        // `a_lane_that_settles_without_reporting_is_reminded_and_a_silent_one_again`
         // takes one before it ages the lane: this is what gives
         // `note_progress`'s pane-hash fallback a baseline to compare
         // against, so aging the record below is not immediately undone by
@@ -15196,6 +15382,305 @@ mod tests {
         );
     }
 
+    /// A lane that never answers is never moved, in an unattended run that
+    /// staffs `blocked` and in one that does not, attended or not. A usage
+    /// limit looks exactly like this silence, and the harness recovers from it
+    /// by itself.
+    #[test]
+    fn a_lane_silent_through_any_number_of_reminders_stays_on_its_step() {
+        for (name, unattended) in [("attended", false), ("unattended", true)] {
+            let (repo, _root_guard) = if unattended {
+                unattended_fixture("silence-stays-unattended")
+            } else {
+                fixture("silence-stays-attended")
+            };
+            let path = add_task_with(&repo, "demo", "implement", |f| {
+                f.workspace_id = Some("w1".into());
+                f.pane_id = Some("w1:p1".into());
+            });
+            let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+            run_pass(&repo, &mux);
+
+            for round in 1..=MAX_REMINDERS * 2 {
+                age_lane(&repo, "demo · implement", Duration::from_secs(700));
+                mux.clear_calls();
+                run_pass(&repo, &mux);
+                assert_eq!(reload(&path).stage(), "implement", "{name} round {round}");
+                assert_eq!(mux.did("prompt").len(), 1, "{name} round {round}");
+            }
+        }
+    }
+
+    /// The board's silent time keeps growing across reminders sent again. A
+    /// lane with no transcript is read by its pane's hash, and every reminder
+    /// typed into the pane changes that hash and moves `last_progress` to the
+    /// pass that sent it, so a clock read off that restarted at each one.
+    #[test]
+    fn a_silent_lane_counts_its_silence_from_before_the_first_reminder() {
+        let (repo, _root_guard) = fixture("silence-keeps-counting");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+        let silent_for = || {
+            let record = &load_lane_records(&repo)["demo · implement"];
+            now_secs() - record.silent_since().expect("silent")
+        };
+
+        for round in 1..=3 {
+            age_lane(&repo, "demo · implement", Duration::from_secs(700));
+            mux.clear_calls();
+            run_pass(&repo, &mux);
+            assert_eq!(mux.did("prompt").len(), 1, "round {round}");
+            let secs = silent_for();
+            assert!(
+                (700 * round..700 * round + 10).contains(&secs),
+                "round {round}: {secs}"
+            );
+        }
+    }
+
+    /// The unblocker's own lane is silenced by a limit just as the lane it was
+    /// sent after was, and used to be moved to `paused` for it. It is reminded
+    /// again where it is.
+    #[test]
+    fn a_silent_lane_on_blocked_is_reminded_again_not_paused() {
+        let (repo, _root_guard) = unattended_fixture("silence-on-blocked");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.blocked_from = Some("implement".into());
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "demo · blocked", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+
+        for round in 1..=MAX_REMINDERS * 2 {
+            age_lane(&repo, "demo · blocked", Duration::from_secs(700));
+            mux.clear_calls();
+            run_pass(&repo, &mux);
+            assert_eq!(reload(&path).stage(), "blocked", "round {round}");
+            assert_eq!(mux.did("prompt").len(), 1, "round {round}");
+        }
+    }
+
+    /// Claude Code writes its own limit reply under model `<synthetic>` half a
+    /// second after each reminder, which moves the transcript's write time as
+    /// an answer would. Only a turn the model wrote answers a reminder, and
+    /// the quiet clock still runs off the write time.
+    #[test]
+    fn a_synthetic_turn_after_a_reminder_is_not_an_answer() {
+        let (repo, _root_guard) = fixture("synthetic-is-silence");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let session = "limited-lane";
+        // The record drawn in the plan's "Limit lands" step, field for field.
+        // Its own timestamp is a day old; what places it after the reminder is
+        // the file's write time, which `write` sets below.
+        const LIMIT_RECORD: &str = r#"{"type":"assistant","timestamp":"2026-10-10T23:59:54.020Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets 3am (Europe/Berlin)"}]},"apiError":"usage_limit_reached","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":1791680400,"rateLimitType":"five_hour"}}}"#;
+        let base = now_secs();
+        let at = |secs: i64| {
+            chrono::DateTime::from_timestamp(secs, 0)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let model_turn = |secs: i64| {
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"requestId\":\"r{secs}\",\
+                 \"message\":{{\"model\":\"claude-x\",\"usage\":{{\"input_tokens\":10,\
+                 \"output_tokens\":5}}}}}}\n",
+                at(secs)
+            )
+        };
+        // The limit record exactly as Claude Code wrote it, and after it the
+        // same reply with a zeroed `usage` block, which is the shape that
+        // would be counted as a turn if the model name were not read.
+        let limit = |secs: i64| {
+            format!(
+                "{}\n{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"message\":{{\
+                 \"model\":\"<synthetic>\",\"usage\":{{\"input_tokens\":0,\
+                 \"output_tokens\":0}},\"content\":[{{\"type\":\"text\",\"text\":\
+                 \"You've hit your session limit\"}}]}}}}\n",
+                LIMIT_RECORD,
+                at(secs)
+            )
+        };
+        let tool_result = |secs: i64| {
+            format!(
+                "{{\"type\":\"user\",\"timestamp\":\"{}\",\"message\":{{\"role\":\"user\",\
+                 \"content\":[{{\"type\":\"tool_result\",\"content\":\"ok\"}}]}}}}\n",
+                at(secs)
+            )
+        };
+
+        let home = crate::scratch::root("dispatch-synthetic-is-silence-home");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{session}.jsonl"));
+        let write = |text: String, modified: i64, append: bool| {
+            use std::io::Write;
+            let mut handle = std::fs::OpenOptions::new()
+                .create(true)
+                .append(append)
+                .write(true)
+                .truncate(!append)
+                .open(&file)
+                .unwrap();
+            handle.write_all(text.as_bytes()).unwrap();
+            handle
+                .set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_secs(modified.try_into().unwrap()),
+                )
+                .unwrap();
+        };
+        write(model_turn(base - 100), base - 100, false);
+
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind: "claude".into(),
+                agent: "claude".into(),
+                model: "claude-x".into(),
+                session: session.into(),
+                last_progress: base - 100,
+                ..LaneRecord::adopted(base - 200)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+
+        with_home(&home, || {
+            // Settled and quiet since the model's last turn: reminded.
+            run_pass(&repo, &mux);
+            assert_eq!(mux.did("prompt").len(), 1);
+            mux.clear_calls();
+
+            // Passes straight after it are inside the wait the reminder began,
+            // though the transcript has been still for 100 seconds.
+            run_pass(&repo, &mux);
+            run_pass(&repo, &mux);
+            assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+            age_reminder(&repo, "demo · implement", Duration::from_secs(30));
+
+            // The harness's limit reply lands. The file changed, but no model
+            // spoke, so the lane is silent: reminded again, and not counted.
+            write(limit(base - 50), base - 50, true);
+            run_pass(&repo, &mux);
+            assert_eq!(reload(&path).stage(), "implement");
+            assert_eq!(mux.did("prompt").len(), 1, "reminded again");
+            let record = &load_lane_records(&repo)["demo · implement"];
+            assert_eq!(record.reminders, 1, "the synthetic reply answered nothing");
+            assert!(record.reminder_unanswered);
+            assert_eq!(record.last_model_turn, Some(base - 100));
+            let raw = std::fs::read_to_string(lanes_path(&repo)).unwrap();
+            assert!(raw.contains("\"reminder_unanswered\": true"), "{raw}");
+            assert!(raw.contains(&format!("\"last_model_turn\": {}", base - 100)));
+            mux.clear_calls();
+
+            // The transcript grows — a tool result included — so the lane is
+            // not quiet, whatever it has or has not answered.
+            write(tool_result(base), base, true);
+            run_pass(&repo, &mux);
+            assert!(mux.did("prompt").is_empty(), "inside `lane_quiet`");
+
+            // The model writes a turn: that answers, so the next reminder is
+            // the second counted one, not a repeat.
+            // `last_progress` only moves forward, so the wait since the tool
+            // result is put back on the record the way a real one would pass.
+            age_lane(&repo, "demo · implement", Duration::from_secs(20));
+            write(model_turn(base - 19), base - 19, true);
+            run_pass(&repo, &mux);
+            assert_eq!(mux.did("prompt").len(), 1);
+            let record = &load_lane_records(&repo)["demo · implement"];
+            assert_eq!(record.reminders, 2);
+            assert!(record.reminder_unanswered, "and the new one is waiting");
+            assert_eq!(record.last_model_turn, Some(base - 19));
+        });
+    }
+
+    /// A silent claude lane stays settled for hours, so a pass must not
+    /// re-read its whole transcript while the file has not been written. The
+    /// model's last turn is read again only once the write time moves.
+    #[test]
+    fn a_settled_claude_lane_is_not_reread_until_its_transcript_is_written() {
+        let (repo, _root_guard) = fixture("transcript-not-reread");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let session = "still-lane";
+        let base = now_secs();
+        let model_turn = |secs: i64| {
+            let stamp = chrono::DateTime::from_timestamp(secs, 0)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{stamp}\",\"requestId\":\"r{secs}\",\
+                 \"message\":{{\"model\":\"claude-x\",\"usage\":{{\"input_tokens\":10,\
+                 \"output_tokens\":5}}}}}}\n"
+            )
+        };
+        let home = crate::scratch::root("dispatch-transcript-not-reread-home");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{session}.jsonl"));
+        let write = |text: String, modified: i64| {
+            let handle = std::fs::File::create(&file).unwrap();
+            std::io::Write::write_all(&mut &handle, text.as_bytes()).unwrap();
+            handle
+                .set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_secs(modified.try_into().unwrap()),
+                )
+                .unwrap();
+        };
+        write(model_turn(base - 100), base - 100);
+
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind: "claude".into(),
+                agent: "claude".into(),
+                model: "claude-x".into(),
+                session: session.into(),
+                last_progress: base - 100,
+                ..LaneRecord::adopted(base - 200)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+            assert_eq!(
+                load_lane_records(&repo)["demo · implement"].last_model_turn,
+                Some(base - 100)
+            );
+
+            // The content changes but the write time does not, so a pass that
+            // read the file again would see the newer turn.
+            write(model_turn(base - 60), base - 100);
+            run_pass(&repo, &mux);
+            assert_eq!(
+                load_lane_records(&repo)["demo · implement"].last_model_turn,
+                Some(base - 100),
+                "the transcript was read again with its write time unmoved"
+            );
+
+            // Once the file is written, the next pass reads it.
+            write(model_turn(base - 60), base - 60);
+            run_pass(&repo, &mux);
+            assert_eq!(
+                load_lane_records(&repo)["demo · implement"].last_model_turn,
+                Some(base - 60)
+            );
+        });
+    }
+
     /// A step that routes back to itself — `blocked` reporting `--block`
     /// again — has reported, so its lane is over though its task is still on
     /// the step. The restart is a new lane in the pane the old one's own: the
@@ -15409,7 +15894,7 @@ mod tests {
         });
 
         // One instance for the whole test — see the equivalent comment on
-        // `a_lane_that_settles_without_reporting_is_reminded_then_blocked_once_it_goes_dead`.
+        // `a_lane_that_settles_without_reporting_is_reminded_and_a_silent_one_again`.
         let mux = FakeMux::new(vec![lane_in(
             &repo,
             "demo · implement",
@@ -15418,12 +15903,7 @@ mod tests {
         )])
         .detached();
 
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-
-        run_pass(&repo, &mux);
+        run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || run_pass(&repo, &mux));
         let task = reload(&path);
         assert_eq!(task.stage(), "paused");
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
@@ -15454,25 +15934,18 @@ mod tests {
             f.pane_id = Some("w1:p1".into());
         });
 
-        // A lane that settled, was reminded, and then wrote nothing further:
-        // the escalation route that has a live pane to decide about. One mux
-        // instance for these three passes, since a real
-        // backend's pane persists between them and the reminder has to land
-        // on the pane the next pass actually reads.
+        // A lane that answered every reminder and still never reported: the
+        // escalation route that has a live pane to decide about. One mux
+        // instance for these passes, since a real backend's pane persists
+        // between them and the reminder has to land on the pane the next pass
+        // actually reads.
         let mux = FakeMux::new(vec![lane_in(
             &repo,
             "demo · implement",
             LaneStatus::Done,
             "w1:p2",
         )]);
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-
-        run_pass(&repo, &mux);
-        age_lane(&repo, "demo · implement", Duration::from_secs(700));
-        mux.clear_calls();
-
-        run_pass(&repo, &mux);
+        run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || run_pass(&repo, &mux));
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
@@ -16287,6 +16760,12 @@ mod tests {
         if let Some(at) = &mut record.reminded_at {
             *at -= how_long.as_secs() as i64;
         }
+        if let Some(at) = &mut record.reminder_sent_at {
+            *at -= how_long.as_secs() as i64;
+        }
+        if let Some(at) = &mut record.quiet_since {
+            *at -= how_long.as_secs() as i64;
+        }
         if let Some(at) = &mut record.launch_grace_since {
             *at -= how_long.as_secs() as i64;
         }
@@ -17062,8 +17541,7 @@ mod tests {
     /// unchanging, which is the *most* silent a pane can be), so a screen
     /// reading would judge this lane stuck from the first pass. Reading the
     /// transcript instead gives it the same patience any settled lane gets: a
-    /// reminder once it is due, and only paused once nothing follows the
-    /// reminder either.
+    /// reminder once it is due, and another if nothing follows it.
     #[test]
     fn silence_is_measured_from_the_transcript_and_not_from_the_pane() {
         let (repo, _root_guard) = fixture("silence-transcript");
@@ -17126,15 +17604,17 @@ mod tests {
             "due for the first time — reminded, not yet blocked"
         );
 
-        // Nothing follows the reminder, and there is no further clock to wait
-        // out: the very next pass pauses it.
+        // Nothing follows the reminder, so once the transcript has been quiet
+        // for `lane_quiet` again it is sent another and the task stays put.
+        age_lane(&repo, "demo · implement", Duration::from_secs(700));
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
             Dispatcher::new(&repo, &pipelines, &mux)
                 .pass(&mut || {})
                 .unwrap();
         });
-        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert_eq!(reload(&path).stage(), "implement");
+        assert_eq!(mux.did("prompt").len(), 1, "reminded again");
     }
 
     /// A pipeline whose `implement` and `fix` share the prompt `implementer`
