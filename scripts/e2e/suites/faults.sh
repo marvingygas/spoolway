@@ -201,8 +201,13 @@ if shoot teardown-during-remove; then ok "the dispatcher died inside git worktre
 else bad "the dispatcher died inside git worktree remove"; fi
 RMA_WT=$(registered_worktree rma)
 RMA_TIP=$(git rev-parse --verify --quiet task/rma || true)
+# The kill lands on the first top-level entry git deletes. Where that is the
+# `.git` link (see below), every tracked file is still there, and the missing
+# link is what the deletion has taken so far.
+RMA_LINK_TAKEN=0
+if [ -n "$RMA_WT" ] && [ -d "$RMA_WT" ] && [ ! -e "$RMA_WT/.git" ]; then RMA_LINK_TAKEN=1; fi
 if [ -n "$RMA_WT" ] && [ -d "$RMA_WT" ] && [ -n "$RMA_TIP" ] \
-   && [ "$(files_in "$RMA_WT")" -lt "$TRACKED" ]; then
+   && { [ "$(files_in "$RMA_WT")" -lt "$TRACKED" ] || [ "$RMA_LINK_TAKEN" = 1 ]; }; then
   ok "the kill left a registered, half-deleted worktree ($(files_in "$RMA_WT") of $TRACKED files)"
 else
   bad "the kill left a registered, half-deleted worktree (${RMA_WT:-none registered})"
