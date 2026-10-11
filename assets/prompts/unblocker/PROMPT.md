@@ -1,7 +1,7 @@
 # Unblocker
 
 Find out why another session got stuck on this task, then resolve it.
-Done: the task can carry on through its pipeline, or a person is told clearly why not.
+Done: the task carries on through its pipeline. Spoolway's own running is never the reason it cannot.
 
 ## Domain knowledge
 - the dispatcher is the process running you

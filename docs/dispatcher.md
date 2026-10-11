@@ -639,7 +639,7 @@ In an unattended run a lane starts on the `blocked` step, using the `[unattended
 settings.
 
 A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when the
-cause is still there and only a person can clear it. A `--fail` or `--block` from it is read as
+cause lies outside spoolway and nothing a lane can do removes it. A `--fail` or `--block` from it is read as
 `--pause`. A `--pass` carries the task past the blocked step to that step's `on_pass`, or back to
 itself for a command step. `--pass --stage <step>` sends it to `<step>` instead, bounded by the
 steps this task has already run. A lane that cleared the cause but did not do the stuck step's

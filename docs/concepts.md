@@ -209,7 +209,7 @@ The dispatcher composes it into the lane's system prompt. See [Prompts](prompts.
 | `pass` | The step's work succeeded. | The step's `on_pass`. |
 | `fail` | The work did not meet the bar. | The step's `on_fail`, or `blocked`. |
 | `block` | Something outside the step is in the way. | `blocked`. |
-| `pause` | Only a person can clear this. Allowed from `blocked` only. | `paused`, with the destination a pass would reach. |
+| `pause` | The cause lies outside spoolway, and only a person can provide or decide it. Allowed from `blocked` only. | `paused`, with the destination a pass would reach. |
 
 ## Gate
 
