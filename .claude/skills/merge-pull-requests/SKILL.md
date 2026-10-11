@@ -235,9 +235,30 @@ request's CI runs on it, and `main` is fast-forwarded once every one of them is 
 git push origin <merge-sha>:refs/heads/<tip-branch>       # once per tip, its own merge commit
 gh pr checks <tip-number> --watch                         # once per tip
 git fetch origin && git log --oneline HEAD..origin/main   # must print nothing
+# ... the nightly rehearsal on the last tip's branch, below, goes here ...
 git push origin main                                      # the last merge commit, now checked
 gh pr list --state open
 ```
+
+Do not push `main` until the rehearsal below is green. The pull requests ran only the `pr`
+tier, and a `main` that goes red afterwards costs a new pull request and a new gate run to
+repair, about 45 minutes each. On 2026-10-11 that happened four times in one pass.
+
+Dispatch `ci.yml` on the last tip's branch, which now holds the last merge commit:
+
+```
+git rev-parse HEAD                                        # the sha the run has to be for
+gh workflow run ci.yml --ref <last-tip-branch>            # the tier input defaults to nightly
+gh run list --workflow=ci.yml --branch <last-tip-branch> --event workflow_dispatch \
+  --limit 5 --json databaseId,headSha,createdAt           # find the run for that sha
+gh run watch <id> --exit-status
+```
+
+The default `nightly` tier runs `dress-rehearsal` on any branch, because the job's `if:` only
+excludes the `pull_request` event. A dispatch is not a pull request, so the branch gets the
+same suite `main` will get. Match the run's `headSha` to the sha above before watching it, as
+the dispatch paragraph further down says. Only a green run for that exact commit lets `main`
+move.
 
 The push to the tip's branch is a fast-forward. The tip is the merge commit's second parent,
 so nothing on the branch is rewritten and no force is needed. If the push is refused, somebody
@@ -246,9 +267,24 @@ pushed to that branch after the survey: fetch it, and redo that tip's merge.
 The pull request's diff and commit list will now show `main`'s commits as well. That is the
 merge commit's first parent, and expected.
 
-Push every tip's merge commit before watching any of them, so their CI runs side by side. A
-red one is fixed as step 3 says, on the task branch, and every merge commit from that tip
-onward is rebuilt on the fixed tip and pushed again.
+Push every tip's merge commit before watching any of them, so their CI runs side by side.
+
+A red tip check or a red rehearsal, found before `main` moves, is fixed at the **end of the
+merge line**. Do not rebuild the merge commits from the red tip onward: the later tip branches
+already hold the old ones, so the rebuilt commits would need a force push, and a force push to
+a tip branch is refused. Instead:
+
+1. Cut a branch from the last merge commit and make the fix there.
+2. Fast-forward the last tip's branch to the fix. Every earlier tip's head is an ancestor of
+   the last merge commit, so every pull request's head still lands on `main`.
+3. Point local `main` at the fix commit, wait for the last tip's pull request checks on that
+   new head, and dispatch the rehearsal again for the new sha.
+4. Push `main` only when both are green. Pushing the old merge commit instead would give
+   `main` the red that was just caught, and leave the last tip's pull request open.
+
+Fixes put on side commits off the merge line left their pull requests open until a no-change
+merge commit put their heads on `main`. All of this works only while `main` has not moved.
+Once `main` has the merges, a red gate is fixed the way the paragraph on a red run below says.
 
 Never `gh pr merge` anything in this pass. That would put a new merge commit on `main` — one
 nothing checked — rather than the commit that just passed. The fast-forward push lands the
@@ -265,7 +301,9 @@ The last line is the check, not a formality. Every pull request whose head lande
 be gone from the open list, the stacked one included. Anything still open did not actually
 merge — find out why before moving on.
 
-Then run `main`'s own gate against what you just pushed. **The push starts nothing.** `ci.yml`
+Then run `main`'s own gate against what you just pushed. It repeats the rehearsal above on
+the same commit, now under `main`'s own name, and it is the run the report cites. **The push
+starts nothing.** `ci.yml`
 triggers on `pull_request`, `schedule` and `workflow_dispatch` — there is no `push:` entry — so
 a merge pushed to `main` is a merge no workflow has looked at, and nothing will look at it
 until the 03:17 UTC schedule the next morning. Dispatch it yourself:
@@ -493,6 +531,29 @@ ends at the push is claiming something it never checked.
   shape. Neither had a pull request, so neither had ever been checked. When the survey's
   `git log` shows commits on `main` that are not merges, they are the first place to
   look once the dispatched run comes back red.
+- **The merges landed, then `main`'s gate went red four times.** Once in `upgrade` and three
+  times in `faults`, each repaired by another pull request and another 45-minute gate run. The
+  `pr` tier the pull requests ran is smaller than the `nightly` tier plus rehearsal that
+  `main` gets. Step 7 now dispatches `ci.yml` on the last tip's branch before `main` moves.
+- **A prompt was reworded, and a suite searched for its old text.** #912 rewrote a prompt and
+  broke `jobs.sh` and D-2, which grep for the wording. Both were found only on `main`'s gate.
+  After merging a change that rewords a prompt, `grep -rn` the old text across
+  `scripts/e2e/suites/` and the tests before the push, and fix each hit.
+- **zsh mangled `"$sha:refs/..."` and `"$sha:scripts/..."`.** After a variable, zsh reads
+  `:r`, `:s` and the like as history modifiers, so `"$sha:refs/heads/x"` lost part of its
+  text. Write `"${sha}:refs/heads/x"`. The same shell does not split an unquoted variable into
+  words, so a `$args` holding several `-p <sha>` pairs reached `git commit-tree` as one
+  argument. Build an array and expand it as `"${args[@]}"`, or write the flags out.
+- **`gh pr checks --watch` right after a push reported the previous head's checks.** The
+  forge had not yet attached the new head's runs, so the watch showed the old commit's table.
+  Before trusting it, compare the head sha with `gh pr view <n> --json headRefOid`, and wait
+  until `gh pr checks <n> --json name,startedAt` lists runs that started after the push.
+- **`ci` never started on #916.** GitHub had not yet computed that pull request's
+  mergeability, which was still `UNKNOWN`, and the workflow never started. Poll
+  `gh pr view <n> --json mergeable` until it says `MERGEABLE` or `CONFLICTING`. If `ci` has
+  still not started, close and reopen the pull request (`gh pr close <n>` then
+  `gh pr reopen <n>`). That is untested, but unlike an empty commit it leaves the branch's
+  head where the merge line put it.
 - **The stacked pull request looks conflict-free and is not.** A stacked branch reports
   `CLEAN` against its own base while its tip conflicts badly with `main`. `mergeStateStatus`
   answers a question about `baseRefName`, so on a stack it is answering the wrong one.
