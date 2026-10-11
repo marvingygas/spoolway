@@ -101,33 +101,16 @@ pub fn lane(name: &str, cwd: &Path) -> crate::mux::Lane {
 /// One ledger line, with only the fields a cost reading looks at set.
 pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> crate::usage::Entry {
     crate::usage::Entry {
-        tier_tokens: Default::default(),
         ts: "2026-08-12T09:00:00Z".into(),
         task: task.into(),
-        plan: None,
         step: step.into(),
         pipeline: "default".into(),
-        agent: "claude".into(),
-        kind: "claude".into(),
         model: "claude-sonnet-5".into(),
         session: session.into(),
         round: 1,
-        wall_s: 0,
         turns: 0,
-        tokens: crate::usage::Tokens::default(),
         cost_usd,
-        reported_usd: None,
-        ctx_peak: None,
-        pipeline_version: "1.0".into(),
-        outcome: None,
-        blocked: false,
-        run: None,
-        trial: None,
-        trial_group: None,
-        dir: None,
-        hand: false,
-        command: None,
-        project: String::new(),
+        ..crate::usage::Entry::neutral()
     }
 }
 

@@ -74,6 +74,24 @@ pub struct LastReport {
     pub blocked: bool,
 }
 
+#[cfg(test)]
+impl LastReport {
+    /// A pass reported from `implement` at time zero, for a test to spread
+    /// with `..` and name only the fields it cares about, so a field added
+    /// later breaks no test that does not read it. A test that depends on the
+    /// step or the outcome names it rather than inheriting it from here.
+    /// `at_ms` is zero, which `reported_since` reads as "compare `at` alone".
+    pub(crate) fn neutral() -> LastReport {
+        LastReport {
+            step: "implement".into(),
+            outcome: "pass".into(),
+            at: 0,
+            at_ms: 0,
+            blocked: false,
+        }
+    }
+}
+
 /// What a task's branch came to against the commit it started from — files,
 /// insertions, deletions, and nothing finer. A replay's comparison is
 /// mechanical on purpose; see `docs/eval.md`.
@@ -2193,11 +2211,8 @@ mod tests {
     fn last_report_at_round_trips_and_an_absent_one_reads_as_zero() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
         task.front.last_report = Some(LastReport {
-            step: "implement".into(),
-            outcome: "pass".into(),
             at: 1_786_900_000,
-            at_ms: 0,
-            blocked: false,
+            ..LastReport::neutral()
         });
         let rendered = task.render().unwrap();
         let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
@@ -2231,8 +2246,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: 1_000,
-            at_ms: 0,
-            blocked: false,
+            ..LastReport::neutral()
         });
         assert!(
             !task.reported_since(1_000, 0),
@@ -2251,7 +2265,7 @@ mod tests {
             outcome: "block".into(),
             at: 1_000,
             at_ms: 1_000_600,
-            blocked: false,
+            ..LastReport::neutral()
         });
         assert!(
             task.reported_since(1_000, 1_000_300),
@@ -2277,7 +2291,7 @@ mod tests {
             outcome: "block".into(),
             at: 1_000,
             at_ms: 1_000_600,
-            blocked: false,
+            ..LastReport::neutral()
         });
         assert!(!task.reported_since(1_000, 0));
         assert!(task.reported_since(999, 0));

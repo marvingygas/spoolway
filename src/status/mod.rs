@@ -5917,9 +5917,7 @@ mod tests {
         fail.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
             outcome: "fail".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         fail.front.paused_at = Some("review".into());
         fail.set_stage(crate::pipeline::PAUSED, None);
@@ -5930,9 +5928,7 @@ mod tests {
         blocked.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
             outcome: "block".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         blocked.front.blocked_from = Some("review".into());
         blocked.front.paused_at = Some("review".into());
@@ -5944,9 +5940,7 @@ mod tests {
         passed.front.last_report = Some(crate::task::LastReport {
             step: "implement".into(),
             outcome: "pass".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         passed.front.paused_at = Some("implement".into());
         passed.set_stage(crate::pipeline::PAUSED, None);
@@ -8215,13 +8209,13 @@ mod tests {
             crate::commands::route(&mut task, &pipeline, &current, outcome, false, None, 0)
                 .unwrap();
         let now = chrono::Utc::now();
-        task.front.last_report = Some(crate::task::LastReport {
-            step: current,
-            outcome: outcome.as_str().to_string(),
-            at: now.timestamp(),
-            at_ms: now.timestamp_millis(),
-            blocked: routed.destination == crate::pipeline::BLOCKED,
-        });
+        let mut report = crate::task::LastReport::neutral();
+        report.step = current;
+        report.outcome = outcome.as_str().to_string();
+        report.at = now.timestamp();
+        report.at_ms = now.timestamp_millis();
+        report.blocked = routed.destination == crate::pipeline::BLOCKED;
+        task.front.last_report = Some(report);
         task.set_stage(&routed.destination, routed.pause_note.as_deref());
         task.save().unwrap();
     }
@@ -8239,8 +8233,7 @@ mod tests {
             step: step.into(),
             outcome: outcome.as_str().into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
     }
 
@@ -8591,8 +8584,7 @@ mod tests {
                     step: crate::pipeline::BLOCKED.into(),
                     outcome: Outcome::Pass.as_str().into(),
                     at: chrono::Utc::now().timestamp(),
-                    at_ms: 0,
-                    blocked: false,
+                    ..crate::task::LastReport::neutral()
                 });
                 task.set_stage(&routed.destination, routed.pause_note.as_deref());
                 task.save().unwrap();
@@ -10888,11 +10880,10 @@ mod tests {
         task.front.paused_at = Some("implement".into());
         task.front.paused_by = Some("schedule".into());
         task.front.last_report = Some(crate::task::LastReport {
-            step: "implement".into(),
             outcome: "fail".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            step: "implement".into(),
+            ..crate::task::LastReport::neutral()
         });
         let pipeline = pipelines.pipelines.get("default").unwrap();
 
@@ -10929,10 +10920,9 @@ mod tests {
         task.front.paused_by = Some("gate".into());
         task.front.last_report = Some(crate::task::LastReport {
             step: "blocked".into(),
-            outcome: "pass".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            outcome: "pass".into(),
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("deploy"));
@@ -10959,10 +10949,9 @@ mod tests {
         task.front.paused_by = Some("gate".into());
         task.front.last_report = Some(crate::task::LastReport {
             step: "blocked".into(),
-            outcome: "pass".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            outcome: "pass".into(),
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("review"));
@@ -10988,10 +10977,9 @@ mod tests {
         task.front.paused_by = Some("schedule".into());
         task.front.last_report = Some(crate::task::LastReport {
             step: "blocked".into(),
-            outcome: "pass".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            outcome: "pass".into(),
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(
@@ -11022,10 +11010,9 @@ mod tests {
         task.front.paused_by = Some("gate".into());
         task.front.last_report = Some(crate::task::LastReport {
             step: "blocked".into(),
-            outcome: "pass".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            outcome: "pass".into(),
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(
@@ -11058,8 +11045,7 @@ mod tests {
             step: "old-name".into(),
             outcome: "block".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         assert_eq!(
             blocked_next(&task, pipeline, true, 0),
@@ -11864,9 +11850,8 @@ mod tests {
         task.front.last_report = Some(crate::task::LastReport {
             step: step.into(),
             outcome: outcome.into(),
-            at: 0,
-            at_ms: 0,
             blocked: outcome == "block",
+            ..crate::task::LastReport::neutral()
         });
         task.front.paused_at = Some(step.into());
         task.front.paused_by = Some("schedule".into());

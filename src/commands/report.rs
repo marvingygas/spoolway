@@ -3428,10 +3428,7 @@ mod tests {
         // step-shaped road this task's `hook_paused` marker is for skipping.
         task.front.last_report = Some(crate::task::LastReport {
             step: "work".to_string(),
-            outcome: "pass".to_string(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.set_stage(crate::pipeline::DONE, None);
         crate::tracking::fire(&repo, &task, crate::pipeline::DONE, 1).unwrap();
@@ -4476,10 +4473,7 @@ mod tests {
         task.front.paused_by = Some(Gate::Step.as_str().to_string());
         task.front.last_report = Some(crate::task::LastReport {
             step: reported_from.into(),
-            outcome: "pass".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
         task
@@ -5192,8 +5186,7 @@ mod tests {
             step: "work".into(),
             outcome: "block".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(
@@ -5240,8 +5233,7 @@ mod tests {
             step: crate::pipeline::BLOCKED.into(),
             outcome: "block".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
 
         assert_eq!(
@@ -5282,8 +5274,7 @@ mod tests {
             step: "older-name".into(),
             outcome: "block".into(),
             at: 1,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 
@@ -6667,10 +6658,7 @@ mod tests {
         task.front.paused_by = Some("schedule".into());
         task.front.last_report = Some(crate::task::LastReport {
             step: "build".into(),
-            outcome: "pass".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
@@ -8840,9 +8828,7 @@ mod tests {
         task.front.last_report = report_outcome.map(|outcome| crate::task::LastReport {
             step: "deploy".into(),
             outcome: outcome.into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.set_stage(crate::pipeline::PAUSED, None);
         task.append_to_section("## Blocker", entry);

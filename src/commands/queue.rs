@@ -10206,10 +10206,7 @@ mod tests {
         task.set_stage_unbanked("implement", "test setup");
         task.front.last_report = Some(crate::task::LastReport {
             step: "implement".into(),
-            outcome: "pass".into(),
-            at: 0,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
         let before = queued(&repo, "solo");
@@ -16008,11 +16005,9 @@ mod tests {
             scope,
             name,
             &crate::jobs::JobSpec {
-                schedule: "0 3 * * *".to_string(),
                 pipeline: "bugfix".to_string(),
                 routine: routine.to_string(),
-                enabled: true,
-                base: None,
+                ..crate::jobs::JobSpec::neutral()
             },
         )
         .unwrap();

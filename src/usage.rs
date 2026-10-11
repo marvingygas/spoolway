@@ -298,6 +298,45 @@ pub struct Entry {
     pub project: String,
 }
 
+#[cfg(test)]
+impl Entry {
+    /// A ledger line with every field at its quietest value that parses, for
+    /// a test to spread with `..` and name only the fields it cares about, so
+    /// a field added later breaks no test that does not read it. It is a lane
+    /// line: no `dir`, no `command`, not a hand session.
+    pub(crate) fn neutral() -> Entry {
+        Entry {
+            ts: "2026-08-04T06:14:15+00:00".into(),
+            task: String::new(),
+            plan: None,
+            step: String::new(),
+            pipeline: String::new(),
+            agent: "claude".into(),
+            kind: "claude".into(),
+            model: "claude-opus-5".into(),
+            session: "s".into(),
+            round: 0,
+            wall_s: 0,
+            turns: 1,
+            tokens: Tokens::default(),
+            tier_tokens: Tokens::default(),
+            cost_usd: None,
+            reported_usd: None,
+            ctx_peak: None,
+            pipeline_version: "1.0".into(),
+            outcome: None,
+            blocked: false,
+            run: None,
+            trial: None,
+            trial_group: None,
+            dir: None,
+            hand: false,
+            command: None,
+            project: String::new(),
+        }
+    }
+}
+
 /// How a command step's run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5489,16 +5528,10 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let entry = Entry {
-            tier_tokens: Default::default(),
-            ts: "2026-08-04T06:14:15+00:00".into(),
             task: "login".into(),
             plan: Some("auth".into()),
             step: "review".into(),
             pipeline: "default".into(),
-            agent: "claude".into(),
-            kind: "claude".into(),
-            model: "claude-opus-5".into(),
-            session: "s".into(),
             round: 2,
             wall_s: 214,
             turns: 9,
@@ -5511,18 +5544,10 @@ mod tests {
                 reasoning: 0,
             },
             cost_usd: Some(0.41),
-            reported_usd: None,
-            ctx_peak: None,
             pipeline_version: "1.1".into(),
             outcome: Some("pass".into()),
-            blocked: false,
             run: Some("r00001".into()),
-            trial: None,
-            trial_group: None,
-            dir: None,
-            hand: false,
-            command: None,
-            project: String::new(),
+            ..Entry::neutral()
         };
         let line = serde_json::to_string(&entry).unwrap();
         std::fs::write(&path, format!("{line}\nnot json at all\n\n{line}\n")).unwrap();
@@ -5560,33 +5585,14 @@ mod tests {
 
     fn minimal_entry(task: &str) -> Entry {
         Entry {
-            tier_tokens: Default::default(),
             ts: chrono::Utc::now().to_rfc3339(),
             task: task.to_string(),
-            plan: None,
             step: "implement".into(),
             pipeline: "default".into(),
             agent: "pi".into(),
             kind: "pi".into(),
             model: "priced-model".into(),
-            session: "s".into(),
-            round: 0,
-            wall_s: 0,
-            turns: 1,
-            tokens: Tokens::default(),
-            cost_usd: None,
-            reported_usd: None,
-            ctx_peak: None,
-            pipeline_version: "1.0".into(),
-            outcome: None,
-            blocked: false,
-            run: None,
-            trial: None,
-            trial_group: None,
-            dir: None,
-            hand: false,
-            command: None,
-            project: String::new(),
+            ..Entry::neutral()
         }
     }
 
@@ -6401,35 +6407,7 @@ mod tests {
     /// A ledger line with only the fields a test overrides left to say —
     /// everything else is the quietest value that parses.
     fn plain_entry() -> Entry {
-        Entry {
-            tier_tokens: Default::default(),
-            ts: "2026-08-04T06:14:15+00:00".into(),
-            task: String::new(),
-            plan: None,
-            step: String::new(),
-            pipeline: String::new(),
-            agent: "claude".into(),
-            kind: "claude".into(),
-            model: "claude-opus-5".into(),
-            session: "s".into(),
-            round: 0,
-            wall_s: 0,
-            turns: 1,
-            tokens: Tokens::default(),
-            cost_usd: None,
-            reported_usd: None,
-            ctx_peak: None,
-            pipeline_version: "1.0".into(),
-            outcome: None,
-            blocked: false,
-            run: None,
-            trial: None,
-            trial_group: None,
-            dir: None,
-            hand: false,
-            command: None,
-            project: String::new(),
-        }
+        Entry::neutral()
     }
 
     /// Banking a lane from outside a pass — the headless interrupt's path —
