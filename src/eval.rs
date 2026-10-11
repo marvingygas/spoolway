@@ -5173,6 +5173,34 @@ impl ScreenState {
         lines
     }
 
+    /// Pull the cursor back onto the last row of the table on screen, when
+    /// it sits past it.
+    ///
+    /// The limit is the row count of the very lines the frame draws, so it
+    /// follows `tab`, `t`, a filter and a reload without each of them
+    /// knowing it. Without it `↓` counted on past the last row while the
+    /// marker, clamped at draw time, stayed on it, and `↑` looked dead until
+    /// every extra press had been undone.
+    fn clamp_cursor(&mut self, loaded: &Loaded, pipelines: &Pipelines) {
+        let rows = row_count(&self.table_lines(loaded, pipelines));
+        self.cursor = self.cursor.min(rows.saturating_sub(1));
+    }
+
+    /// [`ScreenState::settle`], and a table that landed shorter than the
+    /// cursor's position leaves the cursor on its new last row.
+    fn settle_clamped(
+        &mut self,
+        loaded: &mut Option<Loaded>,
+        failed: &mut Option<String>,
+        pipelines: &Pipelines,
+    ) -> bool {
+        let landed = self.settle(loaded, failed);
+        if landed && let Some(loaded) = loaded.as_ref() {
+            self.clamp_cursor(loaded, pipelines);
+        }
+        landed
+    }
+
     /// Start loading through `filters`, under the loading popup.
     fn start_loading(
         &mut self,
@@ -5306,6 +5334,10 @@ fn run_screen(
 /// it answers itself: a scripted input always has a key pending, and would
 /// otherwise race the thread.
 ///
+/// While browsing, keys waiting when one is read are applied before the next
+/// frame, so a held key draws one frame for the burst rather than one each;
+/// see the loop for what ends a burst early.
+///
 /// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
 fn run_screen_with(
     repo: &Repo,
@@ -5326,8 +5358,12 @@ fn run_screen_with(
     let mut failed: Option<String> = None;
     state.start_loading(&mut start, state.filters.clone(), false);
 
-    loop {
-        state.settle(&mut loaded, &mut failed);
+    // The `q` a burst stopped on, kept for the next pass round the loop: the
+    // frame the keys before it made is drawn first, and it quits after.
+    let mut held_back: Option<Key> = None;
+
+    'frames: loop {
+        state.settle_clamped(&mut loaded, &mut failed, pipelines);
         match &failed {
             Some(message) => crate::screen::shell::message_frame(message, writer, out),
             None => draw(pipelines, loaded.as_ref(), &state, writer, out),
@@ -5337,15 +5373,23 @@ fn run_screen_with(
         // `crate::screen::shell::wait_key`. `spoolway eval` on its own installs
         // no handler, so there nothing is ever caught. The idle slices are
         // where a load running behind the popup is noticed landing.
-        let Some(key) = crate::screen::shell::wait_key(input, || {
-            if state.settle(&mut loaded, &mut failed) {
-                match &failed {
-                    Some(message) => crate::screen::shell::message_frame(message, writer, out),
-                    None => draw(pipelines, loaded.as_ref(), &state, writer, out),
-                }
+        let mut key = match held_back.take() {
+            Some(key) => key,
+            None => {
+                let Some(key) = crate::screen::shell::wait_key(input, || {
+                    if state.settle_clamped(&mut loaded, &mut failed, pipelines) {
+                        match &failed {
+                            Some(message) => {
+                                crate::screen::shell::message_frame(message, writer, out)
+                            }
+                            None => draw(pipelines, loaded.as_ref(), &state, writer, out),
+                        }
+                    }
+                }) else {
+                    break;
+                };
+                key
             }
-        }) else {
-            break;
         };
         if let Some(message) = failed {
             return Ok(match crate::screen::shell::leave_on(key) {
@@ -5358,203 +5402,246 @@ fn run_screen_with(
                 None => Leave::Quit,
             });
         }
-        // Browsing and loading are the modes with no filter panel, calendar
-        // or notice open: the only ones where `←` and `→` are a hosting
-        // shell's.
-        if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
-            && let Some(leave) = crate::screen::shell::leave_on(key)
-        {
-            return Ok(leave);
-        }
-        if key == Key::Char('q') {
-            break;
-        }
-        // Past here every mode reads the table's data. Only loading can be
-        // without it, and loading reads no key but the ones above.
-        if matches!(state.mode, Mode::Loading { .. }) {
-            continue;
-        }
-        let Some(loaded) = loaded.as_ref() else {
-            continue;
-        };
-
-        match &mut state.mode {
-            Mode::Loading { .. } => unreachable!("loading reads no key past `q`"),
-            Mode::Notice { .. } => {
-                // Any key dismisses it — the message was already read on the
-                // draw that preceded this key, the same reasoning the queue
-                // screen's own `Mode::Outcome` follows.
-                state.mode = Mode::Browsing;
-            }
-            Mode::Filter(draft) => match key {
-                Key::Esc => state.mode = Mode::Browsing,
-                Key::Up | Key::Char('k') => {
-                    draft.field = draft.field.saturating_sub(1);
-                }
-                Key::Down | Key::Char('j') => {
-                    draft.field = (draft.field + 1).min(draft.fields().len() - 1);
-                }
-                Key::Left | Key::Right => {
-                    handle_filter_change(loaded, draft, key == Key::Right);
-                }
-                // On a date row, `enter` opens the calendar instead of
-                // applying — the one row `enter` means something else on.
-                // Everywhere else it applies the draft and reloads.
-                Key::Enter
-                    if matches!(draft.current(), FilterField::Since | FilterField::Until) =>
+        // While browsing, every key waiting is applied before the next frame,
+        // so a held key never queues up behind a frame and runs after the
+        // person has stopped. Each one still goes through the handler below,
+        // in the order typed; only the drawing between them is skipped. In
+        // any other mode each key still draws its own frame.
+        loop {
+            let was_browsing = matches!(state.mode, Mode::Browsing);
+            let was_table = state.table;
+            'handle: {
+                // Browsing and loading are the modes with no filter panel, calendar
+                // or notice open: the only ones where `←` and `→` are a hosting
+                // shell's.
+                if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
+                    && let Some(leave) = crate::screen::shell::leave_on(key)
                 {
-                    let field = draft.current();
-                    let text = match field {
-                        FilterField::Since => draft.filters.since.as_str(),
-                        FilterField::Until => draft.filters.until.as_str(),
-                        _ => unreachable!("only since/until open a calendar"),
-                    };
-                    let (year, month, day) = calendar_open_date(text);
-                    state.mode = Mode::Calendar {
-                        draft: draft.clone(),
+                    return Ok(leave);
+                }
+                if key == Key::Char('q') {
+                    break 'frames;
+                }
+                // Past here every mode reads the table's data. Only loading can be
+                // without it, and loading reads no key but the ones above.
+                if matches!(state.mode, Mode::Loading { .. }) {
+                    break 'handle;
+                }
+                let Some(loaded) = loaded.as_ref() else {
+                    break 'handle;
+                };
+
+                match &mut state.mode {
+                    Mode::Loading { .. } => unreachable!("loading reads no key past `q`"),
+                    Mode::Notice { .. } => {
+                        // Any key dismisses it — the message was already read on the
+                        // draw that preceded this key, the same reasoning the queue
+                        // screen's own `Mode::Outcome` follows.
+                        state.mode = Mode::Browsing;
+                    }
+                    Mode::Filter(draft) => match key {
+                        Key::Esc => state.mode = Mode::Browsing,
+                        Key::Up | Key::Char('k') => {
+                            draft.field = draft.field.saturating_sub(1);
+                        }
+                        Key::Down | Key::Char('j') => {
+                            draft.field = (draft.field + 1).min(draft.fields().len() - 1);
+                        }
+                        Key::Left | Key::Right => {
+                            handle_filter_change(loaded, draft, key == Key::Right);
+                        }
+                        // On a date row, `enter` opens the calendar instead of
+                        // applying — the one row `enter` means something else on.
+                        // Everywhere else it applies the draft and reloads.
+                        Key::Enter
+                            if matches!(
+                                draft.current(),
+                                FilterField::Since | FilterField::Until
+                            ) =>
+                        {
+                            let field = draft.current();
+                            let text = match field {
+                                FilterField::Since => draft.filters.since.as_str(),
+                                FilterField::Until => draft.filters.until.as_str(),
+                                _ => unreachable!("only since/until open a calendar"),
+                            };
+                            let (year, month, day) = calendar_open_date(text);
+                            state.mode = Mode::Calendar {
+                                draft: draft.clone(),
+                                field,
+                                year,
+                                month,
+                                day,
+                            };
+                        }
+                        Key::Enter => {
+                            let candidate = draft.filters.clone();
+                            state.start_loading(&mut start, candidate, true);
+                        }
+                        _ => {}
+                    },
+                    Mode::Calendar {
+                        draft,
                         field,
                         year,
                         month,
                         day,
-                    };
-                }
-                Key::Enter => {
-                    let candidate = draft.filters.clone();
-                    state.start_loading(&mut start, candidate, true);
-                }
-                _ => {}
-            },
-            Mode::Calendar {
-                draft,
-                field,
-                year,
-                month,
-                day,
-            } => match key {
-                // The row is handed back exactly as it was — nothing in here
-                // touches `draft` itself until `enter` or `x` commits.
-                Key::Esc => state.mode = Mode::Filter(draft.clone()),
-                Key::Char('x') => {
-                    let mut next = draft.clone();
-                    field_text_mut(&mut next, *field).clear();
-                    state.mode = Mode::Filter(next);
-                }
-                Key::Enter => {
-                    let mut next = draft.clone();
-                    *field_text_mut(&mut next, *field) =
-                        format!("{:04}-{:02}-{:02}", *year, *month, *day);
-                    state.mode = Mode::Filter(next);
-                }
-                Key::Left => step_calendar_day(year, month, day, -1),
-                Key::Right => step_calendar_day(year, month, day, 1),
-                Key::Up => step_calendar_day(year, month, day, -7),
-                Key::Down => step_calendar_day(year, month, day, 7),
-                Key::PageUp => step_calendar_month(year, month, day, -1),
-                Key::PageDown => step_calendar_month(year, month, day, 1),
-                _ => {}
-            },
-            Mode::Sort {
-                descending,
-                columns,
-                cursor,
-            } => match key {
-                Key::Esc => state.mode = Mode::Browsing,
-                Key::Up | Key::Char('k') => *cursor = cursor.saturating_sub(1),
-                Key::Down | Key::Char('j') => *cursor = (*cursor + 1).min(columns.len()),
-                Key::Enter => {
-                    let sort = cursor.checked_sub(1).map(|i| Sort {
-                        key: columns[i].1.to_string(),
-                        descending: *descending,
-                    });
-                    match state.table {
-                        TableKind::Lanes => state.filters.lane_sort = sort,
-                        TableKind::Dirs => state.filters.dir_sort = sort,
-                        TableKind::Trials => state.filters.trial_sort = sort,
-                    }
-                    // The row the cursor was on has moved somewhere else in
-                    // the new order; the top is the one place still worth
-                    // reading first.
-                    state.cursor = 0;
-                    state.mode = Mode::Browsing;
-                }
-                _ => {}
-            },
-            Mode::Browsing => match key {
-                Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
-                Key::Down | Key::Char('j') => state.cursor += 1,
-                Key::Tab => {
-                    state.table = state.table.next();
-                    state.cursor = 0;
-                }
-                // Opening a trial is only a filter set for the person, so
-                // `tab` and the `trial` row's `all` are what leave it. The
-                // `pipeline` and `version` rows are cleared with it: either
-                // could hide one of the trial's own pipelines, and showing
-                // every one of those side by side is the point of opening it.
-                Key::Enter if state.table == TableKind::Trials => {
-                    let (rows, _) = screen_trial_rows(loaded, &state.filters);
-                    if let Some(row) = rows.get(state.cursor.min(rows.len().saturating_sub(1))) {
-                        state.filters.trial = Some(row.id.clone());
-                        state.filters.by = EvalBy::Pipeline;
-                        state.filters.pipeline = None;
-                        state.filters.version = None;
-                        state.table = TableKind::Lanes;
-                        state.cursor = 0;
-                    }
-                }
-                Key::Char('f') => {
-                    state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
-                }
-                Key::Char(c @ ('a' | 'd')) => {
-                    let columns = view_columns(loaded, &state.filters, pipelines, state.table);
-                    let current = match state.table {
-                        TableKind::Lanes => state.filters.lane_sort.clone(),
-                        TableKind::Dirs => state.filters.shown_dir_sort(),
-                        TableKind::Trials => state.filters.trial_sort.clone(),
-                    };
-                    // Opens on the column already sorted, so flipping its
-                    // direction is `d` and `enter`; on `default order` when
-                    // there is none on this view.
-                    let cursor = current
-                        .and_then(|s| columns.iter().position(|(_, key)| *key == s.key))
-                        .map_or(0, |i| i + 1);
-                    state.mode = Mode::Sort {
-                        descending: c == 'd',
+                    } => match key {
+                        // The row is handed back exactly as it was — nothing in here
+                        // touches `draft` itself until `enter` or `x` commits.
+                        Key::Esc => state.mode = Mode::Filter(draft.clone()),
+                        Key::Char('x') => {
+                            let mut next = draft.clone();
+                            field_text_mut(&mut next, *field).clear();
+                            state.mode = Mode::Filter(next);
+                        }
+                        Key::Enter => {
+                            let mut next = draft.clone();
+                            *field_text_mut(&mut next, *field) =
+                                format!("{:04}-{:02}-{:02}", *year, *month, *day);
+                            state.mode = Mode::Filter(next);
+                        }
+                        Key::Left => step_calendar_day(year, month, day, -1),
+                        Key::Right => step_calendar_day(year, month, day, 1),
+                        Key::Up => step_calendar_day(year, month, day, -7),
+                        Key::Down => step_calendar_day(year, month, day, 7),
+                        Key::PageUp => step_calendar_month(year, month, day, -1),
+                        Key::PageDown => step_calendar_month(year, month, day, 1),
+                        _ => {}
+                    },
+                    Mode::Sort {
+                        descending,
                         columns,
                         cursor,
-                    };
-                }
-                Key::Char('r') => {
-                    state.start_loading(&mut start, state.filters.clone(), false);
-                }
-                Key::Char('t') if state.table != TableKind::Trials => {
-                    state.filters.flip_figures();
-                }
-                Key::Char('e') if state.table != TableKind::Trials => {
-                    match export(repo, loaded, &state.filters, pipelines, state.table) {
-                        Ok((path, rows)) => {
-                            state.mode = Mode::Notice {
-                                title: "exported",
-                                body: format!(
-                                    "{}, by {}\n{}",
-                                    plural(rows, "row"),
-                                    by_label(&state.filters, state.table),
-                                    display_relative(&path, &repo.root),
-                                ),
-                                keys: None,
-                            };
+                    } => match key {
+                        Key::Esc => state.mode = Mode::Browsing,
+                        Key::Up | Key::Char('k') => *cursor = cursor.saturating_sub(1),
+                        Key::Down | Key::Char('j') => *cursor = (*cursor + 1).min(columns.len()),
+                        Key::Enter => {
+                            let sort = cursor.checked_sub(1).map(|i| Sort {
+                                key: columns[i].1.to_string(),
+                                descending: *descending,
+                            });
+                            match state.table {
+                                TableKind::Lanes => state.filters.lane_sort = sort,
+                                TableKind::Dirs => state.filters.dir_sort = sort,
+                                TableKind::Trials => state.filters.trial_sort = sort,
+                            }
+                            // The row the cursor was on has moved somewhere else in
+                            // the new order; the top is the one place still worth
+                            // reading first.
+                            state.cursor = 0;
+                            state.mode = Mode::Browsing;
                         }
-                        Err(err) => {
-                            state.mode = Mode::Notice {
-                                title: "eval",
-                                body: format!("{err:#}"),
-                                keys: Some(NOTICE_KEYS),
+                        _ => {}
+                    },
+                    Mode::Browsing => match key {
+                        Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
+                        Key::Down | Key::Char('j') => state.cursor += 1,
+                        Key::Tab => {
+                            state.table = state.table.next();
+                            state.cursor = 0;
+                        }
+                        // Opening a trial is only a filter set for the person, so
+                        // `tab` and the `trial` row's `all` are what leave it. The
+                        // `pipeline` and `version` rows are cleared with it: either
+                        // could hide one of the trial's own pipelines, and showing
+                        // every one of those side by side is the point of opening it.
+                        Key::Enter if state.table == TableKind::Trials => {
+                            let (rows, _) = screen_trial_rows(loaded, &state.filters);
+                            if let Some(row) =
+                                rows.get(state.cursor.min(rows.len().saturating_sub(1)))
+                            {
+                                state.filters.trial = Some(row.id.clone());
+                                state.filters.by = EvalBy::Pipeline;
+                                state.filters.pipeline = None;
+                                state.filters.version = None;
+                                state.table = TableKind::Lanes;
+                                state.cursor = 0;
                             }
                         }
-                    }
+                        Key::Char('f') => {
+                            state.mode =
+                                Mode::Filter(Draft::new(state.table, state.filters.clone()));
+                        }
+                        Key::Char(c @ ('a' | 'd')) => {
+                            let columns =
+                                view_columns(loaded, &state.filters, pipelines, state.table);
+                            let current = match state.table {
+                                TableKind::Lanes => state.filters.lane_sort.clone(),
+                                TableKind::Dirs => state.filters.shown_dir_sort(),
+                                TableKind::Trials => state.filters.trial_sort.clone(),
+                            };
+                            // Opens on the column already sorted, so flipping its
+                            // direction is `d` and `enter`; on `default order` when
+                            // there is none on this view.
+                            let cursor = current
+                                .and_then(|s| columns.iter().position(|(_, key)| *key == s.key))
+                                .map_or(0, |i| i + 1);
+                            state.mode = Mode::Sort {
+                                descending: c == 'd',
+                                columns,
+                                cursor,
+                            };
+                        }
+                        Key::Char('r') => {
+                            state.start_loading(&mut start, state.filters.clone(), false);
+                        }
+                        Key::Char('t') if state.table != TableKind::Trials => {
+                            state.filters.flip_figures();
+                        }
+                        Key::Char('e') if state.table != TableKind::Trials => {
+                            match export(repo, loaded, &state.filters, pipelines, state.table) {
+                                Ok((path, rows)) => {
+                                    state.mode = Mode::Notice {
+                                        title: "exported",
+                                        body: format!(
+                                            "{}, by {}\n{}",
+                                            plural(rows, "row"),
+                                            by_label(&state.filters, state.table),
+                                            display_relative(&path, &repo.root),
+                                        ),
+                                        keys: None,
+                                    };
+                                }
+                                Err(err) => {
+                                    state.mode = Mode::Notice {
+                                        title: "eval",
+                                        body: format!("{err:#}"),
+                                        keys: Some(NOTICE_KEYS),
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                 }
-                _ => {}
-            },
+            }
+            if let Some(loaded) = loaded.as_ref() {
+                state.clamp_cursor(loaded, pipelines);
+            }
+            // A key that opened a notice, the filter panel, the sort popup or
+            // the calendar, started a load, or moved to another table ends
+            // the burst: its frame is drawn before the next key is read, so
+            // a notice is never dismissed by a key typed behind it before it
+            // was seen. A scripted input always reports a key pending, so it
+            // drains to its end and the read below stops it.
+            if !(was_browsing && matches!(state.mode, Mode::Browsing))
+                || state.table != was_table
+                || !cfg!(unix)
+                || crate::platform::stop::asked()
+                || !input.byte_pending(std::time::Duration::ZERO)
+            {
+                break;
+            }
+            match crate::screen::read_key(input) {
+                Some(Key::Char('q')) => {
+                    held_back = Some(Key::Char('q'));
+                    break;
+                }
+                Some(next) => key = next,
+                None => break,
+            }
         }
     }
     Ok(Leave::Quit)
@@ -8200,6 +8287,162 @@ mod screen_tests {
         assert!(
             senders.borrow()[0].send(Ok(loaded(Vec::new()))).is_err(),
             "leaving dropped the result"
+        );
+    }
+
+    /// The row the marker is on in the last frame drawn.
+    fn marked_row(text: &str) -> String {
+        last_frame(text)
+            .lines()
+            .find(|l| l.contains("│>"))
+            .unwrap_or_else(|| panic!("no marker in {}", last_frame(text)))
+            .to_string()
+    }
+
+    /// Extra `↓` on the last row leave the cursor there, so one `↑` moves
+    /// the marker up. Before the cursor was clamped, 50 presses put it 47
+    /// rows past the end of a three-row table and `↑` moved nothing.
+    #[test]
+    fn down_on_the_last_row_stays_there_and_one_up_moves_the_marker() {
+        let (repo, _root_guard) = fixture_to_sort("screen-cursor-stops");
+        let after_up = marked_row(&screen(&repo, &format!("{}k", "j".repeat(50))));
+        let second = marked_row(&screen(&repo, "j"));
+        let last = marked_row(&screen(&repo, "jj"));
+        assert_eq!(after_up, second);
+        assert_ne!(second, last);
+    }
+
+    /// `clamp_cursor` pulls a cursor past the end of the table on screen back
+    /// onto its last row. The filter is set by hand here, and the dirs and
+    /// trials tables of this ledger are empty, so they only show the cursor
+    /// held at the top. A load landing is driven through the screen by
+    /// `a_reload_that_lands_shorter_leaves_the_cursor_on_its_new_last_row`.
+    #[test]
+    fn a_table_that_shrinks_leaves_the_cursor_on_its_new_last_row() {
+        let (repo, _root_guard) = fixture_to_sort("screen-cursor-shrinks");
+        let pipelines = Pipelines::builtin();
+        let loaded = load(&repo, &no_filters()).unwrap();
+        let mut state = ScreenState::new(&no_args());
+        state.cursor = 2;
+        state.clamp_cursor(&loaded, &pipelines);
+        assert_eq!(state.cursor, 2, "three pipelines: row 2 is the last");
+
+        state.filters.pipeline = Some("gamma".into());
+        state.clamp_cursor(&loaded, &pipelines);
+        assert_eq!(state.cursor, 0, "one pipeline left");
+
+        for table in [TableKind::Dirs, TableKind::Trials] {
+            state.table = table;
+            state.cursor = 9;
+            state.clamp_cursor(&loaded, &pipelines);
+            assert_eq!(state.cursor, 0, "{table:?}");
+        }
+    }
+
+    /// An `r` reload that lands with fewer rows than the cursor's position
+    /// leaves the cursor on the new last row, so the first `↑` after it moves
+    /// the marker. `r` keeps the cursor where it was, and only the clamp as
+    /// the load lands pulls it back: without it the cursor stays one past
+    /// the two rows and the `↑` seems to do nothing.
+    #[test]
+    fn a_reload_that_lands_shorter_leaves_the_cursor_on_its_new_last_row() {
+        let (repo, _root_guard) = fixture_to_sort("screen-reload-shrinks");
+        let mut loads = 0;
+        let mut input = keys("jjrk");
+        let mut out = Vec::new();
+        run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |filters| {
+                loads += 1;
+                if loads == 1 {
+                    return load_now(&repo, filters);
+                }
+                // The second load: the ledger now holds two of the three
+                // pipelines.
+                let mut shorter = load(&repo, filters).unwrap();
+                shorter.entries.retain(|e| e.pipeline != "alpha");
+                shorter.fallback = fallback_keys(&shorter.entries);
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(Ok(shorter)).unwrap();
+                rx
+            },
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        assert_eq!(loads, 2, "`r` started the second load");
+        let last = last_frame(&drawn);
+        assert!(!last.contains("alpha"), "the shorter table: {last}");
+        let marked = marked_row(&drawn);
+        assert!(
+            marked.contains("gamma"),
+            "`↑` moved off the last row: {marked}"
+        );
+    }
+
+    /// 200 keys and then `←`: the tab switches after the one frame drawn
+    /// for the table. The keys alternate `↓` and `↑` so that every one of
+    /// them would change the frame, and the frame writer, which skips a
+    /// repeat of the last frame, could not hide a frame drawn per key.
+    #[test]
+    fn a_burst_of_keys_then_left_switches_after_one_frame() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-left");
+        let _hosting = Hosting::open(Tab::Eval);
+        let script = format!("{}\x1b[D", format!("{DOWN}k").repeat(100));
+        let mut input = keys(&script);
+        let mut out = Vec::new();
+        let leave = run_now(&repo, &no_args(), &mut input, &mut out);
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let drawn = String::from_utf8(out).unwrap();
+        assert_eq!(frames(&drawn).len(), 1, "one frame for the whole burst");
+    }
+
+    /// A key inside the burst still acts in the order typed: `q` ends the
+    /// screen where it stands, whatever follows it, after one frame for the
+    /// keys before it.
+    #[test]
+    fn a_q_inside_a_burst_still_quits_where_it_was_typed() {
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-q");
+        let mut input = keys("jkjjqjk");
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut input, &mut out);
+        assert_eq!(input.position(), 5, "nothing after the `q` was read");
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 2, "the table, then the keys before the `q`");
+        assert_eq!(marked_row(&drawn), marked_row(&screen(&repo, "jj")));
+    }
+
+    /// A key that opens the sort popup or a notice ends the burst, and the
+    /// frame it made is drawn before the next key is read — so a notice is
+    /// never dismissed by a key typed behind it before it was seen.
+    #[test]
+    fn a_key_that_opens_something_is_drawn_before_the_next_key_is_read() {
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-stops");
+
+        // Four moves, `a`, then two keys the popup reads: a frame for the
+        // table, one for the popup, and one for each popup key.
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut keys("jkjkajk"), &mut out);
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 4, "{drawn}");
+        assert!(all[1].contains("↑↓] column"), "popup drawn: {}", all[1]);
+
+        // `e` opens a notice; the key behind it dismisses it, and the
+        // notice has a frame of its own before that.
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut keys("jkexjk"), &mut out);
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert!(
+            all.iter().any(|f| f.contains("exported")),
+            "the notice was drawn before it was dismissed: {drawn}"
         );
     }
 

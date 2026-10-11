@@ -53,6 +53,15 @@ work while it shows.
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
 
+The cursor stops at the last row of the table, so one `[↑]` always moves it up. When a read, a
+filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves to the new last
+row.
+
+While you browse, keys that arrive faster than the screen draws are all applied in the order
+typed, and the screen draws one frame for them. Holding `[↓]` and then pressing `[←]` switches
+tab at once. Opening a popup, the filter panel, the calendar or a notice ends the burst, and
+that frame is drawn before the next key is read.
+
 ### Totals and per run
 
 The lanes and directory tables open on totals. `[t]` switches both tables to per-run figures,
