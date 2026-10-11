@@ -757,6 +757,18 @@ impl Repo {
         self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
+    /// The advisory lock held while a routine is checked for a live copy and
+    /// its next copy saved, so two submissions of one routine cannot both
+    /// find the queue clear — see `claim_routines` in `commands::queue`.
+    /// Kept apart from [`Repo::task_lock_file`]: a routine's name may also be
+    /// a live task's id, whose own lock the dispatcher takes on every pass.
+    /// The caller checks that `name` is a safe single path segment.
+    pub fn routine_lock_file(&self, name: &str) -> PathBuf {
+        self.home()
+            .join("routine-locks")
+            .join(format!("{name}.lock"))
+    }
+
     /// Bare `spoolway`'s own lock: written when the screen opens, and
     /// removed when it quits — see [`crate::lock::SCREEN_LOCK_FILE`]. A
     /// second `spoolway` or `spoolway dispatch` in the same project refuses

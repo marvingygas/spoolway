@@ -412,10 +412,11 @@ pub struct FireRecord {
     /// stacking a second copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_ids: Vec<String>,
-    /// The local minute a window was last skipped, either because the
-    /// previous run was still in the queue or because the job's table carries
-    /// an unknown key — so the skip is reported once, not on every pass that
-    /// crosses the minute.
+    /// The local minute a window was last skipped — because the previous
+    /// run, or another task named after the routine, was still in the queue,
+    /// because the routine folder or the job's base will not resolve, or
+    /// because the job's table carries an unknown key — so the skip is
+    /// reported once, not on every pass that crosses the minute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_minute: Option<String>,
     /// The local minute [`fire_due`] last looked at for this job,
@@ -503,8 +504,9 @@ fn write_state(repo: &Repo, state: &State) -> Result<()> {
 /// dispatched by the same pass.
 ///
 /// Trouble with one job goes to `problems` and the rest still run. A job
-/// that fires, and one skipped because its previous run is still in the
-/// queue, are each pushed to `actions` naming the job.
+/// that fires, and one skipped because its previous run or any other task
+/// named after its routine is still in the queue, are each pushed to
+/// `actions` naming the job.
 pub fn fire_due(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -637,6 +639,25 @@ pub fn fire_due(
                     job.name,
                     ids.join(", ")
                 ));
+            }
+            Err(err) if err.downcast_ref::<crate::commands::StillQueued>().is_some() => {
+                // A task named after the routine is still in the queue,
+                // which this job's own `queued_ids` may not know about: a
+                // copy queued from the routines tab, or by another job.
+                // Skipped and named once per window, the way a window whose
+                // last run is still queued is.
+                record.skipped_minute = Some(minute.clone());
+                dirty = true;
+                actions.push(format!("job {} · due now · skipped, {err}", job.name));
+            }
+            Err(err) if err.downcast_ref::<crate::commands::RoutineBusy>().is_some() => {
+                // Another submission of the routine held its lock past the
+                // wait: one from the routines tab whose issue hook is still
+                // running, say. Nothing for a person to do, so no problem
+                // line. The minute is left unrecorded like any other failure
+                // here, and a pass later within it tries again: it finds
+                // that submission's copy once saved and skips as still
+                // queued, or fires if the copy never landed.
             }
             Err(err) => {
                 // Only a base problem is recorded like the unknown-key case:
@@ -1738,6 +1759,59 @@ mod tests {
             !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
             "nothing new was queued while the previous run is in flight"
         );
+    }
+
+    /// A copy of the job's routine queued some other way — from the routines
+    /// tab here, so the job's own `queued_ids` does not name it — skips the
+    /// window the same way, naming the copy's step, and is recorded so the
+    /// skip is said once for the minute.
+    #[test]
+    fn a_job_whose_routine_has_a_live_copy_skips_and_names_its_step() {
+        let (repo, _root_guard) = fixture("jobs-live-copy");
+        every_minute_job(&repo, "nightly", "default");
+        crate::commands::queue_routine_target(
+            &repo,
+            &crate::pipeline::Pipelines::builtin(),
+            Some("plan/demo"),
+            &repo.routines_dir().join("nightly"),
+            "default",
+        )
+        .unwrap();
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · due now · skipped, audit is still in the queue, at step queued"]
+        );
+        assert!(skipped(&repo), "the skip is recorded for its minute");
+        assert_eq!(
+            repo.queued_ids().into_iter().collect::<Vec<_>>(),
+            ["audit-1"],
+            "no second copy was queued"
+        );
+    }
+
+    /// A routine another submission is still queueing, its lock held past
+    /// the wait, leaves the window open with no problem line: nothing is
+    /// for a person to do, and the next pass in the minute tries again and
+    /// fires once the lock is free.
+    #[test]
+    fn a_job_whose_routine_is_being_queued_tries_again_without_a_problem() {
+        let (repo, _root_guard) = fixture("jobs-routine-busy");
+        every_minute_job(&repo, "nightly", "default");
+        let held = crate::lock::TaskLock::acquire(&repo.routine_lock_file("audit")).unwrap();
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(!skipped(&repo), "the minute is left open");
+        assert!(repo.queued_ids().is_empty());
+
+        drop(held);
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(actions, ["job nightly · fired · queued audit-1"]);
     }
 
     #[test]

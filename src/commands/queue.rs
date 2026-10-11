@@ -3932,6 +3932,31 @@ fn not_queued_lines(not_queued: &[NotQueued]) -> Vec<String> {
     lines
 }
 
+/// How wide the account of a routine still in the queue wraps: narrower
+/// than [`crate::screen::NOTICE_WRAP`], so the advice breaks into three
+/// even rows close to the width [`issue_body`] already holds the popup to,
+/// rather than one row wider than it and a short tail.
+const STILL_QUEUED_WRAP: usize = 60;
+
+/// One sentence per live task named after a refused routine, naming the
+/// step that task is at, then what lifts the refusal. A started task cannot
+/// be unqueued, so the advice names the board for a copy that has stopped as
+/// well as `unqueue` for one that has not started.
+fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for copy in live {
+        lines.extend(crate::screen::wrap(&format!("{copy}."), STILL_QUEUED_WRAP));
+    }
+    lines.push(String::new());
+    lines.extend(crate::screen::wrap(
+        "A routine runs one copy at a time. Let it finish, resume or restart it from the \
+         board if it has stopped, or unqueue it if it has not started. Then queue the routine \
+         again.",
+        STILL_QUEUED_WRAP,
+    ));
+    lines
+}
+
 /// The queued popup's last line: whether a dispatcher will pick the batch
 /// up. Read once, as the popup is built, and never again while it is up.
 ///
@@ -8492,6 +8517,176 @@ pub(crate) fn routine_target_refusal(target: &std::path::Path) -> Option<String>
     super::routines::read_folder_at(target).ok()?.refusal()
 }
 
+/// Lock every routine in `names` and find the live tasks named after any of
+/// them, before a single id is minted for the batch. A routine runs one copy
+/// at a time: a second live copy would draw as a second row under the same
+/// name, and the name would no longer pick out one task.
+///
+/// A task counts as live anywhere in the queue, paused and blocked
+/// included, and is named after a routine when it carries that `routine:`
+/// or has that name as its id. Each one found comes back as a [`LiveCopy`],
+/// in id order, and the caller refuses the whole batch over any of them.
+///
+/// A queue file that will not parse refuses the batch as well, naming the
+/// file: its `routine:` cannot be read, so it may be a live copy, and
+/// skipping it would let a second copy in beside it once it is mended. One
+/// whose file name is a routine's name is said to be named after it, the
+/// way the id match reads it.
+///
+/// No names, as from a ticked folder that holds no tasks, takes no locks
+/// and finds nothing, without reading the queue: no routine is being
+/// queued, so a broken queue file is no reason to refuse.
+///
+/// The locks are handed back and are the caller's to hold until its copies
+/// are saved, or two submissions of one routine could each find the queue
+/// clear before either wrote. They are taken in name order, the way
+/// [`save_new_tasks`] orders its own, and always before those, so no two
+/// submissions can each hold a lock the other is waiting on. A lock another
+/// submission still holds after [`crate::lock::TaskLock`]'s wait comes back
+/// as a [`RoutineBusy`]. A routine whose name is not a valid id is not
+/// locked: it is not a safe file name, and [`validate_batch`] refuses the id
+/// minted from it before anything is saved.
+fn claim_routines<'a>(
+    repo: &Repo,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(Vec<crate::lock::TaskLock>, Vec<LiveCopy>)> {
+    let names: std::collections::BTreeSet<&str> = names.into_iter().collect();
+    if names.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut locks = Vec::new();
+    for name in &names {
+        if crate::config::check_id("routine", name).is_err() {
+            continue;
+        }
+        let file = repo.routine_lock_file(name);
+        match crate::lock::TaskLock::acquire(&file) {
+            Ok(lock) => locks.push(lock),
+            Err(err) if err.downcast_ref::<crate::lock::TaskLockHeld>().is_some() => {
+                return Err(anyhow::Error::new(RoutineBusy(name.to_string())));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "could not take routine `{name}`'s lock at {}, so it was not queued; \
+                         check that its folder can be written to, then queue it again",
+                        file.display()
+                    )
+                });
+            }
+        }
+    }
+    let (tasks, problems) = repo.tasks_and_problems()?;
+    if !problems.is_empty() {
+        bail!("{}", unreadable_refusal(&problems, &names));
+    }
+    let live = tasks
+        .into_iter()
+        .filter_map(|task| {
+            let name = task
+                .routine()
+                .filter(|routine| names.contains(routine))
+                .or_else(|| names.get(task.id()).copied())?;
+            Some(LiveCopy {
+                routine: name.to_string(),
+                step: task.stage().to_string(),
+            })
+        })
+        .collect();
+    Ok((locks, live))
+}
+
+/// The refusal [`claim_routines`] gives over queue files that will not
+/// parse: each file with its reason, a file named after one of the routines
+/// in `names` marked as such, then what lifts it.
+fn unreadable_refusal(
+    problems: &[crate::task::LoadProblem],
+    names: &std::collections::BTreeSet<&str>,
+) -> String {
+    let files: Vec<String> = problems
+        .iter()
+        .map(|problem| {
+            let named = problem
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| names.contains(stem))
+                .map(|stem| format!(", named after routine `{stem}`"))
+                .unwrap_or_default();
+            format!("  {}{named}\n    {}", problem.path.display(), problem.error)
+        })
+        .collect();
+    let (them, it) = match problems.len() {
+        1 => ("a task file".to_string(), "it"),
+        n => (format!("{n} task files"), "them"),
+    };
+    format!(
+        "the queue holds {them} that will not parse, so whether the routine being queued \
+         still has a live copy cannot be told:\n\n\
+         {}\n\n\
+         A routine runs one copy at a time. Fix {it}; the routine can then be queued.",
+        files.join("\n")
+    )
+}
+
+/// A live task named after a routine, which [`claim_routines`] refuses the
+/// routine over: a copy queued from it earlier, or an ordinary task whose id
+/// is the routine's name. `routine` is that name, which the task draws as,
+/// and `step` the step the task is at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveCopy {
+    routine: String,
+    step: String,
+}
+
+impl std::fmt::Display for LiveCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is still in the queue, at step {}",
+            self.routine, self.step
+        )
+    }
+}
+
+/// A job's routine refused by [`claim_routines`]: a task named after it is
+/// still in the queue. A type of its own so `jobs::fire_due` can tell it
+/// apart from a failure worth retrying, and skip the window once the way it
+/// skips one whose last run is still queued.
+#[derive(Debug)]
+pub(crate) struct StillQueued(Vec<LiveCopy>);
+
+impl std::fmt::Display for StillQueued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let each: Vec<String> = self.0.iter().map(LiveCopy::to_string).collect();
+        f.write_str(&each.join("; "))
+    }
+}
+
+impl std::error::Error for StillQueued {}
+
+/// A routine [`claim_routines`] could not lock because another submission
+/// of it still held the lock after [`crate::lock::TaskLock`]'s wait — one
+/// whose issue hook is still running, say. A type of its own so
+/// `jobs::fire_due` can leave the window open for its next pass rather than
+/// hand a person advice they have no use for: the dispatcher tries again by
+/// itself. The routines tab shows it as written.
+#[derive(Debug)]
+pub(crate) struct RoutineBusy(String);
+
+impl std::fmt::Display for RoutineBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not lock routine `{}` to queue it — another submission of it is being \
+             queued. Run this again in a moment.",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RoutineBusy {}
+
 /// A refusal that comes from a task's base itself and that only an edit to
 /// the task or the job, or creating the branch, will lift: a task with no
 /// `base:` under a job with no `base` key, a base git would read as a flag,
@@ -8531,6 +8726,9 @@ impl std::error::Error for BaseProblem {}
 ///
 /// Runs the tool-requirements gate printed and never asks: nobody is there
 /// to press a key when a job fires, whatever the dispatcher's terminal is.
+///
+/// A routine with a live task named after it is refused with a
+/// [`StillQueued`], before anything is minted — see [`claim_routines`].
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -8538,8 +8736,10 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
-    let (mut submitted, names) = if target.is_dir() {
-        let folder = super::routines::read_folder_at(target)?;
+    let folder;
+    let solo;
+    let tasks: Vec<&RoutineTask> = if target.is_dir() {
+        folder = super::routines::read_folder_at(target)?;
         if let Some(refusal) = folder.refusal() {
             bail!("{refusal}");
         }
@@ -8548,10 +8748,20 @@ pub(crate) fn queue_routine_target(
         if folder.tasks.is_empty() {
             bail!("{} holds no tasks", target.display());
         }
-        let tasks: Vec<&RoutineTask> = folder.tasks.iter().collect();
+        folder.tasks.iter().collect()
+    } else {
+        solo = super::routines::read_task_at(target)?;
+        vec![&solo]
+    };
+    // Held until the copies are saved below.
+    let (_routine_locks, live) = claim_routines(repo, tasks.iter().map(|task| task.id.as_str()))?;
+    if !live.is_empty() {
+        return Err(anyhow::Error::new(StillQueued(live)));
+    }
+    let (mut submitted, names) = if target.is_dir() {
         mint_routine_batch(repo, &tasks)
     } else {
-        mint_routine_solo(repo, &super::routines::read_task_at(target)?)
+        mint_routine_solo(repo, tasks[0])
     };
 
     for (_, doc) in &mut submitted {
@@ -8659,6 +8869,20 @@ fn begin_routine_queue(
     if !refusals.is_empty() {
         return outcome_over(Some(nav), "queue refused", refusals.join("\n\n"));
     }
+    // A routine with a copy still in the queue refuses the whole batch,
+    // before anything is minted. The locks are held until the batch is
+    // saved; a gate or question in between drops them, and answering it
+    // comes back through here to take them and check again.
+    let names = routines
+        .iter()
+        .filter(|folder| nav.selected.contains(&folder.path))
+        .flat_map(|folder| &folder.tasks)
+        .map(|task| task.id.as_str());
+    let _routine_locks = match claim_routines(repo, names) {
+        Ok((_, live)) if !live.is_empty() => return still_queued_panel(&live, nav),
+        Ok((locks, _)) => locks,
+        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+    };
     // Nothing to queue leaves the pane as it stands: the routines tab has
     // no pending screen behind it to drop back to.
     let batch = routine_batch_tasks(repo, routines, nav);
@@ -8721,8 +8945,8 @@ fn finish_routine_mode(
     match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
         Ok(()) => {
             // Back onto the pane with nothing ticked: the batch is queued,
-            // and a tick left standing is one `enter` away from queuing the
-            // same routine a second time.
+            // and a tick left standing is one `enter` away from the refusal
+            // a routine still in the queue meets.
             let mut after = nav.clone();
             after.selected.clear();
             queued_panel(
@@ -8734,6 +8958,24 @@ fn finish_routine_mode(
             )
         }
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+    }
+}
+
+/// The `not queued` popup over the routines pane `nav`, for a submit
+/// [`claim_routines`] refused: it queued nothing, so it names only the live
+/// tasks, and leaves off the dispatcher line, which says nothing about a
+/// batch that never reached the queue. Its key row reads `close` rather
+/// than [`crate::screen::confirm`]'s `confirm`, since there is nothing for
+/// `enter` to confirm: it only closes the popup, back to `nav` with its
+/// ticks as they were.
+fn still_queued_panel(live: &[LiveCopy], nav: &RoutineNav) -> Mode {
+    Mode::Queued {
+        panel: panel(
+            "not queued",
+            &issue_body(still_queued_lines(live)),
+            &crate::screen::keys(&[("enter", "close")]),
+        ),
+        routines: Some(nav.clone()),
     }
 }
 
@@ -8762,6 +9004,13 @@ fn begin_routine_solo(
         return Mode::Routines(nav.clone());
     };
 
+    // The same refusal and locks `begin_routine_queue` takes, for this one
+    // routine task.
+    let _routine_locks = match claim_routines(repo, [task.id.as_str()]) {
+        Ok((_, live)) if !live.is_empty() => return still_queued_panel(&live, nav),
+        Ok((locks, _)) => locks,
+        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+    };
     let batch = mint_routine_solo(repo, task);
     let task_files = readable_task_files(&batch.0);
     finish_routine_mode(
@@ -16863,6 +17112,279 @@ mod tests {
 
         let again = parse_submission("audit-deps-1.md", &raw, Some("plan/demo")).unwrap();
         assert_eq!(again.front.routine, None);
+    }
+
+    /// The queue's file names, sorted.
+    fn queue_files(repo: &Repo) -> Vec<String> {
+        let mut files: Vec<String> = std::fs::read_dir(repo.queue_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Move a queued task to `step`, the way the dispatcher leaves one.
+    fn put_at(repo: &Repo, id: &str, step: &str) {
+        let mut task = queued(repo, id);
+        task.set_stage(step, None);
+        task.save().unwrap();
+    }
+
+    /// The popup a routine still in the queue opens, row for row as the
+    /// plan draws it: the step the copy is at, what lifts the refusal, and
+    /// `enter` to close.
+    #[test]
+    fn a_routine_still_in_the_queue_draws_the_not_queued_popup_as_drawn() {
+        let live = [LiveCopy {
+            routine: "release-spoolway".to_string(),
+            step: "ship".to_string(),
+        }];
+        let Mode::Queued { panel, routines } = still_queued_panel(&live, &RoutineNav::new()) else {
+            panic!("the refusal is the not queued popup");
+        };
+        assert!(
+            routines.is_some(),
+            "closing it goes back to the routines pane"
+        );
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ not queued ")),
+            "{panel:#?}"
+        );
+        let body: Vec<&str> = panel[1..panel.len() - 1]
+            .iter()
+            .map(|row| {
+                row.trim_start_matches("│  ")
+                    .trim_end_matches('│')
+                    .trim_end()
+            })
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "",
+                "release-spoolway is still in the queue, at step ship.",
+                "",
+                "A routine runs one copy at a time. Let it finish, resume or",
+                "restart it from the board if it has stopped, or unqueue it",
+                "if it has not started. Then queue the routine again.",
+                "",
+                "[enter] close",
+            ],
+            "{panel:#?}"
+        );
+    }
+
+    /// A routine whose copy is still in the queue, blocked here, is refused
+    /// from the routines tab by `enter` on its folder and by `space` on its
+    /// task alike: the popup names the copy's step, and no second copy is
+    /// queued.
+    #[test]
+    fn a_routine_with_a_live_copy_is_refused_from_the_routines_tab() {
+        let (repo, _root_guard) = fixture("routine-one-copy-tab");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        routines_exit(&repo, " \r");
+        put_at(&repo, "audit-deps-1", crate::pipeline::BLOCKED);
+
+        for (keys, how) in [(" \r", "enter on the folder"), ("\t ", "space on the task")] {
+            let drawn = routines_screen(&repo, keys);
+            let last = last_frame(&drawn);
+            assert!(last.contains("not queued"), "{how}: {last}");
+            assert!(
+                last.contains("audit-deps is still in the queue, at step blocked."),
+                "{how}: {last}"
+            );
+            assert_eq!(queue_files(&repo), ["audit-deps-1.md"], "{how}: {last}");
+        }
+    }
+
+    /// One live task refuses a whole folder, and the popup names every live
+    /// task named after one of its routines: a copy queued earlier, and an
+    /// ordinary task, paused here, whose id is a routine's name.
+    #[test]
+    fn one_live_task_refuses_a_whole_folder_and_every_one_is_named() {
+        let (repo, _root_guard) = fixture("routine-one-copy-folder");
+        seed_two_routines(&repo);
+        let file = repo.routines_dir().join("nightly").join("audit-deps.md");
+        queue_routine_target(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &file,
+            "bugfix",
+        )
+        .unwrap();
+        add(&repo, "audit-docs", &[]);
+        put_at(&repo, "audit-docs", crate::pipeline::PAUSED);
+
+        // `nightly` sorts second, below `maintenance`.
+        let drawn = routines_screen(&repo, "\x1b[B \r");
+        let last = last_frame(&drawn);
+        assert!(
+            last.contains("audit-deps is still in the queue, at step queued."),
+            "{last}"
+        );
+        assert!(
+            last.contains("audit-docs is still in the queue, at step paused."),
+            "{last}"
+        );
+        assert_eq!(
+            queue_files(&repo),
+            ["audit-deps-1.md", "audit-docs.md"],
+            "{last}"
+        );
+    }
+
+    /// A job's routine with a live copy is refused with [`StillQueued`],
+    /// which `jobs::fire_due` reads to skip the window, and nothing is
+    /// queued.
+    #[test]
+    fn a_job_target_with_a_live_copy_is_refused_as_still_queued() {
+        let (repo, _root_guard) = fixture("routine-one-copy-job");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let folder = repo.routines_dir().join("nightly");
+        let target = || {
+            queue_routine_target(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &folder,
+                "bugfix",
+            )
+        };
+        target().unwrap();
+
+        let err = target().unwrap_err();
+        assert!(err.downcast_ref::<StillQueued>().is_some(), "{err:#}");
+        assert_eq!(
+            format!("{err:#}"),
+            "audit-deps is still in the queue, at step queued"
+        );
+        assert_eq!(queue_files(&repo), ["audit-deps-1.md"]);
+    }
+
+    /// A queue file that will not parse refuses the routine, naming the file,
+    /// since its `routine:` cannot be read: here a copy queued earlier whose
+    /// file a hand edit broke, and an ordinary task named after the routine.
+    /// Skipped, it would let a second copy in beside the first.
+    #[test]
+    fn a_queue_file_that_will_not_parse_refuses_the_routine_and_is_named() {
+        let (repo, _root_guard) = fixture("routine-one-copy-unreadable");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let folder = repo.routines_dir().join("nightly");
+        let target = || {
+            queue_routine_target(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &folder,
+                "bugfix",
+            )
+        };
+        target().unwrap();
+        let copy = repo.queue_dir().join("audit-deps-1.md");
+        let named = repo.queue_dir().join("audit-deps.md");
+        for file in [&copy, &named] {
+            std::fs::write(file, "---\nid: [unclosed\n").unwrap();
+        }
+
+        let err = format!("{:#}", target().unwrap_err());
+        assert!(
+            err.starts_with("the queue holds 2 task files that will not parse"),
+            "{err}"
+        );
+        assert!(err.contains(&format!("  {}\n", copy.display())), "{err}");
+        assert!(
+            err.contains(&format!(
+                "  {}, named after routine `audit-deps`\n",
+                named.display()
+            )),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("Fix them; the routine can then be queued."),
+            "{err}"
+        );
+        assert_eq!(queue_files(&repo), ["audit-deps-1.md", "audit-deps.md"]);
+    }
+
+    /// A ticked routine folder that holds no tasks queues nothing, and a
+    /// broken queue file is no reason to refuse it: no routine is being
+    /// queued, so the pane is left as it stands.
+    #[test]
+    fn an_empty_routine_folder_is_not_refused_over_a_broken_queue_file() {
+        let (repo, _root_guard) = fixture("routine-one-copy-empty");
+        std::fs::create_dir_all(repo.routines_dir().join("nightly")).unwrap();
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(repo.queue_dir().join("note.md"), "---\nid: [unclosed\n").unwrap();
+
+        let drawn = routines_screen(&repo, " \r");
+        let last = last_frame(&drawn);
+        assert!(last.contains("nightly"), "{last}");
+        assert!(!last.contains("queue refused"), "{last}");
+        assert_eq!(queue_files(&repo), ["note.md"]);
+    }
+
+    /// Two submissions of one routine racing: the first holds the routine's
+    /// lock from its check to its save, so the second, arriving while the
+    /// queue is still clear, waits on that lock and checks only once the
+    /// first copy is on disk. Without the lock the second would find the
+    /// queue clear and queue a copy of its own.
+    #[test]
+    fn two_submissions_racing_for_one_routine_queue_one_copy() {
+        let (repo, _root_guard) = fixture("routine-one-copy-race");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let folder = repo.routines_dir().join("nightly");
+
+        // The first submission, between its check and its save.
+        let (first_locks, live) = claim_routines(&repo, ["audit-deps"]).unwrap();
+        assert!(live.is_empty());
+
+        let second = std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                queue_routine_target(
+                    &repo,
+                    &Pipelines::builtin(),
+                    Some("plan/demo"),
+                    &folder,
+                    "bugfix",
+                )
+            });
+            // Long enough for an unlocked second submission to have checked
+            // the clear queue, well inside the lock's own wait.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            add(&repo, "audit-deps-1", &[]);
+            let mut copy = queued(&repo, "audit-deps-1");
+            copy.front.routine = Some("audit-deps".to_string());
+            copy.save().unwrap();
+            drop(first_locks);
+            second.join().unwrap()
+        });
+
+        let err = second.unwrap_err();
+        assert!(err.downcast_ref::<StillQueued>().is_some(), "{err:#}");
+        assert_eq!(queue_files(&repo), ["audit-deps-1.md"]);
     }
 
     /// Save as routine on a highlighted pending group opens the save panel, and `enter`

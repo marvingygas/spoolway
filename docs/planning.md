@@ -252,6 +252,26 @@ A routine folder that holds a `*.md` file that does not parse is not queued. The
 such file with a `spoolway task contract --from "<file>"` command that prints the reason, and
 nothing from the folder is queued.
 
+A routine runs one copy at a time. A routine is refused while any task in the queue carries its
+name in `routine:` or has its name as its id. Paused and blocked tasks count. For a folder, one
+such task refuses the whole batch. Nothing is queued, and the `not queued` popup names each live
+task and the step it is at:
+
+```
+not queued
+
+  release-spoolway is still in the queue, at step ship.
+
+  A routine runs one copy at a time. Let it finish, resume or
+  restart it from the board if it has stopped, or unqueue it
+  if it has not started. Then queue the routine again.
+
+  [enter] close
+```
+
+`enter` closes the popup. A routine is also refused while any file in the queue will not parse,
+because a live copy could be hiding in it. The popup names each such file and its reason.
+
 The tab reads the routine folders again each time you switch to it, so a routine saved with
 `save as routine` a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 
