@@ -212,6 +212,7 @@ pub fn report(
     let pause_note = routed.pause_note;
     let resumed = routed.resumed;
     let paused_from_blocked = routed.paused_from_blocked;
+    let lap_limited = routed.lap_limited;
     let gated_at = routed.gated_at;
 
     // Committing is deterministic, so it is not left to a model. Every lane
@@ -338,6 +339,16 @@ pub fn report(
             crate::pipeline::PAUSED,
             stop_choices(&id, &current)
         ),
+        // The unblocker passed and the lap bound parked the task anyway —
+        // see `UNBLOCK_LAP_LIMIT`. The lane that reported reads this next
+        // and has no other way of knowing why a pass did not move the task
+        // on, so the arrival note that says why is printed in full.
+        None if lap_limited => println!(
+            "{id}: {current} --{outcome}--> {} - {}{}",
+            crate::pipeline::PAUSED,
+            pause_note.as_deref().unwrap_or_default(),
+            stop_choices(&id, &current)
+        ),
         // The routed destination was a cleanup terminal, and the worktree
         // still has uncommitted work in it — see `held_dirty` above.
         None if held_dirty => println!(
@@ -371,6 +382,11 @@ pub struct Routed {
     /// `paused` instead. [`report`]'s own final message tells this apart
     /// from an ordinary park.
     pub paused_from_blocked: bool,
+    /// Whether an unblocker's pass was parked on `paused` by the unattended
+    /// lap bound ([`UNBLOCK_LAP_LIMIT`]) instead of sent back onto the
+    /// command step. [`report`]'s final message tells the lane why, since a
+    /// pass is not otherwise refused.
+    pub lap_limited: bool,
     /// The step whose own gate held an unblocker's `--pass`, when that is
     /// what `gated` above means — `None` for every other kind of gate, an
     /// ordinary step's own pass among them, where the pane a person reads is
@@ -383,6 +399,13 @@ pub struct Routed {
     /// arrival line, after any message the move carries.
     pub walked_past: Option<String>,
 }
+
+/// How many times an unattended unblocker's `--pass` may send the task back
+/// onto a command step before the next such pass parks it on `paused` for a
+/// person. Three laps is enough for an unblocker to fix a flaky or fixable
+/// failure, and it cuts off a command that no pass can repair at the cost of
+/// four unblocker turns in all rather than one per lap for ever.
+pub const UNBLOCK_LAP_LIMIT: u32 = 3;
 
 /// The routing decision, lifted out of [`report`] so a test can walk every
 /// outcome at every step through the same function `spoolway report` itself
@@ -581,13 +604,76 @@ pub fn route(
         // The unblocker's destination is a move like any other, so it lands
         // past the steps this task does not run.
         let landing = crate::dispatch::land_past_hidden(pipeline, task, target, dependents);
+        // An unblocker that keeps passing a command that keeps failing has
+        // no end of its own: leaving `blocked` wipes every `loop:` count just
+        // below, so none of them can trip on this cycle. Spoolway bounds it
+        // here instead, on a counter of its own (`Task::unblock_laps`): each
+        // unattended pass that lands the task on a command step is a lap, and
+        // the pass after `UNBLOCK_LAP_LIMIT` of them parks the task on
+        // `paused` instead. The unblocker lane that makes that last pass has
+        // already run; the bound spares the lane after it.
+        //
+        // The step counted is the one the task lands on, not `origin`. A
+        // mechanical gate that fails back to an agent step (`on_fail`) stops
+        // on that agent step, so `origin` is the agent and the pass is carried
+        // past it onto the gate again: the cycle is the same, and only the
+        // landing names the step that keeps failing.
+        //
+        // A `--stage` is a choice to go somewhere else, and a landing on an
+        // agent step is the unblocker standing in for that step's work, so
+        // neither is the cycle and either one ends any count. Unattended runs
+        // only: with a person at the board, they are the bound.
+        let lands_on_command = pipeline
+            .step(&landing.destination)
+            .is_some_and(|step| step.kind() == crate::pipeline::StepKind::Command);
+        if unattended && stage.is_none() && lands_on_command {
+            let laps = task
+                .front
+                .unblock_laps
+                .get(&landing.destination)
+                .copied()
+                .unwrap_or(0);
+            if laps >= UNBLOCK_LAP_LIMIT {
+                // Parked the way a pause raised from `blocked` is, and for the
+                // same reason: `blocked_from` stays, so the person's resume
+                // reaches `origin` through `cleared_block_target`. Leaving
+                // `blocked` still starts the `loop:` counts again.
+                task.reset_loop_counts();
+                task.front.unblock_laps.clear();
+                task.front.paused_at = Some(origin.clone());
+                return Ok(Routed {
+                    destination: crate::pipeline::PAUSED.to_string(),
+                    gated: false,
+                    pause_note: Some(format!(
+                        "`{step}` failed again after {laps} unblocker passes had sent the \
+                         task back to it; an unattended run stops at this pass rather than \
+                         send it back once more. Resume it once the cause of the failure is \
+                         dealt with",
+                        step = landing.destination
+                    )),
+                    resumed: None,
+                    paused_from_blocked: false,
+                    lap_limited: true,
+                    gated_at: None,
+                    walked_past: None,
+                });
+            }
+            task.front
+                .unblock_laps
+                .insert(landing.destination.clone(), laps + 1);
+        } else {
+            task.front.unblock_laps.clear();
+        }
         walked_past = landing.note();
         let target = landing.destination;
         // Leaving `blocked` starts every `loop:` count again, ahead of the
         // budget check below: a spent limit is what sent the task here, and
         // the unblocker's pass is its answer, so the step it lands on must
-        // not be refused for the arrivals that got it stopped. Spoolway's own
-        // counters never park a task — only the unblocker's judgement does.
+        // not be refused for the arrivals that got it stopped. A `loop:` never
+        // parks a task from here, so the unblocker's judgement decides — with
+        // one exception, above: an unattended run parks a task whose
+        // unblocker keeps sending it back onto a command step that keeps
+        // failing.
         task.reset_loop_counts();
         let routed_target = apply_loop_budget(pipeline, task, current, target.clone(), unattended);
         // `gate_at: blocked` is about to hold this pass, and the resume that
@@ -620,8 +706,11 @@ pub fn route(
         //
         // Parking is still leaving `blocked`, so every `loop:` count starts
         // again here too: the person's resume from `paused` must not walk the
-        // task straight back into the limit that sent it to `blocked`.
+        // task straight back into the limit that sent it to `blocked`. The
+        // unblocker laps end for the same reason: this unblocker gave up, so
+        // the person's resume starts a new run of them.
         task.reset_loop_counts();
+        task.front.unblock_laps.clear();
         let origin = task
             .front
             .blocked_from
@@ -791,6 +880,7 @@ pub fn route(
         pause_note,
         resumed,
         paused_from_blocked,
+        lap_limited: false,
         gated_at,
         walked_past,
     })
@@ -2212,10 +2302,13 @@ fn back_onto_its_step(
         .unwrap_or_else(|| "unblocked by hand".to_string());
     // A person's resume of a task held on `blocked` is a road out of it like
     // the unblocker's pass: the counts that stopped it start again, so the
-    // step it goes back to is not walked straight into a spent limit.
+    // step it goes back to is not walked straight into a spent limit. The
+    // unblocker laps end wherever a person steps in, so the resume starts
+    // them from zero.
     if task.front.stage == crate::pipeline::BLOCKED {
         task.reset_loop_counts();
     }
+    task.front.unblock_laps.clear();
     // After that reset, so a walk-past from `blocked` meets the landing
     // step's `loop:` with its counts started again.
     let current = task.stage().to_string();
@@ -2477,10 +2570,12 @@ pub(crate) fn restart_with(
     // abandonment for the same launch.
     task.front.resume = None;
     // Leaving `blocked` starts the loop counts again, as a resume does, so the
-    // step is not walked straight into the limit that stopped it.
+    // step is not walked straight into the limit that stopped it. The
+    // unblocker laps end here too: a restart is a person stepping in.
     if task.front.stage == crate::pipeline::BLOCKED {
         task.reset_loop_counts();
     }
+    task.front.unblock_laps.clear();
     task.front.restart = Some(step.clone());
     let message = args
         .message
@@ -2583,6 +2678,11 @@ fn past_the_gate(
     if cleared_block || held_unblocker_pass(&task, gated) {
         resume_at(&mut task, &destination);
     }
+    // A person answering the gate is stepping in, so the unblocker laps start
+    // from zero. `route` counts a pass before `gate_at: blocked` holds it,
+    // which means a held pass has already used one lap by the time it gets
+    // here.
+    task.front.unblock_laps.clear();
     // A gate can sit over a caught block, whose entry is over once a person
     // answers. Answered onto `blocked` itself, the stop is still standing.
     if destination != crate::pipeline::BLOCKED {
@@ -3678,6 +3778,193 @@ mod tests {
             "a command step is handed back to itself, never past it: {task:?}"
         );
         assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
+    }
+
+    /// A pipeline whose `work` is a command step that always fails and whose
+    /// `check` is an agent step, followed by another agent step, so a pass
+    /// from `blocked` at `check` lands on an agent step (`review`).
+    const DIRECT_LAPS: &str = "steps:\n  - id: work\n    run: 'false'\n    on_pass: check\n  \
+         - id: check\n    agent: pi\n    on_pass: review\n  \
+         - id: review\n    agent: pi\n    on_pass: done\n  \
+         - id: blocked\n    agent: pi\n    session: true\n";
+
+    /// The shape of a mechanical gate behind an agent step: `gate` fails back
+    /// to `build`, and `build`'s pass spends `gate`'s `loop:` and stops the
+    /// task on `blocked` with `build` as the step it stopped at.
+    const GATE_LAPS: &str = "steps:\n  - id: build\n    agent: pi\n    on_pass: gate\n  \
+         - id: gate\n    run: 'false'\n    loop: 1\n    on_pass: done\n    \
+         on_fail: build\n  - id: blocked\n    agent: pi\n    session: true\n";
+
+    /// A task that stopped at `origin`, resting on `blocked`.
+    fn blocked_task_for_unblock_laps(yaml: &str, origin: &str) -> (Task, Pipeline) {
+        let pipeline = Pipeline::parse("default", yaml).unwrap();
+        let mut task = Task::parse(
+            std::path::PathBuf::new(),
+            &format!("---\nid: laps\nstage: blocked\nblocked_from: {origin}\n---\n"),
+        )
+        .unwrap();
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        (task, pipeline)
+    }
+
+    /// One lap as the dispatcher writes it: the unblocker passes, and the task
+    /// lands on `routed.destination`, takes the steps in `back` (the way the
+    /// failure runs round to `blocked` again) and rests on `blocked` with
+    /// `origin` as the step it stopped at. A pass that parks the task has no
+    /// such road back, so nothing more is written for it.
+    fn one_failing_lap(
+        task: &mut Task,
+        pipeline: &Pipeline,
+        origin: &str,
+        back: &[&str],
+    ) -> Routed {
+        let routed = route(task, pipeline, "blocked", Outcome::Pass, true, None, 0).unwrap();
+        task.set_stage(&routed.destination, None);
+        if routed.destination != crate::pipeline::PAUSED {
+            for step in back {
+                task.set_stage(step, None);
+            }
+            task.set_stage(crate::pipeline::BLOCKED, None);
+            task.front.blocked_from = Some(origin.to_string());
+        }
+        routed
+    }
+
+    /// A command that fails on every run and an unblocker that passes every
+    /// time stop on `paused` once the pass has sent the task back onto the
+    /// command `UNBLOCK_LAP_LIMIT` times. Before the counter, `route` sent the
+    /// task back to `work` on every lap, so the last assertions saw `work`.
+    #[test]
+    fn an_unattended_failing_command_is_parked_after_the_lap_limit() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "work");
+        for lap in 1..=UNBLOCK_LAP_LIMIT {
+            let routed = one_failing_lap(&mut task, &pipeline, "work", &[]);
+            assert_eq!(routed.destination, "work", "lap {lap} is still handed back");
+            assert!(!routed.lap_limited);
+        }
+        let routed = one_failing_lap(&mut task, &pipeline, "work", &[]);
+        assert_eq!(routed.destination, crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("work"));
+        assert_eq!(task.front.blocked_from.as_deref(), Some("work"));
+        assert!(routed.lap_limited, "report() prints the note to the lane");
+        let note = routed.pause_note.expect("the stop says why");
+        assert!(
+            note.contains("`work`") && note.contains(&UNBLOCK_LAP_LIMIT.to_string()),
+            "the note names the step and the laps: {note}"
+        );
+        assert!(task.front.unblock_laps.is_empty(), "paused ends the count");
+    }
+
+    /// The same cycle through a gate that fails back to the agent step behind
+    /// it. The task stops on `build`, so the pass is carried past it onto
+    /// `gate`, and `gate`'s failure runs through `build` before the task is
+    /// blocked again. The count has to be kept on `gate` across that.
+    #[test]
+    fn a_gate_that_fails_back_to_an_agent_is_parked_after_the_lap_limit() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(GATE_LAPS, "build");
+        for lap in 1..=UNBLOCK_LAP_LIMIT {
+            let routed = one_failing_lap(&mut task, &pipeline, "build", &["gate", "build"]);
+            assert_eq!(routed.destination, "gate", "lap {lap} is still handed back");
+        }
+        let routed = one_failing_lap(&mut task, &pipeline, "build", &["gate", "build"]);
+        assert_eq!(routed.destination, crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("build"));
+        assert_eq!(task.front.blocked_from.as_deref(), Some("build"));
+        let note = routed.pause_note.expect("the stop says why");
+        assert!(
+            note.contains("`gate`") && note.contains(&UNBLOCK_LAP_LIMIT.to_string()),
+            "the note names the failing command and the laps: {note}"
+        );
+        assert!(task.front.unblock_laps.is_empty(), "paused ends the count");
+    }
+
+    /// The bound is for unattended runs only: with a person at the board the
+    /// same cycle is never parked.
+    #[test]
+    fn an_attended_failing_command_is_never_parked_by_the_lap_limit() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "work");
+        for _ in 0..=UNBLOCK_LAP_LIMIT + 2 {
+            let routed = route(
+                &mut task,
+                &pipeline,
+                "blocked",
+                Outcome::Pass,
+                false,
+                None,
+                0,
+            )
+            .unwrap();
+            assert_eq!(routed.destination, "work");
+            task.set_stage("work", None);
+            task.set_stage(crate::pipeline::BLOCKED, None);
+            task.front.blocked_from = Some("work".into());
+        }
+        assert!(task.front.unblock_laps.is_empty());
+    }
+
+    /// A pass onto an agent step is the unblocker standing in for that step's
+    /// work, not another lap onto a command, so it is not counted however
+    /// often it happens.
+    #[test]
+    fn an_unblocker_pass_onto_an_agent_step_is_not_counted() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "check");
+        for _ in 0..=UNBLOCK_LAP_LIMIT + 2 {
+            let routed = one_failing_lap(&mut task, &pipeline, "check", &[]);
+            assert_eq!(routed.destination, "review");
+            task.set_stage(crate::pipeline::BLOCKED, None);
+            task.front.blocked_from = Some("check".into());
+        }
+        assert!(task.front.unblock_laps.is_empty());
+    }
+
+    /// A pass that does not land on a command step ends the count, so laps
+    /// from an earlier failure of the command do not carry over to a later
+    /// one.
+    #[test]
+    fn a_pass_onto_an_agent_step_ends_the_unblock_lap_count() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "work");
+        for _ in 0..UNBLOCK_LAP_LIMIT {
+            one_failing_lap(&mut task, &pipeline, "work", &[]);
+        }
+        assert_eq!(
+            task.front.unblock_laps.get("work"),
+            Some(&UNBLOCK_LAP_LIMIT)
+        );
+        task.front.blocked_from = Some("check".into());
+        let routed = one_failing_lap(&mut task, &pipeline, "check", &[]);
+        assert_eq!(routed.destination, "review");
+        assert!(task.front.unblock_laps.is_empty());
+        task.set_stage("work", None);
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        let routed = one_failing_lap(&mut task, &pipeline, "work", &[]);
+        assert_eq!(routed.destination, "work", "the count started over");
+    }
+
+    /// An unblocker that gives up (`--block` from `blocked` parks the task on
+    /// `paused`) ends the count, so the person's resume gets the full
+    /// `UNBLOCK_LAP_LIMIT` laps again. Before the count was cleared there, the
+    /// entry for `work` survived the park and the last assertion saw it.
+    #[test]
+    fn an_unblocker_that_gives_up_ends_the_unblock_lap_count() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "work");
+        one_failing_lap(&mut task, &pipeline, "work", &[]);
+        assert_eq!(task.front.unblock_laps.get("work"), Some(&1));
+        let routed = route(
+            &mut task,
+            &pipeline,
+            "blocked",
+            Outcome::Block,
+            true,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(routed.destination, crate::pipeline::PAUSED);
+        assert!(
+            task.front.unblock_laps.is_empty(),
+            "the give-up ends the count"
+        );
     }
 
     /// A three-step forward chain, each step reached by exactly one hop, plus
@@ -5320,6 +5607,88 @@ mod tests {
 
         report_outcome(&repo, &pipelines, "spent", Outcome::Pass);
         assert_eq!(queued(&repo, "spent").stage(), "e2e");
+    }
+
+    /// A person's `spoolway resume` of a task on `blocked` starts the unblocker
+    /// laps from zero, so the run after it gets all `UNBLOCK_LAP_LIMIT` laps.
+    /// Before the resume cleared the count, the entry survived and the last
+    /// assertion saw it.
+    #[test]
+    fn a_resume_starts_the_unblock_lap_count_again() {
+        let (repo, _root_guard) = unattended_fixture("resume-ends-unblock-laps");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "laps", &[]);
+
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            Pipeline::parse("default", DIRECT_LAPS).unwrap(),
+        );
+        let mut task = queued(&repo, "laps");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.front.unblock_laps.insert("work".into(), 2);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "laps".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(queued(&repo, "laps").front.unblock_laps.is_empty());
+    }
+
+    /// Releasing a pass that `gate_at: blocked` held is a person stepping in
+    /// too. The pass was counted as a lap before it was held, so the count
+    /// has to end on the gate's road out as it does on a plain resume. Before
+    /// `past_the_gate` cleared it, the held pass's lap survived the release
+    /// and the last assertion saw it.
+    #[test]
+    fn releasing_a_held_unblocker_pass_starts_the_unblock_lap_count_again() {
+        let (repo, _root_guard) = unattended_fixture("gate-release-ends-unblock-laps");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "laps", &[]);
+
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            Pipeline::parse("default", DIRECT_LAPS).unwrap(),
+        );
+        let mut task = queued(&repo, "laps");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "laps", Outcome::Pass);
+        let held = queued(&repo, "laps");
+        assert_eq!(held.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            held.front.unblock_laps.get("work"),
+            Some(&1),
+            "the held pass was counted as a lap"
+        );
+
+        resume(&repo, &pipelines, &resume_args("laps", None), None).unwrap();
+        let released = queued(&repo, "laps");
+        assert_ne!(released.stage(), crate::pipeline::PAUSED);
+        assert!(
+            released.front.unblock_laps.is_empty(),
+            "the release starts the count from zero: {:?}",
+            released.front.unblock_laps
+        );
     }
 
     /// The same spent budget, on the shipped pipeline as it actually ships —
@@ -7439,6 +7808,31 @@ mod tests {
                 .unwrap()
                 .contains("→ `review`: the conversation looped")
         );
+    }
+
+    /// A restart is a person stepping in, so it starts the unblocker laps
+    /// from zero like a resume. Before `restart_with` cleared them, the entry
+    /// survived and the last assertion saw it.
+    #[test]
+    fn restarting_a_blocked_task_ends_the_unblock_lap_count() {
+        let (repo, _root_guard) = fixture("restart-ends-unblock-laps");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.blocked_from = Some("review".into());
+        task.set_stage("blocked", None);
+        task.front.unblock_laps.insert("review".into(), 2);
+        task.save().unwrap();
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
+
+        assert!(queued(&repo, "stuck").front.unblock_laps.is_empty());
     }
 
     /// A task that is not on a step has nothing to start over, and the refusal

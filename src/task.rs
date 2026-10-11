@@ -685,6 +685,29 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub launch_busy_since: BTreeMap<String, i64>,
 
+    /// How many times an unattended unblocker's `--pass` has sent the task
+    /// back onto a command step, keyed by that step.
+    ///
+    /// Spoolway's own `loop:` counts are wiped whenever a task leaves
+    /// `blocked` ([`Task::reset_loop_counts`]), so a command that fails every
+    /// time and an unblocker that passes every time would go round with
+    /// nothing to stop them. This is the counter that does, and it is kept
+    /// apart from the `loop:` ledger so that wipe cannot take it. A step's
+    /// entry reaching `commands::UNBLOCK_LAP_LIMIT` makes the next such pass
+    /// park the task on `paused`.
+    ///
+    /// Nothing here is dropped on a move: the cycle can run through an agent
+    /// step on its way back to `blocked` (a gate that fails back to the agent
+    /// behind it), and the count has to survive that. It ends instead where
+    /// the cycle does. A command step that passes clears it (the dispatcher,
+    /// after `run_command`), and so does an unblocker pass that is not
+    /// another lap onto a command step, or that parks the task. A person
+    /// stepping in ends it too: an unblocker that gives up parks the task, and
+    /// `spoolway resume` and `restart` start the count from zero, so a resume
+    /// always gets the full `UNBLOCK_LAP_LIMIT` laps.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unblock_laps: BTreeMap<String, u32>,
+
     /// The step this task last moved here from, written by [`Task::set_stage`]
     /// and read by the dispatcher to key the two counters above.
     ///

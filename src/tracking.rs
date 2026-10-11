@@ -1033,6 +1033,7 @@ mod tests {
             arrivals: Default::default(),
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
+            unblock_laps: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };

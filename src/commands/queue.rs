@@ -1149,6 +1149,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.arrivals = Default::default();
     front.launch_failures = Default::default();
     front.launch_busy_since = Default::default();
+    front.unblock_laps = Default::default();
     front.arrived_from = None;
 
     let body = ends_with_newline(body.to_string());
@@ -10079,6 +10080,18 @@ mod tests {
         );
         let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert!(task.front.launch_failures.is_empty());
+    }
+
+    /// `unblock_laps` is dispatcher-owned like `launch_failures`, and a task
+    /// that carries laps in from an earlier run must not have them survive
+    /// back into the queue: its first failed command would otherwise be
+    /// parked by the unattended lap bound after fewer than
+    /// `UNBLOCK_LAP_LIMIT` unblocker passes.
+    #[test]
+    fn a_task_carrying_unblock_laps_has_them_reset() {
+        let text = task_text("demo", "group: demo\nunblock_laps:\n  build: 2\n", BODY);
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert!(task.front.unblock_laps.is_empty());
     }
 
     /// `restart` is a dispatcher-owned one-shot key the task contract throws

@@ -4683,6 +4683,13 @@ fn into_paused(
                 cause: None,
             },
             Some(Outcome::Block | Outcome::Fail) => held(None),
+            // A pass is on file and `paused_at` is set, with no gate named:
+            // `route`'s unattended lap bound parks an unblocker's pass this
+            // way. So does `Dispatcher::escalate` when the next unblocker
+            // lane hits the launch ceiling, if an earlier lane's pass is
+            // still the last report on file. The file cannot tell the two
+            // apart, so this says what the pass did and names no cause.
+            Some(Outcome::Pass) if front.paused_at.is_some() => held(None),
             // `Dispatcher::escalate`'s road off `blocked`, which reports
             // nothing and stamps the step to resume in `paused_at`.
             _ if front.paused_at.is_some() => stopped(Some(Cause::Escalated)),
@@ -7990,6 +7997,74 @@ mod tests {
             },
         );
         assert_eq!(line, "stopped on blocked, moved to paused (escalated)");
+    }
+
+    /// An unattended unblocker's pass that spoolway's own lap bound parked:
+    /// the lane reported a pass, so the line must not read as the dispatcher
+    /// giving up on it, which `(escalated)` says. It names no cause, because
+    /// the file cannot tell this park from the escalation below.
+    #[test]
+    fn a_pass_parked_by_the_unblocker_lap_limit_reads_passed() {
+        let line = line_after(
+            "road-blocked-lap-limit",
+            "blocked",
+            |task| {
+                task.front.blocked_from = Some("test".into());
+                task.front
+                    .unblock_laps
+                    .insert("test".into(), crate::commands::UNBLOCK_LAP_LIMIT);
+            },
+            |repo, pipelines| {
+                let mut task = repo.task("t").unwrap();
+                let pipeline = pipelines.for_task(&task).unwrap().clone();
+                let routed = crate::commands::route(
+                    &mut task,
+                    &pipeline,
+                    crate::pipeline::BLOCKED,
+                    Outcome::Pass,
+                    true,
+                    None,
+                    0,
+                )
+                .unwrap();
+                assert_eq!(routed.destination, crate::pipeline::PAUSED);
+                task.front.last_report = Some(crate::task::LastReport {
+                    step: crate::pipeline::BLOCKED.into(),
+                    outcome: Outcome::Pass.as_str().into(),
+                    at: chrono::Utc::now().timestamp(),
+                    blocked: false,
+                });
+                task.set_stage(&routed.destination, routed.pause_note.as_deref());
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed blocked, moved to paused");
+    }
+
+    /// `Dispatcher::escalate` on a `blocked` lane that could not be started,
+    /// after an earlier unblocker lane's pass: that pass is still the last
+    /// report on file and the park leaves the same fields as the lap bound's,
+    /// so the line reads as that park does, without a cause, rather than
+    /// guess `(escalated)` or any other. Pins the one case the file cannot
+    /// settle.
+    #[test]
+    fn a_blocked_lane_escalated_after_an_earlier_pass_reads_without_a_cause() {
+        let line = line_after(
+            "road-blocked-escalated-stale-pass",
+            "blocked",
+            |task| {
+                task.front.blocked_from = Some("test".into());
+                reported(task, crate::pipeline::BLOCKED, Outcome::Pass);
+            },
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.reset_loop_counts();
+                task.front.paused_at = task.front.blocked_from.clone();
+                task.set_stage(crate::pipeline::PAUSED, Some("could not start `blocked`"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed blocked, moved to paused");
     }
 
     #[test]

@@ -348,6 +348,7 @@ A cause in brackets follows when the route alone does not explain the move.
 | `stopped on <step>, moved to blocked (escalated)` | The dispatcher stopped the lane in an unattended run, and the unblocker takes the task. The `## Blocker` section gives the exact reason. |
 | `stopped before starting, moved to paused (branch <name> missing)` | The branch the task starts from does not exist. |
 | `stopped on <step>, moved to paused` | The task file names no cause for the step the task left. A cause counts only when the file names that step. |
+| `passed blocked, moved to paused` | The `blocked` lane reported a pass and the task still stopped on `paused`. This is the unblocker lap limit, or the dispatcher stopping a later `blocked` lane. The `## Status Log` gives the exact reason. |
 | `reported a pause on blocked, moved to paused` | The `blocked` lane reported a pause. |
 | `reported a block on blocked, moved to paused` | The `blocked` lane reported a block. The same holds for `failed blocked` when it reported a fail. |
 | `stopped on blocked, moved to paused (escalated)` | The dispatcher stopped the `blocked` lane, in any run. The `## Status Log` gives the exact reason. |

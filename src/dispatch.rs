@@ -1508,6 +1508,13 @@ impl<'a> Dispatcher<'a> {
                     else {
                         continue;
                     };
+                    // A command that passes ends the cycle that
+                    // `Frontmatter::unblock_laps` counts: whatever the
+                    // unblocker did, it worked, so a later failure starts the
+                    // count over rather than inheriting this one.
+                    if outcome == crate::pipeline::Outcome::Pass {
+                        tasks[index].front.unblock_laps.clear();
+                    }
                     // Still on disk if `run_command` just read this
                     // destination off an `Exited` run — that arm leaves its
                     // pid and exit files alone on purpose, for whichever arm
@@ -5161,6 +5168,9 @@ impl<'a> Dispatcher<'a> {
         // does on that road, so the resume does not meet the spent limit again.
         if step.id == crate::pipeline::BLOCKED {
             task.reset_loop_counts();
+            // The unblocker laps end with this park too: nothing sent the task
+            // back to a command step, so the resume starts them from zero.
+            task.front.unblock_laps.clear();
             let origin = task
                 .front
                 .blocked_from
@@ -8212,6 +8222,7 @@ mod tests {
             arrivals: Default::default(),
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
+            unblock_laps: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };
@@ -12895,6 +12906,8 @@ mod tests {
             // rather than an empty file's backfill.
             f.arrivals.insert("implement".into(), 3);
             f.rounds.insert("review->implement".into(), 3);
+            // A lap already counted, so the clear is what empties it.
+            f.unblock_laps.insert("implement".into(), 2);
         });
 
         let mux = FakeMux::new(vec![]);
@@ -12927,6 +12940,11 @@ mod tests {
         assert_eq!(task.rounds_at("implement"), 0, "leaving `blocked` resets");
         assert_eq!(task.front.rounds.len(), 1, "{:?}", task.front.rounds);
         assert_eq!(task.rounds_via("review", "implement"), 0);
+        assert!(
+            task.front.unblock_laps.is_empty(),
+            "the park ends the unblocker laps: {:?}",
+            task.front.unblock_laps
+        );
     }
 
     /// The launch guard's escalation does not touch an `escalated` mark that
@@ -19100,6 +19118,29 @@ mod tests {
             !mux.did("start").iter().any(|s| s.contains("implement")),
             "a command step started a lane: {:?}",
             mux.did("start")
+        );
+    }
+
+    /// A command that exits zero ends the unblocker laps counted against it,
+    /// so a failure on some later day starts the count over instead of
+    /// inheriting laps from this one. Without the clear in the dispatcher the
+    /// entry for `implement` survives the pass and the assertion sees it.
+    #[test]
+    fn a_command_step_that_passes_ends_the_unblock_lap_count() {
+        let (repo, _root_guard) = fixture("command-pass-ends-laps");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.unblock_laps.insert("implement".into(), 2);
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert!(
+            reload(&path).front.unblock_laps.is_empty(),
+            "a passing command left its laps standing: {:?}",
+            reload(&path).front.unblock_laps
         );
     }
 
