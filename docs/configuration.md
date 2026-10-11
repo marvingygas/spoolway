@@ -26,25 +26,39 @@ changes one key and leaves every other byte alone. It refuses a key the file doe
 hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
 created on first write.
 
+A key that `config set` creates is written where `spoolway sync` would put it, with no comment
+above it. The keys after it move down. The first `[models."<glob>"]` row also removes an empty
+`[models]` header. A file that only `config set` has changed is therefore not behind, and `sync`
+leaves it as it is.
+
+A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
+points at. If the link points at a file that does not exist yet, `config set` creates that file.
+
+Parallel `config set` calls in one project run one after another, and each saves its key. A
+call waits up to ten seconds for the one before it. After that it exits 1, names the process that
+holds the lock, and writes nothing. Run it again.
+
 Run `config set` from the main checkout. The dispatcher reads the project's own config, so in
 a linked worktree the command refuses and prints the `-C` form to run instead.
 
 ### What `config set` checks
 
 `config set` checks the value's type. It also runs the checks of `spoolway doctor` that read only
-the config and the hook files. It treats the result in one of two ways.
+the config, the hook files and the pipeline files. It treats the result in one of two ways.
 
 | Value | Result |
 |---|---|
 | One that can never be right | The command refuses, names the values that are allowed, and saves nothing. |
 | One that names something not set up yet | The command saves the value and prints a warning on stderr. `spoolway doctor` fails until the missing piece is added. |
 
-These two keys are refused:
+These keys are refused:
 
 | Key | Refused when | Allowed |
 |---|---|---|
 | `dispatch.backend` | The value is not `herdr` or `headless`, such as `tmux` or `zellij` | `herdr`, `headless` |
 | `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
+| `models.<glob>.input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`, and the same rates under an `above_<N>k_tokens` tier | The value is negative, `inf` or `NaN` | A finite number of dollars per million tokens, 0 or more |
+| `unattended.max_cost_usd` | The value is negative, `inf` or `NaN` | A finite number of dollars, 0 or more |
 
 Warnings come from the same checks `doctor` runs. They cover only the keys you set:
 
@@ -53,8 +67,18 @@ Warnings come from the same checks `doctor` runs. They cover only the keys you s
 | `unattended.blocked_agent` | The name has no profile in `[agents]` |
 | `unattended.*` | `unattended.enabled` is on and `unattended.blocked_model` is blank |
 | `issue_tracking.*` | Any issue-tracking check of `doctor` fails, such as a missing hook script or a blank `project_key` beside a hook |
+| `models.<glob>.compact_ctx`, `agents.<profile>.session_blocked_ctx` | A pipeline step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
 
 A warning does not fail the command, so a script can set keys one after another.
+
+A base rate set to `0` also prints a `warning:` line on stderr. `doctor` does not fail on it. A zero
+base rate means unset, so for a model that the price table or another `[models]` row prices, the
+line names the rate that stays in effect. For a model nothing prices, there is no line.
+
+A zero rate inside an `above_<N>k_tokens` tier is charged as zero, because a tier you write
+replaces the table's tier whole. The line says that part of a request is free above the threshold.
+Setting a tier rate to `0` where the row has no tier writes no tier. The line names the tier the
+model keeps.
 
 ```
 $ spoolway config set dispatch.backend tmux
@@ -171,7 +195,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `system-prompts/` | What finished runs left behind. An entry of a task still in the queue is kept, except in `system-prompts/`. | `retention_days` |
 | `commands/`, `tracking/` | Run files of a task still in the queue | Deleted when the task is archived; `retention_days` sweeps only strays, and keeps an entry whose task is still in the queue |
-| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
+| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
@@ -639,7 +663,7 @@ A profile says which agent binary runs and under what limits. Three ship: `pi`, 
 
 | Key | Default | What it controls |
 |---|---|---|
-| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
+| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. A kind spoolway has no row for, such as the typo `Claude`, keeps its profile as written. `sync` and `config set` leave it alone. `spoolway doctor` and `spoolway pipeline check` fail it until the kind is corrected. `spoolway config set agents.<profile>.kind` switches a profile between `pi`, `codex` and `claude` in one call. It sets `permission_mode` to the new kind's default when the old mode does not fit. |
 | `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
 | `session_reuse_ctx` | `20` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
 | `session_blocked_ctx` | `40` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task escalated: to `blocked` in an unattended run, otherwise to `paused`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
@@ -729,6 +753,9 @@ it. It prints every setting it removes. Those are retired keys (see
 only renamed, such as `cache_write` or a `[pricing]` row, is written under its new name and
 not listed.
 
+A profile whose `kind` spoolway has no row for is treated the same way. It stays in the file
+with its comment, and `spoolway sync` does not list it as dropped.
+
 A key from a newer spoolway is read by that binary only. A spoolway that includes this
 handling still loads the file, names the key, and ignores it. 0.8.0 and 0.7.x do not: they
 refuse a key they do not know inside a table.
@@ -741,8 +768,7 @@ such as `spoolway config set`, `spoolway init --tracker` and `spoolway override 
 leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
 `dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
 `dispatch.backend` set to `tmux` (which loads as `herdr` instead),
-`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode`, an `[agents.<profile>.env]` table, and an
-`[agents.<profile>]` naming a kind spoolway no longer knows how to launch. Only the notes for
+`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode` and an `[agents.<profile>.env]` table. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
 rewritten or dropped on the next save. The rest of the table below load with no note.

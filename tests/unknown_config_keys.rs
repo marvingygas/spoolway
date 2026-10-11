@@ -83,7 +83,8 @@ fn unknown_keys_load_are_named_and_survive_set_and_sync() {
     let mut config = std::fs::read_to_string(project.config_path()).expect("read config");
     config.push_str(
         "\n# a setting from the future\n[dispatch.future]\nunused = 1\n\
-         \n# I meant [unattended]\n[unatended]\nmax_cost = 3\n",
+         \n# I meant [unattended]\n[unatended]\nmax_cost = 3\n\
+         \n# a kind I mistyped\n[agents.typo]\nkind = \"Claude\"\n",
     );
     // A typo inside a known table, with a comment of the person's own.
     config = config.replacen(
@@ -101,13 +102,22 @@ fn unknown_keys_load_are_named_and_survive_set_and_sync() {
     }
     assert!(said.contains("note: "), "{said}");
     assert!(
+        said.contains("agent `typo` kind") && !said.contains("dropped on the next save"),
+        "doctor must fail the unknown kind, not call it dropped: {said}"
+    );
+    assert!(
         said.contains("does not know: "),
         "doctor has no row for the unknown keys: {said}"
     );
 
-    // `config set` edits in place and keeps every one of them.
+    // `config set` edits in place and keeps every one of them, a profile
+    // with an unknown kind included.
     project.run(&["config", "set", "dispatch.keep_finished_lanes", "false"]);
     let after_set = std::fs::read_to_string(project.config_path()).expect("read config");
+    assert!(
+        after_set.contains("[agents.typo]\nkind = \"Claude\""),
+        "{after_set}"
+    );
     assert!(
         after_set.contains("# spelt wrong on purpose\nlane_quite = \"5m\""),
         "{after_set}"
@@ -128,6 +138,15 @@ fn unknown_keys_load_are_named_and_survive_set_and_sync() {
     assert!(
         after_sync.contains("# I meant [unattended]\n[unatended]"),
         "{after_sync}"
+    );
+    assert!(
+        after_sync.contains("[agents.typo]") && after_sync.contains("kind = \"Claude\""),
+        "sync dropped a profile with an unknown kind: {after_sync}"
+    );
+    assert!(
+        !text(&sync.stdout).contains("agents.typo"),
+        "{}",
+        text(&sync.stdout)
     );
     assert!(
         after_sync.contains("# a setting from the future\n[dispatch.future]\nunused = 1"),

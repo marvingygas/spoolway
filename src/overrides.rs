@@ -1072,7 +1072,7 @@ pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>>
     })?;
 
     match text {
-        Some(text) => crate::task::write_atomic(&tracked_path, &text)
+        Some(text) => crate::task::write_atomic(&crate::config::write_target(&tracked_path), &text)
             .with_context(|| format!("writing {}", tracked_path.display()))?,
         None => config.save(root)?,
     }

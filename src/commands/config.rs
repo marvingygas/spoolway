@@ -95,6 +95,10 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
         );
     }
     crate::confkv::check_typed(key, value)?;
+    // Held from the load to the save: a config loaded before the lock was
+    // taken is the one a parallel `config set` has since changed, and saving
+    // from it either drops that call's key or is refused by `save_key`.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     // Built from the tracked file alone. `repo.config` has the override
     // layer merged in, so saving a key out of it checks the tracked text
     // against values it never held and refuses every key but the overridden

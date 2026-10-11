@@ -1547,6 +1547,113 @@ says "config set warns on a hook script that is not there yet" \
   "$SPOOLWAY" config set issue_tracking.hook nosuch.sh
 must "hook restored" "$SPOOLWAY" config set issue_tracking.hook "$BEFORE_HOOK"
 
+# A price or a limit that can never be right is refused and nothing is saved.
+BEFORE_COST=$("$SPOOLWAY" config get unattended.max_cost_usd)
+refuses "config set refuses a negative price, naming what is allowed" \
+  "0 or more" "$SPOOLWAY" config set models.e2e-priced.input -- -5
+refuses "config set refuses an infinite max_cost_usd" \
+  "must be a finite number of dollars" "$SPOOLWAY" config set unattended.max_cost_usd inf
+works "and the cost limit is still what it was" \
+  test "$("$SPOOLWAY" config get unattended.max_cost_usd)" = "$BEFORE_COST"
+works "and the refused price was not saved" \
+  test "$("$SPOOLWAY" config get models.e2e-priced.input)" = "0.0"
+
+# A compaction threshold at or above the profile's block ceiling blocks the
+# step before it compacts. `set` saves it and warns in doctor's own words.
+# The step is the first one this fixture runs on the claude agent, read out of
+# the file: the fixture's mixed profile puts `implement` on pi, which takes no
+# compaction setting. Its model is rewritten whatever it holds, because
+# `set_models` has already replaced every blank `model: ""`.
+COMPACT_PIPELINE=.spoolway/pipelines/default.yml
+cp "$COMPACT_PIPELINE" "$LIVE/default.yml.before-compact"
+COMPACT_STEP=$(awk '/^  - id: / { id = $3 } /^    agent: claude$/ { print id; exit }' \
+  "$COMPACT_PIPELINE")
+sed -i "/^  - id: $COMPACT_STEP\$/,/^\$/s/^\(    model:\).*/\1 \"e2e-compact\"/" "$COMPACT_PIPELINE"
+works "a claude step now runs the e2e-compact model" \
+  test -n "$COMPACT_STEP" -a "$(grep -cF 'model: "e2e-compact"' "$COMPACT_PIPELINE")" = 1
+must "a block ceiling on the claude agent" \
+  "$SPOOLWAY" config set agents.claude.session_blocked_ctx 40
+says "config set warns when a compaction threshold leaves a step blocked first" \
+  "fails its check \"pipeline \`default\` step \`$COMPACT_STEP\`\": agents.claude.session_blocked_ctx = 40 is at or below models.\"e2e-compact\".compact_ctx = 50" \
+  "$SPOOLWAY" config set models.e2e-compact.compact_ctx 50
+works "and the value is saved" \
+  test "$("$SPOOLWAY" config get models.e2e-compact.compact_ctx)" = "50"
+says "and doctor fails the step with the same words" \
+  'agents.claude.session_blocked_ctx = 40 is at or below models."e2e-compact".compact_ctx = 50' \
+  "$SPOOLWAY" doctor --no-live
+must "compaction put back below block" "$SPOOLWAY" config set models.e2e-compact.compact_ctx 30
+cp "$LIVE/default.yml.before-compact" "$COMPACT_PIPELINE"
+
+# A key `config set` creates is written where `sync` would put it, so the file
+# is not "behind" and `doctor` has no sync to ask for.
+must "a concurrency on the claude agent" \
+  "$SPOOLWAY" config set agents.claude.concurrency 2
+silent_about "doctor names no file behind after config set adds a concurrency" \
+  "behind this spoolway" "$SPOOLWAY" doctor --no-live
+must "concurrency put back" "$SPOOLWAY" config set agents.claude.concurrency 0
+
+# Calls that run at the same time, as an agent issuing several tool calls at
+# once does, each save their own key. A call that lost the race may be
+# refused, but none may print success and leave its value out of the file.
+PAR_DIR="$LIVE/config-set-parallel"
+mkdir -p "$PAR_DIR"
+for i in 1 2 3 4 5 6 7 8; do
+  ( "$SPOOLWAY" config set "models.par$i.input" "$i.5" >"$PAR_DIR/set-$i.out" 2>&1
+    echo $? >"$PAR_DIR/set-$i.status" ) &
+done
+wait
+for i in 1 2 3 4 5 6 7 8; do
+  if [ "$(cat "$PAR_DIR/set-$i.status")" != 0 ] \
+    || [ "$("$SPOOLWAY" config get "models.par$i.input" 2>/dev/null)" = "$i.5" ]; then
+    ok "parallel config set: models.par$i.input is saved, or its call was refused"
+  else
+    bad "parallel config set: models.par$i.input was reported saved but is not in config.toml"
+    sed 's/^/        /' "$PAR_DIR/set-$i.out"
+  fi
+done
+
+# The same for `pipeline override --set`, three keys of one pipeline's patch.
+PAR_STEPS=(implement review document)
+for n in 0 1 2; do
+  ( "$SPOOLWAY" pipeline override default --set "${PAR_STEPS[$n]}.model=par-model-$n" \
+      >"$PAR_DIR/ovr-$n.out" 2>&1
+    echo $? >"$PAR_DIR/ovr-$n.status" ) &
+done
+wait
+PAR_PATCH="$SPOOLWAY_PROJECT_HOME/overrides/pipelines/default.yml"
+for n in 0 1 2; do
+  if [ "$(cat "$PAR_DIR/ovr-$n.status")" != 0 ] \
+    || grep -qF "par-model-$n" "$PAR_PATCH" 2>/dev/null; then
+    ok "parallel pipeline override --set: ${PAR_STEPS[$n]}.model is saved, or its call was refused"
+  else
+    bad "parallel pipeline override --set: ${PAR_STEPS[$n]}.model was reported saved but is not in the patch"
+    sed 's/^/        /' "$PAR_DIR/ovr-$n.out"
+  fi
+done
+rm -rf "$SPOOLWAY_PROJECT_HOME/overrides"
+
+# A config.toml that is a symlink into a shared dotfiles folder keeps being
+# one: `config set` writes the new value into the file the link points at.
+# Replacing the link would leave the shared copy without the edit and print
+# nothing about it.
+LINK_DIR="$LIVE/config-set-symlink"
+mkdir -p "$LINK_DIR"
+LINK_KEY=unattended.max_cost_usd
+BEFORE_LINK_COST=$("$SPOOLWAY" config get "$LINK_KEY")
+must "a cost limit written to the regular file first, so the key is on a line" \
+  "$SPOOLWAY" config set "$LINK_KEY" 11
+cp .spoolway/config.toml "$LINK_DIR/before.toml"
+mv .spoolway/config.toml "$LINK_DIR/shared.toml"
+ln -s "$LINK_DIR/shared.toml" .spoolway/config.toml
+must "config set on a symlinked config.toml" "$SPOOLWAY" config set "$LINK_KEY" 12
+works "and config.toml is still a symlink" test -L .spoolway/config.toml
+works "and the value reads back" test "$("$SPOOLWAY" config get "$LINK_KEY")" = "12.0"
+works "and the shared file differs from before in that one line only" \
+  test "$(diff "$LINK_DIR/before.toml" "$LINK_DIR/shared.toml" | grep -c '^[<>]')" = "2"
+rm .spoolway/config.toml
+mv "$LINK_DIR/shared.toml" .spoolway/config.toml
+must "cost limit restored" "$SPOOLWAY" config set "$LINK_KEY" "$BEFORE_LINK_COST"
+
 # ------------------------------------------------------------- sync panel
 # A checkout behind the binary is told nothing in front of a command: no line
 # on stderr, no stamp file. Only `spoolway sync` and `spoolway doctor` speak

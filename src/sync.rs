@@ -1220,7 +1220,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
             // seeds a missing skeleton from `skeleton.shipped` rather than
             // from anything read out of the main checkout.
             acts.push(Act::write(
-                path.clone(),
+                crate::config::write_target(&path),
                 &shown,
                 crate::config::Config::default().render()?,
             ));
@@ -1496,7 +1496,13 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         outcomes.push(Outcome::wrote(&shown, "relaid out"));
     }
 
-    acts.push(Act::write(path, &shown, rewritten));
+    // Through the link, if `config.toml` is one: `sync` runs after every
+    // upgrade, and a rename over a linked shared file would replace the link.
+    acts.push(Act::write(
+        crate::config::write_target(&path),
+        &shown,
+        rewritten,
+    ));
     Ok(())
 }
 
@@ -2902,6 +2908,92 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// A key `config set` creates is already where `sync` would put it: the
+    /// file a fresh `init` wrote and then `config set` added a profile's
+    /// `concurrency` to is not behind, so `sync` leaves it byte for byte as it
+    /// is and `doctor` has nothing to ask for.
+    #[test]
+    fn a_sync_leaves_a_config_that_config_set_gave_a_concurrency_as_it_is() {
+        let (repo, _root_guard) = fixture("config-set-concurrency");
+        Config::default().save(&repo.root).unwrap();
+        let loaded = Config::load(&repo.root).unwrap();
+        let updated = crate::confkv::set(&loaded, "agents.claude.concurrency", "2").unwrap();
+        updated
+            .save_key(&repo.root, "agents.claude.concurrency")
+            .unwrap();
+        let path = Config::path_in(&repo.root);
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("concurrency = 2"), "{before}");
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .all(|line| !line.starts_with("wrote") && !line.starts_with("migrated")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
+    /// The same holds for a `[models."<glob>"]` field `config set` creates:
+    /// `sync` leaves the file as it is.
+    #[test]
+    fn a_sync_leaves_a_config_that_config_set_gave_a_models_row_as_it_is() {
+        let (repo, _root_guard) = fixture("config-set-models");
+        Config::default().save(&repo.root).unwrap();
+        let loaded = Config::load(&repo.root).unwrap();
+        let updated = crate::confkv::set(&loaded, "models.foo-model.input", "5.0").unwrap();
+        updated
+            .save_key(&repo.root, "models.foo-model.input")
+            .unwrap();
+        let path = Config::path_in(&repo.root);
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("foo-model"), "{before}");
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .all(|line| !line.starts_with("wrote") && !line.starts_with("migrated")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
+    /// A `config.toml` that is a symlink is brought forward in the file it
+    /// points at, and stays a link: `sync` runs after every upgrade, and a
+    /// rename over the link would leave the shared copy behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_sync_brings_a_symlinked_config_forward_in_its_target() {
+        let (repo, _root_guard) = fixture("config-symlinked");
+        let path = crate::config::Config::path_in(&repo.root);
+        let target = repo.root.join("shared-config.toml");
+        std::fs::write(&target, "[dispatch]\nlane_quiet = \"45m\"\n").unwrap();
+        std::fs::remove_file(&path).ok();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "config.toml is no longer a symlink"
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert!(after.contains("auto_commit"), "{after}");
     }
 
     /// The other half of the contract: a comment is spoolway's, so one

@@ -812,6 +812,14 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
     if key.starts_with("issue_tracking.") {
         findings.extend(issue_tracking_config_checks(repo, &config.issue_tracking));
     }
+    // Block lives on the profile and compaction on the model, so only a
+    // pipeline step pairs them and `confkv::set` cannot order them. Pipelines
+    // that do not load are `doctor`'s to report, not a reason to say more here.
+    let sets_compaction = key.ends_with(".session_blocked_ctx")
+        || (key.starts_with("models.") && key.ends_with(".compact_ctx"));
+    if sets_compaction && let Ok(pipelines) = Pipelines::load(&repo.root, config) {
+        findings.extend(step_compaction_checks(&pipelines, config));
+    }
     findings
         .into_iter()
         .filter_map(|finding| match finding {
@@ -1368,12 +1376,12 @@ fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
 
 /// One row for each note a config load prints to stderr that no other row
 /// here already names: two hard-retired keys, the gone tmux backend, two
-/// retired `dispatch` settings, and an agent profile's retired `env` table
-/// or unknown kind. Bare `spoolway` prints none of those notes — see
+/// retired `dispatch` settings, and an agent profile's retired `env` table.
+/// Bare `spoolway` prints none of those notes — see
 /// `overrides::QUIET_NOTES` — so these rows are where it says them, in the
 /// "before dispatching" popup. Read off the raw file, as
-/// [`worktree_root_note`] is: the loaded [`Config`] has already stripped or
-/// dropped every one of them. A file that does not parse earns nothing here;
+/// [`worktree_root_note`] is: the loaded [`Config`] has already stripped
+/// every one of them. A file that does not parse earns nothing here;
 /// `config parses` already fails over it.
 fn load_note_rows(checkout: &Path) -> Vec<Finding> {
     let Some(doc) = std::fs::read_to_string(Config::path_in(checkout))
@@ -1428,19 +1436,6 @@ fn load_note_rows(checkout: &Path) -> Vec<Finding> {
             notes.push(format!(
                 "[agents.{name}.env] in this checkout's config is no longer read — a lane \
                  inherits the dispatcher's environment; dropped on the next save"
-            ));
-        }
-        // `kind` defaults to blank when a profile leaves it out, the same as
-        // `AgentProfile`'s own `#[serde(default)]`, and a blank kind is one
-        // no adapter knows either.
-        let kind = profile
-            .get("kind")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default();
-        if crate::agent::adapter(kind).is_none() {
-            notes.push(format!(
-                "[agents.{name}] in this checkout's config names kind `{kind}`, which spoolway \
-                 no longer knows how to launch; dropped on the next save"
             ));
         }
     }
@@ -2093,8 +2088,16 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         )));
     }
 
-    // One check per step, from the function the dispatcher refuses the same
-    // step with: a profile's block and a model's compaction meet only in a step.
+    findings.extend(step_compaction_checks(pipelines, config));
+    findings
+}
+
+/// One check per agent step, from the function the dispatcher refuses the
+/// same step with: a profile's block and a model's compaction meet only in a
+/// step. Shared with `spoolway config set`, which runs it after a
+/// `compact_ctx` or `session_blocked_ctx` is saved.
+fn step_compaction_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+    let mut findings = Vec::new();
     for (pipeline_name, pipeline) in &pipelines.pipelines {
         for step in pipeline
             .steps
