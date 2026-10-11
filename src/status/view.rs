@@ -321,14 +321,17 @@ impl Cause {
 
 /// [`BoardMode::ConfirmPause`]'s panel, `p`'s own: one abort, so the body
 /// names the step it is on directly rather than repeating the task id the
-/// title already carries, and closes
-/// with the two lines that distinguish an interrupted turn from a killed
-/// run — the one thing a person answering `enter` needs to know before they
-/// do. The key line splits in two rather than one, `[enter]` on its own row
-/// and `[s]`/`[esc]` on the next, so the schedule this panel adds reads as a
-/// third, unhurried answer rather than one more word crowded onto the first
-/// line — see the mockup in `docs/dispatcher.md`.
-pub(super) fn pause_confirm_panel(id: &str, abort: &Abort) -> Vec<String> {
+/// title already carries. A command step adds two lines saying what pausing
+/// does to it, since unlike an agent's turn its process is ended and its run
+/// starts over; an agent step needs no such warning.
+///
+/// Its answers are [`pause_answers`].
+pub(super) fn pause_confirm_panel(
+    id: &str,
+    abort: &Abort,
+    scheduled: bool,
+    cursor: usize,
+) -> Vec<String> {
     let time = abort
         .elapsed
         .map(|d| human_secs(d.as_secs() as i64))
@@ -337,22 +340,32 @@ pub(super) fn pause_confirm_panel(id: &str, abort: &Abort) -> Vec<String> {
         "Pausing aborts the step it is on:".to_string(),
         String::new(),
         format!("{}    {}    {time}", abort.step, abort.kind.word()),
-        String::new(),
     ];
-    match abort.kind {
-        AbortKind::Agent => {
-            body.push("The turn is interrupted, not killed.".to_string());
-            body.push("Resuming picks the session back up.".to_string());
-        }
-        AbortKind::Command => {
-            body.push("A killed step runs again in full".to_string());
-            body.push("when you resume.".to_string());
-        }
+    if matches!(abort.kind, AbortKind::Command) {
+        body.push(String::new());
+        body.push("Pausing terminates the command's process.".to_string());
+        body.push("Resuming restarts the command.".to_string());
     }
-    body.push(String::new());
-    body.push("[enter] pause it".to_string());
-    body.push("[s] schedule   [esc] cancel".to_string());
-    crate::screen::boxed(&format!("pause {id}"), &body)
+    crate::screen::ask(
+        &format!("pause {id}"),
+        &body,
+        &pause_answers(abort, scheduled),
+        cursor,
+    )
+}
+
+/// [`pause_confirm_panel`]'s answers, which the board's key handling also
+/// counts to move the cursor: pause now, or leave the step running and pause
+/// when it finishes. The second names the step, and reads `cancel the
+/// scheduled pause` instead while `scheduled` says that step already has one,
+/// since answering it then clears the schedule — see
+/// `Board::on_key_pause_confirm`.
+pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> [String; 2] {
+    let later = match scheduled {
+        true => "cancel the scheduled pause".to_string(),
+        false => format!("pause when {} finishes", abort.step),
+    };
+    ["pause now".to_string(), later]
 }
 
 /// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
@@ -366,8 +379,8 @@ const RESTART_WRAP: usize = 56;
 ///
 /// The session row is left out when none is on record — a lane that never
 /// got as far as a turn — rather than printed empty, the same as
-/// `spoolway restart` prints no session line then. A refusal `s` met is
-/// printed under the two closing lines, above the key line.
+/// `spoolway restart` prints no session line then. A refusal its answer met
+/// is printed under the closing sentence, above the one answer, `restart`.
 pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
     let mut body = vec![
         format!("step      {}", confirm.step),
@@ -395,16 +408,18 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
                 .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
         );
     }
-    crate::screen::panel(
+    crate::screen::ask(
         &format!("restart {}", confirm.id),
         &body,
-        &crate::screen::keys(&[("s", "restart"), ("esc", "cancel")]),
+        &["restart".to_string()],
+        0,
     )
 }
 
-/// [`BoardMode::ResumePicker`]'s panel: where the task stopped, its
-/// pipeline's steps with the cursor's row marked `▸`, any pinned row under
-/// them, a refusal if `enter` met one, and the key line.
+/// [`BoardMode::ResumePicker`]'s panel: where the task stopped, a refusal
+/// if `enter` met one, then the answers — its pipeline's steps with any
+/// pinned row under them, drawn by [`crate::screen::ask`] with `>` on the
+/// cursor's row — and the key row every answer list closes on.
 ///
 /// `height` is [`pane_height`]'s: the list shows as many steps as the pane
 /// leaves room for, with `▲ n more` and `▼ n more` standing in for the rest,
@@ -429,12 +444,7 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
         + 3;
     let line = |i: usize| {
         let row = &picker.rows[i];
-        let mark = if i == picker.cursor { "▸" } else { " " };
-        let text = format!(
-            "{mark} {}{}",
-            crate::screen::pad_to(&row.step, column),
-            row.note
-        );
+        let text = format!("{}{}", crate::screen::pad_to(&row.step, column), row.note);
         text.trim_end().to_string()
     };
     let mut error: Vec<String> = match &picker.error {
@@ -449,13 +459,13 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
     let pinned = picker.rows.len() - picker.listed;
 
     // Every row but the list's own and the refusal's: the two borders, a
-    // blank, the header and a blank above the list; the pinned rows under
-    // it; and a blank, the key line and a blank to close. Three more rows are
-    // kept spare, because `with_popup` pads a frame shorter than the panel
-    // plus two, and the unhosted board's frame is one row short of the pane
-    // — see `clamp_rows`. A panel more than three rows short of the pane is
+    // blank and the header, a blank above the list; the pinned rows under
+    // it; and a blank and the key row to close. Three more rows are kept
+    // spare, because `with_popup` pads a frame shorter than the panel plus
+    // two, and the unhosted board's frame is one row short of the pane —
+    // see `clamp_rows`. A panel more than three rows short of the pane is
     // never padded past it.
-    let fixed = 2 + 3 + pinned + 3 + 3;
+    let fixed = 2 + 2 + 1 + pinned + 2 + 3;
     let room = match height {
         Some(height) => {
             let free = height.saturating_sub(fixed);
@@ -477,25 +487,33 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
     };
     let window = list_window(picker, room);
 
-    let mut body = vec![String::new(), picker.header.clone(), String::new()];
+    let mut body = vec![String::new(), picker.header.clone()];
+    body.extend(error);
+
+    // The `▲`/`▼` lines sit among the answers, so the cursor's index into
+    // them counts those lines to land on the cursor's own step. `ask` gives
+    // them no `>` of their own: the cursor never rests on one.
+    let mut answers = Vec::new();
     if window.marked && window.start > 0 {
-        body.push(format!("▲ {} more", window.start));
+        answers.push(format!("▲ {} more", window.start));
     }
-    body.extend((window.start..window.start + window.shown).map(line));
+    let listed_at = answers.len();
+    answers.extend((window.start..window.start + window.shown).map(line));
     let below = picker.listed - window.start - window.shown;
     if window.marked && below > 0 {
-        body.push(format!("▼ {below} more"));
+        answers.push(format!("▼ {below} more"));
     }
-    body.extend((picker.listed..picker.rows.len()).map(line));
-    body.extend(error);
-    body.push(String::new());
-    body.push(crate::screen::keys(&[
-        ("↑↓", "pick"),
-        ("enter", "resume"),
-        ("esc", "cancel"),
-    ]));
-    body.push(String::new());
-    crate::screen::boxed(&format!("resume {}", picker.id), &body)
+    let pinned_at = answers.len();
+    answers.extend((picker.listed..picker.rows.len()).map(line));
+    let cursor = match picker.cursor.checked_sub(picker.listed) {
+        Some(pin) => pinned_at + pin,
+        None => picker
+            .cursor
+            .checked_sub(window.start)
+            .filter(|at| *at < window.shown)
+            .map_or(usize::MAX, |at| listed_at + at),
+    };
+    crate::screen::ask(&format!("resume {}", picker.id), &body, &answers, cursor)
 }
 
 /// The fewest rows a scrolled picker list is drawn in while it can still
@@ -584,10 +602,11 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
             String::new(),
             "The queue tab is what sends it again.".to_string(),
         ];
-        return crate::screen::panel(
+        return crate::screen::ask(
             &format!("unqueue {}", head.id),
             &body,
-            "[enter] unqueue it   [esc] cancel",
+            &["unqueue it".to_string()],
+            0,
         );
     }
 
@@ -612,10 +631,11 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     }
     body.push(String::new());
     body.push("The queue tab is what sends them again.".to_string());
-    crate::screen::panel(
+    crate::screen::ask(
         &format!("unqueue {}", head.id),
         &body,
-        "[enter] unqueue them   [esc] cancel",
+        &["unqueue them".to_string()],
+        0,
     )
 }
 
@@ -637,7 +657,7 @@ pub(super) fn unqueue_all_confirm_panel(ids: &[String]) -> Vec<String> {
     body.push(String::new());
     body.push("Each goes back to pending. Running, paused and".to_string());
     body.push("blocked tasks stay where they are.".to_string());
-    crate::screen::panel("unqueue all", &body, "[enter] unqueue them   [esc] cancel")
+    crate::screen::ask("unqueue all", &body, &["unqueue them".to_string()], 0)
 }
 
 /// `path` with a leading run matching the home directory rewritten to `~`,
@@ -4623,7 +4643,9 @@ mod tests {
                 "  The lane is torn down and `review-spec` is briefed from",
                 "  scratch. Its conversation is not kept.",
                 "",
-                "  [s] restart   [esc] cancel",
+                "  > restart",
+                "",
+                "  [enter] confirm   [esc] close",
             ]
         );
         assert!(
@@ -4642,7 +4664,8 @@ mod tests {
             assert!(line.chars().count() <= 80, "{line}");
         }
         assert!(panel.iter().any(|line| line.contains("a report landed")));
-        assert!(panel[panel.len() - 2].contains("[s] restart   [esc] cancel"));
+        assert!(panel[panel.len() - 4].contains("> restart"));
+        assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
     }
 
     /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`

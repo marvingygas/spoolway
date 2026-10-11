@@ -225,8 +225,9 @@ pub struct Frontmatter {
     pub escalated: bool,
 
     /// Whether this task was parked by the dispatch tab's stop popup — its
-    /// `i`, which interrupts every running step as dispatching stops — rather
-    /// than by a person's own `p`, Escape in the pane, or an escalation.
+    /// `interrupt them now`, which interrupts every running step as
+    /// dispatching stops — rather than by a person's own `p`, Escape in the
+    /// pane, or an escalation.
     ///
     /// The one thing that sets a stop's parks apart from every other park:
     /// all of them write the same `parked_from`, and a restarted dispatcher

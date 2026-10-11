@@ -293,9 +293,9 @@ _row_time() {
 }
 
 # ------------------------------------------- `p` over a live agent lane
-# The cursor's own panel: it names the step, calls it an agent turn, and says
-# the turn is interrupted rather than killed — the one thing a person
-# answering `enter` needs to know before they do.
+# The cursor's own panel: it names the step, calls it an agent turn, and lists
+# its two answers under the text — `pause now` and `pause when <step>
+# finishes` — with the cursor on the first.
 #
 # Turned on here, for the rest of the suite: a stand-in writes no transcript
 # by default (agents/transcript.sh), so with nothing else `record_usage`
@@ -316,17 +316,23 @@ press p
 
 draws "\`p\` over a live lane opens a panel naming the task" "pause mid-turn"
 draws "the panel names the step and calls it an agent turn" "implement    agent"
-draws "and says the turn is only interrupted" "The turn is interrupted, not killed."
-draws "and offers enter on its own line" "[enter] pause it"
-draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
+draws "and says pausing aborts it" "Pausing aborts the step it is on:"
+draws "and lists pause now first, under the cursor" "> pause now"
+draws "with the scheduled pause as the second answer" "pause when implement finishes"
+draws "and the one key row every popup shares" "[enter] confirm   [esc] close"
 stage_stays "the task file is untouched while the panel is open" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# A key that is neither leaves the panel open and acts on nothing.
+# A letter no longer answers anything — not `s`, which used to schedule — so
+# it leaves the panel open and acts on nothing.
 press x
+press s
 settle_frames 2
 stage_stays "a stray key over the panel changes nothing" mid-turn implement
+if grep -qF "gate_at:" "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"; then
+  bad "and \`s\` no longer schedules a pause"
+else ok "and \`s\` no longer schedules a pause"; fi
 draws "and the panel is still up" "pause mid-turn"
 
 press $'\x1b'
@@ -335,12 +341,14 @@ stage_stays "and leaves the task where it was" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and leaves the lane running"
 else bad "and leaves the lane running"; fi
 
-# `s` leaves the turn running and writes a schedule instead of an interrupt —
-# the NEXT column carries it, and the task's own file gains `gate_at`.
+# The second answer leaves the turn running and writes a schedule instead of
+# an interrupt — the NEXT column carries it, and the task's own file gains
+# `gate_at`.
 press p
 next_frame
-press s
-stops_drawing "\`s\` closes the panel without aborting anything" "pause mid-turn"
+press $'\x1b[B'
+press $'\r'
+stops_drawing "the second answer closes the panel without aborting anything" "pause mid-turn"
 stage_stays "the task stays right where it was" mid-turn implement
 has "and gains a schedule naming its own step" "gate_at: implement" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
@@ -348,12 +356,16 @@ draws "and the NEXT column says where it is headed" "paused after implement"
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# Pressing `s` again, over a fresh panel on the same still-live step, clears
-# the schedule it just wrote.
+# Answering it again, over a fresh panel on the same still-live step, clears
+# the schedule it just wrote: the answer now reads `cancel the scheduled
+# pause`.
 press p
 next_frame
-press s
-stops_drawing "pressing \`s\` again closes the panel too" "pause mid-turn"
+draws "the second answer reads as a cancel while a schedule stands" \
+  "cancel the scheduled pause"
+press $'\x1b[B'
+press $'\r'
+stops_drawing "answering it again closes the panel too" "pause mid-turn"
 lacks "and clears the schedule it named" "gate_at:" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
 
@@ -393,9 +405,9 @@ else
   tail -30 "$BOARD_LOG" | sed 's/^/        /'
 fi
 
-# ------------------------------- stopping with `i` over a live lane
-# `enter` over a running dispatcher asks how to stop it: `enter` again lets
-# running steps finish, `i` interrupts them. `i` parks each task it
+# ------------------- stopping from the stop popup over a live lane
+# `enter` over a running dispatcher asks how to stop it: `let running steps
+# finish` waits, `interrupt them now` interrupts them. That answer parks each task it
 # interrupted with a mark saying the stop parked it, and leaves everything
 # else — here `behind`, which has nothing running — exactly where it was.
 # Starting again resumes exactly the marked tasks.
@@ -408,8 +420,9 @@ else bad "a second lane is mid-turn"; fi
 press $'\r'
 draws "\`enter\` over a running dispatcher opens the stop popup" "╭─ stop dispatching"
 draws "saying no new steps will start" "No new steps will be started."
-draws "offering enter to let running steps finish" "[enter] let running steps finish"
-draws "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back"
+draws "offering to let running steps finish first" "> let running steps finish"
+draws "and to interrupt them" "interrupt them now"
+draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "no task file is written while the popup is open" busy implement
 
 press $'\x1b'
@@ -424,7 +437,11 @@ press $'\r'
 draws_since_waited "\`enter\` asks again" "No new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
 press i
-stage_reaches "\`i\` parks the task it interrupted" busy paused 25
+settle_frames 2
+stage_stays "\`i\` no longer answers the stop popup" busy implement
+press $'\x1b[B'
+press $'\r'
+stage_reaches "interrupt them now parks the task it interrupted" busy paused 25
 if poll_while 15 kill -0 "$BUSY_PID"; then ok "and the turn it interrupted is over"
 else bad "and the turn it interrupted is over"; fi
 has "marking the park as the stop's" "parked_by_stop: true" \
@@ -497,7 +514,8 @@ queue_idle stalled never-run
 next_frame
 press U
 draws "\`U\` opens the unqueue-all panel" "2 tasks have not started:"
-draws "answered with enter or esc, and nothing else" "[enter] unqueue them   [esc] cancel"
+draws "answered with enter or esc, and nothing else" "> unqueue them"
+draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "nothing is written while the panel is open" stalled queued
 
 press U
@@ -557,7 +575,8 @@ press u
 draws "\`u\` on the chain's head opens a panel naming both" "unqueue chain-head"
 draws "the dependent, marked with what it depends on" \
   "chain-tail   (depends on chain-head)"
-draws "and offers enter for both, esc to cancel" "[enter] unqueue them   [esc] cancel"
+draws "and offers one answer for both" "> unqueue them"
+draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "nothing moves while the panel is open" chain-head queued
 stage_stays "not even the dependent" chain-tail queued
 
@@ -710,11 +729,14 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   if grep -qF -- "╭─ restart stuck ─" <<<"$SINCE"; then
     SAW_RESTART=stuck
     for want in "step      implement" "lane      stuck · implement" \
-      "is briefed from" "[s] restart   [esc] cancel"; do
+      "is briefed from" "> restart" "[enter] confirm   [esc] close"; do
       if grep -qF -- "$want" <<<"$SINCE"; then ok "the restart panel says: $want"
       else bad "the restart panel says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
     done
     press s
+    next_frame 3
+    stage_stays "a stray \`s\` over the restart panel restarts nothing" stuck paused
+    press $'\r'
     next_frame 3
     break
   elif grep -qF -- "╭─ restart " <<<"$SINCE"; then
@@ -726,7 +748,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 if [ "$SAW_RESTART" = stuck ]; then ok "\`s\` on the parked row opens the restart panel"
 else bad "\`s\` on the parked row opens the restart panel"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-stage_reaches "\`s\` in the panel sends the task back to the step it held" stuck implement 25
+stage_reaches "enter on the panel's restart sends the task back to the step it held" stuck implement 25
 if poll_until 30 _launched_past "${OLD_LAUNCHES:-0}"; then ok "the dispatcher launches the step again"
 else bad "the dispatcher launches the step again"; fi
 NEW_SESSION=$(last_session)
@@ -835,7 +857,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   MARK=$(wc -l < "$BOARD_LOG")
   press r
   next_frame 3
-  if grep -qF -- "] pick" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
+  if grep -qF -- "╭─ resume " < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
     grep -qF -- "resume gate-edit" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG") && SAW_PICKER=gate-edit
     press $'\r'
     next_frame 3
@@ -854,10 +876,10 @@ else bad "\`enter\` on the picker's preselected row resumes the gate"; fi
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
-# --------------------------- one `i` interrupts every live lane at once
-# The stop's `i` reaches every running step in the run, not only the one a
-# cursor sits on: six live lanes, one keypress, six parks, each marked as the
-# stop's. The dispatcher keeps passing while the popup's `i` writes those
+# --------- interrupting from the stop popup reaches every live lane at once
+# The stop popup's `interrupt them now` reaches every running step in the run,
+# not only the one a cursor sits on: six live lanes, one answer, six parks,
+# each marked as the stop's. The dispatcher keeps passing while the popup writes those
 # parks, and a pass holding a copy of a task read before the park cannot
 # overwrite it — `persist_task`'s own fingerprint check, proven at the unit
 # level by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
@@ -873,9 +895,10 @@ MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
 draws_since_waited "\`enter\` opens the stop popup again" "No new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
-press i
+press $'\x1b[B'
+press $'\r'
 for n in 0 1 2 3 4 5; do
-  stage_reaches "\`i\` parks every live lane" "pass-race-$n" paused 30
+  stage_reaches "interrupt them now parks every live lane" "pass-race-$n" paused 30
   has "each marked as the stop's" "parked_by_stop: true" \
     "$SPOOLWAY_PROJECT_HOME/queue/pass-race-$n.md"
 done

@@ -78,7 +78,7 @@ The routines tab writes a job too, with its own `n`. See [Routines](planning.md#
 | `n` | Write a new job. |
 | `e` | Edit the highlighted job. |
 | `space` | Pause or resume it. |
-| `x` | Delete it, after `enter`/`esc`. |
+| `x` | Delete it, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
 | `ctrl-c` | Leave the screen. |
 
 ### The three choices
@@ -91,8 +91,8 @@ The routines tab writes a job too, with its own `n`. See [Routines](planning.md#
    cancels the picker from either pane.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
-3. The pipeline. The picker lists every pipeline the repo defines and narrows as you type.
-   `enter` saves the job.
+3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
+   you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
 The routines tab's own `n` starts on the schedule panel, for the routine highlighted there, then
 walks the same pipeline panel and save.

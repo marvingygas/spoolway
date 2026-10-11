@@ -135,7 +135,7 @@ group's tasks and what each waits on.
 | `esc` | With the tasks pane focused, return focus to the groups pane. |
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
-| `g` | With the tasks pane focused, set or clear a gate on the highlighted task. |
+| `g` | With the tasks pane focused, open the gate picker on the highlighted task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `o` | With the tasks pane focused, open the highlighted task in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
 | `t` | Fork the group as a trial. See [Trials](#trials). |
@@ -227,8 +227,8 @@ run are removed on the way. A folder that already holds tasks is refused.
 
 Press `x` on a routine to delete it. The popup names the routine, its task count, and every
 job whose routine path is that folder or a task inside it. Each job is listed beside its
-store, `user` or `project`. `enter` deletes those jobs first, then the folder. `esc` keeps
-everything. The folder leaves disk without touching git, so only git can bring it back. A job
+store, `user` or `project`. Its one answer is `delete`: `enter` deletes those jobs first, then
+the folder. `esc` keeps everything. The folder leaves disk without touching git, so only git can bring it back. A job
 store that will not read refuses the delete before anything is removed, naming the store and
 `spoolway doctor`.
 

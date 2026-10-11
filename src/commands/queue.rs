@@ -1886,7 +1886,7 @@ pub(crate) enum ToolGate {
     /// is, and take a second terminal guard inside the screen's. See
     /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
     /// requirement was unmet and `enter` queued anyway, or when the queue
-    /// screen's [`Mode::IssueQuestion`] was answered `n`.
+    /// screen's [`Mode::IssueQuestion`] was answered `queue only`.
     Answered { tracking_off: bool },
 }
 
@@ -2011,8 +2011,9 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
 /// printed by [`print_tool_gate_notice`] and in the queue screen's popup.
 const TOOL_GATE_VERDICT: &str = "issue tracking is not supported.";
 
-/// The gate's two keys, printed and in the popup alike.
-const TOOL_GATE_KEYS: &str = "[enter] queue anyway, without issue tracking   [esc] back";
+/// The gate's one answer, printed and in the popup alike. `esc` is the
+/// other way out, queueing nothing.
+const TOOL_GATE_ANSWER: &str = "queue anyway, without issue tracking";
 
 /// The gate's own box, drawn once per unmet requirement pair — the
 /// declaration line and what this machine actually has — followed by the
@@ -2041,14 +2042,13 @@ pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
 }
 
 /// The screens' own popup for the gate: the same rows and the same line
-/// under them as [`print_tool_gate_notice`], in a box over the tab, as step
-/// 14 of the screen's mockup draws it.
+/// under them as [`print_tool_gate_notice`], in a box over the tab.
 fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
     let mut body = vec![String::new()];
     body.extend(tool_gate_rows(unmet));
     body.push(String::new());
     body.push(TOOL_GATE_VERDICT.to_string());
-    panel("issue tracking", &body, TOOL_GATE_KEYS)
+    crate::screen::ask("issue tracking", &body, &[TOOL_GATE_ANSWER.to_string()], 0)
 }
 
 /// One pair of rows per unmet requirement, unindented — see
@@ -2139,7 +2139,15 @@ fn tool_requirements_gate_with(
     if !interactive {
         return Ok(true);
     }
-    writeln!(out, "  {TOOL_GATE_KEYS}")?;
+    // The notice already ends on a blank row, so the one `answer_rows`
+    // opens on is left out. One answer, so the cursor never moves and the
+    // rows are printed once.
+    for row in crate::screen::answer_rows(&[TOOL_GATE_ANSWER.to_string()], 0)
+        .iter()
+        .skip(1)
+    {
+        writeln!(out, "  {row}")?;
+    }
 
     let _term = term();
     loop {
@@ -3377,13 +3385,16 @@ enum Mode {
         then: Resume,
     },
     /// The question a submit stops at before any ticket is opened, with
-    /// issue tracking on — [`issue_question`]'s panel. A ticket on a public
-    /// tracker is seen by other people and hard to take back, so nothing
-    /// reaches the hook until a person says yes here. `enter` runs `then`
-    /// again and opens the tickets, `n` runs it with issue tracking switched
-    /// off for it, and `esc` goes back having queued nothing.
+    /// issue tracking on — [`issue_question`]'s body, over
+    /// [`ISSUE_ANSWERS`] with the cursor on the `cursor`th. A ticket on a
+    /// public tracker is seen by other people and hard to take back, so
+    /// nothing reaches the hook until a person says yes here. `enter` on
+    /// `create and queue` runs `then` again and opens the tickets, on `queue
+    /// only` runs it with issue tracking switched off for it, and `esc` goes
+    /// back having queued nothing.
     IssueQuestion {
-        panel: Vec<String>,
+        body: Vec<String>,
+        cursor: usize,
         then: Resume,
     },
     /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
@@ -3407,9 +3418,10 @@ enum Mode {
     /// carried on the mode, and read again after `x` deletes one.
     Routines(RoutineNav),
     /// `x`'s own popup over the routines pane `nav` describes: the routine
-    /// and every job that points into it, deleted together on `enter` —
-    /// see [`delete_routine`] — and all kept on `esc`. Every other key does
-    /// nothing, so a stray keystroke can neither delete nor dismiss it.
+    /// and every job that points into it, deleted together on `enter` on its
+    /// one answer, `delete` — see [`delete_routine`] — and all kept on
+    /// `esc`. Every other key does nothing, so a stray keystroke can neither
+    /// delete nor dismiss it.
     DeleteRoutine {
         nav: RoutineNav,
         target: RoutineDelete,
@@ -3489,10 +3501,10 @@ enum Tracking {
     /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
     /// opened. Nothing is queued until each is answered.
     Ask,
-    /// `enter` on the tool gate, or `n` on the question: queue with issue
-    /// tracking switched off.
+    /// The tool gate's answer, or `queue only` on the question: queue with
+    /// issue tracking switched off.
     Off,
-    /// `enter` on the question: open the tickets and queue.
+    /// `create and queue` on the question: open the tickets and queue.
     Open,
 }
 
@@ -3506,22 +3518,34 @@ fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
     tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
 }
 
-/// The issue question's keys, in its popup.
-fn issue_keys() -> String {
-    keys(&[
-        ("enter", "create and queue"),
-        ("n", "queue only"),
-        ("esc", "back"),
-    ])
+/// The issue question's answers, in its popup: open the tickets and queue,
+/// or queue with issue tracking switched off.
+const ISSUE_ANSWERS: [&str; 2] = ["create and queue", "queue only"];
+
+/// The issue question's popup, its cursor on the `cursor`th of
+/// [`ISSUE_ANSWERS`].
+fn issue_question_panel(body: &[String], cursor: usize) -> Vec<String> {
+    crate::screen::ask(
+        "issue tracking",
+        body,
+        &ISSUE_ANSWERS.map(str::to_string),
+        cursor,
+    )
 }
 
+/// How wide [`issue_body`] holds the issue popups' text: room for a
+/// ticket row — see [`ticket_row`] — beside a task id of some length, so
+/// the opening and result popups do not grow a column for most of the rows
+/// that come in.
+const ISSUE_BODY_WIDTH: usize = 54;
+
 /// A body for one of the issue popups — the question, the tickets opening,
-/// what was queued — opening on a blank row as wide as the question's own
-/// key row. The three follow one another over the same spot, and holding
-/// them to one width keeps the box from jumping between them as each
-/// replaces the last, or growing a column every time a row comes in.
+/// what was queued — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The
+/// three follow one another over the same spot, and holding them to one
+/// width keeps the box from jumping between them as each replaces the last,
+/// or growing a column every time a row comes in.
 fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut body = vec![" ".repeat(issue_keys().chars().count())];
+    let mut body = vec![" ".repeat(ISSUE_BODY_WIDTH)];
     body.extend(lines);
     body
 }
@@ -3560,7 +3584,8 @@ fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume)
     let tasks = tasks.iter().map(|task| format!("  {}", task.id()));
     let body = issue_body(std::iter::once(ask).chain(tasks));
     Some(Mode::IssueQuestion {
-        panel: panel("issue tracking", &body, &issue_keys()),
+        body,
+        cursor: 0,
         then,
     })
 }
@@ -4448,14 +4473,14 @@ fn run_screen_from(
                 Key::Esc => state.mode = then.back(),
                 _ => {}
             },
-            Mode::IssueQuestion { then, .. } => match key {
+            Mode::IssueQuestion { then, cursor, .. } => match key {
                 // Yes: the hook runs here, on this thread, and the tab under
                 // the question is held as it stands while it does — each
                 // ticket it answers is laid over that frame as it comes in.
                 // Whatever was typed while the hook ran is thrown away once it
                 // returns: the result popup takes `enter` only once it is on
                 // screen, never an `enter` pressed at the one still filling.
-                Key::Enter => {
+                Key::Enter if *cursor == 0 => {
                     let then = then.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     let at = Submitting {
@@ -4477,7 +4502,9 @@ fn run_screen_from(
                     known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
                 }
-                Key::Char('n') => {
+                // `queue only`: the same submit with issue tracking
+                // switched off, so the hook never runs.
+                Key::Enter => {
                     let then = then.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     let at = Submitting {
@@ -4497,7 +4524,11 @@ fn run_screen_from(
                     known_reading = known_reading.max(reader.started_count());
                 }
                 Key::Esc => state.mode = then.back(),
-                _ => {}
+                _ => {
+                    if let Mode::IssueQuestion { cursor, .. } = &mut state.mode {
+                        *cursor = crate::screen::move_cursor(*cursor, ISSUE_ANSWERS.len(), key);
+                    }
+                }
             },
             Mode::SaveRoutine { group, name } => match key {
                 // The name field reads every ordinary character it is typed,
@@ -5410,9 +5441,9 @@ fn handle_gate_key(
                 dependents,
             }
         }
-        Key::Enter | Key::Char(' ') => {
-            // Pressing it again on the same step clears it, per the
-            // acceptance criterion — a gate is a toggle, not a one-way choice.
+        Key::Enter => {
+            // Choosing the step already gated clears it — a gate is a
+            // toggle, not a one-way choice.
             if let Some(step) = steps.get(cursor) {
                 if state.gates.get(&key_of_task) == Some(&step.id) {
                     state.gates.remove(&key_of_task);
@@ -5422,7 +5453,7 @@ fn handle_gate_key(
             }
             state.mode = Mode::Browsing;
         }
-        Key::Char('g') | Key::Esc => state.mode = Mode::Browsing,
+        Key::Esc => state.mode = Mode::Browsing,
         _ => {}
     }
 }
@@ -6275,10 +6306,9 @@ fn footer(state: &ScreenState) -> String {
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
-        Mode::DeleteRoutine { .. } => key_hint(DELETE_ROUTINE_KEYS),
+        Mode::DeleteRoutine { .. } | Mode::Gate { .. } => hint(&crate::screen::answer_keys()),
         Mode::NewJob { walk, .. } => walk.footer(),
         Mode::JobSaved { .. } => hint(&confirm()),
-        Mode::Gate { .. } => key_hint(GATE_KEYS),
         Mode::Trial(trial) => match trial.stage {
             TrialStage::PickPipelines => key_hint(PICK_KEYS),
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
@@ -6352,15 +6382,8 @@ struct Panes<'a> {
     pipelines: &'a Pipelines,
 }
 
-/// The gate picker's keys, in its popup and on the line under the frame.
-const GATE_KEYS: &[(&str, &str)] = &[("enter", "set"), ("g", "clear"), ("esc", "cancel")];
-
 /// The save panel's keys, in its popup and on the line under the frame.
 const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
-
-/// `x`'s popup's keys, in its popup and on the line under the frame — the
-/// same pair the jobs tab's delete answers to.
-const DELETE_ROUTINE_KEYS: &[(&str, &str)] = &[("enter", "delete"), ("esc", "keep")];
 
 /// The trial picker's second screen's keys, in its popup and on the line
 /// under the frame.
@@ -6516,9 +6539,8 @@ fn popup(
         Mode::Outcome { notice, .. } | Mode::JobSaved { notice, .. } => {
             Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
         }
-        Mode::ToolGate { panel, .. }
-        | Mode::IssueQuestion { panel, .. }
-        | Mode::Queued { panel, .. } => Some(panel.clone()),
+        Mode::IssueQuestion { body, cursor, .. } => Some(issue_question_panel(body, *cursor)),
+        Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
         Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
     }
 }
@@ -6606,9 +6628,9 @@ fn paint(
     writer.write_frame(&frame, crate::screen::pane_size(), out);
 }
 
-/// The gate picker: the highlighted task's own pipeline, one row for each
-/// step it will run (see [`gate_steps`]), with the one currently chosen
-/// marked. `None` when there is no task under
+/// The gate picker: the highlighted task's own pipeline, one answer for
+/// each step it will run (see [`gate_steps`]), with the one currently
+/// chosen marked `·`. `None` when there is no task under
 /// the cursor to gate, or its task names a pipeline that will not
 /// resolve — the same degradation [`handle_gate_key`] already makes.
 fn gate_panel(
@@ -6622,24 +6644,66 @@ fn gate_panel(
     let doc = task.text().ok()?;
     let pipeline = task_pipeline(&doc, pipelines).ok()?;
 
-    let chosen = state.gates.get(&task_key(task));
-    let mut body = vec![String::new()];
-    body.extend(
-        gate_steps(task, &doc, pipeline, dependents)
-            .iter()
-            .enumerate()
-            .map(|(i, step)| {
-                let marker = if i == cursor { ">" } else { " " };
-                let mark = if chosen == Some(&step.id) { " ·" } else { "" };
-                format!("{marker} {}{mark}", step.id)
-            }),
-    );
+    let steps: Vec<String> = gate_steps(task, &doc, pipeline, dependents)
+        .into_iter()
+        .map(|step| step.id.clone())
+        .collect();
+    let chosen = state.gates.get(&task_key(task)).map(String::as_str);
+    Some(gate_steps_panel(&task.id, &steps, chosen, cursor))
+}
 
-    Some(panel(
-        &format!("gate {} at", task.id),
-        &body,
-        &keys(GATE_KEYS),
-    ))
+/// [`gate_panel`]'s popup over task `id`: one answer per step in `steps`,
+/// the one `chosen` already gated marked `·`.
+fn gate_steps_panel(
+    id: &str,
+    steps: &[String],
+    chosen: Option<&str>,
+    cursor: usize,
+) -> Vec<String> {
+    let answers: Vec<String> = steps
+        .iter()
+        .map(|step| {
+            let mark = if chosen == Some(step.as_str()) {
+                " ·"
+            } else {
+                ""
+            };
+            format!("{step}{mark}")
+        })
+        .collect();
+    crate::screen::ask(&format!("gate {id} at"), &[], &answers, cursor)
+}
+
+/// Every popup on the queue and routines tabs that asks something, drawn
+/// once each with made-up content — for the test that walks every such
+/// popup in the project; see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
+    let steps = ["implement", "review", "handover"].map(str::to_string);
+    let unmet = UnmetRequirement {
+        hook: "github.sh".to_string(),
+        tool: "gh".to_string(),
+        floor: "2.40.0".to_string(),
+        found: None,
+    };
+    let routine = RoutineDelete {
+        name: "nightly".to_string(),
+        path: std::path::PathBuf::from("nightly"),
+        tasks: 2,
+        jobs: vec![("nightly-audit".to_string(), crate::jobs::Scope::User)],
+    };
+    vec![
+        (
+            "issue question",
+            issue_question_panel(&issue_body(["create 1 issue on github".to_string()]), 0),
+        ),
+        ("issue tracking", tool_gate_panel(&[unmet])),
+        (
+            "gate picker",
+            gate_steps_panel("wire", &steps, Some("review"), 0),
+        ),
+        ("delete routine", delete_routine_panel(&routine)),
+    ]
 }
 
 /// The project's pipelines, in the order the trial picker lists them —
@@ -7825,7 +7889,7 @@ fn delete_routine_panel(target: &RoutineDelete) -> Vec<String> {
             body.push(format!("    {}   {}", pad_to(name, width), scope.label()));
         }
     }
-    panel("delete this routine", &body, &keys(DELETE_ROUTINE_KEYS))
+    crate::screen::ask("delete this routine", &body, &["delete".to_string()], 0)
 }
 
 /// `enter` on `x`'s popup: every job the popup named, then the folder and
@@ -12664,10 +12728,11 @@ mod tests {
 
         overlay(
             &mut frame,
-            &panel(
+            &crate::screen::ask(
                 "gate wire at",
-                &["> implement".to_string(), "  review".to_string()],
-                &crate::screen::keys(GATE_KEYS),
+                &[],
+                &["implement".to_string(), "review".to_string()],
+                0,
             ),
         );
 
@@ -15291,8 +15356,9 @@ mod tests {
         assert!(last.contains("nightly-audit   user"), "{last}");
         assert!(last.contains("audit-docs      project"), "{last}");
         assert!(!last.contains("weekly-prune"), "{last}");
+        assert!(last.contains("> delete"), "{last}");
         assert_eq!(
-            last.matches("[enter] delete   [esc] keep").count(),
+            last.matches("[enter] confirm   [esc] close").count(),
             2,
             "in the popup and on the line under the frame: {last}"
         );
@@ -17016,22 +17082,22 @@ depends_on: [cart-empty-state]
                 );
                 assert!(frame.contains("    cart-empty-state"), "{frame}");
                 assert!(frame.contains("    cart-totals"), "{frame}");
-                assert!(
-                    frame.contains("[enter] create and queue   [n] queue only   [esc] back"),
-                    "{frame}"
-                );
+                assert!(frame.contains("> create and queue"), "{frame}");
+                assert!(frame.contains("  queue only"), "{frame}");
+                assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
                 assert!(frame.contains("─ groups"), "the tab under it: {frame}");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
                 assert!(repo.queued_ids().is_empty());
             }
 
-            /// `n` queues the group with issue tracking off: no hook call,
-            /// no ticket, and a popup naming what it queued.
+            /// `queue only` queues the group with issue tracking off: no
+            /// hook call, no ticket, and a popup naming what it queued. `n`,
+            /// the letter that used to answer it, does nothing on the way.
             #[test]
-            fn n_queues_with_no_hook_call() {
+            fn queue_only_queues_with_no_hook_call() {
                 let (repo, _root_guard) = cart("issue-question-n");
-                let drawn = screen(&repo, listed(&repo), " \rn");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                let drawn = screen(&repo, listed(&repo), " \rn\x1b[B\r");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
                 let task = queued(&repo, "cart-totals");
                 assert_eq!(task.extra_str("ticket"), "");
                 assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
@@ -17193,7 +17259,7 @@ depends_on: [cart-empty-state]
             }
 
             /// Queuing a routine asks the same question, over the routines
-            /// pane, and `n` there queues it with no hook call.
+            /// pane, and `queue only` there queues it with no hook call.
             #[test]
             fn queuing_a_routine_asks_the_same_question() {
                 let (repo, _root_guard) = cart("issue-question-routine");
@@ -17225,8 +17291,8 @@ group_description: audit
                 );
                 assert!(repo.queued_ids().is_empty());
 
-                routines_screen(&repo, " \rn");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                routines_screen(&repo, " \r\x1b[B\r");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
                 assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
             }
 
@@ -17352,7 +17418,14 @@ group_description: audit
             .unwrap();
             assert!(skip);
             let printed = String::from_utf8(out).unwrap();
-            assert!(printed.contains("[enter] queue anyway"), "{printed}");
+            assert!(
+                printed.contains("  > queue anyway, without issue tracking"),
+                "{printed}"
+            );
+            assert!(
+                printed.contains("  [enter] confirm   [esc] close"),
+                "{printed}"
+            );
         }
 
         /// `esc` is the one path that must reach the caller as `GateCancelled`
@@ -17410,9 +17483,10 @@ group_description: audit
                 "{frame}"
             );
             assert!(
-                frame.contains("[enter] queue anyway, without issue tracking   [esc] back"),
+                frame.contains("> queue anyway, without issue tracking"),
                 "{frame}"
             );
+            assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
             assert!(frame.contains("─ groups"), "the tab under it: {frame}");
             // Nothing outside the frame: every byte written went out as part
             // of one frame or another, each opening with the shared frame
@@ -18676,6 +18750,51 @@ body\n";
                 "{rule}"
             );
         }
+    }
+
+    /// The gate picker answers like every popup that asks something: `space`
+    /// and `g` neither set a gate nor close it, `enter` sets the gate on the
+    /// cursor's step, and `enter` on the step already gated clears it.
+    #[test]
+    fn the_gate_picker_answers_only_enter_and_esc() {
+        let (repo, _root_guard) = fixture("gate-picker-answers");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let mut state = on_pending_task(&groups, "wire");
+        let picker = (0, gate_dependents(&repo, &groups, &state));
+        let panel = gate_panel(&groups, &pipelines, &state, picker).unwrap();
+        assert_eq!(
+            panel[panel.len() - 2].trim_matches(['│', ' ']),
+            "[enter] confirm   [esc] close",
+            "{panel:#?}"
+        );
+        let first = panel[2].trim_matches(['│', ' ']).trim_start_matches("> ");
+
+        for key in [Key::Char(' '), Key::Char('g')] {
+            state.mode = Mode::Gate {
+                cursor: picker.0,
+                dependents: picker.1,
+            };
+            handle_gate_key(&groups, &pipelines, &mut state, picker, key);
+            assert!(matches!(state.mode, Mode::Gate { .. }), "{key:?} closed it");
+            assert!(state.gates.is_empty(), "{key:?} set a gate");
+        }
+
+        handle_gate_key(&groups, &pipelines, &mut state, picker, Key::Enter);
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert_eq!(state.gates.values().collect::<Vec<_>>(), [first]);
+        let panel = gate_panel(&groups, &pipelines, &state, picker)
+            .unwrap()
+            .join("\n");
+        assert!(panel.contains(&format!("> {first} ·")), "{panel}");
+
+        state.mode = Mode::Gate {
+            cursor: picker.0,
+            dependents: picker.1,
+        };
+        handle_gate_key(&groups, &pipelines, &mut state, picker, Key::Enter);
+        assert!(state.gates.is_empty(), "the same step again clears it");
     }
 
     /// A pending task's own `skip:` hides nothing from the picker:

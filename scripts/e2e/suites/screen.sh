@@ -116,13 +116,16 @@ lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 # proof it stayed up.
 RUN="$LIVE/run.txt"
 works "enter on the dispatch tab starts dispatching, and enter then enter stops it" \
-  script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 1; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
+  script -qec "{ printf '\\033[D\\r'; sleep 1; printf '\\033[B\\r'; sleep 5; printf '\\r'; sleep 1; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "enter asks the warnings gate first, as a popup" "─ before dispatching " "$RUN.plain"
-has "whose keys read as drawn" "[enter] start dispatching   [esc] back   [x] hide until these change" "$RUN.plain"
+has "listing its answers, the first under the cursor" "> start dispatching" "$RUN.plain"
+has "with the hide answer under it" "hide until these change" "$RUN.plain"
+has "and the shared key row" "[enter] confirm   [esc] close" "$RUN.plain"
+lacks "with no letter answer left" "[x] hide until" "$RUN.plain"
 has "the header names the child's pid while it runs" "dispatcher running · pid " "$RUN.plain"
 has "and enter is offered to stop it" "[enter] stop dispatching" "$RUN.plain"
 has "and it stays up on an empty queue" "Nothing queued" "$RUN.plain"
@@ -133,8 +136,9 @@ else
 fi
 has "enter over it asks how to stop, as a popup" "╭─ stop dispatching " "$RUN.plain"
 has "saying no new steps will start" "No new steps will be started." "$RUN.plain"
-has "offering enter to let running steps finish" "[enter] let running steps finish" "$RUN.plain"
-has "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back" "$RUN.plain"
+has "offering to let running steps finish" "> let running steps finish" "$RUN.plain"
+has "and to interrupt them" "interrupt them now" "$RUN.plain"
+lacks "with no letter answer left" "[i] interrupt them now" "$RUN.plain"
 lacks "the start was not refused" "the dispatcher did not start" "$RUN.plain"
 has "enter on the popup stops it" "dispatcher stopped" "$LAST"
 lacks "and closes the popup" "No new steps will be started." "$LAST"

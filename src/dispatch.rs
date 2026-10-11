@@ -3231,9 +3231,9 @@ impl<'a> Dispatcher<'a> {
     /// (`tear_down_and_escalate`'s own road, which a person's own hand is
     /// expected to look at), a gate (`paused_at` set — waiting on a decision,
     /// not a lane), a stop's own park (`parked_by_stop` — the stop popup's
-    /// `i` interrupts the lane, and the mux can still read `Working` for a
-    /// pass or two before it dies; restoring then would undo the stop
-    /// mid-teardown), or a lane not seen `Working`. `Blocked` deliberately does
+    /// `interrupt them now` interrupts the lane, and the mux can still read
+    /// `Working` for a pass or two before it dies; restoring then would undo
+    /// the stop mid-teardown), or a lane not seen `Working`. `Blocked` deliberately does
     /// not qualify: a pane right after Escape can still read `Blocked` for a
     /// tick before the mux catches up, and restoring on that reading would
     /// race the Escape park itself rather than wait the one pass it takes to
@@ -13960,8 +13960,8 @@ mod tests {
         );
     }
 
-    /// `scripts/e2e/suites/board-pause.sh`'s "one `i` interrupts every live
-    /// lane at once" section caught this for real: six live lanes get
+    /// `scripts/e2e/suites/board-pause.sh`'s "interrupting from the stop popup
+    /// reaches every live lane at once" section caught this for real: six live lanes get
     /// `parked_by_stop: true` all at once, but each lane's own process takes
     /// a moment to actually die after the interrupt is sent — so the mux can
     /// still report `Working` for a pass or two after the park has already

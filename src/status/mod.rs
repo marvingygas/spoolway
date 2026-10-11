@@ -41,9 +41,9 @@ pub use view::{banner, plain_table};
 use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
     clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, jobs_ledger,
-    pane_height, pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel,
-    spool_frame, table_laid_out, table_window, ticker, tint_available, unqueue_all_confirm_panel,
-    unqueue_confirm_panel,
+    pane_height, pane_width, pause_answers, pause_confirm_panel, restart_confirm_panel,
+    resume_picker_panel, spool_frame, table_laid_out, table_window, ticker, tint_available,
+    unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -720,16 +720,14 @@ impl Board {
     /// undo — `u`, `U` and `s` open one unconditionally, since writing a
     /// task back to pending and throwing a conversation away are exactly
     /// that — see [`BoardMode`]. With a panel already open every other key
-    /// is read by that panel instead: `esc` cancels it on every panel the
-    /// board draws, and `enter` confirms whatever it opened on every panel
-    /// but the restart panel. The letter that opened a panel no longer
-    /// answers it once it is — a `q` typed there, or any other key neither
-    /// mode recognises, is ignored, the same as it is while browsing. The
-    /// restart panel is the exception: it is confirmed by `s`, the letter
-    /// that opened it, and `enter` there is ignored. A pause panel answers one key further: `s` leaves every named abort
-    /// running and schedules its task's `gate_at` on the step it is on
-    /// instead. The resume picker answers `↑`/`↓` too, which move its own
-    /// cursor rather than the board's.
+    /// is read by that panel instead. Every panel lists its answers: `↑`
+    /// and `↓` move the panel's own cursor rather than the board's, `enter`
+    /// runs the answer under it, and `esc` closes the panel with nothing
+    /// changed. No letter answers a panel — the letter that opened one, a
+    /// `q`, or any other key the panel does not read is ignored, the same
+    /// as it is while browsing. A pause panel's second answer leaves every
+    /// named abort running and schedules its task's `gate_at` on the step
+    /// it is on instead.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -748,9 +746,7 @@ impl Board {
         // fighting the borrow checker over `self.mode` at the same time.
         match std::mem::take(&mut self.mode) {
             BoardMode::Browsing => self.on_key_browsing(repo, pipelines, key),
-            BoardMode::ConfirmPause { aborts, id } => {
-                self.on_key_pause_confirm(repo, aborts, id, key)
-            }
+            BoardMode::ConfirmPause(confirm) => self.on_key_pause_confirm(repo, confirm, key),
             BoardMode::ResumePicker(picker) => {
                 self.on_key_resume_picker(repo, pipelines, picker, key)
             }
@@ -910,7 +906,7 @@ impl Board {
                 };
                 // The dispatch loop drops an `Err` out of `on_key` without a
                 // word, so a refused pick would close the picker and leave
-                // the person guessing. It stays open with the refusal under
+                // the person guessing. It stays open with the refusal above
                 // the list instead.
                 match resumed {
                     Ok(()) => return Ok(()),
@@ -953,27 +949,34 @@ impl Board {
             park_under_lock(repo, &id, ParkedBy::Board)?;
             return Ok(());
         }
-        self.mode = BoardMode::ConfirmPause { aborts, id };
+        // Read once, here, so the panel's second answer can say whether it
+        // schedules a pause or cancels the one already set.
+        let scheduled = tasks[i].front.gate_at.as_deref() == Some(aborts[0].step.as_str());
+        self.mode = BoardMode::ConfirmPause(PauseConfirm {
+            aborts,
+            id,
+            scheduled,
+            cursor: 0,
+        });
         Ok(())
     }
 
     fn on_key_pause_confirm(
         &mut self,
         repo: &Repo,
-        aborts: Vec<Abort>,
-        id: String,
+        mut confirm: PauseConfirm,
         key: crate::screen::Key,
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            // The one thing the panel does: abort what it named — an agent
-            // turn interrupted through `Mux::interrupt_lane`, a command run
-            // stopped through `Runs::stop` — and park the task that named
+            // The first answer, `pause now`: abort what the panel named — an
+            // agent turn interrupted through `Mux::interrupt_lane`, a command
+            // run stopped through `Runs::stop` — and park the task that named
             // abort belongs to.
-            Key::Enter => {
+            Key::Enter if confirm.cursor == 0 => {
                 let mux = crate::mux::backend(repo)?;
                 let runs = crate::command_step::Runs::new(&repo.commands_dir());
-                for abort in &aborts {
+                for abort in &confirm.aborts {
                     // A command run is stopped after its task is parked: from
                     // the kill until its files are cleared the run reads as one
                     // that died without an exit code, and a dispatcher pass
@@ -993,21 +996,30 @@ impl Board {
                     }
                 }
             }
-            // `s`: leave every named abort running and write `gate_at` onto
-            // its task instead — whatever that step reports, whenever it
-            // reports it, is what parks it now. An agent step's report parks
-            // it through `commands::report`, and a command step's exit
-            // through the dispatcher's command arm; neither is limited to
-            // the pass a pipeline's own `gate: true` catches. Toggled per task
-            // rather than only ever set, so pressing `s` again on a row that
-            // already carries a schedule for the step it is on clears it —
-            // the mockup's "pressing `s` again... clears it".
-            Key::Char('s') => {
-                for abort in &aborts {
+            // The second answer, `pause when <step> finishes`: leave every
+            // named abort running and write `gate_at` onto its task instead
+            // — whatever that step reports, whenever it reports it, is what
+            // parks it now. An agent step's report parks it through
+            // `commands::report`, and a command step's exit through the
+            // dispatcher's command arm; neither is limited to the pass a
+            // pipeline's own `gate: true` catches. On a row that already
+            // carried a schedule for its step when the panel opened, the same
+            // answer reads `cancel the scheduled pause` and clears it instead.
+            //
+            // It does what its label said, not the opposite of what `gate_at`
+            // reads now: the step can report while the panel is open, and
+            // the gate firing clears `gate_at`, so toggling a fresh read
+            // would write a cancelled pause back onto a step the task has
+            // left. A cancel clears only a schedule that still names the
+            // step, and leaves one another board wrote meanwhile alone.
+            Key::Enter => {
+                for abort in &confirm.aborts {
                     let mut task = repo.task(&abort.task)?;
-                    task.front.gate_at = match task.front.gate_at.as_deref() {
-                        Some(step) if step == abort.step => None,
-                        _ => Some(abort.step.clone()),
+                    let named = task.front.gate_at.as_deref() == Some(abort.step.as_str());
+                    task.front.gate_at = match (confirm.scheduled, named) {
+                        (false, _) => Some(abort.step.clone()),
+                        (true, true) => None,
+                        (true, false) => continue,
                     };
                     task.save()?;
                 }
@@ -1016,7 +1028,11 @@ impl Board {
             // run exactly as they were — nothing here to undo, since nothing
             // was touched while the panel was open.
             Key::Esc => {}
-            _ => self.mode = BoardMode::ConfirmPause { aborts, id },
+            _ => {
+                let answers = pause_answers(&confirm.aborts[0], confirm.scheduled).len();
+                confirm.cursor = crate::screen::move_cursor(confirm.cursor, answers, key);
+                self.mode = BoardMode::ConfirmPause(confirm);
+            }
         }
         Ok(())
     }
@@ -1061,7 +1077,8 @@ impl Board {
         match key {
             // Nothing was touched while the panel was open.
             Key::Esc => return Ok(()),
-            Key::Char('s') => {
+            // Its one answer, `restart`.
+            Key::Enter => {
                 // The panel can sit open while the task moves on: a report
                 // passing the step, or a resume from a shell. `restart`
                 // reads the step afresh and would start over whichever one
@@ -1220,7 +1237,10 @@ pub(crate) fn editor_command(path: &Path) -> String {
 
 /// What a `p`, `r`, `s`, `u` or `U` keypress is waiting to be answered — a
 /// panel drawn over the table, and the one thing standing between an
-/// accidental press and the run it would otherwise change. `Default` is
+/// accidental press and the run it would otherwise change. Every panel here
+/// lists its answers and is answered the same way: the arrows move its
+/// cursor, `enter` runs the answer under it, and `esc` closes it with
+/// nothing changed. `Default` is
 /// `Browsing`, both for [`Board::with_term`] and for [`std::mem::take`]
 /// inside [`Board::on_key`], which is what lets each key handler build the
 /// mode's replacement without holding a borrow of `self.mode` open across it.
@@ -1228,13 +1248,9 @@ pub(crate) fn editor_command(path: &Path) -> String {
 enum BoardMode {
     #[default]
     Browsing,
-    /// `p` found an agent turn or a command run live on task `id`'s own
-    /// step: what pausing would abort, named, and nothing acted on yet.
-    /// `[enter]` carries the pause out, `[s]` leaves every named abort
-    /// running and schedules its task's `gate_at` for the step it is on
-    /// instead, and `[esc]` leaves the task, every lane and every run
-    /// exactly as they were.
-    ConfirmPause { aborts: Vec<Abort>, id: String },
+    /// `p` found an agent turn or a command run live on its task's own
+    /// step — see [`PauseConfirm`].
+    ConfirmPause(PauseConfirm),
     /// `r` on a held row: every step of its pipeline the task runs, with the
     /// one a bare resume goes to preselected — see [`ResumePicker`].
     ResumePicker(ResumePicker),
@@ -1254,8 +1270,9 @@ enum BoardMode {
     /// back to pending rather than just the one under the cursor.
     ConfirmUnqueueAll(Vec<String>),
     /// `s` on a task `spoolway restart` accepts: the step it would start
-    /// over and the session it would abandon. `[s]` carries the restart out
-    /// and `[esc]` leaves the task and its lane exactly as they were.
+    /// over and the session it would abandon. Its one answer, `restart`,
+    /// carries the restart out, and `esc` leaves the task and its lane
+    /// exactly as they were.
     ConfirmRestart(RestartConfirm),
 }
 
@@ -1264,13 +1281,104 @@ impl BoardMode {
     fn panel(&self) -> Option<Vec<String>> {
         match self {
             BoardMode::Browsing => None,
-            BoardMode::ConfirmPause { aborts, id } => Some(pause_confirm_panel(id, &aborts[0])),
+            BoardMode::ConfirmPause(confirm) => Some(pause_confirm_panel(
+                &confirm.id,
+                &confirm.aborts[0],
+                confirm.scheduled,
+                confirm.cursor,
+            )),
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
             BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
             BoardMode::ConfirmUnqueueAll(ids) => Some(unqueue_all_confirm_panel(ids)),
             BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
         }
     }
+}
+
+/// [`BoardMode::ConfirmPause`]'s state: what pausing task `id` would
+/// abort, named, and nothing acted on yet. The cursor opens on `pause now`,
+/// which carries the pause out; the second answer leaves every named abort
+/// running and schedules its task's `gate_at` for the step it is on instead
+/// — or clears that schedule, while `scheduled` says it is already set.
+struct PauseConfirm {
+    aborts: Vec<Abort>,
+    id: String,
+    /// Whether the task's `gate_at` already names the step it is on, read
+    /// when `p` opened the panel.
+    scheduled: bool,
+    cursor: usize,
+}
+
+/// Every panel the board draws to ask something, drawn once each with
+/// made-up content — for the test that walks every popup in the project
+/// that asks something; see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
+    let abort = |kind| Abort {
+        task: "login".to_string(),
+        step: "implement".to_string(),
+        kind,
+        elapsed: Some(Duration::from_secs(141)),
+    };
+    let row = |step: &str, note: &str, next| PickRow {
+        step: step.to_string(),
+        note: note.to_string(),
+        next,
+    };
+    let picker = ResumePicker {
+        id: "login".to_string(),
+        hold: Hold {
+            stage: crate::pipeline::PAUSED.to_string(),
+            paused_at: Some("review".to_string()),
+            parked_from: None,
+            blocked_from: None,
+        },
+        header: "paused at review — it passed".to_string(),
+        rows: vec![
+            row("implement", "on fail", false),
+            row("review", "paused", false),
+            row("handover", "on pass (next)", true),
+        ],
+        listed: 3,
+        labelled: Some((0, 2)),
+        cursor: 2,
+        error: None,
+    };
+    let restart = RestartConfirm {
+        id: "login".to_string(),
+        step: "implement".to_string(),
+        session: None,
+        error: None,
+    };
+    let entry = |id: &str, depends_on: &[&str]| ChainEntry {
+        id: id.to_string(),
+        depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+    };
+    let pending = std::path::Path::new("/pending");
+    vec![
+        (
+            "pause, agent step",
+            pause_confirm_panel("login", &abort(AbortKind::Agent), false, 0),
+        ),
+        (
+            "pause, command step",
+            pause_confirm_panel("login", &abort(AbortKind::Command), true, 0),
+        ),
+        ("restart", restart_confirm_panel(&restart)),
+        (
+            "unqueue",
+            unqueue_confirm_panel(&[entry("login", &[])], pending),
+        ),
+        (
+            "unqueue, with a dependent",
+            unqueue_confirm_panel(&[entry("login", &[]), entry("logout", &["login"])], pending),
+        ),
+        (
+            "unqueue all",
+            unqueue_all_confirm_panel(&["login".to_string(), "logout".to_string()]),
+        ),
+        ("resume picker", resume_picker_panel(&picker, None)),
+    ]
 }
 
 /// [`BoardMode::ResumePicker`]'s state: one held task, every step of its
@@ -1298,7 +1406,7 @@ struct ResumePicker {
     /// the stopped step and its `on_pass` and `on_fail` targets.
     labelled: Option<(usize, usize)>,
     cursor: usize,
-    /// The last refusal `enter` met, printed under the list until `esc`.
+    /// The last refusal `enter` met, printed above the list until `esc`.
     error: Option<String>,
 }
 
@@ -1310,7 +1418,7 @@ struct RestartConfirm {
     step: String,
     /// The conversation the restart throws away, if one is on record.
     session: Option<crate::commands::AbandonedSession>,
-    /// The last refusal `s` met, printed in the panel until `esc`.
+    /// The last refusal `restart` met, printed in the panel until `esc`.
     error: Option<String>,
 }
 
@@ -1615,7 +1723,7 @@ impl AbortKind {
 /// against. Both of those already skip a `paused` task — the one state
 /// nothing is ever live on — so there is nothing further to filter out here.
 /// A `blocked` task is not skipped: the unblocker can be mid-turn on it, and
-/// that turn is exactly what `p` and a stop's `i` reach.
+/// that turn is exactly what `p` and a stop's `interrupt them now` reach.
 fn live_aborts(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1666,10 +1774,10 @@ fn carry_out_abort(mux: &dyn crate::mux::Mux, runs: &crate::command_step::Runs, 
     }
 }
 
-/// The dispatch tab's stop popup's `i`: interrupt every live agent turn and
-/// kill every running command step, parking each of those tasks on `paused`
-/// with [`crate::task::Frontmatter::parked_by_stop`] set, so the next start
-/// can resume exactly these — see [`resume_stop_parked`]. Nothing else in
+/// The dispatch tab's stop popup's `interrupt them now`: interrupt every
+/// live agent turn and kill every running command step, parking each of
+/// those tasks on `paused` with [`crate::task::Frontmatter::parked_by_stop`]
+/// set, so the next start can resume exactly these — see [`resume_stop_parked`]. Nothing else in
 /// the queue is touched. The caller stops the dispatcher afterwards.
 ///
 /// Parks before it aborts, for an agent turn as well as a command run —
@@ -1692,7 +1800,7 @@ pub(crate) fn interrupt_for_stop(repo: &Repo, pipelines: &Pipelines) -> Result<(
     Ok(())
 }
 
-/// Resume every task a stop's `i` parked — [`crate::task::Frontmatter::
+/// Resume every task a stop's interrupt parked — [`crate::task::Frontmatter::
 /// parked_by_stop`] set and still on `paused` — through [`resume_task`],
 /// the same code the board's `r` sends one row through, which spends the
 /// mark. Called by `spoolway dispatch` once it holds the lock and before its
@@ -9132,7 +9240,7 @@ mod tests {
         }
     }
 
-    /// A stop's `i` kills a running command step and parks its task with
+    /// A stop's interrupt kills a running command step and parks its task with
     /// the stop's mark beside `parked_from` — and touches nothing that had
     /// nothing running: an idle task on a step stays exactly where it was.
     #[test]
@@ -9213,7 +9321,14 @@ mod tests {
         assert!(frame.contains("pause login"), "{frame}");
         assert!(frame.contains("handover"), "{frame}");
         assert!(frame.contains("command"), "{frame}");
-        assert!(frame.contains("[enter] pause it"), "{frame}");
+        assert!(
+            frame.contains("Pausing terminates the command's process."),
+            "{frame}"
+        );
+        assert!(frame.contains("Resuming restarts the command."), "{frame}");
+        assert!(frame.contains("> pause now"), "{frame}");
+        assert!(frame.contains("  pause when handover finishes"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
 
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Enter)
@@ -9229,10 +9344,10 @@ mod tests {
         runs.stop(&key);
     }
 
-    /// A stop's `i` interrupts a live agent lane this run owns and parks its
-    /// task with the stop's mark, exercised against the headless backend,
-    /// whose "interrupt" is ending the turn's process outright, the same as
-    /// [`Mux::stop_lane`]. The next start's [`resume_stop_parked`] sends it
+    /// The stop popup's `interrupt them now` interrupts a live agent lane
+    /// this run owns and parks its task with the stop's mark, exercised
+    /// against the headless backend, whose "interrupt" is ending the turn's
+    /// process outright, the same as [`Mux::stop_lane`]. The next start's [`resume_stop_parked`] sends it
     /// back onto its step to continue its session, and spends the mark.
     #[test]
     fn a_stop_interrupt_ends_a_live_agent_turn_and_the_next_start_resumes_it() {
@@ -9441,12 +9556,13 @@ mod tests {
     }
 
     /// `p` on the cursor's own live agent turn — the mockup's own panel —
-    /// names the step, the word `agent`, an elapsed time, and the two lines
-    /// that say the turn is interrupted rather than killed. Nothing is
+    /// names the step, the word `agent` and an elapsed time, then lists its
+    /// two answers with the cursor on `pause now`. An agent step carries no
+    /// closing pair of lines, which only a command step needs. Nothing is
     /// touched before `enter` answers it: the task file it would write is
     /// still exactly what it was when the panel opened.
     #[test]
-    fn pressing_p_on_a_live_agent_lane_names_the_turn_and_says_it_is_only_interrupted() {
+    fn pressing_p_on_a_live_agent_lane_names_the_turn_and_lists_its_answers() {
         let (mut repo, _root_guard) = fixture("pause-cursor-agent-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -9496,14 +9612,11 @@ mod tests {
         assert!(frame.contains("agent"), "{frame}");
         // ~4m20s, off `launched_at` set 260 seconds ago.
         assert!(frame.contains("4m"), "{frame}");
-        assert!(
-            frame.contains("The turn is interrupted, not killed."),
-            "{frame}"
-        );
-        assert!(
-            frame.contains("Resuming picks the session back up."),
-            "{frame}"
-        );
+        assert!(!frame.contains("The turn is interrupted"), "{frame}");
+        assert!(!frame.contains("Resuming"), "{frame}");
+        assert!(frame.contains("> pause now"), "{frame}");
+        assert!(frame.contains("  pause when implement finishes"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
 
         // Nothing written until the panel is answered.
         let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
@@ -9543,12 +9656,13 @@ mod tests {
         );
     }
 
-    /// `s` on `p`'s own panel leaves the live turn running and writes
-    /// `gate_at` naming the step instead of interrupting anything: the board
-    /// answers back to `Browsing`, the task's stage never moves off
+    /// The second answer on `p`'s own panel leaves the live turn running and
+    /// writes `gate_at` naming the step instead of interrupting anything: the
+    /// board answers back to `Browsing`, the task's stage never moves off
     /// `implement`, and the lane the panel named is still there afterwards.
+    /// `s`, the letter that used to schedule it, does nothing.
     #[test]
-    fn pressing_s_on_the_pause_panel_schedules_a_gate_and_leaves_the_lane_running() {
+    fn pausing_when_the_step_finishes_schedules_a_gate_and_leaves_the_lane_running() {
         let (mut repo, _root_guard) = fixture("schedule-pause-cursor");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -9577,6 +9691,15 @@ mod tests {
             .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
+            .unwrap();
+        assert!(matches!(board.mode, BoardMode::ConfirmPause(_)));
+        assert_eq!(repo.task("login").unwrap().front.gate_at, None);
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
 
         assert!(matches!(board.mode, BoardMode::Browsing));
@@ -9646,7 +9769,8 @@ mod tests {
         );
         assert!(frame.contains("step      implement"), "{frame}");
         assert!(frame.contains("lane      login · implement"), "{frame}");
-        assert!(frame.contains("[s] restart   [esc] cancel"), "{frame}");
+        assert!(frame.contains("> restart"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
         assert_eq!(before, after);
         assert_eq!(repo.task("login").unwrap().front.gate_at, None);
@@ -9675,8 +9799,8 @@ mod tests {
         );
     }
 
-    /// `esc` closes the restart panel and changes nothing; `enter`, which
-    /// confirms every other panel, is ignored by this one.
+    /// `esc` closes the restart panel and changes nothing; `s`, the letter
+    /// that opened it, no longer answers it.
     #[test]
     fn esc_on_the_restart_panel_changes_nothing() {
         use crate::screen::Key;
@@ -9687,8 +9811,12 @@ mod tests {
         let (mux, name) = live_headless_lane(&repo);
         let before = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
 
-        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s'), Key::Enter]);
-        assert!(matches!(board.mode, BoardMode::ConfirmRestart(_)), "enter");
+        let board = board_after(
+            &repo,
+            &pipelines,
+            &[Key::Down, Key::Char('s'), Key::Char('s')],
+        );
+        assert!(matches!(board.mode, BoardMode::ConfirmRestart(_)), "s");
         let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s'), Key::Esc]);
         assert!(matches!(board.mode, BoardMode::Browsing));
 
@@ -9697,10 +9825,11 @@ mod tests {
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
     }
 
-    /// `s` on the restart panel carries the restart out: the task stays on
-    /// its step with `restart:` naming it, and the lane is gone.
+    /// `enter` on the restart panel's one answer carries the restart out:
+    /// the task stays on its step with `restart:` naming it, and the lane is
+    /// gone.
     #[test]
-    fn pressing_s_twice_restarts_the_step() {
+    fn confirming_the_restart_panel_restarts_the_step() {
         use crate::screen::Key;
         let (mut repo, _root_guard) = fixture("restart-panel-confirm");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -9708,11 +9837,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
 
-        let board = board_after(
-            &repo,
-            &pipelines,
-            &[Key::Down, Key::Char('s'), Key::Char('s')],
-        );
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s'), Key::Enter]);
 
         assert!(matches!(board.mode, BoardMode::Browsing));
         let task = repo.task("login").unwrap();
@@ -9722,8 +9847,8 @@ mod tests {
     }
 
     /// A task that moved to another step while the panel was open is not
-    /// restarted on the step it is on now, which the panel never named: `s`
-    /// refuses, the panel stays open saying where it went, and the task and
+    /// restarted on the step it is on now, which the panel never named:
+    /// `enter` refuses, the panel stays open saying where it went, and the task and
     /// the lane are left as they were.
     #[test]
     fn a_task_moved_to_another_step_is_not_restarted_from_a_stale_panel() {
@@ -9738,7 +9863,7 @@ mod tests {
         let mut task = repo.task("login").unwrap();
         task.set_stage("review", Some("passed while the panel was open"));
         task.save().unwrap();
-        board.on_key(&repo, &pipelines, Key::Char('s')).unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
 
         let BoardMode::ConfirmRestart(confirm) = &board.mode else {
             panic!("the panel closed on a task that moved");
@@ -9773,7 +9898,7 @@ mod tests {
         let mut task = repo.task("login").unwrap();
         task.set_stage(crate::pipeline::QUEUED, Some("sent back by hand"));
         task.save().unwrap();
-        board.on_key(&repo, &pipelines, Key::Char('s')).unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
 
         let BoardMode::ConfirmRestart(confirm) = &board.mode else {
             panic!("the panel closed on a refused restart");
@@ -9794,11 +9919,13 @@ mod tests {
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
     }
 
-    /// Pressing `s` a second time, on a fresh panel over the same still-live
-    /// step, clears the schedule it wrote rather than writing it again —
-    /// the mockup's "pressing `s` again... clears it".
+    /// The second answer a second time, on a fresh panel over the same
+    /// still-live step, clears the schedule it wrote rather than writing it
+    /// again — and the panel says so, reading `cancel the scheduled pause`
+    /// in its place.
     #[test]
-    fn pressing_s_again_clears_a_scheduled_pause() {
+    fn answering_a_scheduled_pause_again_cancels_it() {
+        use crate::screen::Key;
         let (mut repo, _root_guard) = fixture("schedule-pause-toggle");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -9821,23 +9948,51 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
-            .unwrap();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
-            .unwrap();
+        for key in [Key::Char('p'), Key::Down, Key::Enter] {
+            board.on_key(&repo, &pipelines, key).unwrap();
+        }
         assert_eq!(
             repo.task("login").unwrap().front.gate_at.as_deref(),
             Some("implement")
         );
 
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
-            .unwrap();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
-            .unwrap();
+        board.on_key(&repo, &pipelines, Key::Char('p')).unwrap();
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("  cancel the scheduled pause"), "{frame}");
+        assert!(!frame.contains("pause when implement finishes"), "{frame}");
+        board.on_key(&repo, &pipelines, Key::Down).unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        assert_eq!(repo.task("login").unwrap().front.gate_at, None);
+    }
+
+    /// `cancel the scheduled pause` cancels, never schedules: when the
+    /// schedule is gone by the time it is answered — the step reported and
+    /// its gate fired while the panel was open — it leaves `gate_at` empty
+    /// rather than writing the pause back.
+    #[test]
+    fn cancelling_a_pause_already_gone_leaves_it_gone() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("schedule-pause-gone");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("implement".into());
+        task.save().unwrap();
+        let (_mux, _name) = live_headless_lane(&repo);
+
+        let mut board = Board::for_test();
+        watching_frame(&mut board, &repo, &pipelines);
+        board.on_key(&repo, &pipelines, Key::Down).unwrap();
+        board.on_key(&repo, &pipelines, Key::Char('p')).unwrap();
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("  cancel the scheduled pause"), "{frame}");
+
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = None;
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Down).unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
         assert_eq!(repo.task("login").unwrap().front.gate_at, None);
     }
 
@@ -10211,7 +10366,8 @@ mod tests {
         );
         assert!(frame.contains("unqueue chain-refusals"), "{frame}");
         assert!(frame.contains("chain-refusals.md"), "{frame}");
-        assert!(frame.contains("[enter] unqueue it"), "{frame}");
+        assert!(frame.contains("> unqueue it"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         // Still sitting in the queue — nothing moves until the panel is
         // answered.
         assert!(repo.task("chain-refusals").is_ok());
@@ -10380,7 +10536,8 @@ mod tests {
             frame.contains("chain-refusals   (depends on drop-walk)"),
             "{frame}"
         );
-        assert!(frame.contains("[enter] unqueue them"), "{frame}");
+        assert!(frame.contains("> unqueue them"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         // Still sitting in the queue — nothing moves until the panel is
         // answered.
         assert_eq!(repo.task("drop-walk").unwrap().stage(), "queued");
@@ -10568,7 +10725,8 @@ mod tests {
         // whole frame would prove nothing.
         assert!(frame.contains("chain-refusals"), "{frame}");
         assert!(frame.contains("month-instant"), "{frame}");
-        assert!(frame.contains("[enter] unqueue them"), "{frame}");
+        assert!(frame.contains("> unqueue them"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
 
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Enter)
@@ -10748,20 +10906,17 @@ mod tests {
         assert_eq!(
             panel,
             vec![
-                format!("{TOP_LEFT}─ resume ship-login ─────────────────────────{TOP_RIGHT}")
-                    .as_str(),
-                "│                                             │",
-                "│  paused at review — it passed               │",
-                "│                                             │",
-                "│    implement   on fail                      │",
-                "│    review      paused                       │",
-                "│  ▸ document    on pass (next)               │",
-                "│    handover                                 │",
-                "│                                             │",
-                "│  [↑↓] pick   [enter] resume   [esc] cancel  │",
-                "│                                             │",
-                format!("{BOTTOM_LEFT}─────────────────────────────────────────────{BOTTOM_RIGHT}")
-                    .as_str(),
+                format!("{TOP_LEFT}─ resume ship-login ─────────────{TOP_RIGHT}").as_str(),
+                "│                                 │",
+                "│  paused at review — it passed   │",
+                "│                                 │",
+                "│    implement   on fail          │",
+                "│    review      paused           │",
+                "│  > document    on pass (next)   │",
+                "│    handover                     │",
+                "│                                 │",
+                "│  [enter] confirm   [esc] close  │",
+                format!("{BOTTOM_LEFT}─────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ],
         );
         assert_eq!(
@@ -10906,7 +11061,7 @@ mod tests {
     }
 
     /// `enter` on a row that can no longer be resumed keeps the picker open
-    /// with the refusal under the list, where the dispatch loop would
+    /// with the refusal above the list, where the dispatch loop would
     /// otherwise have dropped it without a word.
     #[test]
     fn a_refused_pick_keeps_the_picker_open_and_prints_the_refusal() {
@@ -11019,16 +11174,12 @@ mod tests {
 
         assert!(panel.len() < 15, "{}", panel.join("\n"));
         let has = |text: &str| panel.iter().any(|line| line.contains(text));
-        assert!(has("▸ s12"), "{}", panel.join("\n"));
-        assert!(
-            has("[↑↓] pick   [enter] resume   [esc] cancel"),
-            "{}",
-            panel.join("\n")
-        );
+        assert!(has("> s12"), "{}", panel.join("\n"));
+        assert!(has("[enter] confirm   [esc] close"), "{}", panel.join("\n"));
         assert!(has("▲ ") && has("▼ "), "{}", panel.join("\n"));
         let shown = panel
             .iter()
-            .filter(|line| line.contains("  s") || line.contains("▸ s"))
+            .filter(|line| line.contains("  s") || line.contains("> s"))
             .count();
         let count = |mark: &str| -> usize {
             let line = panel.iter().find(|line| line.contains(mark)).unwrap();
@@ -11039,7 +11190,7 @@ mod tests {
 
     /// A picker left open while the task is resumed somewhere else refuses
     /// `enter` on any row, rather than rewinding the task or moving it under
-    /// the lane now working it, and says why under the list.
+    /// the lane now working it, and says why above the list.
     #[test]
     fn enter_on_a_picker_whose_task_moved_on_refuses() {
         let (repo, _root_guard) = fixture("picker-stale");
@@ -11182,8 +11333,8 @@ mod tests {
 
         assert!(panel.len() <= 12, "{}", panel.join("\n"));
         let has = |text: &str| panel.iter().any(|line| line.contains(text));
-        assert!(has("▸ review"), "{}", panel.join("\n"));
-        assert!(has("[↑↓] pick"), "{}", panel.join("\n"));
+        assert!(has("> review"), "{}", panel.join("\n"));
+        assert!(has("[enter] confirm   [esc] close"), "{}", panel.join("\n"));
         assert!(has("one …"), "{}", panel.join("\n"));
         assert!(!has("two"), "{}", panel.join("\n"));
     }
@@ -11214,8 +11365,11 @@ mod tests {
             let text = panel.join("\n");
             assert!(panel.len() <= 12, "{outcome}: {text}");
             assert!(text.contains("has moved on"), "{outcome}: {text}");
-            assert!(text.contains("[↑↓] pick"), "{outcome}: {text}");
-            assert!(text.contains('▸'), "{outcome}: {text}");
+            assert!(
+                text.contains("[enter] confirm   [esc] close"),
+                "{outcome}: {text}"
+            );
+            assert!(text.contains("│  > "), "{outcome}: {text}");
         }
     }
 

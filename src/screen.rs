@@ -621,8 +621,8 @@ pub(crate) mod corner {
 /// row loses the one they had the cursor on.
 ///
 /// Shared by [`panel`], which appends its own key line as one more row after
-/// a blank spacer, and by callers whose body lines are already the choices a
-/// person reads and need no footer after them.
+/// a blank spacer, by [`ask`], which appends a popup's answers and their key
+/// row, and by callers whose body needs no key row after it at all.
 pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
     use corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     let head = format!("─ {title} ");
@@ -660,6 +660,66 @@ pub(crate) fn panel(title: &str, body: &[String], keys: &str) -> Vec<String> {
     full.push(String::new());
     full.push(keys.to_string());
     boxed(title, &full)
+}
+
+/// The key row of every popup that asks a person something: `enter` runs
+/// the answer under the cursor, `esc` closes the popup with nothing changed.
+///
+/// One row for every such popup, so no popup answers on letters of its
+/// own, and no letter means one thing in one popup and another one tab
+/// over. The arrows that move the cursor are not named: the `>` on the
+/// cursor's row already says there is one.
+pub(crate) fn answer_keys() -> String {
+    keys(&[("enter", "confirm"), ("esc", "close")])
+}
+
+/// A popup's answers as rows, for the bottom of its body: a blank row, one
+/// row per answer with `>` on the cursor's own and two spaces on the rest,
+/// a blank row, and [`answer_keys`].
+///
+/// An answer of several lines — a pipeline and its description under it —
+/// draws its later lines under its first, two columns in, so they read as
+/// part of the answer rather than as answers of their own. A `cursor` past
+/// the last answer marks no row.
+///
+/// Apart from [`ask`] for a caller that prints its answers under a notice
+/// of its own rather than in a box — `spoolway dispatch`'s gates in a
+/// terminal — so the printed answers and the boxed ones are the same rows.
+pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    for (i, answer) in answers.iter().enumerate() {
+        let mut lines = answer.split('\n');
+        let first = lines.next().unwrap_or_default();
+        let mark = if i == cursor { ">" } else { " " };
+        rows.push(format!("{mark} {first}"));
+        rows.extend(lines.map(|line| format!("  {line}")));
+    }
+    rows.push(String::new());
+    rows.push(answer_keys());
+    rows
+}
+
+/// A framed popup that asks something: its `body`, then its `answers` as
+/// [`answer_rows`] draws them, the cursor on the `cursor`th.
+///
+/// Every popup that asks a question is drawn through this, so each one
+/// reads and answers alike: the arrows move the cursor, `enter` runs the
+/// answer under it, and `esc` closes. A popup that only says something is
+/// a [`notice`] instead, closed by [`confirm`].
+pub(crate) fn ask(title: &str, body: &[String], answers: &[String], cursor: usize) -> Vec<String> {
+    let mut full = body.to_vec();
+    full.extend(answer_rows(answers, cursor));
+    boxed(title, &full)
+}
+
+/// `cursor` moved by `key` over a list of `answers` answers: up or down
+/// one row, held at either end, and unchanged by any other key.
+pub(crate) fn move_cursor(cursor: usize, answers: usize, key: Key) -> usize {
+    match key {
+        Key::Up => cursor.saturating_sub(1),
+        Key::Down => (cursor + 1).min(answers.saturating_sub(1)),
+        _ => cursor,
+    }
 }
 
 /// How wide [`notice`] wraps its text: a popup then stays inside the 100
@@ -782,6 +842,52 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 mod tests {
     use super::*;
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
+
+    /// Every popup in the project that asks a person something closes on
+    /// `[enter] confirm   [esc] close` and nothing else: no letter answers,
+    /// no key row of its own. Each module hands over its own asking popups,
+    /// drawn once; a listed popup that stops drawing through [`ask`], or
+    /// grows a key row of its own, fails here. A new popup has to be added
+    /// to its module's list to be walked.
+    #[test]
+    fn every_popup_that_asks_closes_on_confirm_and_close() {
+        let popups = [
+            crate::status::asking_panels(),
+            vec![("stop dispatching", dispatcher::stop_panel(0))],
+            crate::commands::dispatch_asking_panels(),
+            crate::commands::queue_asking_panels(),
+            crate::commands::jobs_asking_panels(),
+        ]
+        .concat();
+        assert_eq!(popups.len(), 16, "every popup is walked");
+        let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
+        for (name, panel) in popups {
+            let drawn = panel.join("\n");
+            assert!(
+                panel[panel.len() - 1].starts_with(BOTTOM_LEFT),
+                "{name}: {drawn}"
+            );
+            assert_eq!(
+                row(&panel[panel.len() - 2]),
+                answer_keys(),
+                "{name}: {drawn}"
+            );
+            let keyed: Vec<String> = panel
+                .iter()
+                .map(|line| row(line))
+                .filter(|line| line.starts_with('['))
+                .collect();
+            assert_eq!(keyed, [answer_keys()], "{name}: one key row: {drawn}");
+            assert_eq!(
+                panel
+                    .iter()
+                    .filter(|line| row(line).starts_with("> "))
+                    .count(),
+                1,
+                "{name}: the cursor on one answer: {drawn}"
+            );
+        }
+    }
 
     // Pins the exact bytes the board's own key line already draws — see
     // `src/status/mod.rs`'s hint — so a screen that switches over to

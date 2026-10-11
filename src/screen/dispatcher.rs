@@ -210,22 +210,29 @@ pub(crate) fn popup(ran: bool, reason: &str) -> Vec<String> {
     super::notice(title, reason, &super::confirm(), super::NOTICE_WRAP)
 }
 
+/// The stop popup's answers, in the order [`stop_panel`] lists them: the
+/// first leaves running steps to finish, the second interrupts them.
+pub(crate) const STOP_ANSWERS: [&str; 2] = ["let running steps finish", "interrupt them now"];
+
 /// The popup `enter` opens over a running dispatcher: whether its running
-/// steps finish, or are interrupted now. Asked on every stop, even with
-/// nothing running — the choice is the person's each time, never
-/// remembered. Laid out line by line rather than wrapped, so it reads
-/// exactly as the plan's mockup draws it.
-pub(crate) fn stop_panel() -> Vec<String> {
+/// steps finish, or are interrupted now, with the cursor on the
+/// `cursor`th of [`STOP_ANSWERS`]. Asked on every stop, even with nothing
+/// running — the choice is the person's each time, never remembered. Laid
+/// out line by line rather than wrapped, so the explanation keeps the line
+/// breaks it was written with.
+pub(crate) fn stop_panel(cursor: usize) -> Vec<String> {
     let body = [
         "",
         "No new steps will be started.",
         "Interrupting stops agents and commands. When resumed, agents pick",
         "up where they left off and commands restart.",
-        "",
-        "[enter] let running steps finish",
-        "[i] interrupt them now   [esc] back",
     ];
-    super::boxed("stop dispatching", &body.map(str::to_string))
+    super::ask(
+        "stop dispatching",
+        &body.map(str::to_string),
+        &STOP_ANSWERS.map(str::to_string),
+        cursor,
+    )
 }
 
 #[cfg(test)]
@@ -292,11 +299,12 @@ mod tests {
         );
     }
 
-    /// The stop popup, border and all, as the plan's mockup draws it.
+    /// The stop popup, border and all: the explanation, then its two
+    /// answers with the cursor on the gentler one.
     #[test]
-    fn the_stop_popup_is_drawn_as_the_mockup_draws_it() {
+    fn the_stop_popup_lists_its_answers_under_the_explanation() {
         assert_eq!(
-            stop_panel(),
+            stop_panel(0),
             [
                 format!("{TOP_LEFT}─ stop dispatching ──────────────────────────────────────────────────{TOP_RIGHT}").as_str(),
                 "│                                                                     │",
@@ -304,8 +312,10 @@ mod tests {
                 "│  Interrupting stops agents and commands. When resumed, agents pick  │",
                 "│  up where they left off and commands restart.                       │",
                 "│                                                                     │",
-                "│  [enter] let running steps finish                                   │",
-                "│  [i] interrupt them now   [esc] back                                │",
+                "│  > let running steps finish                                         │",
+                "│    interrupt them now                                               │",
+                "│                                                                     │",
+                "│  [enter] confirm   [esc] close                                      │",
                 format!("{BOTTOM_LEFT}─────────────────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );

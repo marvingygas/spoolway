@@ -21,7 +21,9 @@ use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
 use crate::screen::pane::{Items, window};
-use crate::screen::{Key, Notice, PollableRead, key_hint, keys, overlay, pad_to, panel, read_key};
+use crate::screen::{
+    Key, Notice, PollableRead, hint, key_hint, keys, overlay, pad_to, panel, read_key,
+};
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
 /// next and when it last fired. `--json` prints the same rows for a script.
@@ -554,16 +556,13 @@ impl NewJobWalk {
     pub(super) fn footer(&self) -> String {
         match self {
             NewJobWalk::Schedule(_) => key_hint(SCHEDULE_KEYS),
-            NewJobWalk::PickPipeline { .. } => key_hint(PIPELINE_KEYS),
+            NewJobWalk::PickPipeline { .. } => hint(&crate::screen::answer_keys()),
         }
     }
 }
 
 /// The schedule popup's keys, in the popup and on the line under the frame.
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
-
-/// The pipeline popup's keys, in the popup and on the line under the frame.
-const PIPELINE_KEYS: &[(&str, &str)] = &[("enter", "choose"), ("esc", "cancel")];
 
 /// The routines tab's popup once its `n` has saved a job: what it runs, when,
 /// on which pipeline, and where to change it.
@@ -1100,15 +1099,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     let overlay_panel: Option<Vec<String>> = match &state.mode {
         JobMode::PickRoutine { nav, .. } => Some(routine_panel(ctx, nav)),
         JobMode::Walk(walk) => Some(walk.panel(ctx.pipelines)),
-        JobMode::ConfirmDelete(name) => Some(panel(
-            "delete this job",
-            &[
-                String::new(),
-                clip(&format!("  {name}")),
-                "  its schedule is removed from the store.".to_string(),
-            ],
-            &keys(&[("enter", "delete"), ("esc", "keep")]),
-        )),
+        JobMode::ConfirmDelete(name) => Some(delete_panel(name)),
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border.
         JobMode::Outcome(notice) => Some(
@@ -1202,7 +1193,7 @@ fn jobs_footer(mode: &JobMode) -> String {
         // routines pane names — `o` included, gated the same way there.
         JobMode::PickRoutine { .. } => key_hint(ROUTINE_KEYS),
         JobMode::Walk(walk) => walk.footer(),
-        JobMode::ConfirmDelete(_) => key_hint(&[("enter", "delete"), ("esc", "keep")]),
+        JobMode::ConfirmDelete(_) => hint(&crate::screen::answer_keys()),
     }
 }
 
@@ -1388,6 +1379,11 @@ fn clip(s: &str) -> String {
     format!("{kept}…")
 }
 
+/// How wide an answer's own text may be: [`PANEL_BODY_WIDTH`], less the
+/// two columns [`crate::screen::answer_rows`] puts before every answer row
+/// for its `>`.
+const ANSWER_WIDTH: usize = PANEL_BODY_WIDTH - 2;
+
 /// The schedule field's overlay: the expression as typed, the same expression
 /// in words, and the next three firings — recomputed on every keystroke. An
 /// expression that will not parse says so in place of the three lines.
@@ -1426,38 +1422,69 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     )
 }
 
+/// `x`'s popup over job `name`: what deleting it removes, and its one
+/// answer.
+fn delete_panel(name: &str) -> Vec<String> {
+    crate::screen::ask(
+        "delete this job",
+        &[
+            String::new(),
+            clip(&format!("  {name}")),
+            "  its schedule is removed from the store.".to_string(),
+        ],
+        &["delete".to_string()],
+        0,
+    )
+}
+
 /// The pipeline picker's overlay: every pipeline the repo defines, narrowed by
-/// the typed query, the highlighted one showing the first line of its own
-/// description.
+/// the typed query, as answers — the highlighted one showing the first line
+/// of its own description under its name, and a blank row under that.
 fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<String> {
     let matches = pipeline_matches(pipelines, query);
     let cursor = cursor.min(matches.len().saturating_sub(1));
-    let mut body = vec![
-        String::new(),
-        clip(&format!("  find: {query}_")),
-        String::new(),
-    ];
+    let mut body = vec![String::new(), clip(&format!("  find: {query}_"))];
 
     if matches.is_empty() {
+        body.push(String::new());
         body.push("  no pipeline matches".to_string());
     }
-    for (index, name) in matches.iter().enumerate() {
-        let marker = if index == cursor { ">" } else { " " };
-        body.push(clip(&format!("{marker} {name}")));
-        if index == cursor {
-            if let Ok(pipeline) = pipelines.get(name)
-                && let Some(description) = &pipeline.description
-            {
-                body.push(clip(&format!(
-                    "    {}",
-                    crate::fmt::first_line(description)
-                )));
+    let answers: Vec<String> = matches
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut answer = clip_to(name.clone(), ANSWER_WIDTH);
+            if index == cursor {
+                if let Ok(pipeline) = pipelines.get(name)
+                    && let Some(description) = &pipeline.description
+                {
+                    answer.push('\n');
+                    answer.push_str(&clip_to(
+                        format!("  {}", crate::fmt::first_line(description)),
+                        ANSWER_WIDTH,
+                    ));
+                }
+                answer.push('\n');
             }
-            body.push(String::new());
-        }
-    }
+            answer
+        })
+        .collect();
 
-    panel("which pipeline", &body, &keys(PIPELINE_KEYS))
+    crate::screen::ask("which pipeline", &body, &answers, cursor)
+}
+
+/// Every popup on the jobs tab that asks something, drawn once each with
+/// made-up content — for the test that walks every such popup in the
+/// project; see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        ("delete job", delete_panel("nightly-audit")),
+        (
+            "jobs pipeline picker",
+            pipeline_panel(&Pipelines::builtin(), "", 0),
+        ),
+    ]
 }
 
 /// The routine picker's keys, in its popup and on the line under the frame.

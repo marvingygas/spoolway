@@ -225,7 +225,8 @@ has "naming the routine and its task count" "nightly · 2 tasks" "$LAST"
 has "the whole-folder job beside its store" "nightly-audit   user" "$LAST"
 has "the single-task job beside its store" "audit-docs      project" "$LAST"
 lacks "never a job on another routine" "weekly-prune" "$LAST"
-has "under its own keys" "[enter] delete   [esc] keep" "$LAST"
+has "its one answer under the cursor" "> delete" "$LAST"
+has "under the shared key row" "[enter] confirm   [esc] close" "$LAST"
 
 # x asks, enter deletes the jobs and then the folder.
 on_screen '\x1b[Cjjx\r' /dev/null

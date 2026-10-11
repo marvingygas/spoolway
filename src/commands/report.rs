@@ -73,7 +73,7 @@ pub fn report(
         task.front.resume = None;
         // A stop's mark is spent by any resume, whoever sends it — see
         // `back_onto_its_step`'s own clear of the same field. The stop
-        // popup's `i` parks with `parked_from` set exactly like a person's
+        // popup's interrupt parks with `parked_from` set exactly like a person's
         // own Escape does, so this shape can be either; left set, the next
         // `spoolway start` would read `resume_stop_parked` and carry this
         // task through a gate with nobody there to answer it.

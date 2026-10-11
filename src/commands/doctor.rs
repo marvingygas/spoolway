@@ -976,7 +976,7 @@ pub(crate) const HOOK_FAILURE_LABEL: &str = "issue_tracking hooks";
 /// event, the task, the exit code, what clears it and the run's own log.
 ///
 /// The text is also what the "before dispatching" popup fingerprints, so a
-/// second failure changes it and a popup hidden with `x` asks again.
+/// second failure changes it and a hidden popup asks again.
 ///
 /// The remedy depends on the event. A failing `queued`, `started` or `done`
 /// hook pauses its task and `spoolway resume` forgets the run, so the row

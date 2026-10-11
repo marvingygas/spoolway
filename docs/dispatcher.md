@@ -192,15 +192,18 @@ anything, the tab covers the board with a keyless `Starting dispatcher` popup. S
 │  Interrupting stops agents and commands. When resumed, agents pick  │
 │  up where they left off and commands restart.                       │
 │                                                                     │
-│  [enter] let running steps finish                                   │
-│  [i] interrupt them now   [esc] back                                │
+│  > let running steps finish                                         │
+│    interrupt them now                                               │
+│                                                                     │
+│  [enter] confirm   [esc] close                                      │
 ╰─────────────────────────────────────────────────────────────────────╯
 ```
 
-`enter` there stops the child the way `ctrl-c` does: nothing is interrupted, and every lane
-keeps running. `i` interrupts every live agent turn and kills every running command step first,
-parking each of those tasks on `paused` with a mark saying the stop parked it, then stops the
-child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
+`↑` and `↓` move the cursor between the two answers, and it opens on the first. `enter` on `let
+running steps finish` stops the child the way `ctrl-c` does: nothing is interrupted, and every
+lane keeps running. `enter` on `interrupt them now` interrupts every live agent turn and kills
+every running command step first, parking each of those tasks on `paused` with a mark saying
+the stop parked it, then stops the child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
 nothing: there is nothing left to ask.
 
 Starting dispatching again, from the tab or with `spoolway dispatch`, resumes every task the
@@ -370,10 +373,15 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
-| `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). On an open pause panel, schedule the pause instead of carrying it out. |
+| `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
+
+Every panel these keys open lists its answers under its text, with `>` on the cursor's row.
+`↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes the panel with
+nothing changed. No letter answers a panel. The cursor opens on the first answer, such as
+`pause now` or `unqueue it`, and on the `(next)` step in the resume picker.
 
 ### Resume picker
 
@@ -386,9 +394,9 @@ paused at review — it passed
 
   reproduce   on fail
   review      paused
-▸ document    on pass (next)
+> document    on pass (next)
 
-[↑↓] pick   [enter] resume   [esc] cancel
+[enter] confirm   [esc] close
 ```
 
 | Label | Meaning |
@@ -406,15 +414,36 @@ When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `
 | `enter` on any other row | The same as `spoolway resume <task> --stage <step>`. |
 | `esc` | Close the picker and change nothing. |
 
-An `enter` the resume refuses leaves the picker open and prints the reason under the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
+An `enter` the resume refuses leaves the picker open and prints the reason above the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
+
+### Pause panel
+
+`p` on a row with a running agent turn or command opens a panel titled `pause <task>`. It names
+the step it would abort and lists two answers:
+
+```
+╭─ pause cart-empty-state ────────────╮
+│  Pausing aborts the step it is on:  │
+│                                     │
+│  implement    agent    2m 21s       │
+│                                     │
+│  > pause now                        │
+│    pause when implement finishes    │
+│                                     │
+│  [enter] confirm   [esc] close      │
+╰─────────────────────────────────────╯
+```
 
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
-a command step kills the run, and the command runs again in full on resume.
+a command step kills the run, and the command runs again in full on resume. On a command step
+the panel says so in two lines above the answers: `Pausing terminates the command's process.`
+and `Resuming restarts the command.`
 
-`s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
-the named task pauses itself once that step reports, whatever it reports. For a command step,
-the task pauses once the command exits, whatever the exit code. Press `s` again on a
-row that already has a scheduled pause to clear it.
+`pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
+named, so the named task pauses itself once that step reports, whatever it reports. For a
+command step, the task pauses once the command exits, whatever the exit code. On a row that
+already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
+it.
 
 ### Restart panel
 
@@ -430,16 +459,18 @@ row that already has a scheduled pause to clear it.
 │ The lane is torn down and `review` is briefed from  │
 │ scratch. Its conversation is not kept.              │
 │                                                     │
-│ [s] restart   [esc] cancel                          │
+│ > restart                                           │
+│                                                     │
+│ [enter] confirm   [esc] close                       │
 ╰─────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |
 |---|---|
-| `s` | The same as `spoolway restart <task>`. |
+| `enter` on `restart` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The panel opens for a task that `spoolway restart` accepts. A queued, done or hook-held row opens nothing, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the two closing lines. When the task has moved to another step since the panel opened, `s` restarts nothing and says so.
+The panel opens for a task that `spoolway restart` accepts. A queued, done or hook-held row opens nothing, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Footer
 
@@ -517,7 +548,7 @@ Other things put a task on `paused`:
 | Cause | How the task file records it |
 |---|---|
 | `p` on the board | `parked_from: <step>` |
-| The dispatch tab's stop popup, `i` | `parked_from: <step>` and `parked_by_stop: true` |
+| The dispatch tab's stop popup, `interrupt them now` | `parked_from: <step>` and `parked_by_stop: true` |
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
 | A failing `[issue_tracking]` hook on `queued`, `started` or `done` | `hook_paused: queued`, `hook_paused: started` or `hook_paused: done` |
