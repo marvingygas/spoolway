@@ -52,6 +52,15 @@ pub struct LastReport {
     /// one that reported before it ever ran.
     #[serde(default)]
     pub at: i64,
+    /// The same instant as `at`, in epoch milliseconds, so a report can be
+    /// told apart from a lane that started in the same whole second: the
+    /// report of a lane that has just been replaced, and the report this lane
+    /// files at once, both land in one `at`.
+    ///
+    /// Absent on a task file written by an older spoolway, which reads as
+    /// zero. `reported_since` then falls back to comparing `at` alone.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub at_ms: i64,
     /// Whether this report left the task on `blocked`, whatever the lane
     /// said: a `--block` does, and so does a pass or fail whose next step has
     /// spent its `loop:`, a `--fail` from a step that declares no `on_fail`,
@@ -701,6 +710,10 @@ pub struct Frontmatter {
     pub extra: BTreeMap<String, serde_norway::Value>,
 }
 
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
+}
+
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -745,8 +758,8 @@ pub struct Task {
     pub path: PathBuf,
     pub front: Frontmatter,
     pub body: String,
-    /// The step [`Task::set_stage`] moved this task onto since the last
-    /// [`Task::save`], which is where an arrival at a command step starts
+    /// The step [`Task::set_stage`] or [`Task::set_stage_unbanked`] moved this
+    /// task onto since the last [`Task::save`], which is where an arrival at a command step starts
     /// that step's run from nothing. Never loaded from disk, so a pass that
     /// only reads the queue cannot set it.
     pub(crate) arrived_at: Arrival,
@@ -960,8 +973,9 @@ impl Task {
         Ok(format!("---\n{yaml}---\n{}", self.body))
     }
 
-    /// Write the task file. If [`Task::set_stage`] moved it onto a step since
-    /// the last save, that step's old command run is cleared first.
+    /// Write the task file. If [`Task::set_stage`] or
+    /// [`Task::set_stage_unbanked`] moved it onto a step since the last save,
+    /// that step's old command run is cleared first.
     ///
     /// The clearing lives in the write, not in the dispatcher, because a task
     /// reaches a command step by many roads: a dispatcher pass, a lane's
@@ -1071,29 +1085,45 @@ impl Task {
     /// `launch_failures` are reset the same way `set_stage` resets them,
     /// since neither a parked task nor the lane it is handed back to has
     /// anything of those left to mean.
+    ///
+    /// The step's old command run is still cleared by the next `save`, as for
+    /// `set_stage`. Pausing a command step kills only a run that was still
+    /// going, so one that had already exited would otherwise leave its exit
+    /// code for the resume to route on, and the command would never run again.
+    /// Clearing a run is not counting an arrival: `rounds` stays as it was.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
         self.front.launched_at = None;
         self.front.launch_failures.remove(stage);
         self.front.launch_busy_since.remove(stage);
+        self.arrived_at.set(stage);
 
         let line = format!("→ `{}`: {}", stage, message.trim().replace('\n', " "));
         self.log_status(&line);
     }
 
-    /// Whether this task's `last_report` was banked after `since` — a lane's
-    /// own `started_at`, in the same epoch-seconds clock.
+    /// Whether this task's `last_report` was banked after a lane started:
+    /// `since` is the lane's own `started_at` in epoch seconds, and
+    /// `since_ms` the same instant in milliseconds.
+    ///
+    /// Whole seconds cannot say whether a report filed in the lane's first
+    /// second came before or after the lane began, so the millisecond clocks
+    /// decide whenever both sides have one. A report or a lane record from an
+    /// older spoolway has none, and then the whole seconds decide, strictly.
     ///
     /// A report always moves the stage now — no step routes back to itself
     /// any more — but a report and a reminder can still race on the same
     /// pass: the report is what the dispatcher reads, rather than inferring
     /// an answer from movement it might not have seen land yet.
-    pub fn reported_since(&self, since: i64) -> bool {
-        self.front
-            .last_report
-            .as_ref()
-            .is_some_and(|report| report.at > since)
+    pub fn reported_since(&self, since: i64, since_ms: i64) -> bool {
+        self.front.last_report.as_ref().is_some_and(|report| {
+            if report.at_ms > 0 && since_ms > 0 {
+                report.at_ms > since_ms
+            } else {
+                report.at > since
+            }
+        })
     }
 
     /// Forgive the launches counted against this step: one of them left
@@ -2136,6 +2166,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 1_786_900_000,
+            at_ms: 0,
             blocked: false,
         });
         let rendered = task.render().unwrap();
@@ -2151,7 +2182,8 @@ mod tests {
         let older = "---\nid: demo\nstage: blocked\nlast_report:\n  step: implement\n  \
                       outcome: block\n---\n";
         let task = Task::parse(PathBuf::from("demo.md"), older).unwrap();
-        assert_eq!(task.front.last_report.unwrap().at, 0);
+        let report = task.front.last_report.unwrap();
+        assert_eq!((report.at, report.at_ms), (0, 0));
     }
 
     /// The comparison the settled arm decides a self-routing step by: newer
@@ -2161,7 +2193,7 @@ mod tests {
     fn reported_since_reads_the_reports_own_clock_against_the_lanes_start() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
         assert!(
-            !task.reported_since(1_000),
+            !task.reported_since(1_000, 0),
             "no report at all is not a report"
         );
 
@@ -2169,13 +2201,56 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: 1_000,
+            at_ms: 0,
             blocked: false,
         });
         assert!(
-            !task.reported_since(1_000),
+            !task.reported_since(1_000, 0),
             "a report banked before the lane started is the round before's"
         );
-        assert!(task.reported_since(999), "banked after the lane started");
+        assert!(task.reported_since(999, 0), "banked after the lane started");
+    }
+
+    /// Inside one whole second the millisecond clocks decide: a report after
+    /// the lane's start is its own, and one before it is the previous lane's.
+    #[test]
+    fn reported_since_tells_a_report_in_the_lanes_first_second_by_milliseconds() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.last_report = Some(LastReport {
+            step: "blocked".into(),
+            outcome: "block".into(),
+            at: 1_000,
+            at_ms: 1_000_600,
+            blocked: false,
+        });
+        assert!(
+            task.reported_since(1_000, 1_000_300),
+            "filed 300 ms after the lane started, in the same second"
+        );
+        assert!(
+            !task.reported_since(1_000, 1_000_900),
+            "filed 300 ms before the lane started: the lane before's report"
+        );
+        assert!(
+            !task.reported_since(1_000, 1_000_600),
+            "a tie is not after the start"
+        );
+    }
+
+    /// A lane record from an older spoolway has no millisecond start, so the
+    /// whole-second comparison still decides, as it did before.
+    #[test]
+    fn reported_since_falls_back_to_seconds_when_either_side_lacks_milliseconds() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.last_report = Some(LastReport {
+            step: "blocked".into(),
+            outcome: "block".into(),
+            at: 1_000,
+            at_ms: 1_000_600,
+            blocked: false,
+        });
+        assert!(!task.reported_since(1_000, 0));
+        assert!(task.reported_since(999, 0));
     }
 
     /// `title:` round-trips like any other plain key, and an older task file

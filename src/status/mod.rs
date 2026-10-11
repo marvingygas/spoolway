@@ -4729,10 +4729,11 @@ fn off_a_step(
     let on_pass = land(Outcome::Pass);
     let on_fail = land(Outcome::Fail);
     let (on_pass, on_fail) = (on_pass.as_deref(), on_fail.as_deref());
-    // The dispatcher's own walk-past still writes the raw `on_pass` — see
-    // `crate::dispatch::fall_through` — and a failed lane start the raw
-    // `on_fail` — see `Dispatcher::handle_boot_failure` — so a move either
-    // made is read against that.
+    // The dispatcher's own walk-past writes the raw `on_pass` — see
+    // `crate::dispatch::fall_through` — and a lane whose pane never came
+    // free writes the raw `on_fail` — see `Dispatcher::note_pane_busy`,
+    // reached through `handle_boot_failure` — so a move either made is read
+    // against that.
     let raw_pass = step.destination(Outcome::Pass);
     let raw_fail = step.destination(Outcome::Fail);
 
@@ -5521,6 +5522,7 @@ mod tests {
             step: "review".into(),
             outcome: "fail".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         fail.front.paused_at = Some("review".into());
@@ -5533,6 +5535,7 @@ mod tests {
             step: "review".into(),
             outcome: "block".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         blocked.front.blocked_from = Some("review".into());
@@ -5546,6 +5549,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         passed.front.paused_at = Some("implement".into());
@@ -7648,10 +7652,12 @@ mod tests {
         let routed =
             crate::commands::route(&mut task, &pipeline, &current, outcome, false, None, 0)
                 .unwrap();
+        let now = chrono::Utc::now();
         task.front.last_report = Some(crate::task::LastReport {
             step: current,
             outcome: outcome.as_str().to_string(),
-            at: chrono::Utc::now().timestamp(),
+            at: now.timestamp(),
+            at_ms: now.timestamp_millis(),
             blocked: routed.destination == crate::pipeline::BLOCKED,
         });
         task.set_stage(&routed.destination, routed.pause_note.as_deref());
@@ -7671,6 +7677,7 @@ mod tests {
             step: step.into(),
             outcome: outcome.as_str().into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
     }
@@ -9928,6 +9935,7 @@ mod tests {
             step: "implement".into(),
             outcome: "fail".into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
         let pipeline = pipelines.pipelines.get("default").unwrap();
@@ -10758,6 +10766,7 @@ mod tests {
             step: step.into(),
             outcome: outcome.into(),
             at: 0,
+            at_ms: 0,
             blocked: outcome == "block",
         });
         task.front.paused_at = Some(step.into());
@@ -11394,9 +11403,10 @@ mod tests {
         }
     }
 
-    /// A lane start refused on `document`, whose `on_fail` names the hidden
-    /// `suite`, writes that raw `on_fail` — a failed start does not land
-    /// past hidden steps — and still reads as the launch that failed.
+    /// A lane whose pane stayed busy past its timeout on `document`, whose
+    /// `on_fail` names the hidden `suite`, writes that raw `on_fail` — such a
+    /// move does not land past hidden steps — and still reads as the launch
+    /// that failed.
     #[test]
     fn a_failed_start_onto_a_hidden_on_fail_reads_could_not_launch() {
         for rule in RULES {

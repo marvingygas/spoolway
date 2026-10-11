@@ -550,8 +550,10 @@ mod tests {
     /// The moves the dispatcher makes on a task sitting on `current` that no
     /// lane reported, each with the destination it proposes before the
     /// `loop:` check. `on_pass` is where a walk-past goes; `on_fail`, or
-    /// `blocked` when there is none, is where a failed launch or a busy pane
-    /// that never cleared goes.
+    /// `blocked` when there is none, is where a command step's own failed
+    /// start or a busy pane that never cleared goes. An agent lane's failed
+    /// start goes to `blocked`, or to `paused` for the unblocker, both resting
+    /// states, so no move is proposed for it.
     fn dispatcher_moves(pipeline: &Pipeline, current: &str) -> Vec<(&'static str, String)> {
         let Some(step) = pipeline.step(current) else {
             return Vec::new();

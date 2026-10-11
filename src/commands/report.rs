@@ -257,10 +257,12 @@ pub fn report(
     // Left for the dispatcher to bank into this lane's ledger line. Recorded
     // with the step it belongs to, so that a later lane which dies without
     // reporting is banked as having no outcome rather than inheriting this one.
+    let now = chrono::Utc::now();
     task.front.last_report = Some(crate::task::LastReport {
         step: current.clone(),
         outcome: outcome.as_str().to_string(),
-        at: chrono::Utc::now().timestamp(),
+        at: now.timestamp(),
+        at_ms: now.timestamp_millis(),
         blocked: destination == crate::pipeline::BLOCKED,
     });
 
@@ -2679,6 +2681,11 @@ mod tests {
              lane's own started_at from: {}",
             left.at
         );
+        // The millisecond clock is what tells a report from the lane before
+        // this one in the same second. Left at 0 the dispatcher falls back
+        // to whole seconds and the same-second bug returns.
+        assert!(left.at_ms > 0, "at_ms has to be stamped");
+        assert_eq!(left.at_ms / 1000, left.at, "both clocks name one instant");
     }
 
     /// `--handoff` is independent of the outcome: it lands under `##
@@ -3049,6 +3056,7 @@ mod tests {
             step: "work".to_string(),
             outcome: "pass".to_string(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::DONE, None);
@@ -4163,6 +4171,7 @@ mod tests {
             step: "work".into(),
             outcome: "block".into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
 
@@ -4210,6 +4219,7 @@ mod tests {
             step: crate::pipeline::BLOCKED.into(),
             outcome: "block".into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
 
@@ -5433,6 +5443,7 @@ mod tests {
             step: "build".into(),
             outcome: "pass".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -6153,6 +6164,54 @@ mod tests {
         let log = task.section("## Status Log").unwrap();
         assert!(log.contains("put back from the board"), "{log}");
         assert!(!log.to_lowercase().contains("unblocked"), "{log}");
+    }
+
+    /// Pausing a command step and resuming it runs the command again in full:
+    /// the exit code its last run left on disk is not the answer to the new
+    /// visit, so the run reads as never started rather than as `Exited`.
+    #[test]
+    fn resuming_a_paused_command_step_forgets_the_exit_code_of_its_old_run() {
+        use crate::command_step::{RunState, Runs};
+
+        let (repo, _root_guard) = fixture("unpark-command-rerun");
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("handover", None);
+        task.save().unwrap();
+
+        // The run exited while nothing was reading it, so only its code is left.
+        let dir = repo.commands_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Runs::key("handover", "stuck");
+        std::fs::write(
+            crate::runfiles::RunFiles::new(dir.clone()).exit_path(&key),
+            "1",
+        )
+        .unwrap();
+        let runs = Runs::new(&dir);
+        assert_eq!(runs.state(&key), RunState::Exited(1));
+
+        crate::status::park_under_lock(&repo, "stuck", crate::status::ParkedBy::QueuePause)
+            .unwrap();
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "stuck").stage(), "handover");
+        assert_eq!(
+            runs.state(&key),
+            RunState::Fresh,
+            "the command must run again in full, not be routed on the old exit code"
+        );
     }
 
     /// A `--stage` reroute past a park leaves `back_onto_its_step`'s ordinary
@@ -7441,6 +7500,7 @@ mod tests {
             step: "deploy".into(),
             outcome: outcome.into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::PAUSED, None);

@@ -79,7 +79,7 @@ const MAX_LAUNCHES: u32 = 1;
 
 /// How many launches in a row that could not even *start* — never a lane or
 /// a command process that ran and failed, only one that never got going at
-/// all — are retried before the step is treated as one that ran and failed.
+/// all — are retried before the task is routed on.
 ///
 /// Distinct from [`MAX_LAUNCHES`] beside it: that one counts a lane that
 /// *did* start and left nothing behind, and stops for a person because more
@@ -87,8 +87,9 @@ const MAX_LAUNCHES: u32 = 1;
 /// that [`crate::mux::Mux::start_lane`] or a command's own start refused
 /// outright — a tab with no panes to split, a worktree that could not be
 /// prepared — and the task is retried a few times first, on the chance the
-/// obstacle was transient, before it is routed to `on_fail` like any other
-/// failed step. See [`Dispatcher::note_launch_failure`].
+/// obstacle was transient, before the task is routed on: to `on_fail` when
+/// the step's own process would not start, otherwise to `blocked`, where a
+/// person can fix what stopped it. See [`Dispatcher::note_launch_failure`].
 ///
 /// Three, the same patience [`MAX_REMINDERS`] gives a silent lane: enough to
 /// rule out a one-off blip without leaving a broken tab retried forever.
@@ -97,15 +98,27 @@ const MAX_LAUNCHES: u32 = 1;
 /// ceiling as the launch failures that moved the task.
 pub(crate) const MAX_LAUNCH_FAILURES: u32 = 3;
 
+/// Whose fault a launch that could not start is, for
+/// [`Dispatcher::note_launch_failure`]'s choice of where the task goes once
+/// the retries are spent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchFault {
+    /// The step's own process would not start, which is what `on_fail` is for.
+    Step,
+    /// Something around the step: the checkout, the prompt, the multiplexer.
+    Surroundings,
+}
+
 /// How many runs of one command step may be killed in a row, each without an
 /// exit code, before the task is blocked instead of running it again. See the
 /// `Interrupted` arm of [`Dispatcher::run_command`].
 const MAX_COMMAND_KILLS: u32 = 3;
 
 /// How long a step tolerates its pane refusing `agent start` with
-/// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before treating the wait as
-/// [`MAX_LAUNCH_FAILURES`]'s own ceiling does: routed to `step.on_fail`, or
-/// `blocked` when it names none.
+/// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before giving up on the wait:
+/// the task is routed to `step.on_fail`, or `blocked` when it names none.
+/// That is not where [`MAX_LAUNCH_FAILURES`]'s ceiling sends an agent lane:
+/// that goes to `blocked`, or to `paused` when the lane is the unblocker.
 ///
 /// Measured from the *first* such refusal — see [`Task::stamp_launch_busy`]
 /// — not the most recent, so a pane busy for nine straight minutes still
@@ -254,6 +267,12 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LaneRecord {
     started_at: i64,
+    /// `started_at` to the millisecond, which `reported_since` needs to tell a
+    /// report filed in this lane's first second from the previous lane's.
+    /// Zero for a lane adopted or recorded by an older spoolway, which makes
+    /// `reported_since` compare whole seconds instead.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    started_at_ms: i64,
     pub(crate) last_progress: i64,
     output_hash: u64,
     /// Seconds this lane has been `LaneStatus::Working` since the last time
@@ -413,6 +432,7 @@ impl LaneRecord {
     fn adopted(now: i64) -> LaneRecord {
         LaneRecord {
             started_at: now,
+            started_at_ms: 0,
             last_progress: now,
             output_hash: 0,
             busy_s: 0,
@@ -1725,10 +1745,14 @@ impl<'a> Dispatcher<'a> {
                     ) {
                         Some(kind) => {
                             let task = &mut tasks[index];
+                            // One reading for both clocks, so they cannot
+                            // name different seconds across a boundary.
+                            let now = chrono::Utc::now();
                             task.front.last_report = Some(crate::task::LastReport {
                                 step: step.id.clone(),
                                 outcome: outcome.as_str().to_string(),
-                                at: chrono::Utc::now().timestamp(),
+                                at: now.timestamp(),
+                                at_ms: now.timestamp_millis(),
                                 blocked: destination == crate::pipeline::BLOCKED,
                             });
                             task.front.paused_at = Some(step.id.clone());
@@ -1913,9 +1937,10 @@ impl<'a> Dispatcher<'a> {
                         // step, so either it asked something and is waiting for an
                         // answer in its own pane, or it stopped without reporting.
                         // A lane that reported never gets here: `finish_lanes`
-                        // reads `last_report.at` against its `started_at` ahead
-                        // of this arm, which needs no counter and nothing
-                        // cleared, and keeps it out of `owned`.
+                        // reads the report's clock against the lane's start
+                        // (see `Task::reported_since`) ahead of this arm,
+                        // which needs no counter and nothing cleared, and
+                        // keeps it out of `owned`.
                         //
                         // Either way this pass no longer marks anything for
                         // the board to read back: `paused` means the stage
@@ -2705,11 +2730,13 @@ impl<'a> Dispatcher<'a> {
                 // over. A held lane is the exception to the exception:
                 // its report is what parked the task, and it is over only
                 // once the task has come back.
-                let reported = self
-                    .lanes
-                    .get(&lane.name)
-                    .zip(current)
-                    .is_some_and(|(record, task)| task.reported_since(record.started_at));
+                let reported =
+                    self.lanes
+                        .get(&lane.name)
+                        .zip(current)
+                        .is_some_and(|(record, task)| {
+                            task.reported_since(record.started_at, record.started_at_ms)
+                        });
                 if !held && !reported {
                     continue;
                 }
@@ -3732,8 +3759,8 @@ impl<'a> Dispatcher<'a> {
 
     /// Count one launch of `step` that could not even start, and say whether
     /// that spent [`MAX_LAUNCH_FAILURES`] — the caller's cue to route the task
-    /// on exactly as it would a step that ran and reported failure, rather
-    /// than leave it retrying the same step forever.
+    /// on, rather than leave it retrying the same step forever. Where it goes
+    /// depends on `fault`, below.
     ///
     /// Shared by the two roads a launch takes: an agent lane's start in
     /// [`Dispatcher::start_lanes`], and a command step's `Fresh` arm in
@@ -3764,9 +3791,17 @@ impl<'a> Dispatcher<'a> {
     /// than assumed — a count that somehow did climb past it returns the
     /// same destination without writing the reason a second time.
     ///
-    /// Returns `step.on_fail`, or `blocked` when it names none — the same
-    /// resolution an exited command's failing arm and a timed-out one already
-    /// use — but never announces it: a command step's destination still has
+    /// `fault` says whose the failure is. [`LaunchFault::Step`] is the step's
+    /// own process refusing to start, so the ceiling returns `step.on_fail`,
+    /// or `blocked` when it names none — the same resolution an exited
+    /// command's failing arm and a timed-out one already use.
+    /// [`LaunchFault::Surroundings`] is anything the step is not to blame
+    /// for — a `task/<id>` branch that already exists, a prompt file that
+    /// went missing, a multiplexer that would not split a pane. The step
+    /// never ran, so `on_fail` would only run an earlier step again as a
+    /// full lane and come back to the same refusal; the ceiling returns
+    /// `blocked`, where a person can fix the cause. Neither announces it: a
+    /// command step's destination still has
     /// [`crate::commands::apply_loop_budget`] to pass through, which can
     /// redirect it, so only a caller holding the truly final answer says
     /// where the task is going. `blocked_from`, the same way: set by the
@@ -3780,6 +3815,7 @@ impl<'a> Dispatcher<'a> {
         task: &mut Task,
         step: &Step,
         verb: &str,
+        fault: LaunchFault,
         err: &anyhow::Error,
         report: &mut Report,
     ) -> Option<String> {
@@ -3792,10 +3828,11 @@ impl<'a> Dispatcher<'a> {
         if attempt < MAX_LAUNCH_FAILURES {
             return None;
         }
-        let destination = step
-            .on_fail
-            .clone()
-            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
+        let on_fail = match fault {
+            LaunchFault::Step => step.on_fail.clone(),
+            LaunchFault::Surroundings => None,
+        };
+        let destination = on_fail.unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
         if attempt == MAX_LAUNCH_FAILURES {
             let reason = format!(
                 "`{}` could not be started after {MAX_LAUNCH_FAILURES} attempts: {err:#}",
@@ -3821,10 +3858,13 @@ impl<'a> Dispatcher<'a> {
     /// Stamps [`Task::stamp_launch_busy`] on the first refusal only and
     /// reports one waiting line naming the pane and the elapsed time, below
     /// [`LAUNCH_BUSY_TIMEOUT`]. Past it, the stamp is forgiven and the step
-    /// resolves its destination exactly as [`Dispatcher::note_launch_failure`]
-    /// resolves the ceiling's — `step.on_fail`, or `blocked` when it names
-    /// none — because a pane that has not settled in ten minutes is not
-    /// "momentarily" busy any more.
+    /// resolves its destination the way a step's own failure always has —
+    /// `step.on_fail`, or `blocked` when it names none — because a pane that
+    /// has not settled in ten minutes is not "momentarily" busy any more.
+    /// Unlike [`Dispatcher::note_launch_failure`]'s ceiling, which sends a
+    /// start the step is not to blame for to `blocked`, this road is left as
+    /// it was, and [`Dispatcher::handle_boot_failure`] does not park a busy
+    /// unblocker pane.
     fn note_pane_busy(
         &self,
         task: &mut Task,
@@ -4464,10 +4504,14 @@ impl<'a> Dispatcher<'a> {
                         Some(note) => format!("started {name} — {note}"),
                         None => format!("started {name}"),
                     };
+                    // One reading for both start clocks, so they cannot name
+                    // different seconds across a boundary.
+                    let launched = chrono::Utc::now();
                     self.lanes.insert(
                         name.clone(),
                         LaneRecord {
-                            started_at: now_secs(),
+                            started_at: launched.timestamp(),
+                            started_at_ms: launched.timestamp_millis(),
                             last_progress: now_secs(),
                             output_hash: 0,
                             busy_s: 0,
@@ -4564,13 +4608,61 @@ impl<'a> Dispatcher<'a> {
         command_forget: Option<String>,
         report: &mut Report,
     ) -> Result<()> {
-        let destination = match err.downcast_ref::<crate::mux::PaneBusy>() {
-            Some(busy) => self.note_pane_busy(task, step, &busy.pane_id, report),
-            None => self.note_launch_failure(task, step, "start", &err, report),
+        // `from_ceiling` is true only for the three-strikes road. The pane-busy
+        // road keeps routing as it always has, so a busy unblocker pane still
+        // reaches `blocked` again rather than parking.
+        let (destination, from_ceiling) = match err.downcast_ref::<crate::mux::PaneBusy>() {
+            Some(busy) => (
+                self.note_pane_busy(task, step, &busy.pane_id, report),
+                false,
+            ),
+            None => (
+                self.note_launch_failure(
+                    task,
+                    step,
+                    "start",
+                    LaunchFault::Surroundings,
+                    &err,
+                    report,
+                ),
+                true,
+            ),
         };
+        if from_ceiling && destination.is_some() && step.id == crate::pipeline::BLOCKED {
+            // The unblocker is the step a task is sent to when nothing else
+            // can help, so there is nowhere further to route it: `blocked`
+            // again would clear this step's strikes (see [`Task::set_stage`])
+            // and start the same failing lane every lap. Parked instead, with
+            // the reason already on the Status Log from
+            // `note_launch_failure`, so nothing tries this lane again until a
+            // person resumes the task.
+            //
+            // The strikes are forgiven here because the task may not be on
+            // `blocked` at all: a command step's exit can pick the unblocker
+            // as its destination while the task still sits on that command
+            // step. Resuming then arrives back at the command step, which
+            // clears only its own count, so a count left on `blocked` would
+            // re-park the next unblocker failure at once ("attempt 4 of 3"),
+            // with no reason on the Status Log.
+            task.clear_launch_failures(&step.id);
+            crate::status::park(
+                task,
+                "the unblocker lane could not be started; resume it once the cause is fixed",
+                true,
+            );
+            self.persist(task)?;
+            if moved_and_persisted && let Some(key) = command_forget {
+                crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
+            }
+            report.actions.push(format!(
+                "{}: the unblocker could not be started — paused for a person",
+                task.id()
+            ));
+            return Ok(());
+        }
         if let Some(destination) = destination {
-            // A failed start is a move like any other, so `on_fail` is
-            // bound by its target's `loop:` the same way a lane's report is.
+            // A failed start is a move like any other, so it is bound by
+            // its target's `loop:` the same way a lane's report is.
             let destination = match self.pipelines.for_task(task) {
                 Ok(pipeline) => crate::commands::apply_loop_budget(
                     pipeline,
@@ -4900,8 +4992,14 @@ impl<'a> Dispatcher<'a> {
                     match ensure_workspace(self.repo, self.mux, task, &mut self.file_seen) {
                         Ok((worktree, _)) => worktree,
                         Err(err) => {
-                            let destination =
-                                self.note_launch_failure(task, step, "run", &err, report);
+                            let destination = self.note_launch_failure(
+                                task,
+                                step,
+                                "run",
+                                LaunchFault::Surroundings,
+                                &err,
+                                report,
+                            );
                             self.persist(task)?;
                             return Ok(destination.map(|to| (to, Outcome::Fail)));
                         }
@@ -4966,7 +5064,14 @@ impl<'a> Dispatcher<'a> {
                         // Command` match to route through exactly as it
                         // would an exited or timed-out command — including
                         // `blocked_from`, which that routing already sets.
-                        let destination = self.note_launch_failure(task, step, "run", &err, report);
+                        let destination = self.note_launch_failure(
+                            task,
+                            step,
+                            "run",
+                            LaunchFault::Step,
+                            &err,
+                            report,
+                        );
                         self.persist(task)?;
                         return Ok(destination.map(|to| (to, Outcome::Fail)));
                     }
@@ -9750,12 +9855,13 @@ mod tests {
         pipelines
     }
 
-    /// A lane that cannot be started falls back to `on_fail` after its third
-    /// try, and that move answers to the `loop:` of the step it lands on. `b`
-    /// has already had its one arrival, so `a` is sent to `blocked` instead.
+    /// A lane that cannot be started is not a failed step, so after its third
+    /// try it goes to `blocked` rather than `on_fail`, even when `on_fail`
+    /// names a step that has room left. Sending it there would run `b` as a
+    /// full lane for a failure that was never `a`'s.
     #[test]
-    fn a_failed_launch_may_not_land_on_a_spent_step() {
-        let (repo, _root_guard) = fixture("launch-failure-loop-limit");
+    fn a_failed_launch_never_takes_the_steps_on_fail() {
+        let (repo, _root_guard) = fixture("launch-failure-skips-on-fail");
         let pipelines = pipelines_of(
             "steps:\n  \
              - id: a\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
@@ -9764,11 +9870,9 @@ mod tests {
              loop: 1\n    on_pass: z\n  \
              - id: z\n    run: x\n    on_pass: done\n",
         );
-        let path = add_task_with(&repo, "demo", "a", |f| {
-            f.arrivals.insert("b".into(), 1);
-        });
+        let path = add_task_with(&repo, "demo", "a", |_| {});
         let mux = FakeMux::new(vec![]).refusing_to_start();
-        let home = crate::scratch::root("launch-failure-loop-limit-home");
+        let home = crate::scratch::root("launch-failure-skips-on-fail-home");
 
         for _ in 0..3 {
             with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
@@ -9777,12 +9881,7 @@ mod tests {
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::BLOCKED);
         assert_eq!(task.front.blocked_from.as_deref(), Some("a"));
-        assert!(
-            task.body
-                .contains("`a` may not send this to `b` a 2nd time — `b` has `loop: 1`"),
-            "{}",
-            task.body
-        );
+        assert_eq!(task.front.arrivals.get("b"), None, "{}", task.body);
     }
 
     /// A background command that fails after its task has moved on pulls the
@@ -11032,6 +11131,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 5_000,
+            at_ms: 0,
             blocked: false,
         });
         reported.set_stage("review", Some("done"));
@@ -12855,6 +12955,144 @@ mod tests {
         );
     }
 
+    /// A start that fails because of something around the step — here the
+    /// multiplexer refusing — is not the step failing, so the ceiling must
+    /// not send the task down `review`'s `on_fail`. That edge runs `implement`
+    /// again as a full lane, which meets the same refusal one step later.
+    #[test]
+    fn a_launch_failure_not_the_steps_own_blocks_instead_of_taking_on_fail() {
+        let (repo, _root_guard) = fixture("launch-not-own-fault");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        assert_eq!(
+            Pipelines::builtin()
+                .for_task(&reload(&path))
+                .unwrap()
+                .step("review")
+                .and_then(|s| s.on_fail.as_deref()),
+            Some("implement"),
+            "the fixture only proves anything while `review` names an on_fail"
+        );
+
+        for _ in 0..3 {
+            run_pass(&repo, &mux);
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("review"));
+    }
+
+    /// When the unblocker lane itself cannot start, `blocked` again would
+    /// clear its strikes and start the same lane every lap. After three
+    /// strikes in an unattended run the task parks for a person instead, with
+    /// the reason written once, and no fourth start is tried.
+    #[test]
+    fn an_unblocker_that_cannot_start_parks_the_task_once() {
+        let (repo, _root_guard) = unattended_fixture("unblocker-cannot-start");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.blocked_from = Some("implement".into());
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("unblocker-cannot-start-home");
+
+        for _ in 0..3 {
+            with_home(&home, || run_pass(&repo, &mux));
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.parked_from.as_deref(), Some("blocked"));
+        assert_eq!(
+            task.body
+                .matches("could not be started after 3 attempts")
+                .count(),
+            1,
+            "{}",
+            task.body
+        );
+
+        mux.clear_calls();
+        with_home(&home, || run_pass(&repo, &mux));
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+    }
+
+    /// A command step's exit can pick the unblocker while the task still sits
+    /// on that command step, so the park records the command step as
+    /// `parked_from`. Resuming there clears only the command step's count, so
+    /// the park must have cleared the unblocker's own: otherwise the next
+    /// unblocker failure re-parks at once, as "attempt 4 of 3", with no
+    /// reason written to the Status Log.
+    #[test]
+    fn a_park_from_a_command_step_forgives_the_unblockers_strikes() {
+        let (repo, _root_guard) = unattended_fixture("unblocker-park-from-command");
+        let mut pipelines = pipelines_of(
+            "steps:\n  \
+             - id: b\n    run: 'false'\n    on_pass: done\n",
+        );
+        // A hand-built pipeline has no unblocker lane until it is given one.
+        let blocked = Pipelines::builtin().pipelines["default"]
+            .step(crate::pipeline::BLOCKED)
+            .unwrap()
+            .clone();
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .push(blocked);
+        let path = add_task_with_worktree(&repo, "demo", "b");
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("unblocker-park-from-command-home");
+
+        let started = std::time::Instant::now();
+        while reload(&path).stage() != crate::pipeline::PAUSED {
+            with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never parked: {}",
+                reload(&path).body
+            );
+        }
+        let mut task = reload(&path);
+        assert_eq!(task.front.parked_from.as_deref(), Some("b"));
+        assert_eq!(task.front.launch_failures.get("blocked"), None);
+
+        task.set_stage_unbanked("b", "resumed");
+        task.save().unwrap();
+
+        // The resume is an arrival at `b`, so `b` runs again and fails again
+        // before the task reaches the unblocker. Passes go on until it does.
+        // The attempt line goes to the pass reports, never to the task file.
+        let mut actions = Vec::new();
+        let started = std::time::Instant::now();
+        while !actions
+            .iter()
+            .any(|a: &String| a.contains("`blocked`") && a.contains("(attempt"))
+        {
+            let report = with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+            actions.extend(report.actions);
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the task never reached the unblocker: {actions:?}"
+            );
+        }
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.contains("`blocked`") && a.contains("(attempt 1 of 3)")),
+            "the unblocker's count did not start over: {actions:?}"
+        );
+        let task = reload(&path);
+        assert_ne!(task.stage(), crate::pipeline::PAUSED, "{}", task.body);
+    }
+
     /// The bug `pane-busy-retry` exists for: a pane that is momentarily busy —
     /// still running what `start_lane` itself typed into it a moment earlier —
     /// answers `agent_pane_busy`, and that refusal is transient by
@@ -12937,10 +13175,10 @@ mod tests {
 
     /// Past [`LAUNCH_BUSY_TIMEOUT`], a pane that has never once settled is
     /// not "momentarily" busy any more — this resolves the step's
-    /// destination exactly as [`MAX_LAUNCH_FAILURES`]'s own ceiling does,
+    /// destination the way its own failure does (`on_fail`, else `blocked`),
     /// measured from the *first* refusal rather than reset every pass.
     #[test]
-    fn ten_minutes_of_nothing_but_a_busy_pane_resolves_like_the_ceiling() {
+    fn ten_minutes_of_nothing_but_a_busy_pane_takes_the_steps_failure_road() {
         let (repo, _root_guard) = fixture("pane-busy-timeout");
         let path = add_task_with(&repo, "demo", "queued", |front| {
             front
@@ -12980,6 +13218,67 @@ mod tests {
             "{}",
             task.body
         );
+    }
+
+    /// A pane busy past [`LAUNCH_BUSY_TIMEOUT`] still takes the step's
+    /// `on_fail`, and that move answers to the `loop:` of the step it lands
+    /// on like any other: `b` has had its one arrival, so `a` is sent to
+    /// `blocked` instead.
+    #[test]
+    fn a_busy_pane_timeout_may_not_land_on_a_spent_step() {
+        let (repo, _root_guard) = fixture("pane-busy-loop-limit");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: z\n    on_fail: b\n  \
+             - id: b\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             loop: 1\n    on_pass: z\n  \
+             - id: z\n    run: x\n    on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.arrivals.insert("b".into(), 1);
+            f.launch_busy_since
+                .insert("a".to_string(), now_secs() - 601);
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+        let home = crate::scratch::root("pane-busy-loop-limit-home");
+
+        with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED, "{}", task.body);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("a"));
+        assert!(
+            task.body
+                .contains("`a` may not send this to `b` a 2nd time — `b` has `loop: 1`"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// The pane-busy road is not the three-strikes road, so a busy unblocker
+    /// pane that outlasts [`LAUNCH_BUSY_TIMEOUT`] routes to `blocked` as it
+    /// always has, and only a start that is refused three times parks the
+    /// task. Parking here would hide a pane that is merely slow behind a
+    /// "could not be started" pause.
+    #[test]
+    fn a_busy_unblocker_pane_past_the_timeout_is_not_parked() {
+        let (repo, _root_guard) = unattended_fixture("unblocker-pane-busy");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.blocked_from = Some("implement".into());
+            f.launch_busy_since
+                .insert("blocked".to_string(), now_secs() - 601);
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+        let home = crate::scratch::root("unblocker-pane-busy-home");
+
+        with_home(&home, || run_pass(&repo, &mux));
+
+        let task = reload(&path);
+        assert_ne!(task.stage(), crate::pipeline::PAUSED, "{}", task.body);
+        assert_eq!(task.front.parked_from, None);
     }
 
     /// A lane that starts and never gets its briefing is the worst shape a
@@ -14497,6 +14796,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -14564,6 +14864,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -14629,6 +14930,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();
@@ -17272,6 +17574,7 @@ mod tests {
                 step: crate::pipeline::BLOCKED.into(),
                 outcome: "block".into(),
                 at: started_at + 30,
+                at_ms: 0,
                 blocked: false,
             });
         });
@@ -17321,6 +17624,90 @@ mod tests {
             !report.actions.iter().any(|line| line.contains("stuck at")),
             "must not be escalated: {:?}",
             report.actions
+        );
+    }
+
+    /// A report filed in the same whole second the lane started still counts
+    /// as that lane's report. Scripted lanes report this fast, and a lane
+    /// that has reported must be finished, never reminded to report again.
+    // covers: dispatch.lane_quiet — a lane that reported at once is not read as silent
+    #[test]
+    fn a_report_filed_in_the_lanes_first_second_is_not_answered_with_a_reminder() {
+        let (repo, _root_guard) = unattended_fixture("same-second-report");
+        let pipelines = Pipelines::builtin();
+
+        // `blocked` routes a `--block` report back onto itself, which is the
+        // shape where the dispatcher has only the report's clock to go by.
+        // Both stamps sit in the past, in one whole second, so the
+        // whole-second compare ties however the test is timed. The fresh
+        // lane the first pass launches starts after them, and so cannot
+        // count this report as its own.
+        let second = now_secs() - 5;
+        let started_at_ms = second * 1000 + 100;
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            // Stamped the way `spoolway report` stamps it, within the same
+            // whole second the lane started.
+            f.last_report = Some(crate::task::LastReport {
+                step: crate::pipeline::BLOCKED.into(),
+                outcome: "block".into(),
+                at: second,
+                at_ms: second * 1000 + 500,
+                blocked: false,
+            });
+        });
+
+        {
+            // Silent for far longer than `lane_quiet`, so a lane read as
+            // unreported would be reminded on this very pass.
+            let mut record = LaneRecord::adopted(second);
+            record.started_at_ms = started_at_ms;
+            record.last_progress = second - 60;
+            let mut records = HashMap::new();
+            records.insert(lane_name(crate::pipeline::BLOCKED, "demo"), record);
+            save_lane_records(&repo, &records).unwrap();
+        }
+
+        let mux = FakeMux::new(vec![lane(
+            &repo,
+            &lane_name(crate::pipeline::BLOCKED, "demo"),
+            LaneStatus::Done,
+        )]);
+        // The report counts: the lane is finished and the task, still on
+        // `blocked`, is handed to a fresh lane.
+        let before_ms = chrono::Utc::now().timestamp_millis();
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            !report.actions.iter().any(|line| line.contains("reminded")),
+            "a lane that reported must not be reminded to report: {:?}",
+            report.actions
+        );
+        assert!(
+            report.actions.iter().any(|line| line.contains("kept")),
+            "finished like any other reported lane: {:?}",
+            report.actions
+        );
+        // The one prompt is the fresh lane's launch brief, not a reminder.
+        assert_eq!(mux.did("prompt").len(), 1, "{:?}", mux.calls());
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+
+        // A launch stamps the millisecond clock the report is read against.
+        // Left at 0 it would quietly send every launched lane back to the
+        // whole-second compare.
+        let fresh = load_lane_records(&repo)
+            .remove(&lane_name(crate::pipeline::BLOCKED, "demo"))
+            .expect("the fresh lane is recorded");
+        assert!(
+            fresh.started_at_ms >= before_ms,
+            "a launched lane stamps started_at_ms: {} < {before_ms}",
+            fresh.started_at_ms
+        );
+        assert_eq!(
+            fresh.started_at_ms / 1000,
+            fresh.started_at,
+            "both start clocks name the same second"
         );
     }
 
@@ -18833,6 +19220,7 @@ mod tests {
                 step: "implement".into(),
                 outcome: "pass".into(),
                 at: 0,
+                at_ms: 0,
                 blocked: false,
             });
         });
@@ -21082,11 +21470,15 @@ mod tests {
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
-        // step, and the run it started is still going behind it. Put back
-        // without an arrival, since a real arrival would stop that run — a
-        // pass that fails to place a destination never moves the task at all.
+        // step, and the run it started is still going behind it. Set the
+        // stage directly, since that records no arrival, and an arrival
+        // would stop that run — a pass that fails to place a destination
+        // never moves the task at all. The launch counters are put back as a
+        // task that was never launched at `review` has them.
         let mut task = reload(&path);
-        task.set_stage_unbanked("implement", "put back");
+        task.front.stage = "implement".into();
+        task.front.attempts = 0;
+        task.front.launched_at = None;
         task.save().unwrap();
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("implement", "demo");
