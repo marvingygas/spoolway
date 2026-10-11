@@ -184,7 +184,8 @@ and never a destination.
 
 A lane is one running agent on one task at one step. It is a terminal pane in herdr that you
 can watch, type into and take over. It is named `<task> · <step>`, so `login · implement` is
-the implementer working on `login`.
+the implementer working on `login`. A copy of a routine is named for its routine, so
+`release · ship` is the shipper working on the current copy of `release`.
 
 A lane takes one turn. When it reports an outcome, the task moves on. A lane that stops
 without reporting is usually asking a question. See [The dispatcher](dispatcher.md).

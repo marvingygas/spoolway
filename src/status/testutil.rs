@@ -229,10 +229,11 @@ fn headless_lane_running(
 
     let mux = crate::mux::backend(repo).unwrap();
     let pane = mux.create_pane(&repo.root, id).unwrap();
-    let name = crate::mux::lane_name(step, id);
+    let name = crate::mux::run_key(step, id);
     mux.start_lane(
         &crate::mux::LaneSpec {
             name: &name,
+            key: &name,
             label,
             kind: "pi",
             pane_id: &pane.pane_id,

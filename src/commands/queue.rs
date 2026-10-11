@@ -781,7 +781,7 @@ fn queue_unqueue_forced(
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
-        let name = crate::mux::lane_name(stage, id);
+        let name = crate::mux::lane_name(stage, &tasks[idx]);
         // Best-effort, the same as the board's own `pause`: a lane that has
         // already gone quiet on its own has nothing left to interrupt.
         let _ = mux.interrupt_lane(&name);
@@ -3293,7 +3293,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
-        let name = crate::mux::lane_name(tasks[idx].stage(), tasks[idx].id());
+        let name = crate::mux::lane_name(tasks[idx].stage(), &tasks[idx]);
         // Best-effort, the same as the board's own `pause`: a lane that has
         // already gone quiet on its own has nothing left to interrupt.
         let _ = mux.interrupt_lane(&name);

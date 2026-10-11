@@ -731,7 +731,7 @@ A blocked task keeps its pane open until it is resumed.
 ## Where a lane lives
 
 Every task runs in a herdr workspace of its own, nested under the project's row as
-`spoolway/<task>`. There is no setting for the layout. A config that still names
+`spoolway/<task>`. A copy of a routine uses the routine's name in place of the task id. There is no setting for the layout. A config that still names
 `dispatch.herdr_mode` loads with a note, and `spoolway sync` drops the key.
 
 A task that an older release left in a pane of the shared `spoolway-dispatcher` workspace is
@@ -740,7 +740,7 @@ the checkout it already has.
 
 Under a multiplexer every lane is a real pane you can watch and type into. Each agent step of a
 task gets a pane of its own, and keeps it until the task is done. See [Finished lanes keep their
-pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. Sessions you start by
+pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by
 hand are never touched.
 
 The board itself stays in the pane you ran `spoolway dispatch` in.
@@ -755,7 +755,7 @@ grows as a spiral. A step that comes back is the exception. See [Finished lanes 
 pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
 unless it is its workspace's only tab.
 
-A task's tab is renamed to the task's slug, and stays that way across a dispatcher restart. Its
+A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with

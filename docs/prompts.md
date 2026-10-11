@@ -81,7 +81,7 @@ flowchart LR
 ```
 
 The system prompt is composed at launch and written to
-`~/.spoolway/<project>/system-prompts/<task> · <step>.md`. The typed message is one
+`~/.spoolway/<project>/system-prompts/<task> · <step>.md`. A copy of a routine uses the routine's name for `<task>`. The typed message is one
 sentence naming the task file. The file in `.spoolway/prompts/` is never changed.
 
 Paragraphs sent only when they apply:

@@ -391,10 +391,7 @@ const RESTART_WRAP: usize = 56;
 pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
     let mut body = vec![
         format!("step      {}", confirm.step),
-        format!(
-            "lane      {}",
-            crate::mux::lane_name(&confirm.step, &confirm.id)
-        ),
+        format!("lane      {}", confirm.lane),
     ];
     if let Some(session) = &confirm.session {
         body.push(format!("session   {}", session.describe()));
@@ -4757,6 +4754,7 @@ mod tests {
     fn the_restart_panel_draws_its_mockup_within_eighty_columns() {
         let mut confirm = RestartConfirm {
             id: "prompt-cache-ttl-default".to_string(),
+            lane: "prompt-cache-ttl-default · review-spec".to_string(),
             step: "review-spec".to_string(),
             session: Some(crate::commands::AbandonedSession {
                 id: "32b0d7bd-1111-2222-3333-444455556666".to_string(),

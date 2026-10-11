@@ -137,6 +137,17 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     // here, and pass it to those directories: an entry whose leading task id
     // is still in the queue is spared, whatever its age.
     let queued = repo.queued_ids();
+    // A headless lane's record is named for its lane, and a routine copy's
+    // lane carries the routine's name where its id has a number. Its record
+    // would otherwise read as no queued task's and age out under a lane still
+    // running. Its log is named by the numbered id, which `queued` spares.
+    let mut headless_spared = queued.clone();
+    headless_spared.extend(
+        repo.tasks()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|task| task.routine().map(str::to_string)),
+    );
     let scratch = repo.scratch_dir();
     let headless = repo.headless_dir();
     let commands = repo.commands_dir();
@@ -147,8 +158,11 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         if budget == 0 {
             break;
         }
-        let guard = (dir == scratch || dir == headless || dir == commands || dir == tracking)
-            .then_some(&queued);
+        let guard = match dir {
+            _ if dir == headless => Some(&headless_spared),
+            _ if dir == scratch || dir == commands || dir == tracking => Some(&queued),
+            _ => None,
+        };
         let mut removed = sweep_dir(&dir, max_age, budget, guard);
         if dir == headless {
             removed += sweep_dir(
@@ -225,7 +239,8 @@ fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
 /// `commands/`, `tracking/` and `archive/`. An entry whose name, cut at its
 /// first lane separator by [`crate::mux::lane_task`], is in that set is never
 /// swept, however old it reads. For every one but `archive/` the set holds the ids of queued
-/// tasks, so the entry is a live task's. For `archive/` it holds the
+/// tasks, so the entry is a live task's. For `headless/` it also holds their
+/// routines' names, since a routine copy's lane is named for its routine. For `archive/` it holds the
 /// `<id>.md` file names of finished tasks a queued task depends on, which
 /// `lane_task` leaves whole. `None` for `system-prompts/`.
 ///

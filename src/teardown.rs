@@ -77,7 +77,7 @@ impl<'a> Dispatcher<'a> {
         let record = self
             .lanes
             .remove(&lane.name)
-            .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+            .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger));
         self.record_usage(&record, task.id(), step_id, Some(task), pipeline);
         record
     }
@@ -236,8 +236,8 @@ impl<'a> Dispatcher<'a> {
         // not `task.stage()`. By the time `clean_up` runs the task has
         // already been moved onto its terminal step, so `task.stage()` would
         // stamp the line `done` for tokens the previous agent step spent, and
-        // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
-        // and `dispatch::lane_session` both reconstruct — would name a lane
+        // `run_key(&entry.step, &entry.task)` — which `LaneRecord::readopted`
+        // and `dispatch::lane_session` both reconstruct — would name a run
         // that never existed. The records are kept in hand rather than
         // dropped, because their per-session agent homes are reclaimed further
         // down, only once the task is actually archived.
@@ -378,7 +378,7 @@ impl<'a> Dispatcher<'a> {
         let stale: Vec<String> = self
             .lanes
             .keys()
-            .filter(|name| crate::mux::lane_task(name) == task.id())
+            .filter(|name| crate::mux::lane_of_task(name, task))
             .cloned()
             .collect();
         for name in stale {
@@ -952,7 +952,7 @@ impl<'a> Dispatcher<'a> {
             // `record_usage` reads the task for the plan and the step's own
             // verdict, and the step is the stage this task is still sitting on.
             let step_id = task.stage().to_string();
-            let name = lane_name(&step_id, task.id());
+            let name = lane_name(&step_id, task);
             // Read rather than removed: the lane this record tracks is left
             // running, so its bookkeeping — `reminded_at` and the rest of
             // what the reminder loop reads — has to survive into the next
@@ -966,11 +966,10 @@ impl<'a> Dispatcher<'a> {
             // way, on the blank session a lane the ledger has genuinely never
             // heard from still gets.
             let ledger = self.ledger();
-            let record = self
-                .lanes
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
+            let record =
+                self.lanes.get(&name).cloned().unwrap_or_else(|| {
+                    LaneRecord::readopted(self.repo, &name, now_secs(), &ledger)
+                });
             let pipeline = self
                 .pipelines
                 .for_task(task)
@@ -1059,20 +1058,18 @@ impl<'a> Dispatcher<'a> {
         // stage the arm is sitting on, and its pane is stopped.
         let step_ids = self.pipelines.all_step_ids();
         for lane in lanes {
-            let Some((step_id, task_id)) = crate::mux::parse_lane_name(&lane.name, &step_ids)
-            else {
+            let Some((step_id, _)) = crate::mux::parse_lane_name(&lane.name, &step_ids) else {
                 continue;
             };
-            if task_id != task.id() {
+            if !crate::mux::lane_of_task(&lane.name, task) {
                 continue;
             }
             let name = lane.name.clone();
             let ledger = self.ledger();
-            let record = self
-                .lanes
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
+            let record =
+                self.lanes.get(&name).cloned().unwrap_or_else(|| {
+                    LaneRecord::readopted(self.repo, &name, now_secs(), &ledger)
+                });
             let banked = self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
             // Same reset `sweep_on_stop` makes on its own kept record — the
             // stale-record sweep below removes this one before the function
@@ -1124,7 +1121,7 @@ impl<'a> Dispatcher<'a> {
         let stale: Vec<String> = self
             .lanes
             .keys()
-            .filter(|name| crate::mux::lane_task(name) == task.id())
+            .filter(|name| crate::mux::lane_of_task(name, task))
             .cloned()
             .collect();
         for name in stale {

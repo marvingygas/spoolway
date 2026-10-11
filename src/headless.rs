@@ -106,6 +106,11 @@ pub struct Headless {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Record {
     name: String,
+    /// What the pid and exit files are named by — see [`crate::mux::run_key`].
+    /// Blank in a record an older binary wrote, whose files are named by
+    /// `name`: see [`Record::key`].
+    #[serde(default)]
+    key: String,
     kind: String,
     pane_id: String,
     workspace_id: String,
@@ -127,6 +132,20 @@ struct Record {
     /// so it lags a crash and never decides on its own whether one is running:
     /// see [`Headless::status`].
     turns: u32,
+}
+
+impl Record {
+    /// The name this lane's pid and exit files carry.
+    ///
+    /// A routine's copies share one lane name, so the files are kept apart by
+    /// the numbered id instead. A record written before that has no key, and
+    /// its lane's files were named by its name, so that is what it answers.
+    fn key(&self) -> &str {
+        match self.key.is_empty() {
+            true => &self.name,
+            false => &self.key,
+        }
+    }
 }
 
 impl Headless {
@@ -156,6 +175,9 @@ impl Headless {
     /// when a lane is torn down its transcript is the only account of what it
     /// did, and a person looking into a task that went wrong is looking for
     /// exactly that.
+    ///
+    /// Named by the lane's run key, as its pid and exit files are, so each
+    /// copy of a routine keeps its own transcript under the lane they share.
     ///
     /// Kept under [`LOGS_DIR`] so [`Headless::records`] lists a folder that
     /// holds only running lanes' records: a log outlives its lane, so beside
@@ -261,10 +283,10 @@ impl Headless {
         // Asked in this order on purpose. The exit file is written last by the
         // turn itself, so it is authoritative; the pid is only consulted for a
         // turn that has not said it finished.
-        if self.exit_path(&record.name).exists() {
+        if self.exit_path(record.key()).exists() {
             return LaneStatus::Done;
         }
-        if self.read_pid(&record.name).is_some_and(alive) {
+        if self.read_pid(record.key()).is_some_and(alive) {
             return LaneStatus::Working;
         }
         // Recorded but never spawned: no turn has written a pid and none has
@@ -296,7 +318,7 @@ impl Headless {
 
         // A stale exit code would make the turn about to start look finished
         // before it has written a line.
-        self.run_files().clear(&record.name)?;
+        self.run_files().clear(record.key())?;
 
         let mut script = String::new();
 
@@ -305,11 +327,11 @@ impl Headless {
         // as much — and a pipeline pays that on every turn it ever runs.
         script.push_str(&format!(
             "exec </dev/null >>{} 2>&1\n",
-            crate::platform::quote(&self.log_path(&record.name).display().to_string())
+            crate::platform::quote(&self.log_path(record.key()).display().to_string())
         ));
         script.push_str(&format!(
             "echo $$ >{}\n",
-            crate::platform::quote(&self.pid_path(&record.name).display().to_string())
+            crate::platform::quote(&self.pid_path(record.key()).display().to_string())
         ));
 
         // A PATH prefix goes on first, because the agent is resolved through
@@ -349,7 +371,7 @@ impl Headless {
         command.extend(args.iter().map(|arg| crate::platform::quote(arg)));
         command.push(crate::platform::quote(prompt));
         let command_line = command.join(" ");
-        let exit_path = crate::platform::quote(&self.exit_path(&record.name).display().to_string());
+        let exit_path = crate::platform::quote(&self.exit_path(record.key()).display().to_string());
 
         script.push_str(&command_line);
         script.push('\n');
@@ -365,19 +387,19 @@ impl Headless {
             spawn_detached_shell(&script, &record.cwd).context("could not spawn a lane")?;
         reap_when_it_ends(spawned);
 
-        match await_pid_file(|| self.read_pid(&record.name)) {
+        match await_pid_file(|| self.read_pid(record.key())) {
             Some(pid) => Ok(pid),
             None => bail!(
                 "lane `{}` was spawned but never reported a pid — see {}",
                 record.name,
-                self.log_path(&record.name).display()
+                self.log_path(record.key()).display()
             ),
         }
     }
 
     /// End a turn, and the agent under it.
-    fn kill(&self, name: &str) {
-        if let Some(pid) = self.read_pid(name) {
+    fn kill(&self, record: &Record) {
+        if let Some(pid) = self.read_pid(record.key()) {
             kill_group(pid);
         }
     }
@@ -664,8 +686,8 @@ pub(crate) fn lane_working_under(lane_dir: &Path, home: &Path) -> bool {
         .filter_map(|raw| serde_json::from_str::<Record>(&raw).ok())
         .any(|record| {
             record.cwd.starts_with(home)
-                && !run_files.exit_path(&record.name).exists()
-                && run_files.read_pid(&record.name).is_some_and(alive)
+                && !run_files.exit_path(record.key()).exists()
+                && run_files.read_pid(record.key()).is_some_and(alive)
         })
 }
 
@@ -820,7 +842,7 @@ impl Mux for Headless {
         // held anything.
         for record in self.records() {
             if record.pane_id == pane_id {
-                self.kill(&record.name);
+                self.kill(&record);
                 let _ = std::fs::remove_file(self.record_path(&record.name));
             }
         }
@@ -848,6 +870,7 @@ impl Mux for Headless {
 
         self.save(&Record {
             name: spec.name.to_string(),
+            key: spec.key.to_string(),
             kind: spec.kind.to_string(),
             pane_id: spec.pane_id.to_string(),
             // Neither exists here, and both are only ever handed back to this
@@ -896,7 +919,20 @@ impl Mux for Headless {
     }
 
     fn read(&self, name: &str, lines: usize) -> Result<String> {
-        let log = std::fs::read_to_string(self.log_path(name))
+        // The log is named by the run key, so a routine's copies each keep
+        // their own: a lane called for a routine reads the live copy's log,
+        // never an earlier copy's. A running lane's record holds the key. A
+        // stopped one's is worked out from the queue, and a name that names
+        // no live task is tried as it stands, as is a log an older binary
+        // named by the lane name.
+        let key = match self.load(name) {
+            Ok(record) => record.key().to_string(),
+            Err(_) => crate::repo::Repo::discover(&self.root)
+                .map(|repo| crate::mux::lane_key(name, &repo.tasks().unwrap_or_default()))
+                .unwrap_or_else(|_| name.to_string()),
+        };
+        let log = std::fs::read_to_string(self.log_path(&key))
+            .or_else(|_| std::fs::read_to_string(self.log_path(name)))
             .or_else(|_| std::fs::read_to_string(self.lane_dir().join(format!("{name}.log"))))
             .unwrap_or_default();
         let tail: Vec<&str> = log
@@ -925,7 +961,10 @@ impl Mux for Headless {
     fn interrupt_lane(&self, name: &str) -> Result<()> {
         if let Ok(repo) = crate::repo::Repo::discover(&self.root)
             && let Some((kind, session)) = crate::dispatch::lane_session(&repo, name)
-            && let Some((task, step)) = name.split_once(" · ")
+            // Banked under the task's id, not the routine name `name` may
+            // carry: the ledger is keyed by id.
+            && let key = crate::mux::lane_key(name, &repo.tasks().unwrap_or_default())
+            && let Some((task, step)) = key.split_once(" · ")
         {
             crate::usage::bank_lane(&repo, &kind, &session, task, step);
         }
@@ -933,12 +972,21 @@ impl Mux for Headless {
     }
 
     fn stop_lane(&self, name: &str, _pane_id: &str) -> Result<()> {
-        self.kill(name);
+        // A lane with no record has no files under a key of ours to clear:
+        // its name is the only thing left to try, which is what a record
+        // from before keys were stored answers anyway.
+        let key = match self.load(name) {
+            Ok(record) => {
+                self.kill(&record);
+                record.key().to_string()
+            }
+            Err(_) => name.to_string(),
+        };
         // The record goes; the log stays, in `logs/`. One is bookkeeping the
         // next pass would trip over, the other is the only account of what
         // this lane did.
         let _ = std::fs::remove_file(self.record_path(name));
-        self.run_files().clear(name)?;
+        self.run_files().clear(&key)?;
         Ok(())
     }
 
@@ -1112,12 +1160,19 @@ mod tests {
 
         /// A lane placed in the fixture root, ready to be prompted.
         fn lane(&self, name: &str, kind: &str, args: &[&str]) -> String {
+            self.keyed_lane(name, name, kind, args)
+        }
+
+        /// [`Fixture::lane`] with a run key of its own, as a routine copy's
+        /// lane has.
+        fn keyed_lane(&self, name: &str, key: &str, kind: &str, args: &[&str]) -> String {
             let pane = new_pane_id(&self.root);
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             self.mux
                 .start_lane(
                     &LaneSpec {
                         name,
+                        key,
                         label: "implementer",
                         kind,
                         pane_id: &pane,
@@ -1440,6 +1495,92 @@ mod tests {
         );
     }
 
+    /// Two copies of one routine share a lane name, so a lane's pid and exit
+    /// files are named by its key, the numbered id. A copy that starts while an
+    /// earlier copy's files are still on disk neither reads them as its own nor
+    /// clears them, and leaves its own under its own key. Keyed by name, as
+    /// they were, the earlier copy's exit file would have made the new lane
+    /// read as finished before it had run.
+    #[test]
+    fn a_new_copy_of_a_routine_does_not_read_an_earlier_copys_files() {
+        let f = Fixture::new("routine-copies");
+        f.agent("pi", "sleep 60");
+        let name = "release · implement";
+        let earlier = "release-5 · implement";
+        let later = "release-6 · implement";
+        std::fs::create_dir_all(f.mux.lane_dir()).unwrap();
+        std::fs::write(f.mux.exit_path(earlier), "0\n").unwrap();
+        std::fs::write(f.mux.pid_path(earlier), format!("{}\n", std::process::id())).unwrap();
+
+        let pane = new_pane_id(&f.root);
+        f.mux
+            .start_lane(
+                &LaneSpec {
+                    name,
+                    key: later,
+                    label: "implementer",
+                    kind: "pi",
+                    pane_id: &pane,
+                    args: &["--session-id".to_string(), "s1".to_string()],
+                    env: &BTreeMap::new(),
+                    path_prefix: Some(&f.bin),
+                },
+                &mut || {},
+            )
+            .unwrap();
+        assert_eq!(f.status(name), LaneStatus::Idle);
+
+        f.mux.prompt(name, "go").unwrap();
+        assert_eq!(f.status(name), LaneStatus::Working);
+        assert!(
+            f.mux.pid_path(later).exists(),
+            "the run files follow the key"
+        );
+        assert!(!f.mux.pid_path(name).exists(), "none are named by the lane");
+
+        f.mux.stop_lane(name, "").unwrap();
+        assert!(!f.mux.pid_path(later).exists());
+        assert!(
+            f.mux.exit_path(earlier).exists() && f.mux.pid_path(earlier).exists(),
+            "stopping one copy's lane must leave an earlier copy's files alone"
+        );
+    }
+
+    /// Each copy of a routine keeps a log of its own, named by its key, and
+    /// reading the lane by its shared name reads the live copy's log. Named by
+    /// the lane, as it was, the later copy appended to the earlier one's file
+    /// and read the earlier copy's turns as its own.
+    #[test]
+    fn each_copy_of_a_routine_keeps_its_own_log() {
+        let f = Fixture::new("routine-logs");
+        f.agent("pi", "echo hello");
+        let name = "release · implement";
+        let earlier = "release-5 · implement";
+        let later = "release-6 · implement";
+
+        f.keyed_lane(name, earlier, "pi", &["--session-id", "s1"]);
+        f.mux.prompt(name, "go").unwrap();
+        f.settle(name);
+        f.mux.stop_lane(name, "").unwrap();
+
+        f.keyed_lane(name, later, "pi", &["--session-id", "s2"]);
+        assert_eq!(
+            f.mux.read(name, 50).unwrap(),
+            "",
+            "a copy that has not run yet read an earlier copy's log"
+        );
+        f.mux.prompt(name, "go").unwrap();
+        f.settle(name);
+
+        assert_eq!(f.mux.read(name, 50).unwrap().matches("hello").count(), 1);
+        assert!(f.mux.log_path(earlier).exists() && f.mux.log_path(later).exists());
+        assert!(
+            !f.mux.log_path(name).exists(),
+            "no log is named by the lane"
+        );
+        f.mux.stop_lane(name, "").unwrap();
+    }
+
     /// No keyboard reaches a running headless turn, so `interrupt_lane` ends
     /// it exactly as `stop_lane` would — see the doc comment on the impl.
     #[test]
@@ -1558,6 +1699,7 @@ mod tests {
         let refused = f.mux.start_lane(
             &LaneSpec {
                 name: "implement-demo",
+                key: "implement-demo",
                 label: "implementer",
                 kind: "gemini",
                 pane_id: &pane,
@@ -1591,6 +1733,7 @@ mod tests {
             .start_lane(
                 &LaneSpec {
                     name: "implement-demo",
+                    key: "implement-demo",
                     label: "implementer",
                     kind: "pi",
                     pane_id: &pane,
@@ -1758,6 +1901,7 @@ mod tests {
             .start_lane(
                 &LaneSpec {
                     name: "implement-live",
+                    key: "implement-live",
                     label: "implementer",
                     kind,
                     pane_id: &pane,

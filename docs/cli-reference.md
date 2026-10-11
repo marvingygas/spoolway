@@ -687,6 +687,11 @@ spoolway lane "<task> · <step>" -m "yes, use the second option"
 spoolway lane "<task> · <step>" --attach
 ```
 
+A lane is named for its task id. A copy of a routine is named for its routine, so `release · ship`
+reaches the live copy of `release`. The copy's numbered id also works, for
+example `release-6 · ship`. Once the copy has left the queue, only the numbered id reads its
+transcript.
+
 | Flag | Default | What it does |
 |---|---|---|
 | `-n`, `--lines <N>` | `100` | How many lines from the end |
