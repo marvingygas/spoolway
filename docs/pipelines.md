@@ -344,6 +344,15 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. A later non-zero exit sends the task to `on_fail` from wherever it is. |
 | `timeout` | routes to `on_fail` | kills the run, nothing routes |
 
+A task that reaches `done` while a background step with `on_fail` is still running stays at
+`done`. It is not archived and its `done` hook does not fire until the run ends. A non-zero
+exit sends the task to `on_fail`. A zero exit lets the task archive. A run that outlives its
+step's `timeout` is stopped, so the task never waits past it. A background step with no
+`on_fail` is stopped when the task is cleaned up.
+
+When the late failure sends the task to `blocked`, the task records the failed background step
+as the step it was blocked from. `spoolway resume` runs that step again.
+
 A command step runs in its own pane. `headless: true` runs that command with no pane; this
 step option is separate from the internal test-only dispatcher backend. A pane closes the
 moment its exit code is judged, on a pass and on a failure alike. Only a timed-out run's pane

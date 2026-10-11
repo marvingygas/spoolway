@@ -639,6 +639,57 @@ has "blocked_from names the step it was actually pulled out of, not \`scratch\` 
 # nothing is waiting on it any more.
 touch "$SCRATCH_HOLD"
 
+# ------------------------------------------------- background, on_fail, at done
+# The same promise, kept when the task reaches `done` before the check ends:
+# cleanup used to stop the run unread and archive the task as if it had
+# passed. `late` fails only once told to, so the task is provably at `done`,
+# and still in the queue, when the failure lands.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+LATE_FAIL="$LIVE/late-fail-now"
+rm -f "$LATE_FAIL"
+{
+  printf '\n  - id: late\n'
+  printf '    description: A background step that fails after its task is done.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; exit 1\n' "$LATE_FAIL"
+  printf '    background: true\n'
+  printf '    on_pass: review\n'
+  printf '    on_fail: blocked\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: late/" .spoolway/pipelines/default.yml
+works "a background step checked after its task is done checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart   # the pipeline it is holding has no `late` step in it
+task_doc "$LIVE/late-fail.md" late-fail "$BODY" "group: late-fail"
+must "a task behind a background step that fails after it is done" \
+  "$SPOOLWAY" queue add --from "$LIVE/late-fail.md"
+
+if drive late-fail done 120; then
+  ok "the task reached done while its background check was still running"
+else
+  bad "the task reached done while its background check was still running \
+(at \`$(stage_of late-fail)\`)"
+fi
+# Long enough for several passes: an archive would take one.
+sleep 3
+if [ "$(stage_of late-fail)" = done ]; then
+  ok "and it is not archived while the check is still going"
+else
+  bad "and it is not archived while the check is still going \
+(at \`$(stage_of late-fail)\`)"
+fi
+
+touch "$LATE_FAIL"
+if drive late-fail blocked 120; then
+  ok "the check's failure reached the task waiting at done"
+else
+  bad "the check's failure reached the task waiting at done \
+(at \`$(stage_of late-fail)\`)"
+fi
+# `done` is not a step a resume can go back to, so the block names the check:
+# a resume runs it again rather than falling back to whatever reported last.
+has "blocked_from names the failed check, not done" \
+  "blocked_from: late" $SPOOLWAY_PROJECT_HOME/queue/late-fail.md
+
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
 # `setsid sh -c`, and macOS ships no `setsid` binary. It now calls

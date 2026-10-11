@@ -684,6 +684,43 @@ enum FallThrough {
     },
 }
 
+/// The step a command run belongs to, as `(step id, step)`, when `key` is one
+/// of `task_id`'s runs and the pipeline still defines the step.
+///
+/// A key is `<task> · <step>` — see [`crate::command_step::Runs::key`]. The
+/// one place that reads it back, so the reap and the `done` hold cannot
+/// disagree about which step a run is for.
+fn run_step<'p, 'k>(
+    pipeline: &'p Pipeline,
+    task_id: &str,
+    key: &'k str,
+) -> Option<(&'k str, &'p Step)> {
+    let step_id = key.strip_prefix(&format!("{task_id} · "))?;
+    pipeline.step(step_id).map(|step| (step_id, step))
+}
+
+/// The step of a background check still running for `task_id` that declares
+/// `on_fail`, which is to say one that can still send the task somewhere.
+///
+/// What holds a task at `done` and what the board names on that row, so both
+/// read the same answer. `keys` is any of the task's run keys: only a
+/// background step with an `on_fail` counts, which leaves a `.group` file
+/// harmless.
+pub(crate) fn awaited_check<'a>(
+    pipeline: &Pipeline,
+    runs: &crate::command_step::Runs,
+    task_id: &str,
+    keys: &'a [String],
+) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        let (step_id, step) = run_step(pipeline, task_id, key)?;
+        (step.background
+            && step.on_fail.is_some()
+            && runs.state(key) == crate::command_step::RunState::Running)
+            .then_some(step_id)
+    })
+}
+
 /// Whether `step` falls through to `on_pass` for `task` without starting a
 /// lane, and why.
 ///
@@ -1375,6 +1412,7 @@ impl<'a> Dispatcher<'a> {
                 // Read before `tasks[index]` is borrowed mutably: a task
                 // leaving `queued` onto a `last:` entry step needs it.
                 let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
+                let keys = command_keys.get(tasks[index].id()).unwrap_or(&no_keys);
                 match self.route_reserved_stage(
                     &mut tasks[index],
                     index,
@@ -1382,6 +1420,7 @@ impl<'a> Dispatcher<'a> {
                     &pipeline,
                     graph,
                     dependents,
+                    keys,
                     owned,
                     kept,
                     &mut candidates,
@@ -1416,7 +1455,6 @@ impl<'a> Dispatcher<'a> {
                 // reach the task wherever this pass finds it, even a step it
                 // is only halfway through; the loop re-reads the stage on
                 // `continue`, same as the `FallThrough::To` arm below.
-                let keys = command_keys.get(tasks[index].id()).unwrap_or(&no_keys);
                 if let Some(key) = self.reap_stale_runs(&mut tasks[index], &pipeline, report, keys)
                 {
                     // The exit code goes only once the move is written: a
@@ -1909,7 +1947,8 @@ impl<'a> Dispatcher<'a> {
     ///
     /// These same four names are `[issue_tracking]`'s own four rest events,
     /// and `RESERVED` already lists exactly them — so firing the hook here,
-    /// once, ahead of everything below that is specific to one of the four,
+    /// once, ahead of everything below that is specific to one of the four
+    /// (bar the `done` hold for a background check, which has to come first),
     /// covers every arrival at any of them without repeating the check four
     /// times. `fire` is idempotent for the run's whole lifetime, so a task
     /// sitting on one of these across many passes only ever starts it once.
@@ -1929,6 +1968,7 @@ impl<'a> Dispatcher<'a> {
         pipeline: &Pipeline,
         graph: &Graph,
         dependents: usize,
+        keys: &[String],
         owned: &[(String, String, &Lane)],
         kept: &[(String, String, &Lane)],
         candidates: &mut Vec<Candidate>,
@@ -1939,6 +1979,13 @@ impl<'a> Dispatcher<'a> {
     ) -> Result<Routed> {
         if !crate::pipeline::RESERVED.contains(&stage) {
             return Ok(Routed::NotReserved);
+        }
+        // Ahead of the `done` hook below: a task a background check can still
+        // pull back is not finished, so the tracker must not hear that it is.
+        if stage == crate::pipeline::DONE
+            && self.settle_background_checks(task, pipeline, report, keys)?
+        {
+            return Ok(Routed::NextTask);
         }
         // A trial arm's `queued`/`done` are not the moments this project's
         // own issue tracker should hear about: the arm is a disposable copy,
@@ -4967,6 +5014,53 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
+    /// Keep a task at `done` while a background check can still pull it back,
+    /// or route the failure of one that has. Answers whether the pass is
+    /// finished with the task.
+    ///
+    /// A background step that declares `on_fail` is promised the last word
+    /// from wherever the task is, and `done` is the one reserved stage that
+    /// ends the task: a check the per-task loop has not read by now is read
+    /// here or never, because cleanup stops it unread and the task archives
+    /// as if it had passed. A run past its step's `timeout:` is stopped by
+    /// the same look, so it cannot hold the task here forever.
+    ///
+    /// `keys` is the pass's own slice from
+    /// [`crate::command_step::Runs::keys_by_task`], the one the per-task loop
+    /// hands [`Dispatcher::reap_stale_runs`]. It leaves out a `.group` file,
+    /// which records a process a foreground step left running for the steps
+    /// after it, and the reap would stop it on the spot while the check is
+    /// still testing against it.
+    fn settle_background_checks(
+        &mut self,
+        task: &mut Task,
+        pipeline: &Pipeline,
+        report: &mut Report,
+        keys: &[String],
+    ) -> Result<bool> {
+        let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+        if let Some(key) = self.reap_stale_runs(task, pipeline, report, keys) {
+            // Forgotten only once the move is written, the same as the
+            // per-task loop does.
+            if self.persist(task)? {
+                runs.forget(&key)?;
+            }
+            return Ok(true);
+        }
+        if let Some(step_id) = awaited_check(pipeline, &runs, task.id(), keys) {
+            // Pushed on every pass the hold lasts, which keeps the run alive
+            // too: a pass with an action is not `quiet`, and a quiet one
+            // would let `spoolway run` exit before the check has ended.
+            report.actions.push(format!(
+                "{}: held at `done` — background `{step_id}` is still running and can send \
+                 the task to its `on_fail`",
+                task.id()
+            ));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Look after every one of this task's command runs except the one on the
     /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
     /// and can say more about.
@@ -5009,7 +5103,10 @@ impl<'a> Dispatcher<'a> {
     /// `keys` is this task's own slice of one `commands/` directory read —
     /// [`crate::command_step::Runs::keys_by_task`] — taken once per pass by
     /// the caller rather than reread here per task, so a queue of a hundred
-    /// tasks costs one `read_dir` and not a hundred.
+    /// tasks costs one `read_dir` and not a hundred. It never holds a
+    /// `.group` file, and a caller must not add one: this stops every
+    /// foreground run it is given, and that file records a process a
+    /// foreground step left running on purpose.
     fn reap_stale_runs(
         &self,
         task: &mut Task,
@@ -5018,18 +5115,13 @@ impl<'a> Dispatcher<'a> {
         keys: &[String],
     ) -> Option<String> {
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
-        // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
-        let prefix = format!("{} · ", task.id());
         for key in keys {
-            let Some(step_id) = key.strip_prefix(&prefix) else {
+            let Some((step_id, step)) = run_step(pipeline, task.id(), key) else {
                 continue;
             };
             if step_id == task.stage() {
                 continue;
             }
-            let Some(step) = pipeline.step(step_id) else {
-                continue;
-            };
             // A foreground step's run belongs to the visit that started it.
             // Once the task is anywhere else, the run is stopped and its files
             // forgotten, and its exit is never routed on: `on_fail` of a
@@ -5106,8 +5198,20 @@ impl<'a> Dispatcher<'a> {
                     // background one that failed — a resume from `blocked`
                     // carries on from *there*, same as any other block. Read
                     // before `set_stage` overwrites it.
+                    //
+                    // From `done` that step is the check itself. `done` is
+                    // not a step `resume_target` can name, so a `blocked_from`
+                    // of `done` would be dropped and the resume would fall back
+                    // to whatever last reported — possibly `handover`, which
+                    // pushes a second time — and archive without the failed
+                    // check ever running again. Resuming onto the check runs it
+                    // afresh, and the task carries on from it as it did the
+                    // first time.
                     if destination == crate::pipeline::BLOCKED {
-                        let stopped_on = task.stage().to_string();
+                        let stopped_on = match task.stage() {
+                            crate::pipeline::DONE => step_id.to_string(),
+                            stage => stage.to_string(),
+                        };
                         crate::commands::set_blocked_from(task, &stopped_on);
                     }
                     // The task is leaving the step it is on, so whatever
@@ -20356,6 +20460,160 @@ mod tests {
         );
     }
 
+    /// A background check that declares `on_fail` keeps its say after its
+    /// task reaches `done`: the task is not archived while the check is still
+    /// going, and a non-zero exit sends it to `on_fail` from where it is
+    /// (docs/pipelines.md, "Background and headless").
+    #[test]
+    fn a_task_at_done_waits_for_its_background_check_that_can_still_fail() {
+        let (repo, _root_guard) = fixture("command-background-at-done");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("sleep 2; exit 1", true);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "review",
+            "the check must have started and the task moved on"
+        );
+        task.set_stage("done", None);
+        task.save().unwrap();
+
+        let held = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert!(
+            path.exists(),
+            "a task at `done` was archived while its background check was still running"
+        );
+        assert!(
+            held.actions
+                .iter()
+                .any(|a| a.contains("held at `done`") && a.contains("`implement`")),
+            "the hold must say what the task is waiting on: {:?}",
+            held.actions
+        );
+        assert!(
+            !held.quiet,
+            "a held task is work the run still has to wait for"
+        );
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+        let blocked = reload(&path);
+        assert_eq!(
+            blocked.front.blocked_from.as_deref(),
+            Some("implement"),
+            "`done` is not a step a resume can go back to, so the block names the check"
+        );
+        assert_eq!(
+            crate::commands::resume_target(&blocked, &pipelines.pipelines["default"]),
+            "implement",
+            "a resume must run the failed check again, not fall back to the last report"
+        );
+    }
+
+    /// The `done` hook is how an issue tracker learns a task is finished, so
+    /// it must not run for a task a background check can still pull back: the
+    /// ticket would close while the task sat on `blocked`.
+    #[test]
+    fn a_task_held_at_done_for_a_background_check_does_not_fire_its_done_hook() {
+        let (mut repo, _root_guard) = fixture("command-background-at-done-hook");
+        let fired = repo.root.join("hook-fired");
+        write_hook(&repo, "mark.sh", &format!("touch '{}'", fired.display()));
+        repo.config.issue_tracking.hook = "mark.sh".into();
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("sleep 2; exit 1", true);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        run_pass_with(&repo, &mux, &pipelines);
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+
+        run_pass_with(&repo, &mux, &pipelines);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !fired.exists(),
+            "the `done` hook fired while the check could still fail"
+        );
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+        assert!(
+            !fired.exists(),
+            "the `done` hook fired for a task that never finished"
+        );
+    }
+
+    /// A process a foreground step left running for the steps after it
+    /// (recorded in a `.group` file) is not the check's to lose: the hold
+    /// reads the same keys the per-task loop does, so it does not stop that
+    /// process while the check is still testing against it.
+    #[test]
+    fn holding_a_task_at_done_leaves_a_foreground_steps_kept_process_running() {
+        let (repo, _root_guard) = fixture("command-background-at-done-group");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("sleep 300", true);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        run_pass_with(&repo, &mux, &pipelines);
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let check = crate::command_step::Runs::key("implement", "demo");
+        // Forgetting a run whose process is still going is what leaves the
+        // `.group` file behind.
+        let served = crate::command_step::Runs::key("review", "demo");
+        let pid = runs
+            .start(&served, "sleep 300", &repo.root, &BTreeMap::new())
+            .unwrap();
+        runs.forget(&served).unwrap();
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+
+        run_pass_with(&repo, &mux, &pipelines);
+        assert!(
+            path.exists(),
+            "the check is still running, so the task waits"
+        );
+        assert!(
+            crate::headless::alive(pid),
+            "the process a foreground step kept was stopped while the check ran"
+        );
+
+        runs.stop(&served);
+        runs.stop(&check);
+    }
+
     /// A foreground command's run can outlive its step when a person reports
     /// past it by hand. Its late non-zero exit belongs to a step the task has
     /// left, so it must not pull the task anywhere: only a `background: true`
@@ -20883,6 +21141,49 @@ mod tests {
             report.actions
         );
         assert!(!crate::headless::alive(pid), "the background run survived");
+    }
+
+    /// A check that outlasts its step's `timeout:` does not hold its task at
+    /// `done` forever: it is stopped, and the task archives.
+    #[test]
+    fn a_task_at_done_does_not_wait_past_the_checks_timeout() {
+        let (repo, _root_guard) = fixture("command-background-at-done-timeout");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running_for("sleep 300", true, Duration::from_millis(300));
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let pid = crate::command_step::Runs::new(&repo.commands_dir())
+            .read_pid(&key)
+            .unwrap();
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+
+        std::thread::sleep(Duration::from_millis(400));
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert!(!crate::headless::alive(pid), "the overdue check survived");
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert!(
+            !path.exists(),
+            "the task must archive once the check is gone"
+        );
     }
 
     // ------------------------------------------------------- serial command steps

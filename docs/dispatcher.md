@@ -316,6 +316,7 @@ stateDiagram-v2
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
+| `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
