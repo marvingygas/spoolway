@@ -1842,30 +1842,27 @@ mod tests {
         runs.stop(&key);
     }
 
-    // While a board confirm panel is open it reads every key: `→` there is
-    // the panel's to ignore, not the shell's, so the screen stays on the
-    // board rather than opening the queue tab.
+    // While a board menu or confirm panel is open it reads every key: `→`
+    // there is the menu's to ignore, not the shell's, so the screen stays on
+    // the board rather than opening the queue tab.
     #[test]
     fn an_open_board_panel_keeps_the_arrows_from_the_shell() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[DU\x1b[C");
+        let frames = drive_host(&repo, "\x1b[Do\x1b[C");
         let last = frames.last().unwrap();
-        assert!(
-            last.contains("not started"),
-            "the panel is still up: {last}"
-        );
+        assert!(last.contains("> open"), "the menu is still up: {last}");
         assert!(!last.contains("─ groups"), "{last}");
     }
 
-    // Once the panel is answered — `enter`, which carries the unqueue out —
-    // the board is at rest again and `→` is the shell's: it reaches the
-    // queue tab.
+    // Once the panel is answered — `unqueue` picked from the menu, then
+    // `enter`, which carries the unqueue out — the board is at rest again
+    // and `→` is the shell's: it reaches the queue tab.
     #[test]
     fn an_answered_board_panel_gives_the_arrows_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel-answered");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[DU\r\x1b[C");
+        let frames = drive_host(&repo, "\x1b[Do\x1b[B\x1b[B\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(last.contains("─ groups"), "{last}");
     }

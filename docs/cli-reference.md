@@ -120,8 +120,8 @@ a second `enter` while a stop is already going does nothing. Starting dispatchin
 every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
-finishing` for one, left out once none are). `r`, `p`, `s` and `u`/`U` work whether or not a
-child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
+finishing` for one, left out once none are). `r` and the `o` options menu work whether or not
+a child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
@@ -326,7 +326,7 @@ The last lines apply to a task on `paused` or `blocked`. They name the step `spo
 
 ### `spoolway queue pause <task>`
 
-Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. The board's `p` key does the same.
+Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. `pause` in the board's options menu does the same.
 
 ```
 spoolway queue pause <task> [--force]
@@ -345,8 +345,8 @@ A task that is still `queued`, or has a live lane or running command on its step
 ### `spoolway queue unqueue <task>`
 
 Carry a not-started task back to the pending directory, with every reserved key
-stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
-carries the same task and every unstarted task that depends on it; this command has no panel
+stripped. `spoolway queue add --from` takes the result again unchanged. `unqueue` in the board's options
+menu carries the same task and every unstarted task that depends on it; this command has no panel
 to list a chain on, so it refuses instead.
 
 ```
@@ -357,7 +357,7 @@ spoolway queue unqueue <task> --force
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--all` | | Every not-started task, the way the board's `U` does. Refused together with `--force` |
+| `--all` | | Every not-started task at once. Refused together with `--force` |
 | `--force` | | Interrupt any live lane, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
 
 A task that has started is refused, naming its stage, its checkout when it has one, and both
@@ -728,7 +728,7 @@ The session line reads `abandoned, already banked` when the usage ledger already
 |---|---|---|
 | `-m`, `--message <TEXT>` | `restarted by hand — fresh session` | Note for the status log |
 
-The board's `s` key does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
+`restart` in the board's options menu does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
 
 While a dispatcher runs, the step is checked against the pipelines it loaded at start. See
 [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).

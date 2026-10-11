@@ -283,7 +283,7 @@ pub(crate) enum Cause {
     /// An issue-tracking hook exited non-zero, or was killed three times in a
     /// row without an exit code.
     HookFailed,
-    /// A person parked it: the board's `p`, or an Escape in the pane.
+    /// A person parked it: the board's `pause`, or an Escape in the pane.
     Manually,
     /// The dispatch tab's stop popup parked it.
     DispatchingStopped,
@@ -319,7 +319,7 @@ impl Cause {
     }
 }
 
-/// [`BoardMode::ConfirmPause`]'s panel, `p`'s own: one abort, so the body
+/// [`BoardMode::ConfirmPause`]'s panel, `pause`'s own: one abort, so the body
 /// names the step it is on directly rather than repeating the task id the
 /// title already carries. A command step adds two lines saying what pausing
 /// does to it, since unlike an agent's turn its process is ended and its run
@@ -373,9 +373,10 @@ pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> [String; 2] {
 /// row, and narrow enough that the panel stays inside an 80-column pane.
 const RESTART_WRAP: usize = 56;
 
-/// [`BoardMode::ConfirmRestart`]'s panel, `s`'s own: the step, the lane and
-/// the session a restart throws away, then what happens to them, so a person
-/// sees exactly which conversation they are giving up before they answer.
+/// [`BoardMode::ConfirmRestart`]'s panel, `restart`'s own: the step, the lane
+/// and the session a restart throws away, then what happens to them, so a
+/// person sees exactly which conversation they are giving up before they
+/// answer.
 ///
 /// The session row is left out when none is on record — a lane that never
 /// got as far as a turn — rather than printed empty, the same as
@@ -639,29 +640,8 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     )
 }
 
-/// [`BoardMode::ConfirmUnqueueAll`]'s panel. One id per line — `boxed` sizes the
-/// panel from its widest line, and a single line joining every id, the way
-/// an earlier version of this did, grows with the count instead of the
-/// longest id: five or more unstarted tasks pushed it past 80 columns.
-pub(super) fn unqueue_all_confirm_panel(ids: &[String]) -> Vec<String> {
-    let mut body = vec![
-        String::new(),
-        format!(
-            "{} task{} {} not started:",
-            ids.len(),
-            if ids.len() == 1 { "" } else { "s" },
-            if ids.len() == 1 { "has" } else { "have" }
-        ),
-    ];
-    body.extend(ids.iter().map(|id| format!("  {id}")));
-    body.push(String::new());
-    body.push("Each goes back to pending. Running, paused and".to_string());
-    body.push("blocked tasks stay where they are.".to_string());
-    crate::screen::ask("unqueue all", &body, &["unqueue them".to_string()], 0)
-}
-
 /// `path` with a leading run matching the home directory rewritten to `~`,
-/// for the pending path a `u` panel shows.
+/// for the pending path an `unqueue` panel shows.
 ///
 /// A small copy of `crate::repo::shorten_home`, which is private to that
 /// module and outside what this task touches — duplicated here rather than
@@ -4599,22 +4579,6 @@ mod tests {
         assert_eq!(restored, without_cursor);
     }
 
-    /// `unqueue_all_confirm_panel` lists one id per line rather than joining
-    /// them onto one, so the box `boxed` draws stays inside 80 columns no
-    /// matter how many tasks have not started — five ids joined onto one
-    /// `GUTTER`-separated line already pushed it past that.
-    #[test]
-    fn the_unqueue_all_panel_stays_within_eighty_columns_at_five_tasks() {
-        let ids: Vec<String> = (1..=5).map(|n| format!("unstarted-task-{n}")).collect();
-        let panel = unqueue_all_confirm_panel(&ids);
-        for line in &panel {
-            assert!(line.chars().count() <= 80, "{line}");
-        }
-        for id in &ids {
-            assert!(panel.iter().any(|line| line.contains(id.as_str())), "{id}");
-        }
-    }
-
     /// `restart_confirm_panel` draws the board's restart mockup row for row,
     /// and stays inside an 80-column pane with a refusal printed in it.
     #[test]
@@ -4669,7 +4633,7 @@ mod tests {
     }
 
     /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`
-    /// exactly like `unqueue_all_confirm_panel` — sized to its widest line,
+    /// — sized to its widest line,
     /// not a fixed 80 columns, and never wider than that in practice since
     /// every entry gets its own line.
     #[test]

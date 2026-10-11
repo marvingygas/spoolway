@@ -52,7 +52,7 @@ pub fn report(
     let mut current = task.stage().to_string();
 
     // A lane started for a step that a person's own Escape (or the board's
-    // `p`) parked mid-turn, with no idea any of that happened, reports in
+    // `pause`) parked mid-turn, with no idea any of that happened, reports in
     // against the step it actually ran — not `paused`, which is all the
     // task's own stage says now. This report is itself proof the lane is
     // alive and working, the same fact `dispatch::auto_restore_parked`
@@ -706,8 +706,8 @@ pub fn route(
             Gate::Schedule => "held by this task's own schedule".to_string(),
             Gate::Step => "held by this step's own gate".to_string(),
         });
-        // Spent, not standing, whoever wrote it — the board's `s` is the
-        // example, but a `gate_at` typed by hand into the task fires and
+        // Spent, not standing, whoever wrote it — the board's pause panel is
+        // the example, but a `gate_at` typed by hand into the task fires and
         // clears exactly the same way. A step's own `gate: true` is the one
         // that holds every task that ever reaches it. Left set, a later
         // route that brought this task back onto the same step — a loop, a
@@ -1226,7 +1226,7 @@ fn lane_committed(started_at: &str, head_now: &str) -> bool {
 /// nothing in exactly the case it exists for, so it skips `blocked` and lets the
 /// entry have it.
 pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
-    // A task that never started — parked off `queued` by the board's `p`
+    // A task that never started — parked off `queued` by the board's `pause`
     // or `spoolway queue pause`, or held on `paused` by the tracking hook —
     // has no step to go back to, and the entry is the wrong answer: it
     // skips the dependency and hook gates only the `queued` arm applies, so
@@ -1540,7 +1540,7 @@ pub enum ResumeRoad {
         cleared_block: bool,
         destination: String,
     },
-    /// A `p` park (`parked_from`): back onto the step it never left, by
+    /// A `pause` park (`parked_from`): back onto the step it never left, by
     /// [`unpark`].
     Unpark(String),
     /// A hook that failed on `done`: straight back to `done`.
@@ -1654,7 +1654,7 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
             destination,
         });
     }
-    // A `p` park is answered differently from a real stop: nothing was ever
+    // A `pause` park is answered differently from a real stop: nothing was ever
     // in the way, so putting it back is not a lap — see `unpark`.
     if let Some(step) = &task.front.parked_from {
         return Ok(ResumeRoad::Unpark(step.clone()));
@@ -1680,7 +1680,7 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
 /// gated step and is waiting to be let past it; `--stage` is still honoured
 /// there, since naming a step by hand is a person overriding the route on
 /// purpose. Anything else resumes the step that stopped it — a real block,
-/// through `back_onto_its_step`'s ordinary road, or a `p` park, through
+/// through `back_onto_its_step`'s ordinary road, or a `pause` park, through
 /// `unpark` beside it.
 ///
 /// `from_step` is the calling lane's own step, read from `SPOOLWAY_STEP` at
@@ -1760,9 +1760,9 @@ fn resume_checked(
 
     // A gate is the one road out of `paused` that answers a *question*
     // rather than a stop — `paused_at` is what tells the two apart, not the
-    // stage alone: a `p` park and a resumed block both land on `paused` too,
-    // and neither has a gate to answer. `--stage` is checked first: a person
-    // names one to reroute a genuine gate, or a park, on purpose, and it
+    // stage alone: a `pause` park and a resumed block both land on `paused`
+    // too, and neither has a gate to answer. `--stage` is checked first: a
+    // person names one to reroute a genuine gate, or a park, on purpose, and it
     // always takes the ordinary road onto the step it names.
     let road = match &args.stage {
         Some(stage) => {
@@ -1931,7 +1931,7 @@ fn back_onto_its_step(
         task.mark_blocker_cleared();
     }
 
-    // A `p` park runs none of `resume_at`'s bookkeeping — see `unpark`.
+    // A `pause` park runs none of `resume_at`'s bookkeeping — see `unpark`.
     // Ahead of the hook pause below, which a park leaves standing.
     if let ResumeRoad::Unpark(step) = &road {
         return unpark(repo, pipelines, task, step.clone());
@@ -2119,8 +2119,8 @@ fn task_lanes(
 /// [`resume_target`]. A task that never started has no step to start over,
 /// and neither has one held by a hook, whose pause is on `queued` or `done`.
 ///
-/// `pub(crate)` for the board's `s`, which opens its panel only where this
-/// finds a step, so the panel never offers a restart this would refuse.
+/// `pub(crate)` for the board's `restart`, which opens its panel only where
+/// this finds a step, so the panel never offers a restart this would refuse.
 pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     let id = &task.front.id;
     let stage = task.stage();
@@ -2313,8 +2313,8 @@ pub(crate) fn restart_with(
 /// The conversation a restart of `step` on task `id` throws away, if one is
 /// on record.
 ///
-/// Shared by `spoolway restart`'s own report and the board's `s` panel, so
-/// the session a person confirms is the one the command says it abandoned.
+/// Shared by `spoolway restart`'s own report and the board's `restart` panel,
+/// so the session a person confirms is the one the command says it abandoned.
 pub(crate) fn abandoned_session(repo: &Repo, step: &str, id: &str) -> Option<AbandonedSession> {
     let ledger = crate::usage::read(repo).unwrap_or_default();
     let lane = crate::mux::lane_name(step, id);
@@ -3217,7 +3217,7 @@ mod tests {
     }
 
     /// A lane started for `work` reports in after a person's own Escape (or
-    /// the board's `p`) has already parked its task on `paused`, with
+    /// the board's `pause`) has already parked its task on `paused`, with
     /// `parked_from: work` and `escalated: false`. The lane never knew any of
     /// that happened — it is still mid-turn when the park lands, and its
     /// report is for the step it was actually started on.
@@ -6069,7 +6069,7 @@ mod tests {
         );
     }
 
-    /// A task parked before it ever started — `p` on a `queued` row, which
+    /// A task parked before it ever started — `pause` on a `queued` row, which
     /// records no `parked_from` — goes back onto `queued`, not the entry
     /// step: it is the `queued` arm that applies the dependency and hook
     /// gates, and a resume that lands past it launches the task off a
@@ -6111,7 +6111,7 @@ mod tests {
         assert_eq!(task.front.arrived_from, arrived_from_before);
     }
 
-    /// A bare `spoolway resume` on a `p`-parked task reaches `unpark`, not
+    /// A bare `spoolway resume` on a `pause`-parked task reaches `unpark`, not
     /// `resume_at`: the round trip banks no lap, gives nothing back (there
     /// was nothing to give back), and marks the step to be continued the
     /// same way a real resume does.

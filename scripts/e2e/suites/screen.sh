@@ -340,7 +340,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"
 has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
-has "the key line is still drawn under it" "[o] open task" "$LAST"
+has "the key line is still drawn under it" "[o] options" "$LAST"
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns
 # no row of the full board touches column 0 or column 119. Each row ends in the

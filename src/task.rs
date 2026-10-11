@@ -185,13 +185,13 @@ pub struct Frontmatter {
     /// resume` to carry it straight back to.
     ///
     /// `blocked_from`'s counterpart for a stop nothing reported — but the two
-    /// can both be set at once: parking a `blocked` row (the board's `p`, or
-    /// `spoolway queue pause`) writes `parked_from: blocked` beside whatever
+    /// can both be set at once: parking a `blocked` row (the board's `pause`,
+    /// or `spoolway queue pause`) writes `parked_from: blocked` beside whatever
     /// `blocked_from` the block already carried, and leaves that field alone.
     /// `resume_road` in `src/commands/report.rs` checks `parked_from`
     /// first, so it is the one that decides where a resume goes when both are
     /// set. Three gestures set it — a person's own keypress (the
-    /// board's `p`), a person's own Escape typed into the pane (see
+    /// board's `pause`), a person's own Escape typed into the pane (see
     /// `Dispatcher::park_after_interrupt`), and a lane `Dispatcher::
     /// escalate_clock` gave up on for going quiet — and [`Self::escalated`]
     /// is what tells the last of those apart from the first two once a lane
@@ -226,8 +226,8 @@ pub struct Frontmatter {
 
     /// Whether this task was parked by the dispatch tab's stop popup — its
     /// `interrupt them now`, which interrupts every running step as
-    /// dispatching stops — rather than by a person's own `p`, Escape in the
-    /// pane, or an escalation.
+    /// dispatching stops — rather than by a person's own board `pause`, Escape
+    /// in the pane, or an escalation.
     ///
     /// The one thing that sets a stop's parks apart from every other park:
     /// all of them write the same `parked_from`, and a restarted dispatcher
@@ -1063,7 +1063,7 @@ impl Task {
     /// Move to `stage` and log why, without banking a lap.
     ///
     /// For exactly one round trip: a person parking a task from the board
-    /// with `p`, and putting it back afterwards. Neither direction is a lap
+    /// with `pause`, and putting it back afterwards. Neither direction is a lap
     /// of anything — the task never left the step it was on, so counting one
     /// here would leave a `loop:` budget seeing an arrival no pipeline
     /// routed. See [`Task::set_stage`], which this deliberately does not

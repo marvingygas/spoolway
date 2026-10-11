@@ -1131,9 +1131,9 @@ pub enum QueueCommand {
     Add(QueueAddArgs),
 
     /// Interrupt any live agent lane the task owns, then park it on `paused`
-    /// — the same thing `p` does on the board for every state but one: a
-    /// running command step, which the board asks a person about with its
-    /// own confirm panel.
+    /// — the same thing `pause` in the board's options menu does for every
+    /// state but one: a running command step, which the board asks a person
+    /// about with its own confirm panel.
     ///
     /// A running command step is refused rather than acted on, unless
     /// `--force` says to kill it — a script has nobody there to answer that
@@ -1147,8 +1147,8 @@ pub enum QueueCommand {
     /// which `spoolway resume` refuses.
     Resume { task: String },
 
-    /// What the board's `u`/`U` keys do to a row, from a script: carry a
-    /// not-started task back to the pending directory, stripped
+    /// What `unqueue` in the board's options menu does to a row, from a
+    /// script: carry a not-started task back to the pending directory, stripped
     /// of every reserved key, so `queue add --from` takes it again
     /// unchanged.
     ///
@@ -1164,7 +1164,7 @@ pub struct QueueUnqueueArgs {
     /// Task id to unqueue. Omitted only with `--all`.
     pub task: Option<String>,
 
-    /// Every not-started task, the way the board's `U` does — with no
+    /// Every not-started task at once — with no
     /// per-task dependency check, since anything depending on the set has
     /// not started either and is in the set too. Refused together with
     /// `--force`, in either flag order: that pair would tear down every

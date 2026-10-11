@@ -140,7 +140,7 @@ pub(crate) fn system_prompt(
 ///
 /// The person bullets are fixed for every lane, gated or not, because
 /// composing happens once at launch and this file is all a pane has once the
-/// person in it starts talking: a `p` park from the board, a gate, or a step
+/// person in it starts talking: a `pause` from the board, a gate, or a step
 /// landing on `blocked` with nobody staffed to clear it all leave the same
 /// lane sitting in the same pane, and none of the three is knowable ahead of
 /// the turn that might cause it. They hold in a running pane too, so a lane's
@@ -912,7 +912,7 @@ pub(crate) fn carry_prompt(task: &Task, _pipeline: &Pipeline) -> String {
 /// Three gestures land a task on `paused` with `parked_from` set rather than
 /// a gate or a real block, and `escalated` — [`crate::task::Frontmatter::
 /// escalated`] — is what tells the third apart from the first two, which this
-/// answers for without knowing which of them it was: the board's `p` key,
+/// answers for without knowing which of them it was: the board's `pause`,
 /// and a person's own Escape typed straight into the pane — see
 /// [`crate::dispatch::Dispatcher::park_after_interrupt`]. Neither of those
 /// changed anything, so the `park` state says so, plainly, the opposite of

@@ -712,6 +712,32 @@ pub(crate) fn ask(title: &str, body: &[String], answers: &[String], cursor: usiz
     boxed(title, &full)
 }
 
+/// The line an [`options`] menu with no items shows instead of a list.
+pub(crate) const NOTHING_TO_DO: &str = "nothing to do here";
+
+/// A row's options menu: a popup titled `title` that lists `items`, each
+/// named by its verb alone, the cursor on the `cursor`th, closed on
+/// `[enter] confirm   [esc] close` like every popup that asks.
+///
+/// The items open straight under the title with no blank row: the menu
+/// has no body above its list for one to set apart. A menu with no items
+/// still opens, so `o` never seems to do nothing; it says
+/// [`NOTHING_TO_DO`] over `[esc] close`, since there is nothing for
+/// `enter` to confirm. That line is drawn plain, not dim: [`overlay`]
+/// counts a colour code as columns, which would push the box's right
+/// border out of line.
+pub(crate) fn options(title: &str, items: &[&str], cursor: usize) -> Vec<String> {
+    if items.is_empty() {
+        return panel(
+            title,
+            &[NOTHING_TO_DO.to_string()],
+            &keys(&[("esc", "close")]),
+        );
+    }
+    let items: Vec<String> = items.iter().map(|item| item.to_string()).collect();
+    boxed(title, &answer_rows(&items, cursor)[1..])
+}
+
 /// `cursor` moved by `key` over a list of `answers` answers: up or down
 /// one row, held at either end, and unchanged by any other key.
 pub(crate) fn move_cursor(cursor: usize, answers: usize, key: Key) -> usize {

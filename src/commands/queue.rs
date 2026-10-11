@@ -269,8 +269,8 @@ fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<R
 /// `blocked`, neither of which is an entry here: `paused_at` for a gate,
 /// `parked_from` for a park, and for a block the step [`crate::commands::
 /// resume_target`] reads back as the one it stopped on. A blocked task parked
-/// by `p` carries `parked_from: blocked`, which names no entry either, so it is
-/// marked at that same step.
+/// by `pause` carries `parked_from: blocked`, which names no entry either, so
+/// it is marked at that same step.
 fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
     let front = &task.front;
     // The step a block stopped the task on, or `None` when it never started.
@@ -531,7 +531,7 @@ fn queue_add_dry_run(
 }
 
 /// `spoolway queue unqueue <id>` / `--all`: the command form of the board's
-/// `u`/`U` keys — carry a not-started task back to the pending
+/// `unqueue` — carry a not-started task back to the pending
 /// directory, with every reserved key stripped, so `queue add --from` takes
 /// it again unchanged. The move itself is [`crate::status::unqueue_task`]
 /// (or, for `--all`, one call of it per not-started task) — this only adds
@@ -558,7 +558,7 @@ pub fn queue_unqueue(repo: &Repo, pipelines: &Pipelines, args: &QueueUnqueueArgs
     queue_unqueue_one(repo, pipelines, id, args.force)
 }
 
-/// `--all`: every not-started task, the way the board's `U` does — no
+/// `--all`: every not-started task at once — no
 /// per-task [`crate::status::depended_on_by_queued`] check, since anything
 /// depending on the set has not started either and is carried back in the
 /// same batch. Stops at the first one [`unqueue_or_bail`] cannot carry,
@@ -585,7 +585,7 @@ fn queue_unqueue_all(repo: &Repo) -> Result<()> {
 /// One task, named on the command line: [`crate::status::not_started`]
 /// carries it straight through [`unqueue_or_bail`], refusing a sibling
 /// still queued that names it in `depends_on` — this command has no panel to
-/// list a chain on, unlike the board's own `u`, which carries that
+/// list a chain on, unlike the board's own `unqueue`, which carries that
 /// dependent back to pending alongside it instead. Anything further along
 /// is refused unless `force` says to tear its checkout down first — see
 /// [`queue_unqueue_forced`] — and even then while a queued task depends on it.
@@ -662,8 +662,8 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
 }
 
 /// Write `id`'s task into pending through
-/// [`crate::status::unqueue_task`] — the same call the board's bare `u`/`U`
-/// make — then check the queue file is actually gone: that function is
+/// [`crate::status::unqueue_task`] — the same call the board's `unqueue`
+/// makes — then check the queue file is actually gone: that function is
 /// silent about a newer draft already sitting in pending, right for a
 /// keypress with a board to keep drawing but wrong for a script that named
 /// a task by hand and needs to know its unqueue did not happen.
@@ -741,7 +741,7 @@ fn queue_unqueue_forced(
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
         let name = crate::mux::lane_name(stage, id);
-        // Best-effort, the same as the board's own `p`: a lane that has
+        // Best-effort, the same as the board's own `pause`: a lane that has
         // already gone quiet on its own has nothing left to interrupt.
         let _ = mux.interrupt_lane(&name);
         println!("interrupted lane {stage}/{id}");
@@ -3177,19 +3177,19 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
 /// then park it on `paused` — always, not only when something was actually
 /// interrupted.
 ///
-/// The board's own `p` now parks unconditionally too — see
-/// `Board::begin_pause_cursor` — so the two agree on every state but one: a
-/// running command step. There, `p` opens a confirm panel and waits on a
+/// The board's own `pause` parks unconditionally too — see
+/// `Board::begin_pause` — so the two agree on every state but one: a
+/// running command step. There, `pause` opens a confirm panel and waits on a
 /// person to answer it, which a script has nobody to do; this refuses
 /// outright instead, unless `--force` says the caller already knows what it
 /// is choosing.
 ///
 /// Interrupting a live agent lane is best-effort and always allowed — an
 /// interrupted turn is not lost work, only a turn that ends early — the same
-/// trade `p` itself makes. A running *command* step is different: killing one
-/// throws away whatever it was doing, which is why the board asks first
-/// rather than acting outright. A script has nobody to ask, so this refuses
-/// instead, unless `--force` says the caller already knows what it is
+/// trade the board's `pause` makes. A running *command* step is different:
+/// killing one throws away whatever it was doing, which is why the board asks
+/// first rather than acting outright. A script has nobody to ask, so this
+/// refuses instead, unless `--force` says the caller already knows what it is
 /// choosing.
 pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
     let tasks = repo.tasks()?;
@@ -3202,7 +3202,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
         let name = crate::mux::lane_name(tasks[idx].stage(), tasks[idx].id());
-        // Best-effort, the same as the board's own `p`: a lane that has
+        // Best-effort, the same as the board's own `pause`: a lane that has
         // already gone quiet on its own has nothing left to interrupt.
         let _ = mux.interrupt_lane(&name);
     }
@@ -3214,12 +3214,12 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     if !running.is_empty() && !force {
         bail!(
             "`{id}` is running a command step (`{}`) — pass `--force` to stop it and \
-             pause, or use the board's `p` key to choose interactively",
+             pause, or pick `pause` from the board's options menu to choose interactively",
             running[0].step
         );
     }
 
-    // The same body the board's `p` runs, so a task already on `paused`
+    // The same body the board's `pause` runs, so a task already on `paused`
     // keeps the step it stopped on. The task is checked first because that
     // body is silent about one that left the queue, and this command must
     // not print `paused` for it.
@@ -5233,7 +5233,7 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 /// focused and a task actually highlighted under it, which is checked by the
 /// caller before this is reached. Never blocks: the pane runs the editor on
 /// its own, and the screen keeps redrawing and reading keys while it is
-/// open, the same non-blocking shape `Board::open_cursor` uses — this calls
+/// open, the same non-blocking shape the board's `open_task` uses — this calls
 /// through `crate::status::editor_command` rather than resolving
 /// `$VISUAL`/`$EDITOR` a second time.
 ///
@@ -9625,8 +9625,9 @@ mod tests {
     /// `queue pause` on a `blocked` task with the unblocker mid-turn
     /// interrupts that lane and parks the task, exactly as it already does
     /// for any other live step — gained through the same two predicates the
-    /// board's `p` reads, with no edit to `queue_pause` itself. `blocked_from`
-    /// survives untouched beside the fresh `parked_from: blocked`.
+    /// board's `pause` reads, with no edit to `queue_pause` itself.
+    /// `blocked_from` survives untouched beside the fresh
+    /// `parked_from: blocked`.
     #[test]
     fn queue_pause_interrupts_a_blocked_tasks_live_unblocker() {
         let (mut repo, _root_guard) = fixture("queue-pause-blocked");
@@ -10430,7 +10431,7 @@ mod tests {
     }
 
     /// `gate_at` is a task's to set, read by `commands::report` the same
-    /// way whoever wrote it by hand or the board's own `s` key would have —
+    /// way whoever wrote it by hand or the board's pause panel would have —
     /// though unlike `step.gate`, it catches whatever that step reports, not
     /// only its pass.
     #[test]
@@ -17860,7 +17861,7 @@ body\n";
     }
 
     /// `--all` carries every not-started task back at once, with no
-    /// dependency check between them — the board's own `U`, from a script.
+    /// dependency check between them.
     #[test]
     fn queue_unqueue_all_carries_every_not_started_task() {
         let (repo, _root_guard) = fixture("queue-unqueue-all");
@@ -17890,7 +17891,7 @@ body\n";
 
     /// A task on `queued` names a sibling that depends on it in the
     /// refusal — this command has no panel to carry the two back together,
-    /// unlike the board's own `u` — and a task the queue does not have
+    /// unlike the board's own `unqueue` — and a task the queue does not have
     /// names itself.
     #[test]
     fn queue_unqueue_refuses_a_queued_dependency_and_an_unknown_id() {
@@ -18451,8 +18452,8 @@ body\n";
         );
     }
 
-    /// A blocked task parked with `p` carries `parked_from: blocked`, which is
-    /// no entry here: it is marked at the step it was blocked on, while the
+    /// A blocked task parked with `pause` carries `parked_from: blocked`, which
+    /// is no entry here: it is marked at the step it was blocked on, while the
     /// resume line still names `blocked`, where unparking really lands it.
     #[test]
     fn route_marks_a_parked_block_at_the_step_it_blocked_on() {
