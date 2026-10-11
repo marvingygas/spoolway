@@ -1516,6 +1516,14 @@ mod tests {
             .runs
             .read_pid(key)
             .expect("the pid file the wrapper wrote is still there to read");
+        // The exit file is the wrapper's last write, so the run's subshell can
+        // still be exiting when `settle` returns, and on macOS `alive` asks
+        // `kill(2)`, which counts a zombie its parent has not reaped yet. A
+        // short grace absorbs both; the pane's own shell never ends at all.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::headless::alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(
             !crate::headless::alive(pid),
             "the pid recorded for `{key}` is still alive after the command it \
