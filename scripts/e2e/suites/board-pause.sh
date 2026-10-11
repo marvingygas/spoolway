@@ -606,6 +606,18 @@ if [ -n "$STUCK_PID" ]; then ok "the unblocker is really mid-turn on the blocked
 else bad "the unblocker is really mid-turn on the blocked row"; fi
 draws "the board draws the staffed blocked row" "stuck"
 
+# While the unblocker is mid-turn, a resume from the command line would start
+# a second lane in the same worktree and lose its verdict, so both commands
+# refuse and name the pause that takes the task from it.
+STUCK_FILE="$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+STUCK_BEFORE=$(cat "$STUCK_FILE")
+refuses "\`spoolway resume\` refuses a blocked task whose unblocker is live" \
+  "queue pause stuck" "$SPOOLWAY" resume stuck
+refuses "\`spoolway queue resume\` refuses it too" \
+  "queue pause stuck" "$SPOOLWAY" queue resume stuck
+if [ "$(cat "$STUCK_FILE")" = "$STUCK_BEFORE" ]; then ok "the refused resumes left the task file alone"
+else bad "the refused resumes left the task file alone"; fi
+
 press p
 
 draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"

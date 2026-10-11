@@ -3215,9 +3215,15 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     // The same body the board's `p` runs, so a task already on `paused`
     // keeps the step it stopped on. The task is checked first because that
     // body is silent about one that left the queue, and this command must
-    // not print `paused` for it.
-    repo.task(id)
+    // not print `paused` for it. `Repo::task` reads the archive too, so a
+    // task archived since the lookup above is named as gone, as that lookup
+    // would have named it.
+    let task = repo
+        .task(id)
         .with_context(|| format!("no queued task `{id}`"))?;
+    if task.path.starts_with(repo.archive_dir()) {
+        bail!("no queued task `{id}` — it finished and was archived");
+    }
     crate::status::park_under_lock(repo, id, crate::status::ParkedBy::QueuePause)?;
 
     // Stopped only once the task is on disk as paused. Between the kill and
@@ -3234,14 +3240,15 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
 }
 
 /// Whether `id` is still queued, or has a live agent lane or running command
-/// step. That is a superset of what `spoolway resume` refuses: a blocked task
-/// whose unblocker lane is live qualifies and is accepted — see `queue_resume`.
+/// step, or is claimed by the dispatcher for a boot. `spoolway resume` refuses
+/// the same set, so `queue_resume` hands it those tasks, a blocked task with
+/// its unblocker lane live or being booted among them.
 fn queued_or_running(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<bool> {
     let tasks = repo.tasks()?;
     let Some(idx) = tasks.iter().position(|t| t.id() == id) else {
         return Ok(false);
     };
-    if crate::status::not_started(&tasks[idx]) {
+    if crate::status::not_started(&tasks[idx]) || crate::claim::live(repo).contains_key(id) {
         return Ok(true);
     }
     let lanes = crate::mux::backend(repo)?.list_lanes().unwrap_or_default();
@@ -3272,9 +3279,10 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
             stage: None,
             message: None,
         };
-        // This is the whole resume, not only a check: a task on `blocked` with
-        // its unblocker lane live counts as running here, passes the guard, and
-        // is moved by it. Resuming it again below would send it to `queued`.
+        // Only a refusal comes back from here: each of these tasks is queued,
+        // or has a lane or command run live on its step, or is claimed by the
+        // dispatcher, and so is one `spoolway resume` turns away. That
+        // includes a `blocked` task whose unblocker lane is live.
         crate::commands::resume(repo, pipelines, &args, None)?;
     } else {
         crate::status::resume_task(repo, pipelines, id)?;
@@ -9761,11 +9769,10 @@ mod tests {
         assert_eq!(queued(&repo, "solo").stage(), "implement");
     }
 
-    /// A blocked task whose unblocker lane is live counts as running here, but
-    /// is still resumable: it must be moved onto its step once, not again onto
-    /// `queued` by a second resume.
+    /// A blocked task whose unblocker lane is live is refused, naming
+    /// `queue pause`, and its file is left exactly as it was.
     #[test]
-    fn queue_resume_moves_a_blocked_task_with_a_live_unblocker_once() {
+    fn queue_resume_refuses_a_blocked_task_with_a_live_unblocker() {
         let (mut repo, _root_guard) = fixture("queue-resume-blocked-live");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -9774,6 +9781,7 @@ mod tests {
         task.front.blocked_from = Some("implement".into());
         task.set_stage_unbanked(crate::pipeline::BLOCKED, "test setup");
         task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
         let (mux, name) = crate::status::testutil::live_headless_lane_at(
             &repo,
             "stuck",
@@ -9781,16 +9789,59 @@ mod tests {
             "unblocker",
         );
 
-        queue_resume(&repo, &pipelines, "stuck").unwrap();
+        let err = queue_resume(&repo, &pipelines, "stuck").unwrap_err();
         let _ = mux.interrupt_lane(&name);
 
-        let task = queued(&repo, "stuck");
-        assert_eq!(task.stage(), "implement");
-        assert!(
-            !task.body.contains("put back from the board"),
-            "resumed a second time: {}",
-            task.body
-        );
+        let said = format!("{err:#}");
+        assert!(said.contains("queue pause stuck"), "{said}");
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+    }
+
+    /// A blocked task the dispatcher has claimed, with no lane listed yet, is
+    /// refused: it is the unblocker's boot, and moving the task now would
+    /// start a second lane beside it.
+    #[test]
+    fn queue_resume_refuses_a_blocked_task_the_dispatcher_has_claimed() {
+        let (mut repo, _root_guard) = fixture("queue-resume-blocked-claimed");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = Some("implement".into());
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "test setup");
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let mut claims = crate::claim::Claims::new(&repo);
+        claims.claim("stuck", crate::pipeline::BLOCKED);
+
+        let err = queue_resume(&repo, &pipelines, "stuck").unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("queue pause stuck"), "{said}");
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+    }
+
+    /// An archived task is refused with "nothing to resume", and the archive
+    /// record is not rewritten.
+    #[test]
+    fn queue_resume_refuses_an_archived_task() {
+        let (repo, _root_guard) = fixture("queue-resume-archived");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "old", &[]);
+        let mut task = queued(&repo, "old");
+        task.set_stage("done", None);
+        task.save().unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let archived = repo.archive_dir().join("old.md");
+        std::fs::rename(&task.path, &archived).unwrap();
+        let before = std::fs::read_to_string(&archived).unwrap();
+
+        let err = queue_resume(&repo, &pipelines, "old").unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("nothing to resume"), "{said}");
+        assert_eq!(std::fs::read_to_string(&archived).unwrap(), before);
     }
 
     /// Without `--force`, a started task a queued task depends on is not told

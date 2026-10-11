@@ -334,7 +334,7 @@ spoolway queue pause <task> [--force]
 
 Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered. While a dispatcher runs, it routes on the pipelines that dispatcher loaded at start.
 
-A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
+A task that is still `queued`, has a live lane or running command on its step, or is `blocked` with an unblocker lane that is live or starting is refused. An archived task is refused with "nothing to resume". The refusals are the ones `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
 ### `spoolway queue unqueue <task>`
 
@@ -654,6 +654,8 @@ These tasks are refused, each with a message that names the reason and what to d
 |---|---|---|
 | On `queued` | Always | It starts on its own, so there is nothing to resume |
 | On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
+| On `blocked` while its unblocker lane is live or starting | Always | Run `spoolway queue pause <task>` to take the task from the unblocker first |
+| Archived | Always, with or without `--stage` | There is nothing to resume. Run `spoolway queue add` to queue a new task |
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
@@ -693,7 +695,7 @@ A `paused` task restarts the step it was parked or gated on. The command accepts
 |---|---|
 | On `queued` | It starts on its own. Run `spoolway queue pause <task>` to hold it back |
 | Paused by an issue-tracking hook | Run `spoolway resume <task>` |
-| On `done`, or on a step that ends the pipeline | Run `spoolway resume <task> --stage <step>` to run a step again |
+| On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
 | On a step that runs a command | Run `spoolway resume <task>`, because a command holds no conversation |
 

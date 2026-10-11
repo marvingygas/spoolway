@@ -266,6 +266,8 @@ lane without a session, set `blocked_session = false` in the config.
   both the gate and the blocked step. See [Gates](#gates).
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
+- `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
+  or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
 - `spoolway pipeline show` marks where each pipeline's `blocked` step comes from.
 
