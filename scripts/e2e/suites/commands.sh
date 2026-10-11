@@ -1218,6 +1218,59 @@ silent_about "config get in the main checkout does not see it" "from-the-worktre
 says "config path in the worktree names its own setup folder, not the project's" \
   "setup:     $WT/.spoolway" "$SPOOLWAY" -C "$WT" config path
 
+# Under `--json` the checkout note goes to stderr, so stdout is one value a
+# script can parse. `jq -e .` on two concatenated values would still pass,
+# so count the values instead.
+for JSON_CMD in "config path" "doctor"; do
+  # shellcheck disable=SC2086
+  JSON_OUT=$("$SPOOLWAY" -C "$WT" $JSON_CMD --json 2>/dev/null)
+  if [ "$(jq -s 'length' <<<"$JSON_OUT" 2>/dev/null)" = "1" ]; then
+    ok "$JSON_CMD --json in a linked worktree prints one JSON value"
+  else
+    bad "$JSON_CMD --json in a linked worktree prints one JSON value"
+    sed 's/^/        /' <<<"$JSON_OUT"
+  fi
+done
+JSON_NOTE=$("$SPOOLWAY" -C "$WT" config path --json 2>&1 >/dev/null)
+if jq -e --arg p "$WT" '.path == $p and .branch == "task/config-diff"' \
+  <<<"$JSON_NOTE" >/dev/null 2>&1; then
+  ok "and stderr still names the checkout's path and branch"
+else
+  bad "and stderr still names the checkout's path and branch"
+  sed 's/^/        /' <<<"$JSON_NOTE"
+fi
+# Every command that refuses `--json` must exit non-zero, say so on stderr
+# and leave stdout empty. The override commands are given arguments that
+# parse, so they reach the refusal and never open an editor.
+while IFS= read -r REFUSED; do
+  # shellcheck disable=SC2086
+  REFUSED_OUT=$("$SPOOLWAY" -C "$WT" $REFUSED --json 2>"$LIVE/refused.err")
+  REFUSED_STATUS=$?
+  if [ "$REFUSED_STATUS" -ne 0 ] && [ -z "$REFUSED_OUT" ] \
+    && grep -qF "has no JSON form" "$LIVE/refused.err"; then
+    ok "$REFUSED --json exits non-zero, prints nothing and says it has no JSON form"
+  else
+    bad "$REFUSED --json exits non-zero, prints nothing and says it has no JSON form"
+    sed 's/^/        /' "$LIVE/refused.err"
+  fi
+done <<'LIST'
+pipeline check
+pipeline override default --set impl.timeout=1
+prompt contract
+prompt list
+prompt override impl
+config show
+config get unattended.blocked_agent
+config contract
+config override
+template contract
+hook contract
+override contract
+group list
+sync
+queue add
+LIST
+
 BEFORE_ROOT=$(cat .spoolway/config.toml)
 BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
 OUT=$("$SPOOLWAY" -C "$WT" config set unattended.blocked_agent "should-not-land" 2>&1)

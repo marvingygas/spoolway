@@ -819,9 +819,13 @@ impl CheckoutNote {
     /// mockup exactly. `--json`: the same two facts as one line of JSON,
     /// with the path left absolute — a script reading it has no `$HOME` to
     /// resolve `~` against, and no reason to be handed one that does.
+    ///
+    /// The JSON form goes to stderr. A command's stdout under `--json` must
+    /// be one value a script can parse, and a note printed ahead of it on
+    /// stdout made two.
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string(self)?);
+            eprintln!("{}", serde_json::to_string(self)?);
         } else {
             println!("checkout: {} ({})", shorten_home(&self.path), self.branch);
         }

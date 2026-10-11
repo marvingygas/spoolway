@@ -28,7 +28,7 @@ checkout: ~/.spoolway/worktrees/checkout-line (task/checkout-line)
 
 In the main checkout nothing extra is printed. A linked worktree whose branch has no
 `.spoolway/` reads the main checkout's setup, and the line names the main checkout. Under `--json` the same line is one JSON
-object:
+object, written to stderr so that stdout stays one JSON value a script can parse:
 
 ```
 {"path":"/home/you/.spoolway/worktrees/checkout-line","branch":"task/checkout-line"}
@@ -36,8 +36,16 @@ object:
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
 override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
-`config show`, `config list`, `config get`, `config path`, `config override`, `doctor` and
-`sync`.
+`config show`, `config list`, `config get`, `config path`, `config override`, `doctor`, `jobs
+list` and `sync`.
+
+## Commands with no JSON form
+
+`--json` is global, but these commands only print text. With `--json` they exit non-zero and
+say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt contract`,
+`prompt list`, `prompt override`, `config show`, `config get`, `config contract`,
+`config override`, `template contract`, `hook contract`, `override contract`, `group list`,
+`sync` and `queue add` without `--from`.
 
 ## Your work
 

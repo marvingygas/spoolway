@@ -465,7 +465,7 @@ refused too, naming the step and the edit. `sync` never edits a step for you.
 
 Enter writes the files and prints the report `sync` always prints. Esc, ctrl-c, or the terminal
 going away mid-question writes nothing and prints "Nothing was changed." With no terminal to
-answer, under `--json`, inside a lane, with `--dry-run`, with `--replace`, or with nothing to
+answer, inside a lane, with `--dry-run`, with `--replace`, or with nothing to
 write, `sync` writes straight away and draws no panel.
 
 The report lists every refused file first, then every file written or removed, then one line

@@ -257,10 +257,12 @@ fn run() -> Result<()> {
         // file at all any more, and is handled above, before a project is
         // even discovered.
         Command::Config(ConfigCommand::Contract) => {
-            commands::config_contract(&Repo::discover(&cwd)?, cli.json)
+            commands::refuse_json("config contract", cli.json)?;
+            commands::config_contract(&Repo::discover(&cwd)?)
         }
         Command::Config(ConfigCommand::Show) => {
-            commands::config_show(&Repo::discover(&cwd)?, cli.json)
+            commands::refuse_json("config show", cli.json)?;
+            commands::config_show(&Repo::discover(&cwd)?)
         }
         Command::Config(ConfigCommand::List) => {
             commands::config_list(&Repo::discover(&cwd)?, cli.json)
@@ -272,7 +274,8 @@ fn run() -> Result<()> {
         // `commands::config_path_anywhere`.
         Command::Config(ConfigCommand::Path) => commands::config_path_anywhere(&cwd, cli.json),
         Command::Config(ConfigCommand::Get { key }) => {
-            commands::config_get(&Repo::discover(&cwd)?, key, cli.json)
+            commands::refuse_json("config get", cli.json)?;
+            commands::config_get(&Repo::discover(&cwd)?, key)
         }
         Command::Config(ConfigCommand::Set { key, value }) => {
             commands::config_set(&Repo::discover(&cwd)?, key, value)
@@ -287,6 +290,7 @@ fn run() -> Result<()> {
         // config.toml that no longer parses is exactly when you want it
         // open.
         Command::Config(ConfigCommand::Override) => {
+            commands::refuse_json("config override", cli.json)?;
             let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
             commands::config_override(&repo, home_error.as_ref())
         }
@@ -444,6 +448,9 @@ fn run() -> Result<()> {
                     commands::queue_route(&repo, routing(&graph)?, task, cli.json)
                 }
                 Command::Queue(QueueCommand::Add(args)) => {
+                    if args.from.is_empty() {
+                        commands::refuse_json("queue add", cli.json)?;
+                    }
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     // A running dispatcher's own pipelines, not the files —
                     // see `routing_for_task`. Handed over unread, because
@@ -481,11 +488,12 @@ fn run() -> Result<()> {
                     commands::pipeline_show(&repo, &read, cli.json)
                 }
                 Command::Pipeline(PipelineCommand::Check) => {
+                    commands::refuse_json("pipeline check", cli.json)?;
                     // Not `?`: `pipeline check` is the command that names a
                     // pipeline file that will not parse, so the load failure
                     // is handed in and reported rather than aborting it.
                     let read = Pipelines::load(&repo.checkout, &repo.config);
-                    commands::pipeline_check(&repo, read, cli.json)
+                    commands::pipeline_check(&repo, read)
                 }
                 Command::Pipeline(PipelineCommand::List) => {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
@@ -499,6 +507,7 @@ fn run() -> Result<()> {
                     commands::pipeline_contract(&repo, &read)
                 }
                 Command::Pipeline(PipelineCommand::Override(args)) => {
+                    commands::refuse_json("pipeline override", cli.json)?;
                     commands::pipeline_override(&repo, &args.name, &args.set)
                 }
                 Command::Pipeline(PipelineCommand::Copy(args)) => {
@@ -514,6 +523,7 @@ fn run() -> Result<()> {
                 // yet, and `prompt contract` exists to preview exactly that
                 // edit before it does.
                 Command::Prompt(PromptCommand::Contract(args)) => {
+                    commands::refuse_json("prompt contract", cli.json)?;
                     // Not plain `load`: a project with no pipelines yet
                     // gets a pointer to `pipeline contract` instead of a
                     // load failure — see `Pipelines::load_or_empty` and
@@ -522,18 +532,23 @@ fn run() -> Result<()> {
                     prompt::contract(&repo, &read, args)
                 }
                 Command::Prompt(PromptCommand::List) => {
+                    commands::refuse_json("prompt list", cli.json)?;
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
-                    prompt::list(&repo, &read, cli.json)
+                    prompt::list(&repo, &read)
                 }
                 Command::Prompt(PromptCommand::Show { name }) => prompt::show(&repo, name),
                 Command::Prompt(PromptCommand::Override { name }) => {
+                    commands::refuse_json("prompt override", cli.json)?;
                     commands::prompt_override(&repo, name)
                 }
                 Command::Prompt(PromptCommand::Copy(args)) => {
                     commands::prompt_copy(&repo, &args.from, &args.to, cli.json)
                 }
 
-                Command::Override(OverrideCommand::Contract) => commands::override_contract(),
+                Command::Override(OverrideCommand::Contract) => {
+                    commands::refuse_json("override contract", cli.json)?;
+                    commands::override_contract()
+                }
                 Command::Override(OverrideCommand::List) => {
                     commands::override_list(&repo, cli.json)
                 }
@@ -544,10 +559,19 @@ fn run() -> Result<()> {
                     commands::override_drop(&repo, args.target.as_deref())
                 }
 
-                Command::Template(TemplateCommand::Contract) => commands::template_contract(&repo),
-                Command::Hook(HookCommand::Contract) => commands::hook_contract(&repo),
+                Command::Template(TemplateCommand::Contract) => {
+                    commands::refuse_json("template contract", cli.json)?;
+                    commands::template_contract(&repo)
+                }
+                Command::Hook(HookCommand::Contract) => {
+                    commands::refuse_json("hook contract", cli.json)?;
+                    commands::hook_contract(&repo)
+                }
 
-                Command::Group(GroupCommand::List) => commands::group_list(&repo),
+                Command::Group(GroupCommand::List) => {
+                    commands::refuse_json("group list", cli.json)?;
+                    commands::group_list(&repo)
+                }
 
                 Command::Jobs(JobsCommand::Contract) => commands::jobs_contract(&repo, cli.json),
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
@@ -574,12 +598,10 @@ fn run() -> Result<()> {
                     crate::install::report(installed);
                     Ok(())
                 }
-                Command::Sync(args) => sync::run_asking(
-                    &repo,
-                    args,
-                    cli.json,
-                    std::env::var_os(dispatch::ENV_STEP).is_some(),
-                ),
+                Command::Sync(args) => {
+                    commands::refuse_json("sync", cli.json)?;
+                    sync::run_asking(&repo, args, std::env::var_os(dispatch::ENV_STEP).is_some())
+                }
             }
         }
     }

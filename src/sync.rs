@@ -192,7 +192,7 @@ fn closing_line(dry_run: bool, nothing_to_do: bool, refused: bool) -> &'static s
     }
 }
 
-pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
+pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     if repo.borrowed {
         bail!(
             "this linked worktree has no `.spoolway/` on its branch, so it reads the setup of {} \
@@ -211,7 +211,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     // about, and a lane running in a linked worktree needs to know which
     // checkout is about to be rewritten before it reads the report.
     if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
+        note.print(false)?;
         println!();
     }
 
@@ -417,12 +417,11 @@ enum Answer {
 /// `spoolway sync` as a person runs it: the files it is about to write or
 /// remove, drawn in a panel, and [`run`] only once enter says so. `run`
 /// itself never asks: this is the one place a person answers, and `--replace`,
-/// a script, `--json` and a lane all reach `run` without a question.
-pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, json: bool, in_lane: bool) -> Result<()> {
+/// a script and a lane all reach `run` without a question.
+pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, in_lane: bool) -> Result<()> {
     run_asking_with(
         repo,
         args,
-        json,
         in_lane,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
@@ -439,7 +438,6 @@ pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, json: bool, in_lane: bool
 fn run_asking_with(
     repo: &Repo,
     args: &SyncArgs,
-    json: bool,
     in_lane: bool,
     interactive: bool,
     input: &mut impl crate::screen::PollableRead,
@@ -448,12 +446,12 @@ fn run_asking_with(
     interrupt: impl FnOnce() -> SigintGuard,
 ) -> Result<()> {
     // Nobody to answer, or nothing to ask about: a script (the e2e suites run
-    // `sync` with no terminal), `--json`, and a lane — whose pane can carry a
+    // `sync` with no terminal) and a lane — whose pane can carry a
     // real terminal nobody is watching, so a panel parked there would hang
     // the step until its own timeout — write straight away. `--dry-run` writes nothing to ask
     // about, and `--replace` names its files on the command line already.
-    if !interactive || json || in_lane || args.dry_run || !args.replace.is_empty() {
-        return run(repo, args, json);
+    if !interactive || in_lane || args.dry_run || !args.replace.is_empty() {
+        return run(repo, args);
     }
     let dry = SyncArgs {
         dry_run: true,
@@ -462,7 +460,7 @@ fn run_asking_with(
     let outcomes = scan(repo, &dry)?;
     let (wrote, removed) = dedup_paths(&outcomes);
     if wrote.is_empty() && removed.is_empty() {
-        return run(repo, args, json);
+        return run(repo, args);
     }
     let notes = migration_notes(&outcomes);
     let keys = crate::screen::keys(&[("enter", "apply"), ("esc", "cancel")]);
@@ -490,7 +488,7 @@ fn run_asking_with(
         }
     };
     match answer {
-        Answer::Apply => run(repo, args, json),
+        Answer::Apply => run(repo, args),
         Answer::Cancel => {
             writeln!(out, "{CANCELLED}")?;
             Ok(())
@@ -2200,7 +2198,7 @@ mod tests {
         let (mut repo, root) = fixture("borrowed");
         repo.borrowed = true;
 
-        let err = run(&repo, &args(), false).expect_err("a borrowed setup is not this worktree's");
+        let err = run(&repo, &args()).expect_err("a borrowed setup is not this worktree's");
         let said = format!("{err:#}");
         assert!(
             said.contains("no `.spoolway/` on its branch")
@@ -2224,20 +2222,12 @@ mod tests {
     /// terminal and `SIGINT` guard, returning what it drew — the panel and
     /// the cancel line, never `run`'s report, which prints to the real
     /// stdout.
-    fn ask(
-        repo: &Repo,
-        args: &SyncArgs,
-        json: bool,
-        in_lane: bool,
-        tty: bool,
-        keys: &str,
-    ) -> String {
+    fn ask(repo: &Repo, args: &SyncArgs, in_lane: bool, tty: bool, keys: &str) -> String {
         let mut input = std::io::Cursor::new(keys.as_bytes().to_vec());
         let mut out = Vec::new();
         run_asking_with(
             repo,
             args,
-            json,
             in_lane,
             tty,
             &mut input,
@@ -2283,7 +2273,7 @@ mod tests {
         std::fs::write(&first.path, "stale, from an older release\n").unwrap();
 
         crate::platform::test_home::with_home(&home, || {
-            run(&repo, &args(), false).unwrap();
+            run(&repo, &args()).unwrap();
         });
 
         assert!(
@@ -2424,7 +2414,7 @@ mod tests {
         assert!(!config_dir.join(crate::config::CONFIG_FILE).exists());
 
         crate::platform::test_home::with_home(&home, || {
-            run(&repo, &args(), false).unwrap();
+            run(&repo, &args()).unwrap();
         });
 
         assert!(
@@ -2466,7 +2456,7 @@ mod tests {
         .unwrap();
 
         crate::platform::test_home::with_home(&home, || {
-            run(&repo, &args(), false).unwrap();
+            run(&repo, &args()).unwrap();
         });
 
         let config_after = std::fs::read_to_string(&config_path).unwrap();
@@ -2512,7 +2502,7 @@ mod tests {
     #[test]
     fn asking_sync_writes_only_once_enter_is_pressed() {
         let (repo, _root_guard) = fixture("ask-enter");
-        let drawn = ask(&repo, &args(), false, false, true, "q\r");
+        let drawn = ask(&repo, &args(), false, true, "q\r");
         assert!(drawn.contains(TITLE), "{drawn}");
         assert!(drawn.contains("config.toml"), "{drawn}");
         assert!(drawn.contains("[enter] apply"), "{drawn}");
@@ -2527,7 +2517,7 @@ mod tests {
     fn asking_sync_writes_nothing_on_esc_or_ctrl_c() {
         for (name, keys) in [("ask-esc", "\x1b"), ("ask-ctrl-c", "")] {
             let (repo, _root_guard) = fixture(name);
-            let drawn = ask(&repo, &args(), false, false, true, keys);
+            let drawn = ask(&repo, &args(), false, true, keys);
             assert!(drawn.contains(TITLE), "{name}: {drawn}");
             assert!(
                 drawn.ends_with(&format!("{CANCELLED}\n")),
@@ -2537,18 +2527,14 @@ mod tests {
         }
     }
 
-    /// No terminal, `--json` or a lane: written straight away with no panel
+    /// No terminal or a lane: written straight away with no panel
     /// and no key read — `keys` is empty, so a read would cancel and leave
     /// the config unwritten rather than pass by accident.
     #[test]
     fn asking_sync_writes_straight_away_with_nobody_to_answer() {
-        for (name, json, in_lane, tty) in [
-            ("ask-no-tty", false, false, false),
-            ("ask-json", true, false, true),
-            ("ask-lane", false, true, true),
-        ] {
+        for (name, in_lane, tty) in [("ask-no-tty", false, false), ("ask-lane", true, true)] {
             let (repo, _root_guard) = fixture(name);
-            let drawn = ask(&repo, &args(), json, in_lane, tty, "");
+            let drawn = ask(&repo, &args(), in_lane, tty, "");
             assert!(drawn.is_empty(), "{name}: {drawn}");
             assert!(Config::path_in(&repo.checkout).is_file(), "{name}");
         }
@@ -2563,11 +2549,11 @@ mod tests {
             dry_run: true,
             replace: Vec::new(),
         };
-        assert!(ask(&repo, &dry, false, false, true, "").is_empty());
+        assert!(ask(&repo, &dry, false, true, "").is_empty());
         assert!(!Config::path_in(&repo.checkout).exists());
 
-        run(&repo, &args(), false).unwrap();
-        assert!(ask(&repo, &args(), false, false, true, "").is_empty());
+        run(&repo, &args()).unwrap();
+        assert!(ask(&repo, &args(), false, true, "").is_empty());
     }
 
     fn outcome_lines(outcomes: &[Outcome]) -> Vec<String> {
@@ -3723,7 +3709,7 @@ mod tests {
         std::fs::write(&mine, "## Mine\n\nkeep me\n").unwrap();
         std::fs::write(&theirs, "## What to build\n\nAnything.\n").unwrap();
 
-        run(&repo, &args(), false).unwrap();
+        run(&repo, &args()).unwrap();
         let outcomes = scan(&repo, &args()).unwrap();
 
         assert_eq!(
@@ -4965,7 +4951,7 @@ mod tests {
         std::fs::create_dir_all(&repo.home).unwrap();
         std::fs::write(&stamp, "some-fingerprint /a/skill/SKILL.md\n").unwrap();
 
-        run(&repo, &args(), false).unwrap();
+        run(&repo, &args()).unwrap();
 
         assert!(!stamp.exists(), "a real sync must remove the old stamp");
     }
@@ -4985,7 +4971,6 @@ mod tests {
                 dry_run: true,
                 ..args()
             },
-            false,
         )
         .unwrap();
 
@@ -4997,7 +4982,7 @@ mod tests {
     #[test]
     fn sync_writes_no_sync_stamp() {
         let (repo, _root_guard) = fixture("no-sync-stamp");
-        run(&repo, &args(), false).unwrap();
+        run(&repo, &args()).unwrap();
         assert!(!repo.home.join("sync-stamp").exists());
     }
 }

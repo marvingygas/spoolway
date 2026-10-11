@@ -5285,7 +5285,7 @@ mod tests {
                 home: crate::mux::project_home(&root).unwrap(),
             };
 
-            crate::commands::pipeline_check(&repo, Ok(pipelines.clone()), false)
+            crate::commands::pipeline_check(&repo, Ok(pipelines.clone()))
                 .expect("the private pipeline and its private prompt must both check out");
             crate::commands::pipeline_list(&repo, &pipelines, false)
                 .expect("listing must not fail with a private pipeline present");
