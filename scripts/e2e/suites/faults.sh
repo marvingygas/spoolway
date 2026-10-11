@@ -491,7 +491,9 @@ poll_until 10 test -s "$LIVE/term.pid" || {
   printf '  \033[31mSETUP\033[0m the dispatcher on a terminal never started\n' >&2
   exit 2
 }
-if poll_until 20 grep -aqF 'start the run' "$TERM_LOG"; then printf '\r' >&8; fi
+# `↓` `enter` picks the gate's second answer, hiding what it shows, as
+# `screen_dispatch` does.
+if poll_until 20 grep -aqF 'hide until these change' "$TERM_LOG"; then printf '\033[B\r' >&8; fi
 TERM_PID=$(cat "$LIVE/term.pid")
 # `ps` prints `?` (or `??`) for a process with no controlling terminal.
 TERM_TTY=$(ps -o tty= -p "$TERM_PID" 2>/dev/null | tr -d ' ')
@@ -499,7 +501,6 @@ case "$TERM_TTY" in
   '' | '?' | '??' | '-') bad "the dispatcher's stdin is a terminal" ;;
   *) ok "the dispatcher's stdin is a terminal" ;;
 esac
-expect_fail D-2 cron-tool-prompt
 if await one gone 60; then ok "an unrelated task moves on while the job fires"
 else bad "an unrelated task moves on while the job fires"; fi
 lacks "the pass never waits on a key" "queue anyway" "$TERM_LOG"
@@ -507,7 +508,6 @@ if poll_until 20 test -f "$SPOOLWAY_PROJECT_HOME/queue/tick-1.md"; then
   has "and the job's task is queued with tracking off" "tracking: off" \
     "$SPOOLWAY_PROJECT_HOME/queue/tick-1.md"
 else bad "and the job's task is queued with tracking off (it was never queued)"; fi
-expect_fail_end
 kill -KILL "$TERM_PID" 2>/dev/null
 exec 8>&-
 forget tick-1
