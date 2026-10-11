@@ -261,8 +261,41 @@ MIDRUN_BODY="$WORK/midrun-body.md"
 task_body "$MIDRUN_BODY"
 task_doc midrun.md midrun "$MIDRUN_BODY" "group: midrun" "pipeline: t"
 must "a task for the mid-run edit queues" "$SPOOLWAY" queue add --from midrun.md
-# Long enough to make the edit and both checks below while the lane is up;
-# spent as it is read, so it holds only this one turn.
+
+# A second pipeline, and a task held at its gate, for the route check below.
+# Resuming a held gate sends the task on to the gate's `on_pass`.
+cat > .spoolway/pipelines/g.yml <<'YML'
+description: A gated step, then command steps that do nothing.
+
+steps:
+  - id: g1
+    description: The gate a task is held at.
+    agent: pi
+    model: fake-local
+    prompt: builder
+    gate: true
+    on_pass: gx
+    on_fail: blocked
+  - id: gx
+    description: The step the running dispatcher loaded after g1.
+    run: "true"
+    on_pass: done
+    on_fail: blocked
+YML
+{
+  echo "---"
+  echo "id: midrun-held"
+  echo "title: held at a gate"
+  echo "stage: paused"
+  echo "paused_at: g1"
+  echo "pipeline: g"
+  echo "group: midrun-held"
+  echo
+  echo "---"
+  cat "$MIDRUN_BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/midrun-held.md"
+# Long enough to make the edits and every check below while the lane, and so
+# the dispatcher, is up; spent as it is read, so it holds only this one turn.
 echo "linger:10" > "$MIDRUN_CTL/midrun.a"
 
 "$SPOOLWAY" dispatch >/dev/null 2>&1 &
@@ -283,7 +316,64 @@ cp .spoolway/pipelines/t.yml .spoolway/pipelines/u.yml
 task_doc midrun-new.md midrun-new "$MIDRUN_BODY" "group: midrun-new" "pipeline: u"
 refuses "queue add refuses a pipeline the running dispatcher never loaded" \
   "restart the dispatcher" "$SPOOLWAY" queue add --from midrun-new.md
-rm -f .spoolway/pipelines/u.yml
+# `queue list` draws a task the dispatcher cannot route as a row saying so,
+# naming the restart as `queue add`'s refusal does, and still lists the rest.
+# `queue add` refuses the same task, but the board's queue tab checks the
+# files rather than the dispatcher's copy, so a task sent from there reaches it.
+{
+  echo "---"
+  echo "id: midrun-unloaded"
+  echo "title: names a pipeline added since the start"
+  echo "stage: paused"
+  echo "paused_at: g1"
+  echo "pipeline: u"
+  echo "group: midrun-unloaded"
+  echo
+  echo "---"
+  cat "$MIDRUN_BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/midrun-unloaded.md"
+says "queue list names the restart for a task on a pipeline the dispatcher never loaded" \
+  "restart the dispatcher to use it" "$SPOOLWAY" queue list
+says "queue list still lists the other tasks" "midrun-held" "$SPOOLWAY" queue list
+rm -f .spoolway/pipelines/u.yml "$SPOOLWAY_PROJECT_HOME/queue/midrun-unloaded.md"
+
+# `queue route` and `queue list` name where resuming a held task goes, and
+# `spoolway resume` takes the task there. While a dispatcher runs, that is the
+# step its own copy of the pipeline names, so a gate whose `on_pass` was edited
+# since the start still resumes to the step the dispatcher loaded.
+cat > .spoolway/pipelines/g.yml <<YML
+steps:
+  - id: g1
+    agent: pi
+    model: fake-local
+    prompt: builder
+    gate: true
+    on_pass: gy
+    on_fail: blocked
+  - id: gy
+    run: "true"
+    on_pass: done
+    on_fail: blocked
+  - id: gx
+    run: "true"
+    on_pass: done
+    on_fail: blocked
+YML
+says "queue route names the step the running dispatcher resumes a held gate to" \
+  "sends it to gx" "$SPOOLWAY" queue route midrun-held
+silent_about "queue route does not name the step only the edited file has" \
+  "sends it to gy" "$SPOOLWAY" queue route midrun-held
+says "queue list names the step the running dispatcher resumes a held gate to" \
+  "→ gx" "$SPOOLWAY" queue list
+silent_about "queue list does not name the step only the edited file has" \
+  "→ gy" "$SPOOLWAY" queue list
+# A pipeline file half-saved mid-run does not stop `queue list`: the
+# dispatcher's copy is what it routes on.
+echo "steps: [" > .spoolway/pipelines/broken.yml
+says "queue list answers while a pipeline file does not parse" \
+  "→ gx" "$SPOOLWAY" queue list
+rm -f .spoolway/pipelines/broken.yml .spoolway/pipelines/g.yml \
+  "$SPOOLWAY_PROJECT_HOME/queue/midrun-held.md"
 
 # The run drains its one task and ends on its own. A task routed onto `x`
 # never does — the running dispatcher has no `x` to start — so a run still

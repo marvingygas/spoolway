@@ -409,6 +409,8 @@ When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `
 
 An `enter` the resume refuses leaves the picker open and prints the reason under the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
 
+When the board cannot route the task for an `r`, the picker lists no steps and shows the reason. Its key line offers only `esc`, which closes it.
+
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
 a command step kills the run, and the command runs again in full on resume.
 
@@ -470,12 +472,19 @@ While a dispatcher is running, these commands route a task on that copy and not 
 
 - `spoolway report`
 - `spoolway resume` and `spoolway queue resume`
+- `spoolway queue route`
 - `spoolway restart`
 - the `r` picker and the `s` key on the board
 - `spoolway queue add`
+- the NEXT column of the board and of `spoolway queue list`
 
-Each reads only the pipeline its own task names. With no dispatcher running, they read the
+Each reads only the pipelines its own tasks name. With no dispatcher running, they read the
 pipeline files.
+
+`spoolway queue route`, `spoolway queue list` and the board therefore name the step that
+`spoolway resume` takes. A task whose pipeline the running dispatcher did not load shows as
+`unknown`, with NEXT telling you to restart the dispatcher. While a dispatcher runs,
+`spoolway queue list` still answers when a pipeline file does not parse.
 
 An edit to a pipeline file changes nothing until the dispatcher restarts. A pipeline override
 follows the same rule: `spoolway pipeline override` writes a patch file, and the running

@@ -348,8 +348,10 @@ fn run() -> Result<()> {
             // checkout's own copy instead — that is what they are for.
             //
             // While a dispatcher runs, `report`, `resume`, `restart`, `queue
-            // resume` and `queue add` route on the copy it loaded instead of this — see
-            // `routing_for_task` and `crate::pipeline_snapshot`.
+            // resume`, `queue route` and `queue add` route on the copy it
+            // loaded instead of this, and `queue list` and the board's rows
+            // do the same per task — see `routing_for_task` and
+            // `crate::pipeline_snapshot`.
             //
             // Read here, but not *demanded* here: the failure is handed to
             // `routing` and lands at the call sites that actually route. Most
@@ -437,11 +439,15 @@ fn run() -> Result<()> {
                 // the grouped help instead.
                 Command::Screen => screen::shell::run(&repo, routing(&graph)?, &cwd),
                 Command::Queue(QueueCommand::List) => {
-                    commands::queue_list(&repo, routing(&graph)?, cli.json)
+                    let files = routing_for_rows(&repo, &graph)?;
+                    commands::queue_list(&repo, &files, cli.json)
                 }
                 Command::Queue(QueueCommand::Show { task }) => commands::queue_show(&repo, task),
                 Command::Queue(QueueCommand::Route { task }) => {
-                    commands::queue_route(&repo, routing(&graph)?, task, cli.json)
+                    // Routed as `spoolway resume` routes, so the destination
+                    // it prints is the one a resume takes.
+                    let routed = routing_for_task(&repo, &graph, Some(task))?;
+                    commands::queue_route(&repo, &routed, task, cli.json)
                 }
                 Command::Queue(QueueCommand::Add(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
@@ -602,9 +608,31 @@ fn routing(graph: &Result<Pipelines>) -> Result<&Pipelines> {
     graph.as_ref().map_err(|err| anyhow::anyhow!("{err:#}"))
 }
 
-/// The routing graph for a command that moves one task: the running
-/// dispatcher's own copy of that task's pipeline when a dispatcher is up, and
-/// [`routing`]'s files when none is — see [`pipeline_snapshot::for_task`].
+/// The files' pipelines for a reader that routes many tasks, such as `queue
+/// list`. While a dispatcher runs it routes every row on that dispatcher's
+/// copy and reads the files for none, so a pipeline file somebody half-saved
+/// mid-run must not refuse it: the files' failure is demanded only when no
+/// dispatcher runs, as for [`routing`]. In its place the reader gets the
+/// dispatcher's whole copy, a real graph to route on should that dispatcher
+/// stop before the reader looks again.
+fn routing_for_rows<'a>(
+    repo: &Repo,
+    graph: &'a Result<Pipelines>,
+) -> Result<std::borrow::Cow<'a, Pipelines>> {
+    match (graph, pipeline_snapshot::LoadedPipelines::live(repo)) {
+        (Ok(files), _) => Ok(std::borrow::Cow::Borrowed(files)),
+        (Err(_), Some(loaded)) => match loaded.pipelines(&loaded.names()) {
+            Ok(copy) => Ok(std::borrow::Cow::Owned(copy)),
+            Err(_) => routing(graph).map(std::borrow::Cow::Borrowed),
+        },
+        (Err(_), None) => routing(graph).map(std::borrow::Cow::Borrowed),
+    }
+}
+
+/// The routing graph for a command that moves one task, or names where
+/// resuming it goes: the running dispatcher's own copy of that task's
+/// pipeline when a dispatcher is up, and [`routing`]'s files when none is —
+/// see [`pipeline_snapshot::for_task`].
 fn routing_for_task<'a>(
     repo: &Repo,
     graph: &'a Result<Pipelines>,

@@ -279,7 +279,9 @@ spoolway queue list
 spoolway queue list --json
 ```
 
-`--json` prints the dispatcher's pid and one object per task.
+`--json` prints the dispatcher's pid and one object per task. While a dispatcher runs, NEXT is
+routed on the pipelines that dispatcher loaded at start. See [Editing a pipeline while it
+runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 ### `spoolway queue show <task>`
 
@@ -317,6 +319,8 @@ To send it to another step, in your own shell:
 The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
 
 `--json` prints the same facts as one object.
+
+While a dispatcher runs, the command routes on the pipelines that dispatcher loaded at start, so the step it names is the one `spoolway resume` takes.
 
 ### `spoolway queue pause <task>`
 

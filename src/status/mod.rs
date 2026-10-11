@@ -836,7 +836,10 @@ impl Board {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
         };
-        let rows = rows(repo, pipelines)?;
+        let rows = match rows(repo, pipelines) {
+            Ok(rows) => rows,
+            Err(err) => return self.refuse_resume(repo, &id, &err),
+        };
         let Some(row) = rows.iter().find(|r| r.id == id) else {
             return Ok(());
         };
@@ -846,6 +849,13 @@ impl Board {
         let Ok(task) = repo.task(&id) else {
             return Ok(());
         };
+        // The picker's `(next)` row must name the step `enter` resumes to,
+        // and `resume_task` routes on the dispatcher's copy of the pipelines.
+        let routed = match routed_for(repo, pipelines, &id) {
+            Ok(routed) => routed,
+            Err(err) => return self.refuse_resume(repo, &id, &err),
+        };
+        let pipelines = &*routed;
         if let Ok(crate::commands::ResumeRoad::Queued | crate::commands::ResumeRoad::HookDone) =
             crate::commands::resume_road(&task, pipelines)
         {
@@ -855,6 +865,30 @@ impl Board {
         // the queue every frame.
         let dependents = crate::dispatch::queue_dependents(repo, &task)?;
         self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines, dependents)?);
+        Ok(())
+    }
+
+    /// Opens the picker with no steps and `err` under it, for an `r` refused
+    /// before there was a list to draw: the board's own reading failed, or
+    /// the dispatcher's copy of the pipelines changed between that reading
+    /// and the key and now refuses the task. The dispatch loop drops an `Err` out of `on_key` without
+    /// a word, so returning it would leave a key that does nothing and says
+    /// nothing; the person gets the refusal, with its remedy, instead. Silent
+    /// about a task the queue no longer has, like `r` itself.
+    fn refuse_resume(&mut self, repo: &Repo, id: &str, err: &anyhow::Error) -> Result<()> {
+        let Ok(task) = repo.task(id) else {
+            return Ok(());
+        };
+        self.mode = BoardMode::ResumePicker(ResumePicker {
+            id: id.to_string(),
+            hold: Hold::of(&task),
+            header: format!("`{id}` cannot be resumed from the board right now."),
+            rows: Vec::new(),
+            listed: 0,
+            labelled: None,
+            cursor: 0,
+            error: Some(format!("{err:#}")),
+        });
         Ok(())
     }
 
@@ -3486,6 +3520,22 @@ fn build_rows(
     ledger: &[crate::usage::Entry],
     grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
+    // Every row's NEXT names the step a resume takes, and while a dispatcher
+    // runs `spoolway resume` takes it on the dispatcher's copy of the
+    // pipelines. So both readers of these rows — the board and `queue list`
+    // — route here, on each reading, rather than on whatever files their
+    // caller loaded: a dispatcher can start or stop while a board is open.
+    // A task naming a pipeline that dispatcher never loaded is drawn as an
+    // unroutable row in the loop below, so one such task does not stop the
+    // board redrawing every other.
+    let (routed, refused) = match crate::pipeline_snapshot::for_tasks(repo, tasks) {
+        Some(snapshot) => (
+            std::borrow::Cow::Owned(snapshot.pipelines),
+            snapshot.refused,
+        ),
+        None => (std::borrow::Cow::Borrowed(pipelines), BTreeMap::new()),
+    };
+    let pipelines = &*routed;
     // The dispatcher's own record of what it has started outside a lane. Built
     // once: it is a handle on a directory, and every task below asks it the
     // same question.
@@ -3506,6 +3556,10 @@ fn build_rows(
     let claims = crate::claim::live(repo);
     let mut rows: Vec<Row> = Vec::new();
     for task in tasks {
+        if let Some(refusal) = refused.get(task.id()) {
+            rows.push(unroutable_row(repo, tasks, graph, task, refusal));
+            continue;
+        }
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
         // Read off the graph this frame already built, for every step NEXT
@@ -4165,6 +4219,40 @@ fn cached_queue_in(
     tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems, parsed))
+}
+
+/// The row for a task the running dispatcher's copy of the pipelines cannot
+/// route, with `refusal` in NEXT.
+///
+/// Drawn from the task alone: its pipeline is the one thing nothing can read
+/// a step, a state or a destination from. It reads `unknown` and offers no
+/// resume, since `spoolway resume` refuses it with the same restart.
+fn unroutable_row(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    graph: &Graph,
+    task: &crate::task::Task,
+    refusal: &str,
+) -> Row {
+    Row {
+        id: task.id().to_string(),
+        group: task.front.group.clone(),
+        issue_url: issue_url_of(task),
+        after: stacked_after(repo, tasks, task),
+        stage: task.stage().to_string(),
+        arrivals: task.rounds_at(task.stage()),
+        pipeline: task.front.pipeline.clone().unwrap_or_default(),
+        state: State::Unknown,
+        depth: graph.depth(task.id()),
+        steps_left: 0,
+        dependents: graph.dependents(task.id()),
+        ctx: None,
+        out: None,
+        cost: None,
+        lane_time: None,
+        next: refusal.to_string(),
+        resumable: false,
+    }
 }
 
 /// The other group `task`'s own group stacks on, if any — the bare group its
@@ -9488,6 +9576,144 @@ mod tests {
         gate("running");
         resume_task(&repo, &edited, "running").unwrap();
         assert_eq!(repo.task("running").unwrap().stage(), loaded_next);
+    }
+
+    /// A gate passed at `implement`, on a board whose own graph was read
+    /// from files edited since the run started — `implement` passes to
+    /// `document` there, and to the builtin's own step in the dispatcher's
+    /// copy. Returns `(board's graph, dispatcher's copy, the step the copy
+    /// resumes to)`, and holds the project lock under a snapshot of the copy
+    /// until the returned guard drops.
+    fn gate_on_edited_pipeline(repo: &Repo, id: &str) -> (Pipelines, String, crate::lock::Lock) {
+        let loaded = Pipelines::builtin();
+        let loaded_next = loaded
+            .get("default")
+            .unwrap()
+            .step("implement")
+            .unwrap()
+            .on_pass
+            .clone()
+            .unwrap();
+        let mut edited = loaded.clone();
+        edited
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_pass = Some("document".into());
+        assert_ne!(loaded_next, "document", "the edit must change the route");
+
+        add_to(repo, id, &[], Some("implement"), Some(id));
+        let mut task = repo.task(id).unwrap();
+        task.front.paused_at = Some("implement".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(repo, &loaded).unwrap();
+        (edited, loaded_next, lock)
+    }
+
+    /// The `(next)` row the `r` picker preselects sits on the step `enter`
+    /// resumes to — the dispatcher's copy of the pipeline — and not on the
+    /// step the board's own, since edited, files name.
+    #[test]
+    fn the_resume_pickers_next_row_names_the_step_the_running_dispatcher_resumes_to() {
+        let (repo, _root_guard) = fixture("picker-next-on-snapshot");
+        let (edited, loaded_next, _lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let mut board = Board::for_test();
+        board.cursor = Some("gate".into());
+        board
+            .on_key(&repo, &edited, crate::screen::Key::Char('r'))
+            .unwrap();
+        let picker = open_picker(&board);
+        let next = picker.rows.iter().find(|row| row.next).unwrap();
+        assert_eq!(next.step, loaded_next);
+        assert_eq!(
+            picker.cursor,
+            picker.rows.iter().position(|r| r.next).unwrap()
+        );
+
+        press(&mut board, &repo, &edited, &[crate::screen::Key::Enter]);
+        assert_eq!(repo.task("gate").unwrap().stage(), loaded_next);
+    }
+
+    /// A row's NEXT — the board's column and `queue list`'s — names the step
+    /// `spoolway resume` takes: the dispatcher's copy while one runs, the
+    /// files once none does.
+    #[test]
+    fn a_rows_next_names_the_step_the_running_dispatcher_resumes_to() {
+        let (repo, _root_guard) = fixture("rows-next-on-snapshot");
+        let (edited, loaded_next, lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let next = |repo: &Repo| {
+            let rows = rows(repo, &edited).unwrap();
+            rows.iter().find(|r| r.id == "gate").unwrap().next.clone()
+        };
+        assert!(
+            next(&repo).ends_with(&format!("→ {loaded_next}")),
+            "{}",
+            next(&repo)
+        );
+        assert!(!next(&repo).contains("document"));
+
+        drop(lock);
+        assert!(next(&repo).ends_with("→ document"), "{}", next(&repo));
+    }
+
+    /// A task on a pipeline the running dispatcher never loaded — one the
+    /// board's own queue tab can still queue — is drawn as a row that says so,
+    /// and the reading goes on drawing every other task on the dispatcher's
+    /// copy. Failing the reading instead would stop the board redrawing.
+    #[test]
+    fn a_task_the_running_dispatcher_cannot_route_gets_a_row_that_says_so() {
+        let (repo, _root_guard) = fixture("row-unroutable-by-snapshot");
+        let (mut edited, loaded_next, _lock) = gate_on_edited_pipeline(&repo, "gate");
+        let default = edited.pipelines.get("default").unwrap().clone();
+        edited.pipelines.insert("added".into(), default);
+        add_to(&repo, "newcomer", &[], Some("implement"), Some("newcomer"));
+        let mut task = repo.task("newcomer").unwrap();
+        task.front.pipeline = Some("added".into());
+        task.save().unwrap();
+
+        let rows = rows(&repo, &edited).unwrap();
+        let row = rows.iter().find(|r| r.id == "newcomer").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(!row.resumable);
+        assert!(row.next.contains("restart the dispatcher"), "{}", row.next);
+        assert_eq!(row.pipeline, "added");
+        let gate = rows.iter().find(|r| r.id == "gate").unwrap();
+        assert!(
+            gate.next.ends_with(&format!("→ {loaded_next}")),
+            "{}",
+            gate.next
+        );
+    }
+
+    /// An `r` the dispatcher's copy refuses after the row was read — it
+    /// changed in between — opens the picker with the refusal rather than
+    /// doing nothing, and with only `esc` offered: there is no step to pick.
+    #[test]
+    fn a_refused_resume_opens_a_picker_that_shows_why_and_offers_only_esc() {
+        let (repo, _root_guard) = fixture("resume-refused-picker");
+        let (_edited, _, _lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let mut board = Board::for_test();
+        board
+            .refuse_resume(&repo, "gate", &anyhow::anyhow!("restart the dispatcher"))
+            .unwrap();
+        let picker = open_picker(&board);
+        assert_eq!(picker.error.as_deref(), Some("restart the dispatcher"));
+        assert!(picker.rows.is_empty());
+        let panel = view::resume_picker_panel(picker, None).join("\n");
+        assert!(panel.contains("restart the dispatcher"), "{panel}");
+        assert!(panel.contains("esc"), "{panel}");
+        assert!(!panel.contains("enter"), "{panel}");
+        assert_eq!(repo.task("gate").unwrap().stage(), crate::pipeline::PAUSED);
     }
 
     /// A task a stop parked and a person then resumed by hand, then parked
