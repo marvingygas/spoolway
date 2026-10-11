@@ -1906,12 +1906,14 @@ fn open_and_prefix(
         ToolGate::Answered { tracking_off } => tracking_off,
     };
     if tracking_off {
-        // Every route that can switch tracking off for a batch — the queue
-        // screen's `n` and the tool gate's `enter` — funnels through here,
-        // so this is the one place that needs to stamp it:
-        // `dispatch::route_reserved_stage` and `tracking_gate` read
+        // Every route that switches tracking off for a whole batch — the
+        // tool gate's `enter`, printed or in the queue screen's popup —
+        // funnels through here, so this is the one place that needs to stamp
+        // it: `dispatch::route_reserved_stage` and `tracking_gate` read
         // `Task::tracking_off` back to fire no hook for these tasks and never
-        // hold them waiting on one.
+        // hold them waiting on one. The issue question switches it off per
+        // group instead: `untrack_groups` stamps the ticked groups' tasks
+        // before they get here, and `open_tickets` passes them by.
         for task in tasks.iter_mut() {
             task.set_extra_str("tracking", "off");
         }
@@ -1994,8 +1996,9 @@ pub(crate) enum ToolGate {
     /// printing the gate again under the screen would draw it where no frame
     /// is, and take a second terminal guard inside the screen's. See
     /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
-    /// requirement was unmet and `enter` queued anyway, or when the queue
-    /// screen's [`Mode::IssueQuestion`] was answered `queue only`.
+    /// requirement was unmet and `enter` queued anyway. The issue question
+    /// never sets it — its ticked groups carry `tracking: off` on their own
+    /// tasks instead, see [`untrack_groups`].
     Answered { tracking_off: bool },
 }
 
@@ -2280,6 +2283,14 @@ fn tool_requirements_gate_with(
 /// the queue already carrying the prefix — `carry_to_pending` keeps `group:`
 /// as written — gets it exactly once, not stacked on again.
 ///
+/// A group whose every task in the batch sets `tracking: off` is skipped:
+/// no ticket opened for it, so no tracker key belongs in its names, even
+/// when a sibling of it already queued with one seeded the slug. The issue
+/// question's ticked groups reach here that way — see [`untrack_groups`].
+/// A group with only some of its tasks off still takes the prefix on all
+/// of them, so one hand-written `tracking: off` never splits a group across
+/// two `group:` names — see [`untracked_groups`].
+///
 /// Runs after [`open_tickets`] and before any task is saved. The `task/` ref
 /// namespace is kept, so `spoolway stack` and the orphaned-branch sweep still
 /// find these branches where they look today; the worktree directory follows
@@ -2297,10 +2308,14 @@ fn prefix_generated_names(
     // One line per distinct prefix applied, naming the new group — the rename
     // is invisible otherwise until somebody runs `git branch`.
     let mut announced: std::collections::BTreeSet<(String, String)> = Default::default();
+    let untracked = untracked_groups(tasks);
     for task in tasks.iter_mut() {
         let Some(group) = task.front.group.clone() else {
             continue;
         };
+        if untracked.contains(&group) {
+            continue;
+        }
         let Some(slug) = group_slug.get(&group) else {
             continue;
         };
@@ -2726,15 +2741,43 @@ fn record_slug_and_url(
 /// the first valid answer in dependency order. Run before a batch is saved
 /// (via [`prefix_generated_names`]) and again before [`write_back_ids`] on a
 /// mid-batch failure, so what lands on disk is the group's decision, never a
-/// later task's own raw answer.
+/// later task's own raw answer. A group whose every task sets `tracking:
+/// off` gets no `slug:`, as it gets no prefix — see
+/// [`prefix_generated_names`].
 fn stamp_group_slugs(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+    let untracked = untracked_groups(tasks);
     for task in tasks.iter_mut() {
         if let Some(group) = &task.front.group
+            && !untracked.contains(group)
             && let Some(slug) = group_slug.get(group)
         {
             task.set_extra_str("slug", slug);
         }
     }
+}
+
+/// The `group:` names in `tasks` whose every task sets `tracking: off` —
+/// the groups the slug prefix leaves bare. Judged per group rather than
+/// per task: a group is one name on the board, in `queue list` and in the
+/// dispatcher's group draining, so a lone hand-written `tracking: off`
+/// beside tracked siblings takes their prefix rather than stay behind
+/// under the bare name as a second group. Every ticked group on the issue
+/// question is whole, since [`untrack_groups`] stamps all of its tasks.
+fn untracked_groups(tasks: &[Task]) -> BTreeSet<String> {
+    let mut off: BTreeSet<String> = BTreeSet::new();
+    let mut on: BTreeSet<&str> = BTreeSet::new();
+    for task in tasks {
+        let Some(group) = task.front.group.as_deref() else {
+            continue;
+        };
+        if task.tracking_off() {
+            off.insert(group.to_string());
+        } else {
+            on.insert(group);
+        }
+    }
+    off.retain(|group| !on.contains(group.as_str()));
+    off
 }
 
 /// Whether `s` is an absolute `http`/`https` URL with a host.
@@ -3528,16 +3571,15 @@ enum Mode {
         then: Resume,
     },
     /// The question a submit stops at before any ticket is opened, with
-    /// issue tracking on — [`issue_question`]'s body, over
-    /// [`ISSUE_ANSWERS`] with the cursor on the `cursor`th. A ticket on a
-    /// public tracker is seen by other people and hard to take back, so
-    /// nothing reaches the hook until a person says yes here. `enter` on
-    /// `create and queue` runs `then` again and opens the tickets, on `queue
-    /// only` runs it with issue tracking switched off for it, and `esc` goes
-    /// back having queued nothing.
+    /// issue tracking on: a checklist of the batch's groups, each ticked
+    /// one left untracked for this run — see [`issue_question`] and
+    /// [`IssueChecklist`]. A ticket on a public tracker is seen by other
+    /// people and hard to take back, so nothing reaches the hook until a
+    /// person confirms here. `enter` runs `then` again, opening the
+    /// tickets of every group left unticked and queuing the ticked ones
+    /// with `tracking: off`, and `esc` goes back having queued nothing.
     IssueQuestion {
-        body: Vec<String>,
-        cursor: usize,
+        checklist: IssueChecklist,
         then: Resume,
     },
     /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
@@ -3704,42 +3746,160 @@ impl Resume {
 
 /// Whether a screen submit may still stop at the tool-requirements gate or
 /// the issue question, and how it answered them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Tracking {
     /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
     /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
     /// opened. Nothing is queued until each is answered.
     Ask,
-    /// The tool gate's answer, or `queue only` on the question: queue with
-    /// issue tracking switched off.
+    /// The tool gate's answer: queue the whole batch with issue tracking
+    /// switched off.
     Off,
-    /// `create and queue` on the question: open the tickets and queue.
-    Open,
+    /// `enter` on the question: open the tickets and queue, except for the
+    /// bare group names held here — the groups ticked on the checklist —
+    /// whose tasks queue with `tracking: off` instead. See
+    /// [`untrack_groups`].
+    Open(BTreeSet<String>),
 }
 
 /// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
 /// when it goes straight on: already answered, or every requirement met.
 /// `Open` has passed the gate on the way to the question.
-fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
-    if tracking != Tracking::Ask {
+fn tool_gate(repo: &Repo, tracking: &Tracking, then: Resume) -> Option<Mode> {
+    if *tracking != Tracking::Ask {
         return None;
     }
     tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
 }
 
-/// The issue question's answers, in its popup: open the tickets and queue,
-/// or queue with issue tracking switched off.
-const ISSUE_ANSWERS: [&str; 2] = ["create and queue", "queue only"];
+/// Stamp `tracking: off` on every task in `tasks` whose group the issue
+/// question's answer ticks. [`open_tickets`] then never hands those tasks to
+/// the hook, and [`prefix_generated_names`] leaves their names bare, as
+/// with tracking switched off for the whole batch. A no-op for any answer
+/// but [`Tracking::Open`].
+fn untrack_groups(tasks: &mut [Task], tracking: &Tracking) {
+    let Tracking::Open(untracked) = tracking else {
+        return;
+    };
+    for task in tasks.iter_mut() {
+        if untracked.contains(checklist_group(task)) {
+            task.set_extra_str("tracking", "off");
+        }
+    }
+}
 
-/// The issue question's popup, its cursor on the `cursor`th of
-/// [`ISSUE_ANSWERS`].
-fn issue_question_panel(body: &[String], cursor: usize) -> Vec<String> {
-    crate::screen::ask(
-        "issue tracking",
-        body,
-        &ISSUE_ANSWERS.map(str::to_string),
-        cursor,
-    )
+/// The row of the issue question `task` is counted under: its `group:`, or
+/// its own id for a task with none, which is a group of one everywhere the
+/// queue groups tasks — see [`crate::task::Frontmatter::group`].
+///
+/// The id is never reached on the screen: both submits run
+/// [`validate_batch`] before they ask, and [`parse_submission`] refuses a
+/// task with no `group:`. That matters for a routine, whose ids are minted
+/// afresh each time `enter` rebuilds the batch — a row keyed by a minted
+/// id could stop matching between the question and its answer, but its
+/// `group:` is written in the routine file and stays the same.
+fn checklist_group(task: &Task) -> &str {
+    task.front.group.as_deref().unwrap_or(task.id())
+}
+
+/// [`Mode::IssueQuestion`]'s state: the batch's groups that still have a
+/// ticket to open, in batch order, with how many of their tasks the batch
+/// queues; which of them are ticked to stay untracked; and the row the
+/// cursor is on. Nothing starts ticked, so an `enter` pressed out of habit
+/// opens every group's tickets.
+#[derive(Debug, Clone)]
+struct IssueChecklist {
+    groups: Vec<(String, usize)>,
+    ticked: BTreeSet<String>,
+    cursor: usize,
+}
+
+impl IssueChecklist {
+    /// `space`: tick the group under the cursor, or clear its tick.
+    fn toggle(&mut self) {
+        let Some((group, _)) = self.groups.get(self.cursor) else {
+            return;
+        };
+        if !self.ticked.remove(group) {
+            self.ticked.insert(group.clone());
+        }
+    }
+
+    /// `a`: tick every group, or clear every tick when all are ticked
+    /// already.
+    fn toggle_all(&mut self) {
+        if self.ticked.len() == self.groups.len() {
+            self.ticked.clear();
+        } else {
+            self.ticked = self.groups.iter().map(|(group, _)| group.clone()).collect();
+        }
+    }
+}
+
+/// The issue question's key row.
+const ISSUE_KEYS: &[(&str, &str)] = &[
+    ("enter", "confirm"),
+    ("space", "select"),
+    ("a", "select all"),
+    ("esc", "back"),
+];
+
+/// The issue question's own fixed rows: a blank, its heading and a blank
+/// over the list.
+const ISSUE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 3;
+
+/// The issue question's popup: a heading naming what a tick does, then one
+/// row per group of `checklist` — its tick and how many tasks it queues —
+/// with the cursor's own marked `>`. Rows are cut to `width` and the list
+/// scrolls inside `height` the way the trial picker's do — see
+/// [`checkbox_row_cap`], [`popup_height`] and [`scroll_rows`] — so a long
+/// group name or a batch of many groups never pushes the popup past the
+/// frame.
+fn issue_question_panel(
+    checklist: &IssueChecklist,
+    (width, height): (usize, Option<usize>),
+) -> Vec<String> {
+    let mut body = vec![
+        String::new(),
+        clip(
+            "Deactivate issue tracking for selected groups:".to_string(),
+            width,
+        ),
+        String::new(),
+    ];
+    // Names padded to one column, three spaces past the longest, so the
+    // counts line up.
+    let name_width = checklist
+        .groups
+        .iter()
+        .map(|(group, _)| group.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let rows: Vec<String> = checklist
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, (group, count))| {
+            let marker = if i == checklist.cursor { '>' } else { ' ' };
+            let tick = if checklist.ticked.contains(group) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let name = crate::screen::pad_to(group, name_width);
+            clip(
+                format!("{marker} {tick} {name}{}", plural(*count, "task")),
+                width,
+            )
+        })
+        .collect();
+    body.extend(scroll_rows(
+        &rows,
+        checklist.cursor,
+        list_room(height, ISSUE_CHROME_ROWS),
+    ));
+    panel("issue tracking", &body, &fit_keys(keys(ISSUE_KEYS), width))
 }
 
 /// How wide [`issue_body`] holds the issue popups' text: room for a
@@ -3748,11 +3908,11 @@ fn issue_question_panel(body: &[String], cursor: usize) -> Vec<String> {
 /// that come in.
 const ISSUE_BODY_WIDTH: usize = 54;
 
-/// A body for one of the issue popups — the question, the tickets opening,
-/// what was queued — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The
-/// three follow one another over the same spot, and holding them to one
-/// width keeps the box from jumping between them as each replaces the last,
-/// or growing a column every time a row comes in.
+/// A body for one of the issue popups — the tickets opening, what was
+/// queued — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The two
+/// follow one another over the same spot, and holding them to one width
+/// keeps the box from jumping as the second replaces the first, or growing
+/// a column every time a row comes in.
 fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut body = vec![" ".repeat(ISSUE_BODY_WIDTH)];
     body.extend(lines);
@@ -3765,36 +3925,36 @@ fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
 /// hook wrote back, which [`open_tickets`] reports `kept` and never hands
 /// the hook again.
 ///
-/// Lists every task in the batch and names the tracker — see
-/// [`crate::tracking::tracker`]. The count is the tickets still to open.
-fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
-    if tracking != Tracking::Ask || !crate::tracking::configured(repo) {
+/// One row per group with at least one task naming no `ticket:`, in batch
+/// order, counting every task of that group the batch queues. A group whose
+/// every task already names one has nothing for a tick to stop, so it is
+/// left off.
+fn issue_question(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
+    if *tracking != Tracking::Ask || !crate::tracking::configured(repo) {
         return None;
     }
-    let opening = tasks
-        .iter()
-        .filter(|task| task.extra_str("ticket").is_empty())
-        .count();
-    if opening == 0 {
-        return None;
-    }
-    let mut groups: Vec<&str> = Vec::new();
-    for group in tasks.iter().filter_map(|task| task.front.group.as_deref()) {
-        if !groups.contains(&group) {
-            groups.push(group);
+    let mut groups: Vec<(String, usize)> = Vec::new();
+    let mut opening: BTreeSet<&str> = BTreeSet::new();
+    for task in tasks {
+        let group = checklist_group(task);
+        match groups.iter_mut().find(|(name, _)| name == group) {
+            Some((_, count)) => *count += 1,
+            None => groups.push((group.to_string(), 1)),
+        }
+        if task.extra_str("ticket").is_empty() {
+            opening.insert(group);
         }
     }
-    let ask = format!(
-        "create {} on {} for {}",
-        plural(opening, "issue"),
-        crate::tracking::tracker(repo),
-        groups.join(", ")
-    );
-    let tasks = tasks.iter().map(|task| format!("  {}", task.id()));
-    let body = issue_body(std::iter::once(ask).chain(tasks));
+    groups.retain(|(group, _)| opening.contains(group.as_str()));
+    if groups.is_empty() {
+        return None;
+    }
     Some(Mode::IssueQuestion {
-        body,
-        cursor: 0,
+        checklist: IssueChecklist {
+            groups,
+            ticked: BTreeSet::new(),
+            cursor: 0,
+        },
         then,
     })
 }
@@ -4733,15 +4893,17 @@ fn run_screen_from(
                 Key::Esc => state.mode = then.back(),
                 _ => {}
             },
-            Mode::IssueQuestion { then, cursor, .. } => match key {
-                // Yes: the hook runs here, on this thread, and the tab under
-                // the question is held as it stands while it does — each
-                // ticket it answers is laid over that frame as it comes in.
-                // Whatever was typed while the hook ran is thrown away once it
-                // returns: the result popup takes `enter` only once it is on
-                // screen, never an `enter` pressed at the one still filling.
-                Key::Enter if *cursor == 0 => {
+            Mode::IssueQuestion { then, checklist } => match key {
+                // The hook runs here, on this thread, for every group left
+                // unticked, and the tab under the question is held as it
+                // stands while it does — each ticket it answers is laid over
+                // that frame as it comes in. Whatever was typed while the
+                // hook ran is thrown away once it returns: the result popup
+                // takes `enter` only once it is on screen, never an `enter`
+                // pressed at the one still filling.
+                Key::Enter => {
                     let then = then.clone();
+                    let tracking = Tracking::Open(checklist.ticked.clone());
                     let base = crate::repo::branch_at(cwd)?;
                     let at = Submitting {
                         repo,
@@ -4751,42 +4913,24 @@ fn run_screen_from(
                     };
                     let held = Held::new(&groups, &panes, &state);
                     let mut redraw = |panel: &[String]| held.draw(panel, writer, out);
-                    state.mode = resume(
-                        &at,
-                        &then,
-                        Tracking::Open,
-                        &mut groups,
-                        &mut state,
-                        &mut redraw,
-                    );
+                    state.mode = resume(&at, &then, tracking, &mut groups, &mut state, &mut redraw);
                     known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
                 }
-                // `queue only`: the same submit with issue tracking
-                // switched off, so the hook never runs.
-                Key::Enter => {
-                    let then = then.clone();
-                    let base = crate::repo::branch_at(cwd)?;
-                    let at = Submitting {
-                        repo,
-                        pipelines,
-                        base: &base,
-                        routines: &routines,
-                    };
-                    state.mode = resume(
-                        &at,
-                        &then,
-                        Tracking::Off,
-                        &mut groups,
-                        &mut state,
-                        &mut |_| {},
-                    );
-                    known_reading = known_reading.max(reader.started_count());
-                }
                 Key::Esc => state.mode = then.back(),
                 _ => {
-                    if let Mode::IssueQuestion { cursor, .. } = &mut state.mode {
-                        *cursor = crate::screen::move_cursor(*cursor, ISSUE_ANSWERS.len(), key);
+                    if let Mode::IssueQuestion { checklist, .. } = &mut state.mode {
+                        match key {
+                            Key::Char(' ') => checklist.toggle(),
+                            Key::Char('a') => checklist.toggle_all(),
+                            _ => {
+                                checklist.cursor = crate::screen::move_cursor(
+                                    checklist.cursor,
+                                    checklist.groups.len(),
+                                    key,
+                                );
+                            }
+                        }
                     }
                 }
             },
@@ -6952,7 +7096,10 @@ fn popup(
         Mode::Outcome { notice, .. } | Mode::JobSaved { notice, .. } => {
             Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
         }
-        Mode::IssueQuestion { body, cursor, .. } => Some(issue_question_panel(body, *cursor)),
+        Mode::IssueQuestion { checklist, .. } => Some(issue_question_panel(
+            checklist,
+            (checkbox_row_cap(layout), popup_height(layout)),
+        )),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
         Mode::Options(menu) => {
             let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
@@ -7093,7 +7240,9 @@ fn gate_steps_panel(
 
 /// Every popup on the queue and routines tabs that asks something, drawn
 /// once each with made-up content — for the test that walks every such
-/// popup in the project; see `crate::screen`'s own tests.
+/// popup in the project; see `crate::screen`'s own tests. The issue
+/// question and the trial picker are left out: each is a tick list that
+/// answers on keys of its own, not one answer picked under a cursor.
 #[cfg(test)]
 pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
     let steps = ["implement", "review", "handover"].map(str::to_string);
@@ -7110,10 +7259,6 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
         jobs: vec![("nightly-audit".to_string(), crate::jobs::Scope::User)],
     };
     vec![
-        (
-            "issue question",
-            issue_question_panel(&issue_body(["create 1 issue on github".to_string()]), 0),
-        ),
         ("issue tracking", tool_gate_panel(&[unmet])),
         (
             "gate picker",
@@ -7558,12 +7703,14 @@ fn begin_submission(
     if pending.is_empty() {
         return queued_panel(&[], &[], &not_queued, dispatcher_line(repo), None);
     }
-    if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
+    if let Some(gate) = tool_gate(repo, &tracking, Resume::Selection) {
         return gate;
     }
-    if let Some(question) = issue_question(repo, tracking, &pending, Resume::Selection) {
+    if let Some(question) = issue_question(repo, &tracking, &pending, Resume::Selection) {
         return question;
     }
+    let mut pending = pending;
+    untrack_groups(&mut pending, &tracking);
     let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
     let mut tickets = PopupTickets::new(&pending, redraw);
     let selected = state.selected.clone();
@@ -7595,8 +7742,7 @@ fn begin_submission(
 /// What [`finish_submit`] writes beside the batch itself: the tasks it
 /// came from, the branch it is based on, the groups it was selected as, the
 /// ids of the selected tasks it left out — see [`not_queued`] — and whether
-/// the tool-requirements gate or the issue question switched issue tracking
-/// off for it.
+/// the tool-requirements gate switched issue tracking off for all of it.
 struct Submit<'a> {
     tasks: &'a [(String, String)],
     base: &'a str,
@@ -8628,9 +8774,10 @@ pub(crate) fn queue_routine_target(
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
 /// comment on why that is a different list from the empty `tasks`.
 ///
-/// `tracking_off` is the answer of the tool-requirements gate or the issue
-/// question, asked already in the screen's own popup — see
-/// [`ToolGate::Answered`].
+/// `tracking_off` is the answer of the tool-requirements gate, asked
+/// already in the screen's own popup — see [`ToolGate::Answered`]. Groups
+/// ticked on the issue question already carry `tracking: off` on their own
+/// tasks — see [`untrack_groups`].
 fn finish_routine(
     repo: &Repo,
     tasks: &mut [Task],
@@ -8717,12 +8864,13 @@ fn finish_routine_mode(
         Focus::Groups => Resume::Routines(nav.clone()),
         Focus::Tasks => Resume::RoutineTask(nav.clone()),
     };
-    if let Some(gate) = tool_gate(repo, tracking, then.clone()) {
+    if let Some(gate) = tool_gate(repo, &tracking, then.clone()) {
         return gate;
     }
-    if let Some(question) = issue_question(repo, tracking, &tasks, then) {
+    if let Some(question) = issue_question(repo, &tracking, &tasks, then) {
         return question;
     }
+    untrack_groups(&mut tasks, &tracking);
     let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
     let mut tickets = PopupTickets::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
@@ -17035,6 +17183,59 @@ mod tests {
             assert_eq!(queued(&repo, "untracked").extra_str("ticket"), "");
         }
 
+        /// With `key_in_names` on, a hand-written `tracking: off` task takes
+        /// the slug prefix its tracked sibling's hook answered, so the group
+        /// keeps one `group:` name rather than splitting in two. Only a group
+        /// whose every task is off stays bare.
+        #[test]
+        fn a_tracking_off_task_beside_a_tracked_sibling_takes_the_prefix() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-prefix");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-7"; echo "slug=gh-7"; } >"$SPOOLWAY_OUT""#,
+            );
+            let tracked = write_doc(
+                &repo,
+                "tracked.md",
+                &task_text(
+                    "tracked",
+                    "group: search\ngroup_description: search\n",
+                    BODY,
+                ),
+            );
+            let untracked = write_doc(
+                &repo,
+                "untracked.md",
+                &task_text(
+                    "untracked",
+                    "group: search\ndepends_on: [tracked]\ntracking: off\n",
+                    BODY,
+                ),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&tracked, &untracked]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            for id in ["tracked", "untracked"] {
+                let task = queued(&repo, id);
+                assert_eq!(task.front.group.as_deref(), Some("gh-7-search"), "{id}");
+                assert_eq!(
+                    task.front.branch.as_deref(),
+                    Some(format!("task/gh-7-{id}").as_str()),
+                    "{id}"
+                );
+                assert_eq!(task.extra_str("slug"), "gh-7", "{id}");
+            }
+            assert_eq!(queued(&repo, "untracked").extra_str("ticket"), "");
+        }
+
         /// The group size the hook is told counts only the tasks that call
         /// it: a group of a `tracking: off` task and one tracked task is a
         /// group of one, so a hook opening an epic only above one opens none.
@@ -17885,7 +18086,7 @@ mod tests {
         /// The queue screen's `enter` is the third way a batch arrives, and
         /// it takes the same prefix: driven through `begin_submission` the
         /// way the screen's own tests do, with the issue question already
-        /// answered yes.
+        /// answered with nothing ticked.
         #[test]
         fn a_screen_submission_takes_the_prefix_like_queue_add() {
             let (mut repo, _root_guard) = fixture("open-screen-prefix");
@@ -17913,7 +18114,7 @@ mod tests {
                 "plan/demo",
                 &mut groups,
                 &mut state,
-                Tracking::Open,
+                Tracking::Open(BTreeSet::new()),
                 &mut |_| {},
             );
             assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
@@ -18277,6 +18478,86 @@ depends_on: [cart-empty-state]
                 (repo, root_guard)
             }
 
+            /// [`cart`], plus a second pending group `search` of one task.
+            /// The two are the pane's first two rows, so `" \x1b[B "`
+            /// selects both; which comes first depends on the files'
+            /// creation times — see [`shop_order`].
+            fn shop(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+                let (repo, root_guard) = cart(name);
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+",
+                        BODY,
+                    ),
+                );
+                (repo, root_guard)
+            }
+
+            /// [`shop`]'s two groups in the order the pane lists them, which is
+            /// the order the batch and the checklist take them in: newest
+            /// first, so it follows which file the filesystem dates later
+            /// and cannot be fixed by the fixture.
+            fn shop_order(repo: &Repo) -> Vec<String> {
+                listed(repo)
+                    .into_iter()
+                    .map(|group| group.name)
+                    .filter(|name| name == "cart" || name == "search")
+                    .collect()
+            }
+
+            /// The keys that move the checklist's cursor from its first row
+            /// onto `search`'s.
+            fn to_search(repo: &Repo) -> &'static str {
+                if shop_order(repo)[0] == "search" {
+                    ""
+                } else {
+                    "\x1b[B"
+                }
+            }
+
+            /// [`shop`]'s checklist rows as the popup draws them, in pane
+            /// order, with the cursor on `cursor` and `ticked` ticked.
+            fn shop_rows(repo: &Repo, cursor: &str, ticked: &[&str]) -> Vec<String> {
+                shop_order(repo)
+                    .iter()
+                    .map(|name| {
+                        let marker = if name == cursor { '>' } else { ' ' };
+                        let tick = if ticked.contains(&name.as_str()) {
+                            "[x]"
+                        } else {
+                            "[ ]"
+                        };
+                        let count = if name == "cart" { "2 tasks" } else { "1 task" };
+                        format!("{marker} {tick} {name:<9}{count}")
+                    })
+                    .collect()
+            }
+
+            /// The rows of the popup titled `title` in `frame`, each cut out
+            /// of its box and trimmed of the two-space indent [`boxed`]
+            /// draws, from the blank row under the title to the key row.
+            fn popup_rows(frame: &str, title: &str) -> Vec<String> {
+                frame
+                    .lines()
+                    .skip_while(|line| !line.contains(&format!("{TOP_LEFT}─ {title} ")))
+                    .skip(1)
+                    .take_while(|line| !line.contains(BOTTOM_LEFT))
+                    .map(|line| {
+                        let inner = line.split('│').nth(2).unwrap_or("");
+                        inner
+                            .strip_prefix("  ")
+                            .unwrap_or(inner)
+                            .trim_end()
+                            .to_string()
+                    })
+                    .collect()
+            }
+
             fn hook_calls(repo: &Repo) -> Vec<String> {
                 std::fs::read_to_string(repo.tracking_dir().join("calls.log"))
                     .unwrap_or_default()
@@ -18285,41 +18566,246 @@ depends_on: [cart-empty-state]
                     .collect()
             }
 
-            /// `enter` stops at the question before the hook runs: it lists
-            /// every task in the batch and names the tracker, over the tab.
+            /// `enter` stops at the question before the hook runs: a
+            /// checklist of the batch's groups, each counting the tasks it
+            /// queues, nothing ticked, over the tab.
             #[test]
-            fn enter_asks_before_the_hook_runs() {
-                let (repo, _root_guard) = cart("issue-question-asks");
-                let drawn = screen(&repo, listed(&repo), " \r");
+            fn enter_asks_with_a_checklist_of_groups_before_the_hook_runs() {
+                let (repo, _root_guard) = shop("issue-question-asks");
+                let drawn = screen(&repo, listed(&repo), " \x1b[B \r");
                 let frame = last_frame(&drawn);
-                assert!(
-                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
-                    "{frame}"
-                );
-                assert!(
-                    frame.contains("create 2 issues on open for cart"),
-                    "{frame}"
-                );
-                assert!(frame.contains("    cart-empty-state"), "{frame}");
-                assert!(frame.contains("    cart-totals"), "{frame}");
-                assert!(frame.contains("> create and queue"), "{frame}");
-                assert!(frame.contains("  queue only"), "{frame}");
-                assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
+                let first = shop_order(&repo)[0].clone();
+                let mut expected = vec![
+                    String::new(),
+                    "Deactivate issue tracking for selected groups:".to_string(),
+                    String::new(),
+                ];
+                expected.extend(shop_rows(&repo, &first, &[]));
+                expected.extend([
+                    String::new(),
+                    "[enter] confirm   [space] select   [a] select all   [esc] back".to_string(),
+                ]);
+                assert_eq!(popup_rows(frame, "issue tracking"), expected, "{frame}");
                 assert!(frame.contains("─ groups"), "the tab under it: {frame}");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
                 assert!(repo.queued_ids().is_empty());
             }
 
-            /// `queue only` queues the group with issue tracking off: no
-            /// hook call, no ticket, and a popup naming what it queued. `n`,
-            /// the letter that used to answer it, does nothing on the way.
+            /// The popup as drawn for a batch of three groups: nothing
+            /// ticked on open, one row ticked after `↓` and `space`, and
+            /// every row ticked by `a` — box, padding and key row exact.
             #[test]
-            fn queue_only_queues_with_no_hook_call() {
-                let (repo, _root_guard) = cart("issue-question-n");
-                let drawn = screen(&repo, listed(&repo), " \rn\x1b[B\r");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
+            fn the_checklist_draws_each_group_its_tick_and_its_count() {
+                let mut checklist = IssueChecklist {
+                    groups: vec![
+                        ("cart".to_string(), 3),
+                        ("checkout".to_string(), 2),
+                        ("search".to_string(), 1),
+                    ],
+                    ticked: BTreeSet::new(),
+                    cursor: 0,
+                };
+                let drawn = |checklist: &IssueChecklist| {
+                    issue_question_panel(checklist, (usize::MAX, None)).join("\n")
+                };
+                let frame = |rows: [&str; 3]| {
+                    [
+                        "╭─ issue tracking ─────────────────────────────────────────────────╮",
+                        "│                                                                  │",
+                        "│  Deactivate issue tracking for selected groups:                  │",
+                        "│                                                                  │",
+                        rows[0],
+                        rows[1],
+                        rows[2],
+                        "│                                                                  │",
+                        "│  [enter] confirm   [space] select   [a] select all   [esc] back  │",
+                        "╰──────────────────────────────────────────────────────────────────╯",
+                    ]
+                    .join("\n")
+                };
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│  > [ ] cart       3 tasks                                        │",
+                        "│    [ ] checkout   2 tasks                                        │",
+                        "│    [ ] search     1 task                                         │",
+                    ])
+                );
+
+                checklist.cursor = crate::screen::move_cursor(0, 3, Key::Down);
+                checklist.toggle();
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│    [ ] cart       3 tasks                                        │",
+                        "│  > [x] checkout   2 tasks                                        │",
+                        "│    [ ] search     1 task                                         │",
+                    ])
+                );
+
+                checklist.cursor = 0;
+                checklist.toggle_all();
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│  > [x] cart       3 tasks                                        │",
+                        "│    [x] checkout   2 tasks                                        │",
+                        "│    [x] search     1 task                                         │",
+                    ])
+                );
+            }
+
+            /// A batch of more groups than the frame has rows for scrolls
+            /// the list under the cursor, and a group name wider than the
+            /// frame is cut, so the popup never runs past the frame.
+            #[test]
+            fn the_checklist_scrolls_and_clips_inside_the_frame() {
+                let mut groups: Vec<(String, usize)> =
+                    (0..20).map(|i| (format!("group-{i:02}"), 1)).collect();
+                groups[0].0 = "a-very-long-group-name-that-runs-past-the-frame".to_string();
+                let checklist = IssueChecklist {
+                    groups,
+                    ticked: BTreeSet::new(),
+                    cursor: 10,
+                };
+                let height = 15;
+                let panel = issue_question_panel(&checklist, (40, Some(height)));
+                assert!(panel.len() <= height, "{}", panel.join("\n"));
+                let drawn = panel.join("\n");
+                assert!(drawn.contains("> [ ] group-10"), "{drawn}");
+                assert!(drawn.contains("↑"), "{drawn}");
+                assert!(drawn.contains("↓"), "{drawn}");
+                // Two borders and the two-space indent each side of the text.
+                assert!(
+                    panel.iter().all(|line| line.chars().count() <= 40 + 6),
+                    "{drawn}"
+                );
+            }
+
+            /// A group whose every task already names a `ticket:` has no
+            /// ticket left to open, so it is left off the list; with no
+            /// group left at all, `enter` queues without asking.
+            #[test]
+            fn a_group_with_every_ticket_named_is_left_off_the_list() {
+                let (repo, _root_guard) = shop("issue-question-ticketed");
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+ticket: \"#9\"
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), " \x1b[B \r");
+                let rows = popup_rows(last_frame(&drawn), "issue tracking");
+                assert_eq!(rows[3..5], ["> [ ] cart   2 tasks", ""], "{rows:?}");
+
+                // `search` alone: nothing to ask, queued straight away.
+                let keys = format!("{} \r", to_search(&repo));
+                let drawn = screen(&repo, listed(&repo), &keys);
+                assert!(!drawn.contains("issue tracking"), "{drawn}");
+                assert_eq!(
+                    repo.queued_ids(),
+                    BTreeSet::from(["search-box".to_string()])
+                );
+                assert!(hook_calls(&repo).is_empty());
+            }
+
+            /// `space` ticks the row under the cursor and clears it again;
+            /// `a` ticks every row, and clears every tick once all are
+            /// ticked.
+            #[test]
+            fn space_ticks_a_row_and_a_ticks_or_clears_them_all() {
+                let (repo, _root_guard) = shop("issue-question-ticks");
+                let rows = |input: &str| {
+                    let drawn = screen(&repo, listed(&repo), &format!(" \x1b[B \r{input}"));
+                    popup_rows(last_frame(&drawn), "issue tracking")[3..5].to_vec()
+                };
+                let order = shop_order(&repo);
+                let (first, second) = (order[0].as_str(), order[1].as_str());
+                assert_eq!(rows("\x1b[B "), shop_rows(&repo, second, &[second]));
+                assert_eq!(rows("\x1b[B  "), shop_rows(&repo, second, &[]));
+                let both = [first, second];
+                assert_eq!(rows("a"), shop_rows(&repo, first, &both));
+                // One already ticked: `a` ticks the rest rather than clearing.
+                assert_eq!(rows(" a"), shop_rows(&repo, first, &both));
+                assert_eq!(rows("aa"), shop_rows(&repo, first, &[]));
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
+            }
+
+            /// A ticked group queues with `tracking: off` and never reaches
+            /// the hook; the group left unticked opens its tickets as
+            /// before, in the same batch.
+            #[test]
+            fn enter_opens_tickets_only_for_the_groups_left_unticked() {
+                let (repo, _root_guard) = shop("issue-question-mixed");
+                let keys = format!(" \x1b[B \r{} \r", to_search(&repo));
+                screen(&repo, listed(&repo), &keys);
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                let search = queued(&repo, "search-box");
+                assert!(search.tracking_off());
+                assert_eq!(search.extra_str("ticket"), "");
+                for id in ["cart-empty-state", "cart-totals"] {
+                    let task = queued(&repo, id);
+                    assert!(!task.tracking_off(), "{id}");
+                    assert_ne!(task.extra_str("ticket"), "", "{id}");
+                }
+            }
+
+            /// With `key_in_names` on, a ticked group's names stay bare even
+            /// when a sibling of that group is already queued with a slug —
+            /// the slug that would otherwise prefix them.
+            #[test]
+            fn a_ticked_groups_names_take_no_slug_from_a_queued_sibling() {
+                let (mut repo, _root_guard) = shop("issue-question-bare");
+                repo.config.issue_tracking.key_in_names = true;
+                std::fs::write(
+                    repo.queue_dir().join("search-old.md"),
+                    "---\nid: search-old\ntitle: search-old\nstage: queued\n\
+                     group: gh-7-search\nslug: gh-7\nepic: \"#7\"\n---\nbody\n",
+                )
+                .unwrap();
+                // One chain with the queued sibling, as a group must be.
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+depends_on: [search-old]
+",
+                        BODY,
+                    ),
+                );
+                let keys = format!(" \x1b[B \r{} \r", to_search(&repo));
+                screen(&repo, listed(&repo), &keys);
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                let search = queued(&repo, "search-box");
+                assert_eq!(search.front.group.as_deref(), Some("search"));
+                assert_eq!(search.front.branch.as_deref(), Some("task/search-box"));
+                assert_eq!(search.extra_str("slug"), "");
+            }
+
+            /// Every group ticked queues the whole batch with issue tracking
+            /// off: no hook call, no ticket, and a popup naming what it
+            /// queued.
+            #[test]
+            fn every_group_ticked_queues_with_no_hook_call() {
+                let (repo, _root_guard) = cart("issue-question-all");
+                let drawn = screen(&repo, listed(&repo), " \ra\r");
+                assert!(
+                    hook_calls(&repo).is_empty(),
+                    "the hook ran for a ticked group"
+                );
                 let task = queued(&repo, "cart-totals");
                 assert_eq!(task.extra_str("ticket"), "");
+                assert!(task.tracking_off());
                 assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
 
                 let frame = last_frame(&drawn);
@@ -18412,7 +18898,7 @@ depends_on: [cart-empty-state]
             /// A hook answering `slug=` with `key_in_names` on prefixes the
             /// names, as the shipped `github.sh` does on every batch — and
             /// the result is still step 12: ticket rows, then what was
-            /// queued, the box held to the question's width, and no
+            /// queued, the box held to the issue popups' width, and no
             /// `opening issues` frame drawn once the last ticket is in.
             #[test]
             fn a_slug_answer_keeps_the_result_to_the_ticket_rows() {
@@ -18475,11 +18961,12 @@ depends_on: [cart-empty-state]
                     .take_while(|c| *c != TOP_RIGHT)
                     .count()
                     + 1;
-                assert_eq!(width, 60, "held to the question's width: {frame}");
+                assert_eq!(width, 60, "held to the issue popups' width: {frame}");
             }
 
-            /// Queuing a routine asks the same question, over the routines
-            /// pane, and `queue only` there queues it with no hook call.
+            /// Queuing a routine asks with the same checklist, over the
+            /// routines pane, and a ticked group there queues with no hook
+            /// call.
             #[test]
             fn queuing_a_routine_asks_the_same_question() {
                 let (repo, _root_guard) = cart("issue-question-routine");
@@ -18497,12 +18984,15 @@ group_description: audit
                 );
                 let drawn = routines_screen(&repo, " \r");
                 let frame = last_frame(&drawn);
-                assert!(
-                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
-                    "{frame}"
-                );
-                assert!(
-                    frame.contains("create 1 issue on open for nightly"),
+                let rows = popup_rows(frame, "issue tracking");
+                assert_eq!(
+                    rows[1..5],
+                    [
+                        "Deactivate issue tracking for selected groups:",
+                        "",
+                        "> [ ] nightly   1 task",
+                        "",
+                    ],
                     "{frame}"
                 );
                 assert!(
@@ -18511,9 +19001,63 @@ group_description: audit
                 );
                 assert!(repo.queued_ids().is_empty());
 
-                routines_screen(&repo, " \r\x1b[B\r");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
-                assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
+                routines_screen(&repo, " \r \r");
+                assert!(
+                    hook_calls(&repo).is_empty(),
+                    "the hook ran for a ticked group"
+                );
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                assert!(queued(&repo, ids.first().unwrap()).tracking_off());
+            }
+
+            /// `space` on the routines tab's tasks pane — one task queued
+            /// alone — asks with the same checklist, and its group left
+            /// unticked opens its ticket.
+            #[test]
+            fn queuing_one_routine_task_asks_the_same_question() {
+                let (repo, _root_guard) = cart("issue-question-routine-solo");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let drawn = routines_screen(&repo, "\t ");
+                let rows = popup_rows(last_frame(&drawn), "issue tracking");
+                assert_eq!(rows[3], "> [ ] nightly   1 task", "{rows:?}");
+
+                routines_screen(&repo, "\t \r");
+                assert_eq!(hook_calls(&repo).len(), 1);
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                let task = queued(&repo, ids.first().unwrap());
+                assert!(!task.tracking_off());
+                assert_ne!(task.extra_str("ticket"), "");
+            }
+
+            /// A routine task with no `group:` is refused before the
+            /// question opens, so no row is ever keyed by a minted id that
+            /// `enter` could mint afresh. With `audit-1` queued meanwhile, a
+            /// tick on it would match nothing in a rebuilt batch holding
+            /// `audit-2` and let the hook open the ticket it was set to
+            /// skip — see [`checklist_group`].
+            #[test]
+            fn a_routine_task_with_no_group_never_reaches_the_checklist() {
+                let (repo, _root_guard) = cart("issue-question-routine-no-group");
+                write_routine(&repo, "nightly", "audit", &task_text("audit", "", BODY));
+                let drawn = routines_screen(&repo, "\t ");
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("issue tracking"), "{frame}");
+                assert!(frame.contains("a task must set `group:`"), "{frame}");
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
             }
 
             /// A trial never asks and opens no tickets, as before.

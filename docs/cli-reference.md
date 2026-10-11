@@ -228,13 +228,36 @@ off` written onto every task, and `esc` returns to the queue screen with nothing
 scripts](configuration.md#the-shipped-hook-scripts).
 
 When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
-before it opens any ticket. The question names the tracker and lists every task in the batch.
-`enter` on `create and queue` opens the tickets and queues, `enter` on `queue only` queues the
-batch with `tracking: off` written onto every task instead, and `esc` returns to the queue screen
-with nothing queued. Once the hook
-runs, a popup fills in each task's row as the hook answers it and takes `enter` only once every
-row is done. Queueing a routine from the routines tab asks the same question. A trial never
-asks and opens no ticket. See
+before it opens any ticket. The popup is a checklist of the groups that skip issue tracking for
+this run:
+
+```
+╭─ issue tracking ─────────────────────────────────────────────────╮
+│                                                                  │
+│  Deactivate issue tracking for selected groups:                  │
+│                                                                  │
+│  > [ ] cart       3 tasks                                        │
+│    [ ] checkout   2 tasks                                        │
+│    [ ] search     1 task                                         │
+│                                                                  │
+│  [enter] confirm   [space] select   [a] select all   [esc] back  │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+Each row is a group with at least one task that has no `ticket:`. The count is how many of the
+group's tasks the batch queues. Nothing starts ticked.
+
+| Key | What it does |
+| --- | --- |
+| `space` | Ticks or clears the group under the cursor. |
+| `a` | Ticks every group, or clears every tick when all are ticked. |
+| `enter` | Queues the batch. A ticked group's tasks get `tracking: off` written onto them and never reach the hook. Every other group's tickets are opened. |
+| `esc` | Returns to the queue screen with nothing queued. |
+
+When no group has a task without a `ticket:`, no popup opens. Once the hook runs, a popup fills
+in each task's row as the hook answers it and takes `enter` only once every row is done.
+Queueing a routine from the routines tab asks the same question. A trial never asks and opens
+no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`

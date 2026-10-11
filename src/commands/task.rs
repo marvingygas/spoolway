@@ -174,10 +174,10 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "tracking",
         "Set to `off` — no other value is accepted — to run no \
          `[issue_tracking]` hook event for this task and never hold it \
-         waiting on one. Written automatically on every task in a batch \
-         whose issue question or tool-requirements gate was answered to \
-         decline tracking; write it by hand only to queue a task the same \
-         way without either prompt.",
+         waiting on one. Written automatically on every task of a group \
+         ticked on the issue question, and on every task in a batch whose \
+         tool-requirements gate was answered to decline tracking; write it \
+         by hand only to queue a task the same way without either prompt.",
     ),
     (
         "base",

@@ -471,13 +471,14 @@ must "the hook is restored to the plain one" \
 
 # ------------------------------------------ the queue tab asks before `open`
 # The queue tab's `enter` no longer runs the hook straight away: with
-# tracking on, it asks first — `create and queue` or `queue only`, picked with
-# the arrows and `enter`, `esc` to close — over every task in the batch. What only this suite can say
-# is that `queue only` really does keep the hook's process from ever starting: the
+# tracking on, it asks first, with a checklist of the batch's groups: `space`
+# ticks the group under the cursor, `a` ticks all, `enter` confirms, `esc`
+# goes back. A ticked group queues with tracking off. What only this suite
+# can say is that a ticked group really does keep the hook's process from ever starting: the
 # whole binary reading real keys off a pipe, against the real `open.sh` above,
 # which writes `tracking/task-file.<task>` on every `open` it is called for.
-# `enter` on the same question is the control — the same hook, the same
-# marker, written — so a marker missing after `queue only` is the question working, not
+# `enter` on the same question with nothing ticked is the control — the same
+# hook, the same marker, written — so a marker missing after a tick is the question working, not
 # a hook that never fires. One group in pending at a time, so the cursor opens
 # on it.
 pending_doc asked-a "$BODY" "group: asked" \
@@ -489,19 +490,18 @@ TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 ASK_ESC="$LIVE/ask-esc.out"
 on_screen ' \r\x1b' "$ASK_ESC"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_ESC"
 has "enter on the queue tab asks before any ticket is opened" \
-  "create 2 issues on open for asked" "$ASK_ESC"
+  "Deactivate issue tracking for selected groups:" "$ASK_ESC"
 has "in a popup over the queue tab" "╭─ issue tracking " "$ASK_ESC"
-has "listing every task in the batch" "asked-b" "$ASK_ESC"
-has "whose keys read as drawn" \
-  "> create and queue" "$ASK_ESC"
-has "and queue only under it" "queue only" "$ASK_ESC"
-has "under the shared key row" "[enter] confirm   [esc] close" "$ASK_ESC"
+has "listing the group with nothing ticked and its task count" \
+  "> [ ] asked   2 tasks" "$ASK_ESC"
+has "under the checklist's key row" \
+  "[enter] confirm   [space] select   [a] select all   [esc] back" "$ASK_ESC"
 works "esc queues nothing" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
 works "and leaves the group in pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/asked-a.md"
 works "and the hook was never called" \
   bash -c '[ ! -e "$1/task-file.asked-a" ] && [ ! -e "$1/task-file.asked-b" ]' _ "$TRACKING"
 
-# `n` used to answer `queue only`; now a letter answers nothing, so the
+# A letter answers nothing, so the
 # question stays up until `esc` closes it and nothing is queued.
 ASK_LETTER="$LIVE/ask-letter.out"
 on_screen ' \rn\x1b' "$ASK_LETTER"
@@ -512,8 +512,8 @@ works "and the hook was never called for it" \
   bash -c '[ ! -e "$1/task-file.asked-a" ]' _ "$TRACKING"
 
 ASK_N="$LIVE/ask-n.out"
-on_screen ' \r\x1b[B\r' "$ASK_N"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_N"
-works "queue only on the question queues the group" \
+on_screen ' \r \r' "$ASK_N"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_N"
+works "ticking the group on the question queues it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
 works "the whole of it" test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-b.md"
 works "with no hook call for either task" \
@@ -535,8 +535,8 @@ has "whose ticket landed on the task" "ticket: acme/app#" \
 has "and the result popup names what was created" "╭─ issues created " "$ASK_YES"
 
 # -------------------------------------------- tracking off: no hook, ever
-# `queue only` above proved the hook never runs at `open`. This is this task's own
-# acceptance criterion: `queue only` also stamps `tracking: off` onto the queued task
+# Ticking a group above proved the hook never runs at `open`. This is this task's own
+# acceptance criterion: a ticked group also stamps `tracking: off` onto the queued task
 # (`commands::queue::open_and_prefix`), and the dispatcher reads that back —
 # the same way it already reads a trial arm's `trial:` — to fire no
 # `[issue_tracking]` event for it on `queued`, `started` or `done` either,
@@ -550,8 +550,8 @@ must "the hook is switched to the one that marks every event, for this case" \
 pending_doc declined-tracking "$BODY" "group: declined-tracking" \
   "group_description: a task queued with tracking declined, driven to done"
 DECLINED_OUT="$LIVE/declined-tracking.out"
-on_screen ' \r\x1b[B\r' "$DECLINED_OUT"; sed -i 's/\x1b\[[0-9;]*m//g' "$DECLINED_OUT"
-has "the question, answered n, queues the task" "queued 1 task" "$DECLINED_OUT"
+on_screen ' \r \r' "$DECLINED_OUT"; sed -i 's/\x1b\[[0-9;]*m//g' "$DECLINED_OUT"
+has "the question, with its group ticked, queues the task" "queued 1 task" "$DECLINED_OUT"
 has "with tracking: off stamped onto it" "tracking: off" \
   "$SPOOLWAY_PROJECT_HOME/queue/declined-tracking.md"
 
@@ -575,11 +575,11 @@ works "and no tracking/ bookkeeping file exists for it at all" \
 # ticket opened, sat at `queued` with the dispatcher stopped until the
 # `drive` above started one reading `record.sh`. Same dispatcher, same hook,
 # tracking on — so its `queued` marker is what the declined task's missing
-# one is measured against. `asked-a`, declined through the same `queue only`, is the
+# one is measured against. `asked-a`, ticked through the same checklist, is the
 # screen's two-task batch getting the same treatment.
 works "the control: a tracking-on task in the same run did fire the queued hook" \
   test -e "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md.env.queued"
-works "while asked-a, declined through the same n, fired none" \
+works "while asked-a, ticked through the same checklist, fired none" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md.env.queued"
 
 must "the hook is switched back to the one that only answers open" \

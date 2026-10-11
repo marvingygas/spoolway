@@ -407,7 +407,7 @@ spoolway to an issue tracker. No pipeline file names a tracker.
 |---|---|---|
 | `hook` | blank | A bare file name inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`), such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
-| `key_in_names` | `true` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. With no hook configured, or a blank `hook`, there is no slug to prefix with, so this changes nothing either way. |
+| `key_in_names` | `true` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. A group whose every task in the batch sets `tracking: off` gets no prefix. With no hook configured, or a blank `hook`, there is no slug to prefix with, so this changes nothing either way. |
 
 A project whose `config.toml` already spells out `key_in_names = false` keeps that value; the
 new default only applies where the key is absent. Delete the line, or set it to `true`, to pick
@@ -491,12 +491,20 @@ The submission is refused, naming the group, when no task in a group sets
 `group_description:`. A group whose tasks in the submission all set `tracking: off` and name
 no `ticket:` needs none.
 
-On the queue screen, `enter` asks before any of this runs. The question names the tracker,
-the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
-every task in the batch: `enter` on `create and queue` creates the tickets and queues, `enter` on `queue only` queues the batch with
-`tracking: off` written onto every task instead, and `esc` goes back with nothing queued.
-Queueing a routine asks the same question. A trial never asks and opens no ticket. See
-[`spoolway queue`](cli-reference.md#spoolway-queue) and
+On the queue screen, `enter` asks before any of this runs, with a checklist headed
+`Deactivate issue tracking for selected groups:`. It lists every group in the batch that has a
+task with no `ticket:`, with how many of its tasks the batch queues. Nothing starts ticked.
+
+| Key | What it does |
+| --- | --- |
+| `space` | Ticks or clears the group under the cursor. |
+| `a` | Ticks every group, or clears every tick when all are ticked. |
+| `enter` | Queues the batch. Every task of a ticked group gets `tracking: off` and never reaches the hook. Every other group's tickets are created. |
+| `esc` | Goes back with nothing queued. |
+
+Ticks are not remembered, so the next `enter` asks again with nothing ticked. A ticked group's
+names get no `key_in_names` prefix. Queueing a routine asks the same question. A trial never
+asks and opens no ticket. See [`spoolway queue`](cli-reference.md#spoolway-queue) and
 [`tracking`](tasks.md#the-frontmatter-is-spoolways).
 
 The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
