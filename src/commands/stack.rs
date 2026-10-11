@@ -1123,10 +1123,15 @@ fn owner_repo(worktree: &Path) -> Result<(String, String)> {
 }
 
 /// `owner/repo` out of an `origin` remote, whether it is spelled
-/// `git@github.com:owner/repo.git` or `https://github.com/owner/repo`.
+/// `git@github.com:owner/repo.git`, `https://github.com/owner/repo` or through
+/// an SSH host alias such as `git@github.com-work:owner/repo.git`.
 fn parse_owner_repo(url: &str) -> Option<(String, String)> {
     let stripped = url.trim().trim_end_matches(".git");
     let (_, after) = stripped.split_once("github.com")?;
+    // An alias (`github.com-work`, the usual way to hold two GitHub accounts)
+    // keeps going after `github.com` until the `:` or `/` that opens the path;
+    // skipping it keeps the alias out of the owner.
+    let after = &after[after.find([':', '/'])?..];
     let after = after.trim_start_matches([':', '/']);
     let (owner, repo) = after.split_once('/')?;
     Some((owner.to_string(), repo.to_string()))
@@ -1330,6 +1335,18 @@ mod tests {
             Some(("marvingygas".to_string(), "spoolway".to_string()))
         );
         assert_eq!(parse_owner_repo("https://gitlab.com/a/b"), None);
+    }
+
+    /// An `origin` spelled through an SSH host alias such as
+    /// `github.com-work` (the usual way to hold two GitHub accounts) names
+    /// the owner and repo in the path after the alias host, so the owner
+    /// is `o` and the repo is `r`.
+    #[test]
+    fn owner_repo_reads_the_path_after_an_ssh_host_alias() {
+        assert_eq!(
+            parse_owner_repo("git@github.com-work:o/r.git"),
+            Some(("o".to_string(), "r".to_string()))
+        );
     }
 
     /// An open task of another group whose `branch:` was stamped at queue

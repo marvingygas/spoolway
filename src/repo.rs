@@ -3580,10 +3580,10 @@ fn read_or_mint(
 /// for adding an object to repository database`, and `chmod a-w
 /// <repo>/.git/refs` fails the following `git commit` with `cannot lock ref
 /// 'HEAD'`. A grant of `--git-dir` alone would leave both writes refused.
-/// `--git-common-dir` answers the directory that holds both — and, since
-/// `<repo>/.git/worktrees/<name>` nests inside it, the one grant covers
-/// `index.lock` too, without needing to also assemble that name from
-/// `cut_worktree`'s own bookkeeping.
+/// `--git-common-dir` answers the directory that holds both. It does not
+/// cover the worktree's own index: codex's sandbox keeps
+/// `<repo>/.git/worktrees/<name>` read-only although it nests inside this
+/// directory, so a lane is granted [`worktree_git_dir`] as well.
 ///
 /// For a borrowed checkout — one a lane's workspace was pointed at rather
 /// than one `cut_worktree` made — `worktree` is the main checkout or a
@@ -3597,6 +3597,31 @@ pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .with_context(|| format!("resolving the git directory for {}", worktree.display()))?;
+    Ok(git_path(&out))
+}
+
+/// The git directory `worktree` itself owns: `<repo>/.git/worktrees/<name>`
+/// for a linked worktree, where its `index` and `index.lock` live, and the
+/// repo's own `.git` for a main checkout or a borrowed one.
+///
+/// [`git_dir`] cannot answer this. codex's `workspace-write` sandbox made
+/// `<repo>/.git/worktrees/<name>` read-only even with the shared `.git` it
+/// nests inside granted, so `git add` failed creating `index.lock` there. A
+/// lane is granted this directory as well. Outside a linked worktree it is
+/// the same path as [`git_dir`]'s, so the grant repeats one directory rather
+/// than naming an empty or missing one.
+pub fn worktree_git_dir(worktree: &Path) -> Result<PathBuf> {
+    let out = run(
+        worktree,
+        "git",
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    )
+    .with_context(|| {
+        format!(
+            "resolving the worktree's own git directory for {}",
+            worktree.display()
+        )
+    })?;
     Ok(git_path(&out))
 }
 
@@ -4413,12 +4438,13 @@ mod tests {
     /// A linked worktree's own git dir, `.git/worktrees/<name>`, holds
     /// `index.lock` — but not the objects a `git add` writes or the branch
     /// ref a `git commit` moves, which live in the main checkout's shared
-    /// `.git` instead. So the grant a lane needs is the *main* checkout's
-    /// `.git`, whether it is asked of the linked worktree or of the main
-    /// checkout itself — the two resolve to the one path a real commit made
-    /// from inside the linked worktree actually writes into, existing and
-    /// identical either way, never a `worktrees/<name>` path that holds only
-    /// half of what a commit needs.
+    /// `.git` instead. So the grant that covers those two writes is the
+    /// *main* checkout's `.git`, whether it is asked of the linked worktree
+    /// or of the main checkout itself — the two resolve to the one path a
+    /// real commit made from inside the linked worktree actually writes
+    /// into, existing and identical either way, never a `worktrees/<name>`
+    /// path that holds only half of what a commit needs. A codex lane is
+    /// granted the worktree's own directory as well (`worktree_git_dir`).
     #[test]
     fn git_dir_resolves_a_linked_worktree_to_the_shared_main_git_dir() {
         let (_origin, work, _base_guard) = fixture("git-dir");

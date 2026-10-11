@@ -371,6 +371,12 @@ fn sample_placeholders(session: &str) -> std::collections::BTreeMap<&'static str
         // `crate::repo::git_dir`. The main checkout's own `.git`, shared by
         // every worktree of the repo, not a `worktrees/<task>` subdirectory.
         ("git_dir", "/<repo>/.git".to_string()),
+        // The worktree's own git directory — see
+        // `crate::repo::worktree_git_dir`.
+        (
+            "worktree_git_dir",
+            "/<repo>/.git/worktrees/<task>".to_string(),
+        ),
     ])
 }
 
@@ -768,6 +774,7 @@ fn agent_verify_live(
     // Falls back to the literal path a fresh `git init` would have produced
     // if that init above was swallowed and never ran.
     let git_dir = crate::repo::git_dir(&dir).unwrap_or_else(|_| dir.join(".git"));
+    let worktree_git_dir = crate::repo::worktree_git_dir(&dir).unwrap_or_else(|_| dir.join(".git"));
     let values = std::collections::BTreeMap::from([
         ("model", model.clone()),
         ("session_id", session.clone()),
@@ -778,6 +785,7 @@ fn agent_verify_live(
         ("state_dir", dir.display().to_string()),
         ("project_home", dir.display().to_string()),
         ("git_dir", git_dir.display().to_string()),
+        ("worktree_git_dir", worktree_git_dir.display().to_string()),
     ]);
     let rendered_args = profile.render_args(&values)?;
     // Composed by the adapter, exactly as a headless lane's first turn is —
