@@ -277,6 +277,7 @@ spoolway queue add --from <PATH> --base <BRANCH>
 | `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
+| `--no-tracking [<GROUP>]` | | Queue a group with `tracking: off` and call no `open` hook for it. Repeatable, once per group. With no group, it covers every group in the batch |
 
 While a dispatcher runs, a task whose `pipeline:` that dispatcher did not load is refused, and
 the message says to restart the dispatcher. See [Editing a pipeline while it
@@ -320,6 +321,22 @@ proceeds the same way without waiting. Otherwise it opens a ticket per task. It 
 hook for a task that sets `tracking: off` itself. A batch's other tasks still call it, and a
 failure there refuses the whole batch. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
+
+`--no-tracking` gives the queue screen's issue question from the command line. `--no-tracking
+checkout` queues every task of the group `checkout` with `tracking: off`. The other groups open
+their tickets as before. Repeat the flag for more groups. On its own, as in `--no-tracking --from
+tasks/`, it covers every group in the batch, and the word after it is read as a group only when
+it is not a flag. An empty group name, as in `--no-tracking ""`, is refused. The flag is accepted
+with no hook configured, where it only writes `tracking: off`. `--dry-run` checks it too.
+
+A group that no task in the batch belongs to is refused before the hook runs, and nothing is
+queued:
+
+```
+spoolway: --no-tracking names `chekout`, but no task in this batch belongs to that group.
+The batch's groups are cart, checkout, search.
+Fix the group name, or drop the flag to open every group's tickets. Nothing was queued.
+```
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`
 and a task's issue reads `task issue`. The status is `created`, `kept` or `FAILED`. The queue

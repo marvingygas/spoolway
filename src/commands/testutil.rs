@@ -49,6 +49,7 @@ pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {
         from: vec![path.display().to_string()],
         base: Some("plan/demo".to_string()),
         dry_run: false,
+        no_tracking: Vec::new(),
     };
     queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
         .unwrap_or_else(|e| panic!("queueing {id}: {e:#}"));

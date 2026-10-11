@@ -67,6 +67,7 @@ pub fn add_to(
         from: vec![path.display().to_string()],
         base: Some("group/demo".to_string()),
         dry_run: false,
+        no_tracking: Vec::new(),
     };
     crate::commands::queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
     // `group` is set above so the task always validates; a task

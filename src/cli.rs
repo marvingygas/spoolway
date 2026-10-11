@@ -1195,6 +1195,11 @@ pub struct QueuePauseArgs {
     pub force: bool,
 }
 
+/// What `queue add --no-tracking` stores for the flag with no group. A NUL
+/// byte cannot appear in a command-line argument, so it can never be a group
+/// name or an empty one a person typed.
+pub const NO_TRACKING_BARE: &str = "\0";
+
 #[derive(Debug, Args)]
 pub struct QueueAddArgs {
     /// A task to queue: a file, a directory of `*.md` files (read in
@@ -1232,6 +1237,23 @@ pub struct QueueAddArgs {
     /// would be queued. No task file is written, no ticket is opened.
     #[arg(long, requires = "from")]
     pub dry_run: bool,
+
+    /// Queue a group with `tracking: off` and call no `open` hook for it:
+    /// the command-line form of ticking the group on the queue screen's
+    /// issue question. Repeatable, once per group. With no group, it covers
+    /// every group in the batch. A group no task in the batch belongs to is
+    /// refused, with nothing queued. Accepted with no hook configured too,
+    /// where it only writes `tracking: off`.
+    ///
+    /// The value is optional, so the next word is a group only when it is
+    /// not itself a flag: `--no-tracking --from tasks/` is the bare flag.
+    /// An empty group name, as in `--no-tracking ""`, is refused rather than
+    /// read as the bare flag.
+    // The bare flag is stored as `NO_TRACKING_BARE`, which no argument a
+    // shell can pass equals, so an empty value (say from an unset shell
+    // variable) stays distinct from no value.
+    #[arg(long, value_name = "GROUP", num_args = 0..=1, default_missing_value = NO_TRACKING_BARE)]
+    pub no_tracking: Vec<String>,
 }
 
 /// Print or validate the task contract — the same shape
@@ -1883,6 +1905,37 @@ mod tests {
     #[test]
     fn attach_requires_a_lane() {
         assert!(try_lane_args(&["--attach"]).is_err());
+    }
+
+    /// `queue add --no-tracking` repeats once per group, and with no group it
+    /// is the bare flag: the next word being another flag is not read as a
+    /// group named `--from`.
+    #[test]
+    fn queue_add_no_tracking_parses_named_and_bare() {
+        fn parse(argv: &[&str]) -> Vec<String> {
+            let mut full = vec!["spoolway", "queue", "add"];
+            full.extend_from_slice(argv);
+            match Cli::try_parse_from(full).unwrap().command {
+                Command::Queue(QueueCommand::Add(args)) => args.no_tracking,
+                other => panic!("not queue add: {other:?}"),
+            }
+        }
+        assert!(parse(&["--from", "t/"]).is_empty());
+        assert_eq!(
+            parse(&["--from", "t/", "--no-tracking", "a", "--no-tracking", "b"]),
+            ["a", "b"]
+        );
+        assert_eq!(
+            parse(&["--no-tracking", "--from", "t/"]),
+            [NO_TRACKING_BARE]
+        );
+        assert_eq!(
+            parse(&["--from", "t/", "--no-tracking"]),
+            [NO_TRACKING_BARE]
+        );
+        // An empty value is a value, not the bare flag.
+        assert_eq!(parse(&["--no-tracking", "", "--from", "t/"]), [""]);
+        assert_eq!(parse(&["--no-tracking=", "--from", "t/"]), [""]);
     }
 
     /// `eval --month` was a deprecated alias for the removed `spend --month`

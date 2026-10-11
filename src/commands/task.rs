@@ -175,9 +175,10 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "Set to `off` — no other value is accepted — to run no \
          `[issue_tracking]` hook event for this task and never hold it \
          waiting on one. Written automatically on every task of a group \
-         ticked on the issue question, and on every task in a batch whose \
-         tool-requirements gate was answered to decline tracking; write it \
-         by hand only to queue a task the same way without either prompt.",
+         ticked on the issue question or named by `queue add --no-tracking`, \
+         and on every task in a batch whose tool-requirements gate was \
+         answered to decline tracking; write it by hand only to queue a task \
+         the same way without any of those.",
     ),
     (
         "base",
@@ -636,6 +637,7 @@ mod tests {
             from: paths.iter().map(|p| p.to_string()).collect(),
             base: None,
             dry_run: false,
+            no_tracking: Vec::new(),
         }
     }
 

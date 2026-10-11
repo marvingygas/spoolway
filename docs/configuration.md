@@ -489,7 +489,7 @@ whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's o
 
 The submission is refused, naming the group, when no task in a group sets
 `group_description:`. A group whose tasks in the submission all set `tracking: off` and name
-no `ticket:` needs none.
+no `ticket:` needs none. A group named by `queue add --no-tracking` needs none either.
 
 On the queue screen, `enter` asks before any of this runs, with a checklist headed
 `Deactivate issue tracking for selected groups:`. It lists every group in the batch that has a
@@ -503,7 +503,8 @@ task with no `ticket:`, with how many of its tasks the batch queues. Nothing sta
 | `esc` | Goes back with nothing queued. |
 
 Ticks are not remembered, so the next `enter` asks again with nothing ticked. A ticked group's
-names get no `key_in_names` prefix. Queueing a routine asks the same question. A trial never
+names get no `key_in_names` prefix. `spoolway queue add --no-tracking <group>` gives the same
+answer from the command line. Queueing a routine asks the same question. A trial never
 asks and opens no ticket. See [`spoolway queue`](cli-reference.md#spoolway-queue) and
 [`tracking`](tasks.md#the-frontmatter-is-spoolways).
 

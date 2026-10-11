@@ -11448,6 +11448,7 @@ mod tests {
             from: vec![pending_doc.display().to_string()],
             base: Some("group/demo".to_string()),
             dry_run: false,
+            no_tracking: Vec::new(),
         };
         crate::commands::queue_add(&repo, &pipelines, &queue_args, &repo.root, false).unwrap();
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
