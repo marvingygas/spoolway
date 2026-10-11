@@ -314,6 +314,17 @@ case "$DOMAIN $VERB" in
     ws=${FLAG[workspace]:-}
     checkout=$(field "$ws" 3 "$STATE/workspaces")
     [ -n "$checkout" ] || fail not_linked_worktree "workspace holds no worktree"
+    # Herdr removes the checkout itself, and cleanup reads git and the disk
+    # afterwards to see that it did: a double that answered success and left
+    # the folder standing would hold every finished task at `done`. Run from
+    # the repository's common dir, since git will not remove the worktree it
+    # is run in.
+    if [ -e "$checkout" ]; then
+      common=$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+        || fail worktree_remove_failed "not a git worktree: $checkout"
+      git --git-dir="$common" worktree remove --force --force "$checkout" >/dev/null 2>&1 \
+        || fail worktree_remove_failed "git could not remove $checkout"
+    fi
     echo '{"result":{}}'
     ;;
 

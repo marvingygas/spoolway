@@ -963,6 +963,42 @@ pub trait PathExt {
     fn comparable(&self) -> PathBuf;
 }
 
+/// Whether `path` lies strictly under `root`, each spelled however it arrived.
+/// `root` itself is not under `root`, so a caller that deletes what this
+/// accepts can never delete the folder that holds them all.
+///
+/// Git lists a worktree by its fully resolved path, while a project home is
+/// kept as it was spelled, so with `$HOME` or `~/.spoolway` behind a symlink
+/// the two never share a prefix as written. Both are resolved first. A path
+/// whose folder is already gone is resolved through its nearest folder that
+/// still exists, so a half-removed checkout still answers.
+pub fn is_within(path: &Path, root: &Path) -> bool {
+    let (path, root) = (
+        resolve_through_existing(path),
+        resolve_through_existing(root),
+    );
+    path != root && path.starts_with(root)
+}
+
+/// `path` fully resolved, however much of it is still on disk: the nearest
+/// folder that exists is resolved and the missing rest appended.
+pub fn resolve_through_existing(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(resolved) = current.canonical() {
+            return tail.iter().rev().fold(resolved, |acc, part| acc.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 impl PathExt for Path {
     fn canonical(&self) -> std::io::Result<PathBuf> {
         self.canonicalize()
@@ -986,6 +1022,31 @@ impl PathExt for PathBuf {
 #[cfg(test)]
 mod path_spelling_tests {
     use super::*;
+
+    /// Git lists a worktree by its resolved path while the project home is
+    /// spelled through a symlink; the two must still be seen as nested. The
+    /// root itself is not under itself, and a folder already gone is resolved
+    /// through the part of its path that still exists.
+    #[cfg(unix)]
+    #[test]
+    fn within_compares_resolved_paths() {
+        let dir = crate::scratch::root("path-within");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real/worktrees")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+
+        let spelled = dir.join("link/worktrees");
+        let listed = dir
+            .join("real/worktrees")
+            .canonical()
+            .unwrap()
+            .join("task-a");
+        assert!(is_within(&listed, &spelled));
+        assert!(!is_within(&spelled, &spelled));
+        assert!(is_within(&spelled.join("gone/deeper"), &spelled));
+        assert!(!is_within(&dir.join("real/other"), &spelled));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The property every comparison in spoolway leans on: whatever spelling
     /// a path arrives in, resolving it twice lands in the same place. Without

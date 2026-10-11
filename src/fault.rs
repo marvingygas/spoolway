@@ -150,15 +150,17 @@ pub(crate) fn run_killing_at(
     point: &str,
     cwd: &Path,
     args: &[&str],
+    env: &[(&str, &str)],
     moved: impl Fn() -> bool,
 ) -> Result<String> {
     use anyhow::Context;
     if !claim(repo_root, point) {
-        return crate::repo::run(cwd, "git", args);
+        return crate::repo::run_with_env(cwd, "git", args, env);
     }
     use std::os::unix::process::CommandExt;
     let mut child = std::process::Command::new("git")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .process_group(0)
         .stdout(std::process::Stdio::null())

@@ -577,6 +577,89 @@ fi
 sweep
 forget evallive
 
+# ------------------------------------------- killed during the worktree cut
+# `git worktree add` is not atomic: a dispatcher killed inside it leaves the
+# checkout registered and part populated, git's `initializing` lock on its
+# entry and a stale `index.lock`, with `run` and `base_commit` on the task but
+# no `workspace_id` or `worktree_path`, and no lane ever started. A real kill
+# timed to land inside the cut is a race against git's own speed, so the case
+# builds that state directly and lets a dispatcher find it.
+sweep
+queue_hang cutkill
+CUT_WT="$SPOOLWAY_PROJECT_HOME/worktrees/task-cutkill"
+CUT_BASE=$(git rev-parse HEAD)
+CUT_FILES=$(git ls-files | wc -l)
+git worktree add -q --no-track -b task/cutkill "$CUT_WT" "$CUT_BASE"
+git -C "$CUT_WT" ls-files | while read -r f; do rm -f "$CUT_WT/$f"; done
+CUT_ADMIN="$(git rev-parse --git-common-dir)/worktrees/task-cutkill"
+: > "$CUT_ADMIN/index.lock"
+echo initializing > "$CUT_ADMIN/locked"
+sed -i -e "/^id:/a run: rbcut0001" -e "/^id:/a base_commit: $CUT_BASE" \
+  "$SPOOLWAY_PROJECT_HOME/queue/cutkill.md"
+dispatcher_start
+CUT_PID=$(lane_pid "cutkill · implement" 20)
+if [ -n "$CUT_PID" ] \
+   && ! front cutkill | grep -q '^borrowed: true' \
+   && [ "$(git -C "$(worktree_of cutkill)" ls-files | wc -l)" = "$CUT_FILES" ] \
+   && [ -z "$(git -C "$(worktree_of cutkill)" status --porcelain)" ] \
+   && [ ! -e "$CUT_ADMIN/index.lock" ]; then
+  ok "a worktree cut a kill left half done is cut again, not borrowed"
+else
+  bad "a worktree cut a kill left half done is cut again, not borrowed"
+  printf '        lane pid: %s, stage: %s, borrowed: %s\n' "$CUT_PID" \
+    "$(stage_of cutkill)" "$(front cutkill | grep '^borrowed:')"
+  front cutkill | tail -6 | sed 's/^/        /'
+fi
+sweep
+forget cutkill
+
+# ---------------------------------------- killed during the worktree removal
+# The same for `git worktree remove`: the task sits on `done` with its tree
+# part deleted, and the removal marker cleanup writes before it starts is on
+# disk, holding the run it was written for. The restart must finish the
+# removal without committing the missing files to the branch, which the
+# dependent is cut from.
+dispatcher_start
+queue_hang rmkill
+echo hang > "$CTL/rmdep"
+task_doc "$LIVE/rmdep.md" rmdep "$BODY" "group: rmkill" "depends_on: [rmkill]"
+must "rmdep queues" "$SPOOLWAY" queue add --from "$LIVE/rmdep.md"
+RM_PID=$(lane_pid "rmkill · implement" 20)
+RM_WT=$(worktree_of rmkill)
+if [ -n "$RM_PID" ] && [ -n "$RM_WT" ] && [ -d "$RM_WT" ]; then
+  kill_dispatcher KILL
+  kill -9 "$RM_PID" 2>/dev/null
+  RM_TIP=$(git rev-parse task/rmkill)
+  RM_BASE=$(git branch --show-current)
+  git -C "$RM_WT" ls-files | tail -n +2 | while read -r f; do rm -f "$RM_WT/$f"; done
+  mkdir -p "$SPOOLWAY_PROJECT_HOME/removing"
+  front rmkill | sed -n 's/^run: *//p' | tr -d '\n' \
+    > "$SPOOLWAY_PROJECT_HOME/removing/rmkill"
+  sed -i 's/^stage: .*/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/rmkill.md"
+  dispatcher_start
+  poll_until 30 test -f "$SPOOLWAY_PROJECT_HOME/archive/rmkill.md"
+  RMDEP_PID=$(lane_pid "rmdep · implement" 30)
+  RMDEP_WT=$(worktree_of rmdep)
+  if [ -f "$SPOOLWAY_PROJECT_HOME/archive/rmkill.md" ] \
+     && [ ! -d "$RM_WT" ] \
+     && ! git worktree list --porcelain | grep -qF "$RM_WT" \
+     && [ "$(git rev-parse task/rmkill)" = "$RM_TIP" ] \
+     && [ -n "$RMDEP_PID" ] && [ -n "$RMDEP_WT" ] \
+     && git diff --quiet "$RM_BASE" "task/rmdep"; then
+    ok "a removal a kill cut short is finished without committing the half tree"
+  else
+    bad "a removal a kill cut short is finished without committing the half tree"
+    printf '        archived: %s, tip: %s -> %s\n' \
+      "$([ -f "$SPOOLWAY_PROJECT_HOME/archive/rmkill.md" ] && echo yes || echo no)" \
+      "$RM_TIP" "$(git rev-parse task/rmkill 2>&1)"
+  fi
+else
+  bad "a removal a kill cut short is finished without committing the half tree (the lane never started)"
+fi
+sweep
+forget rmdep
+git branch -D task/rmkill 2>/dev/null
+
 # ---------------- a home deleted by hand refuses, naming both files
 # `binding-record`'s own Goal names three ways the checkout's stamp and its
 # home's record can stop agreeing, and says each one "stops with an error

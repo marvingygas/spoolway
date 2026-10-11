@@ -66,6 +66,9 @@ if drive land gone; then ok "a task runs queued -> ... -> done and is archived"
 else bad "a task runs queued -> ... -> done and is archived (stuck at \`$(stage_of land)\`)"; fi
 
 has "its journey is in the status log" "→ \`handover\`" $SPOOLWAY_PROJECT_HOME/archive/land.md
+# The handover log is reclaimed with the task, so the archived file is the only
+# place left that names the pull request.
+has "the archived task names its pull request" "- pull req    #" $SPOOLWAY_PROJECT_HOME/archive/land.md
 if handed_over land; then ok "the change is handed over as a pushed branch and a pull request"
 else bad "the change is handed over as a pushed branch and a pull request"; ls "$FORGE/prs" | sed 's/^/        /'; fi
 # With no dependency, a task stacks on the plan branch it was cut from.
