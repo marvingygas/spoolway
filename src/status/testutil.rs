@@ -126,6 +126,7 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
         trial_group: None,
         dir: None,
         hand: false,
+        command: None,
         project: String::new(),
     }
 }

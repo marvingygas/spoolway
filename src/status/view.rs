@@ -982,6 +982,11 @@ pub(super) fn group_totals(
         // `entry.plan` is the ledger's own field name — it carries a task's
         // `group:` verbatim.
         let Some(group) = &entry.plan else { continue };
+        // A command step's run is not a lane: its wall time is a gate's, and
+        // a group's TIME is what its lanes were busy.
+        if entry.command.is_some() {
+            continue;
+        }
         // A ledger line only exists once its lane has settled — see
         // [`GroupTotal`] — so the one thing left to rule out is a task this
         // board is not drawing at all.

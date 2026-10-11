@@ -179,7 +179,7 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--group <NAME>` | One group's runs only |
 | `--task <ID>` | One task's runs only |
 | `--pipeline <NAME>` | One pipeline's lanes only |
-| `--step <STEP>` | One step's lanes only |
+| `--step <STEP>` | One step's lanes and command step runs only. A command step such as `test` shows its rows in the command steps table. |
 | `--pipeline-version <X.Y>` | Lanes that ran under this pipeline version only |
 | `--since <WHEN>`, `--until <WHEN>` | The window |
 | `--all` | Every project spoolway knows about |
@@ -218,6 +218,55 @@ cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 The delta line reads each later arm against the first, on pass rate, cost and time. The sign
 says which way it moved, not which arm is better. A `--sort` can put a later arm on top; the
 delta line still reads against the arm that started first.
+
+## The command steps table
+
+A command step, one with a `run:` line, runs no lane and spends no tokens, so it has no row in
+the lanes table. Every run of one that ends banks its own line in the usage ledger, and the
+printed `spoolway eval` shows those lines in a second table below the lanes table. It is drawn
+under every `by`, and its rows are named the way the lanes table names them. No lane figure
+changes when the ledger holds command steps, and the board's eval tab stays lanes only.
+
+```
+spoolway eval --by step --pipeline impl
+```
+```
+Command steps
+PIPELINE  STEP    RUNS  PASS  BLOCKS      TIME
+impl      suite     14   86%       2  1h 12m
+impl      test      31   74%       5    48m 09s
+Total               45             7  2h 00m
+```
+
+| Column | What it is |
+|---|---|
+| `RUNS` | Command step runs on this row. This counts runs of the command, so under `by task` it is not the run of the task that the lanes table counts. |
+| `PASS` | Share of the runs that exited 0, out of those that got a verdict. A run stopped at its `timeout:` counts as a failure. A run that vanished without an exit code is left out of both sides, as a lane that never reported is. |
+| `BLOCKS` | Runs whose move went to `blocked`: a failing run with no `on_fail`, a spent `loop:`, or the third kill in a row. |
+| `TIME` | Wall time, summed. |
+
+The `Total` line adds `RUNS`, `BLOCKS` and `TIME` and leaves `PASS` blank. The table has the
+same four columns under `--per-run`, which changes only the lanes table. `--sort` does not
+reach it, and `--csv` does not carry it. When only command steps match, `--csv` stops with a
+message that points at `--json`. The filters `--since`, `--until`, `--group`, `--task`,
+`--pipeline`, `--step`, `--pipeline-version` and `--trial` narrow it as they narrow the lanes
+table. When only command steps match, the lanes table is left out.
+
+`--json` holds the table under a `commands` key, beside `by`, `rows` and `total`. It has the
+same shape: `commands.by`, `commands.rows` and `commands.total`. A row carries the naming
+columns of the lanes rows under the same `by`, plus `runs`, `judged` (the runs that got a
+verdict), `pass` (a fraction of `judged`, `null` when none did), `blocks` and `time_s`.
+
+Each line in `usage.jsonl` has a `command` object and no `session`, `kind`, `model` or cost.
+`command.ended` says how the run ended: `exited` with its `command.exit` code, `timeout`,
+`interrupted` or `killed`. A run that vanished without an exit code is `interrupted` and is
+started over, which banks its own line. The third such run in a row is `killed`, and blocks the
+task. `outcome` is `pass` or `fail` for the first two and absent for the others. `blocked` says
+whether the move went to `blocked`. `wall_s` is the time from the run's start to its exit.
+A run stopped at its `timeout:` banks the time until it was stopped, and a run that vanished
+banks `0`. The line also carries the task, step, pipeline, pipeline version, run, round and
+group, as a lane's line does. A step the task walked past, such as a `last:` step that was not
+reached, ran nothing and banks nothing.
 
 ## The directory table
 
@@ -341,3 +390,9 @@ steps and versions here, and read what you paid on your provider's bill.
 
 `spoolway report` writes a lane's verdict to the task's `last_report:`. The dispatcher reads it
 back when it banks the lane. A lane that never reported counts as neither pass nor failure.
+
+A command step's verdict is its exit code, which the dispatcher reads from the run's files in
+`commands/` under the project home. It banks the line once, when the result is final: an exit
+code, a stop at the step's `timeout:`, a run that vanished, or a background run's exit. An exit
+code read again on a later pass is not banked again. The run's start is the time its `.pid` file
+was written, and its exit is the time the wrapper wrote `.exit`.

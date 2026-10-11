@@ -1562,6 +1562,85 @@ else
 $(arrivals $SPOOLWAY_PROJECT_HOME/queue/walked.md walk-a) time(s), wanted 2)"
 fi
 
+# ------------------------------------------------------------- the usage ledger
+# A command step's run is banked to the usage ledger when it ends, as a line of
+# its own: no tokens and no session, so it is not a lane, and `spoolway eval`
+# reads it into a command steps table under `commands`. One step that exits 0
+# and one that exits 1 are the two shapes of a gate's verdict, and the second
+# one sends the task to `blocked`, which the lanes table cannot show.
+cat > .spoolway/pipelines/default.yml <<'YAML'
+steps:
+  - id: okgate
+    description: Exits 0, so the task goes on to the next gate.
+    run: "true"
+    on_pass: redgate
+  - id: redgate
+    description: Exits 1, and a failing step with no on_fail blocks the task.
+    run: "exit 1"
+    on_pass: done
+YAML
+# The walk-past case's task is still queued and names steps this pipeline
+# lacks, which `pipeline check` would report.
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
+works "a pipeline of two gates checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_stop
+task_doc "$LIVE/ledgered.md" ledgered "$BODY" "group: ledgered"
+must "a task for the ledger case queues" "$SPOOLWAY" queue add --from "$LIVE/ledgered.md"
+if drive ledgered blocked 120; then
+  ok "a task whose second gate exits 1 stops on blocked"
+else
+  bad "a task whose second gate exits 1 stops on blocked (at \`$(stage_of ledgered)\`)"
+fi
+
+LEDGER="$SPOOLWAY_PROJECT_HOME/usage.jsonl"
+# One line per run: the dispatcher reads an exit code on every pass until the
+# move it chose has landed, and a line per read would bank each run many times.
+for gate in okgate redgate; do
+  COUNT=$(jq -s --arg step "$gate" \
+    '[.[] | select(.task == "ledgered" and .step == $step and .command)] | length' \
+    "$LEDGER" 2>/dev/null)
+  if [ "$COUNT" = 1 ]; then ok "the ledger holds one command line for \`$gate\`"
+  else bad "the ledger holds one command line for \`$gate\` (found ${COUNT:-none})"; fi
+done
+if jq -se '[.[] | select(.task == "ledgered" and .step == "okgate")][0]
+    | .command.ended == "exited" and .command.exit == 0 and .outcome == "pass"
+      and (.blocked | not) and (.session // "") == "" and (.cost_usd == null)' \
+    "$LEDGER" >/dev/null 2>&1; then
+  ok "the passing gate's line records exit 0, a pass, no block and no cost"
+else
+  bad "the passing gate's line records exit 0, a pass, no block and no cost"
+  grep '"task":"ledgered"' "$LEDGER" | sed 's/^/        /'
+fi
+if jq -se '[.[] | select(.task == "ledgered" and .step == "redgate")][0]
+    | .command.ended == "exited" and .command.exit == 1 and .outcome == "fail"
+      and .blocked == true and .wall_s >= 0' \
+    "$LEDGER" >/dev/null 2>&1; then
+  ok "the failing gate's line records exit 1, a fail and the move to blocked"
+else
+  bad "the failing gate's line records exit 1, a fail and the move to blocked"
+  grep '"task":"ledgered"' "$LEDGER" | sed 's/^/        /'
+fi
+
+EVAL=$("$SPOOLWAY" eval --by step --json 2>&1)
+if jq -e '.commands.by == "step"
+    and ([.commands.rows[] | select(.step == "okgate")][0] | .runs == 1 and .pass == 1 and .blocks == 0)
+    and ([.commands.rows[] | select(.step == "redgate")][0] | .runs == 1 and .pass == 0 and .blocks == 1)' \
+    <<<"$EVAL" >/dev/null 2>&1; then
+  ok "eval --by step --json shows both gates under commands"
+else
+  bad "eval --by step --json shows both gates under commands"; sed 's/^/        /' <<<"$EVAL" | head -40
+fi
+# The lanes table is for lanes: a command line adds none.
+if jq -e '[.rows[] | select(.step == "okgate" or .step == "redgate")] | length == 0' \
+    <<<"$EVAL" >/dev/null 2>&1; then
+  ok "and neither gate is a row of the lanes table"
+else
+  bad "and neither gate is a row of the lanes table"
+fi
+says "eval --step shows a command step's rows instead of refusing" "redgate" \
+  "$SPOOLWAY" eval --by step --step redgate
+
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
 

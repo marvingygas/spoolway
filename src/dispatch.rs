@@ -543,6 +543,110 @@ pub struct Dispatcher<'a> {
     /// `Exited` arm, and the `Interrupted` arm once a run has been killed
     /// often enough to block the task.
     pending_command_forget: Option<String>,
+    /// The result [`Dispatcher::run_command`] just read off a finished run
+    /// and routed on — an exit code, a timeout stop, or the third kill in a
+    /// row — set beside [`Self::pending_command_forget`] and taken by the
+    /// same caller. The caller banks it once the move's destination is final,
+    /// because only then is it known whether the move was routed to `blocked`.
+    /// The row records that routing, not where the move landed: it is banked
+    /// before the task file is saved.
+    /// An interrupted run that starts over routes nowhere and banks inside
+    /// `run_command` itself.
+    pending_command_result: Option<FinishedCommand>,
+}
+
+/// What a command step's run came to, held until it can be banked — see
+/// [`Dispatcher::pending_command_result`] and [`bank_command_run`].
+#[derive(Debug, Clone)]
+struct FinishedCommand {
+    id: String,
+    ended: crate::usage::CommandEnd,
+    exit: Option<i32>,
+    wall_s: i64,
+}
+
+impl FinishedCommand {
+    /// A run that ended in an exit code, timed from its pid file to its exit
+    /// file.
+    fn exited(runs: &crate::command_step::Runs, key: &str, code: i32) -> Self {
+        FinishedCommand {
+            id: runs.run_id(key),
+            ended: crate::usage::CommandEnd::Exited,
+            exit: Some(code),
+            wall_s: runs.wall(key).as_secs_f64().round() as i64,
+        }
+    }
+
+    /// A run that ended some other way. It has no exit code, and its wall
+    /// time is what the caller measured, or zero when nothing can say when it
+    /// stopped — see [`crate::command_step::Runs::wall`].
+    fn without_code(
+        runs: &crate::command_step::Runs,
+        key: &str,
+        ended: crate::usage::CommandEnd,
+        wall_s: i64,
+    ) -> Self {
+        FinishedCommand {
+            id: runs.run_id(key),
+            ended,
+            exit: None,
+            wall_s,
+        }
+    }
+}
+
+/// Bank one command step's run to the usage ledger, once. `pipeline` is the
+/// task's pipeline, and `blocked` is whether the move this run chose landed
+/// on `blocked`. The run's verdict is `pass` or `fail` when it exited or
+/// timed out, and absent when it vanished, since no verdict exists then.
+fn bank_command_run(
+    repo: &Repo,
+    task: &Task,
+    step_id: &str,
+    pipeline: Option<&Pipeline>,
+    finished: &FinishedCommand,
+    blocked: bool,
+) {
+    use crate::usage::CommandEnd;
+    let outcome = match (finished.ended, finished.exit) {
+        (CommandEnd::Exited, Some(0)) => Some("pass"),
+        (CommandEnd::Exited, _) | (CommandEnd::Timeout, _) => Some("fail"),
+        (CommandEnd::Interrupted, _) | (CommandEnd::Killed, _) => None,
+    };
+    let entry = crate::usage::Entry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        task: task.id().to_string(),
+        plan: task.front.group.clone(),
+        step: step_id.to_string(),
+        pipeline: pipeline.map(|p| p.name.clone()).unwrap_or_default(),
+        agent: String::new(),
+        kind: String::new(),
+        model: String::new(),
+        session: String::new(),
+        round: task.steps_at(step_id),
+        wall_s: finished.wall_s,
+        turns: 0,
+        tokens: Default::default(),
+        tier_tokens: Default::default(),
+        cost_usd: None,
+        reported_usd: None,
+        ctx_peak: None,
+        pipeline_version: pipeline.map(|p| p.version.clone()).unwrap_or_default(),
+        outcome: outcome.map(str::to_string),
+        blocked,
+        run: task.front.run.clone(),
+        trial: task.front.trial.clone(),
+        trial_group: task.front.trial_group.clone(),
+        dir: None,
+        hand: false,
+        command: Some(crate::usage::CommandRun {
+            id: finished.id.clone(),
+            ended: finished.ended,
+            exit: finished.exit,
+        }),
+        project: String::new(),
+    };
+    crate::usage::bank_command_run(repo, &entry);
 }
 
 /// What one session has banked to the usage ledger so far — the running
@@ -932,6 +1036,7 @@ impl<'a> Dispatcher<'a> {
             ledger: None,
             file_seen: HashMap::new(),
             pending_command_forget: None,
+            pending_command_result: None,
         }
     }
 
@@ -1521,6 +1626,7 @@ impl<'a> Dispatcher<'a> {
                     // reading the run's state again here: a background run
                     // can finish on its own between the two.
                     let command_forget = self.pending_command_forget.take();
+                    let finished_command = self.pending_command_result.take();
                     // A launch-failure ceiling is the one road here
                     // `run_command` never narrates for itself — see
                     // `Dispatcher::note_launch_failure`, which cannot say
@@ -1568,6 +1674,22 @@ impl<'a> Dispatcher<'a> {
                         destination,
                         self.unattended,
                     );
+
+                    // Banked once the destination is final: a spent `loop:`
+                    // above can turn an `on_fail` into `blocked`, and the
+                    // row records that. Before the gate hold below, which
+                    // turns a destination into `paused` and is the same
+                    // choice `LastReport::blocked` records for it.
+                    if let Some(finished) = &finished_command {
+                        bank_command_run(
+                            self.repo,
+                            &tasks[index],
+                            &step.id,
+                            Some(&pipeline),
+                            finished,
+                            destination == crate::pipeline::BLOCKED,
+                        );
+                    }
 
                     if launch_failed {
                         report.actions.push(format!(
@@ -2953,6 +3075,7 @@ impl<'a> Dispatcher<'a> {
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
             dir: None,
             hand: false,
+            command: None,
             // Never written: the ledger's own location says which project this
             // is, and only a reader spanning several needs the answer.
             project: String::new(),
@@ -4551,6 +4674,7 @@ impl<'a> Dispatcher<'a> {
         // dispatcher visited earlier in the same pass can never leak onto
         // one it did not just read a code from.
         self.pending_command_forget = None;
+        self.pending_command_result = None;
         let id = task.id().to_string();
         let Some(run) = step.run.clone() else {
             // Refused at load, so reaching this means a pipeline was rewritten
@@ -4583,9 +4707,18 @@ impl<'a> Dispatcher<'a> {
                 // them apart is the number the step wrote down — and without it
                 // the task would sit here for as long as the dispatcher runs.
                 let limit = step.command_timeout();
-                if runs.elapsed(&key).unwrap_or_default() < limit {
+                let elapsed = runs.elapsed(&key).unwrap_or_default();
+                if elapsed < limit {
                     return Ok(None);
                 }
+                // Named before `stop` clears the pid file the id and the
+                // start are read from.
+                self.pending_command_result = Some(FinishedCommand::without_code(
+                    &runs,
+                    &key,
+                    crate::usage::CommandEnd::Timeout,
+                    elapsed.as_secs_f64().round() as i64,
+                ));
                 runs.stop(&key);
                 let reason = format!(
                     "`{}` ran past its timeout of {} and was stopped",
@@ -4620,6 +4753,7 @@ impl<'a> Dispatcher<'a> {
                 // caller this key is theirs to clear once that landing
                 // happens — see the field's own doc.
                 self.pending_command_forget = Some(key.clone());
+                self.pending_command_result = Some(FinishedCommand::exited(&runs, &key, code));
                 //
                 // A command's pane has nothing left to show the instant its
                 // exit code is judged, pass or fail alike — closed here rather
@@ -4689,7 +4823,15 @@ impl<'a> Dispatcher<'a> {
                 // than routing down `on_fail`, because no verdict exists to
                 // route on. An exit code from any run resets the count.
                 let kills = runs.note_kill(&key)?;
+                // No moment the command ended at, so no wall time either —
+                // see [`crate::command_step::Runs::wall`].
+                let ended = match kills >= MAX_COMMAND_KILLS {
+                    true => crate::usage::CommandEnd::Killed,
+                    false => crate::usage::CommandEnd::Interrupted,
+                };
+                let finished = FinishedCommand::without_code(&runs, &key, ended, 0);
                 if kills >= MAX_COMMAND_KILLS {
+                    self.pending_command_result = Some(finished);
                     // Left on disk, like an `Exited` run: the caller forgets
                     // it once the move to `blocked` has landed. Forgotten any
                     // earlier, a block that could not be placed this pass (no
@@ -4712,6 +4854,12 @@ impl<'a> Dispatcher<'a> {
                     ));
                     return Ok(Some((crate::pipeline::BLOCKED.to_string(), Outcome::Fail)));
                 }
+                // A run started over still ran: it is banked here, since it
+                // routes nowhere for the caller to bank it on. Its id is gone
+                // with the pid file `discard` clears next, and the run that
+                // replaces it banks its own.
+                let pipeline = self.pipelines.for_task(task).ok();
+                bank_command_run(self.repo, task, &step.id, pipeline, &finished, false);
                 runs.discard(&key)?;
                 // Closed rather than left standing: the run is about to be
                 // started again from `Fresh`, which would only replace it
@@ -5046,6 +5194,20 @@ impl<'a> Dispatcher<'a> {
                     if runs.elapsed(key).unwrap_or_default() < limit {
                         continue;
                     }
+                    let elapsed = runs.elapsed(key).unwrap_or_default();
+                    bank_command_run(
+                        self.repo,
+                        task,
+                        step_id,
+                        Some(pipeline),
+                        &FinishedCommand::without_code(
+                            &runs,
+                            key,
+                            crate::usage::CommandEnd::Timeout,
+                            elapsed.as_secs_f64().round() as i64,
+                        ),
+                        false,
+                    );
                     runs.stop(key);
                     report.actions.push(format!(
                         "{}: background `{step_id}` ran past its timeout of {} and was stopped \
@@ -5065,14 +5227,31 @@ impl<'a> Dispatcher<'a> {
                         let _ = self.mux.close_pane(&pane);
                         runs.forget_pane(key);
                     }
+                    // Banked on the first read, and then skipped on every
+                    // later one: a code that routes nothing stays on disk and
+                    // is read again each pass. `blocked` is settled below for
+                    // the one road that moves the task.
+                    let finished = FinishedCommand::exited(&runs, key, code);
+                    let bank = |task: &Task, blocked: bool| {
+                        bank_command_run(
+                            self.repo,
+                            task,
+                            step_id,
+                            Some(pipeline),
+                            &finished,
+                            blocked,
+                        )
+                    };
                     // A zero exit is a pass for a step the task already walked
                     // away from — nothing to route on — so the code itself is
                     // left exactly as unread as a step with no `on_fail`
                     // leaves every code.
                     if code == 0 {
+                        bank(task, false);
                         continue;
                     }
                     let Some(destination) = step.on_fail.clone() else {
+                        bank(task, false);
                         continue;
                     };
                     // The failure pulls the task off the step it is on, so
@@ -5086,6 +5265,7 @@ impl<'a> Dispatcher<'a> {
                         destination,
                         self.unattended,
                     );
+                    bank(task, destination == crate::pipeline::BLOCKED);
                     // Read once and cleared — by the caller, once the move
                     // is on disk — the same discipline `run_command`'s own
                     // `Exited` arm keeps. This step's task has already left
@@ -14840,6 +15020,7 @@ mod tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -15542,6 +15723,7 @@ mod tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -15582,6 +15764,7 @@ mod tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -15663,6 +15846,7 @@ mod tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -19204,6 +19388,13 @@ mod tests {
             "the command ran more than once while its destination waited for a slot: {:?}",
             count(&count_file)
         );
+        // Every one of those passes read the same exit code again. The run is
+        // banked on the first and recognised on the rest.
+        assert_eq!(
+            command_rows(&repo).len(),
+            1,
+            "a code read on several passes banked more than once"
+        );
     }
 
     /// The other half of the ordering: once a command step's destination
@@ -19365,6 +19556,37 @@ mod tests {
             task.section("## Status Log")
         );
         assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+
+        // Two runs started over and a third that blocked the task: three runs,
+        // three rows, none with an exit code or a verdict, and only the last
+        // one on `blocked`.
+        let rows = command_rows(&repo);
+        let ends: Vec<_> = rows
+            .iter()
+            .map(|r| r.command.as_ref().unwrap().ended)
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                crate::usage::CommandEnd::Interrupted,
+                crate::usage::CommandEnd::Interrupted,
+                crate::usage::CommandEnd::Killed
+            ]
+        );
+        assert!(
+            rows.iter()
+                .all(|r| r.command.as_ref().unwrap().exit.is_none())
+        );
+        assert!(rows.iter().all(|r| r.outcome.is_none()));
+        assert_eq!(
+            rows.iter().map(|r| r.blocked).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        let ids: std::collections::HashSet<_> = rows
+            .iter()
+            .map(|r| r.command.as_ref().unwrap().id.clone())
+            .collect();
+        assert_eq!(ids.len(), 3, "each run banks under an id of its own");
     }
 
     /// The block is not final until its move lands. A pass that returns the
@@ -19822,6 +20044,96 @@ mod tests {
             "the exit code is what the decision was made on, so it is said: {:?}",
             report.actions
         );
+    }
+
+    /// Every command step run the ledger holds, oldest first.
+    fn command_rows(repo: &Repo) -> Vec<crate::usage::Entry> {
+        crate::usage::read(repo)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.command.is_some())
+            .collect()
+    }
+
+    /// A run that exits non-zero banks one ledger row naming its exit code,
+    /// its verdict and the block it caused. The row is not a lane: it holds
+    /// no session, tokens or cost, and `is_lane` is false for it. Passes after
+    /// the move has landed find no exit code left to read, because the caller
+    /// forgets the run, so they bank nothing. The test
+    /// `a_command_step_whose_destination_has_no_slot_does_not_rerun` holds
+    /// the move back, so it is the one that re-reads a code.
+    // covers: a command step's run banks one ledger row
+    #[test]
+    fn a_failing_command_banks_one_ledger_row_that_is_not_a_lane() {
+        let (repo, _root_guard) = fixture("command-ledger-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 2", false);
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+        for _ in 0..3 {
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+        }
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "one run, one row: {rows:?}");
+        let row = &rows[0];
+        let run = row.command.as_ref().unwrap();
+        assert_eq!(run.ended, crate::usage::CommandEnd::Exited);
+        assert_eq!(run.exit, Some(2));
+        assert_eq!(row.task, "demo");
+        assert_eq!(row.step, "implement");
+        assert_eq!(row.pipeline, "default");
+        assert_eq!(row.outcome.as_deref(), Some("fail"));
+        assert!(row.blocked, "its move landed on `blocked`");
+        assert!(row.wall_s >= 0);
+        assert!(row.session.is_empty() && row.tokens.is_zero() && row.cost_usd.is_none());
+        assert!(!row.is_lane());
+    }
+
+    /// A clean exit banks a pass whose move did not land on `blocked`.
+    // covers: a command step's run banks one ledger row
+    #[test]
+    fn a_clean_command_banks_a_pass_that_did_not_block() {
+        let (repo, _root_guard) = fixture("command-ledger-pass");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].command.as_ref().unwrap().exit, Some(0));
+        assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
+        assert!(!rows[0].blocked);
+    }
+
+    /// A run's wall time is rounded to the nearest second, not cut down to
+    /// the whole one beneath it: a gate that took 1.6s banks 2, where
+    /// truncating banked 1 and made every figure that sums them run short.
+    #[test]
+    fn a_runs_wall_time_is_rounded_not_truncated() {
+        let (repo, _root_guard) = fixture("command-wall-rounds");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let files = crate::runfiles::RunFiles::new(repo.commands_dir());
+        let key = crate::command_step::Runs::key("test", "demo");
+        let started = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for (path, at) in [
+            (files.pid_path(&key), started),
+            (
+                files.exit_path(&key),
+                started + Duration::from_millis(1_600),
+            ),
+        ] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_modified(at).unwrap();
+        }
+
+        assert_eq!(FinishedCommand::exited(&runs, &key, 0).wall_s, 2);
     }
 
     /// The exit code used to live only in this pass's own report, which the
@@ -20338,6 +20650,10 @@ mod tests {
             "blocked_from names the step the task was actually pulled out of, not the \
              background step that failed"
         );
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].command.as_ref().unwrap().exit, Some(1));
+        assert!(rows[0].blocked, "the reroute landed the task on `blocked`");
         assert!(
             report
                 .actions
@@ -20664,6 +20980,21 @@ mod tests {
             crate::command_step::RunState::Exited(0),
             "a zero exit is left exactly as unread as a step with no on_fail leaves it"
         );
+        // Left on disk, so every pass reads it again: the first banks the run
+        // and the rest must not.
+        for _ in 0..3 {
+            let mut report = Report::default();
+            Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+                &mut task,
+                pipeline,
+                &mut report,
+                &keys,
+            );
+        }
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
+        assert!(!rows[0].blocked);
     }
 
     /// The pane a background run landed in is nobody's to close but
@@ -20836,6 +21167,14 @@ mod tests {
             !crate::headless::alive(pid),
             "the command was routed away from but left running"
         );
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].command.as_ref().unwrap().ended,
+            crate::usage::CommandEnd::Timeout
+        );
+        assert_eq!(rows[0].outcome.as_deref(), Some("fail"));
+        assert!(rows[0].blocked);
     }
 
     /// A background command is walked away from, so the step that started it
@@ -20876,6 +21215,13 @@ mod tests {
             report.actions
         );
         assert!(!crate::headless::alive(pid), "the background run survived");
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].command.as_ref().unwrap().ended,
+            crate::usage::CommandEnd::Timeout
+        );
+        assert!(!rows[0].blocked, "a reaped timeout moves no task");
     }
 
     // ------------------------------------------------------- serial command steps

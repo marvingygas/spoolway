@@ -6,7 +6,9 @@ covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.j
 # Cost accounting
 
 spoolway records what every lane spent: tokens, cost, wall time and outcome. The record is
-the ledger, one line per lane, in `~/.spoolway/<project>/usage.jsonl`.
+the ledger, in `~/.spoolway/<project>/usage.jsonl`. It holds one line per lane and one line per
+command step run. A command step line carries no tokens and no cost. See
+[The command steps table](eval.md#the-command-steps-table).
 
 ## How the numbers get there
 
