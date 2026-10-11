@@ -112,8 +112,8 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, remote-base, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, kept-panes | The `suite` step of the pipelines, on the last task of a chain |
-| `nightly` | the `pr` suites plus `upgrade` and `faults` | Daily CI and the release workflow |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, upgrade, herdr-bind, remote-base, home-mode, kept-panes | The `suite` step of the pipelines, on the last task of a chain |
+| `nightly` | the `pr` suites plus `faults` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
 
