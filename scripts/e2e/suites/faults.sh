@@ -163,7 +163,6 @@ if [ -n "$CUT_WT" ] && [ -d "$CUT_WT" ] && [ "$(files_in "$CUT_WT")" -lt "$TRACK
 else
   bad "the kill left a registered worktree missing tracked files (${CUT_WT:-none registered}: $([ -d "${CUT_WT:-/nonexistent}" ] && files_in "$CUT_WT" || echo 0) of $TRACKED)"
 fi
-expect_fail D-1 worktree-crash-safety
 # Hold the implement turn open so the checkout the task runs on can be counted
 # while it is in use, not after cleanup has removed it.
 echo "linger:15" > "$CTL/cut.implement"
@@ -188,7 +187,6 @@ fi
 if [ -z "$(registered_worktree cut)" ] && [ ! -d "$CUT_WT" ]; then
   ok "and the worktree is removed at the end"
 else bad "and the worktree is removed at the end (${CUT_WT:-?} is still there)"; fi
-expect_fail_end
 dispatcher_stop
 forget cut
 
@@ -232,7 +230,6 @@ fi
 if [ -d "$RMA_WT" ] && [ ! -e "$RMA_WT/.git" ]; then
   printf 'gitdir: %s\n' "$LIVE/proj/.git/worktrees/$(basename "$RMA_WT")" > "$RMA_WT/.git"
 fi
-expect_fail D-6 worktree-crash-safety
 if settle rma gone 120 && settle rmb blocked 120; then
   ok "the restart finishes both tasks"
 else bad "the restart finishes both tasks"; fi
@@ -255,7 +252,6 @@ if git rev-parse --verify --quiet task/rmb > /dev/null \
 else bad "the dependent was cut from the full tree"; fi
 if [ -z "$(registered_worktree rma)" ]; then ok "and no worktree is left registered for the task"
 else bad "and no worktree is left registered for the task"; fi
-expect_fail_end
 dispatcher_stop
 forget rmb
 
@@ -319,14 +315,12 @@ wrapper_dead() {
 if [ -n "$WRAPPER" ] && [ "$COMMAND_ALIVE" = 1 ] && poll_until 5 wrapper_dead; then
   ok "SIGKILL took the wrapper alone and the command is still running"
 else bad "SIGKILL took the wrapper alone and the command is still running"; fi
-expect_fail D-4 command-step-lifecycle
 if await cmdk gone 90; then ok "the task runs to the end"
 else bad "the task runs to the end"; fi
 if grep '^cmdk start' "$RUNS/log" | grep -qv 'others=0$'; then
   bad "the command never runs twice at once after its wrapper is killed"
   sed 's/^/        /' "$RUNS/log"
 else ok "the command never runs twice at once after its wrapper is killed"; fi
-expect_fail_end
 
 echo 6 > "$CTL/slow-secs"
 must "the task whose wrapper takes SIGTERM" "$SPOOLWAY" queue add --from "$LIVE/cmdt.md"
@@ -335,13 +329,11 @@ else bad "the second command is running"; fi
 WRAPPER=$(wrapper_of cmdt)
 if [ -n "$WRAPPER" ] && kill -TERM "$WRAPPER" 2>/dev/null; then ok "SIGTERM reached the wrapper"
 else bad "SIGTERM reached the wrapper"; fi
-expect_fail D-4 command-step-lifecycle
 if await cmdt gone 90; then ok "the task runs to the end after its wrapper took SIGTERM"
 else bad "the task runs to the end after its wrapper took SIGTERM"; fi
 STARTS=$(grep -c '^cmdt start' "$RUNS/log")
 if [ "$STARTS" -eq 1 ]; then ok "a command that exited 0 under a SIGTERMed wrapper is not run again"
 else bad "a command that exited 0 under a SIGTERMed wrapper is not run again (started $STARTS times)"; fi
-expect_fail_end
 dispatcher_stop
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
@@ -358,17 +350,18 @@ for i in 1 2 3 4 5 6 7 8; do
     SILENT=$((SILENT + 1))
   fi
 done
-expect_fail C-3 config-set-lock
 if [ "$SILENT" -eq 0 ]; then ok "every value is saved, or its call exited non-zero"
 else bad "every value is saved, or its call exited non-zero ($SILENT calls succeeded and lost their value)"; fi
-expect_fail_end
 cp "$LIVE/config.toml.bak" .spoolway/config.toml
 
-# --------------------------------------------- D-9: a slow git fetch in a cut
+# ------------------------------- D-9: a slow remote asked about a task's base
 # Reached over ssh:// because git calls `core.sshCommand` only for an ssh
 # transport. The command sleeps, then runs the requested git command locally,
 # as a slow network would. The ids sort the slow task ahead of the free one, so
-# the pass reaches the fetch first.
+# the pass reaches the slow remote first. It asks `origin` whether the base
+# exists there with `git ls-remote`, before any cut, so that ask is what the
+# bound has to stop. The bound on the fetch inside the cut has a unit test of
+# its own.
 SLOW_BASE=task/slow-base
 must "a base only origin has" git -C "$ORIGIN" branch "$SLOW_BASE" plan/faults
 echo hang > "$CTL/aa-slow"
@@ -401,21 +394,18 @@ must "and no probe of it" git config ssh.variant ssh
 : > "$LIVE/ssh.log"
 : > "$LIVE/ssh.pids"
 dispatcher_start
-if poll_until 30 test -s "$LIVE/ssh.log"; then ok "the cut reached the sleeping ssh command"
-else bad "the cut reached the sleeping ssh command"; fi
-expect_fail D-9 fetch-timeout
+if poll_until 30 test -s "$LIVE/ssh.log"; then ok "the base ask reached the sleeping ssh command"
+else bad "the base ask reached the sleeping ssh command"; fi
 if await zz-free implement 45; then ok "the unrelated task started"
 else bad "the unrelated task started"; fi
-# Starting the other task is not enough: a fix that moved the fetch aside
+# Starting the other task is not enough: a fix that moved the ask aside
 # would pass that and still leave it hanging. The stub records its parent, which
-# is the `git fetch` the cut started, and that is the process a bound has to
-# stop. The sleeping stub itself is no sign: killing git leaves it behind as an
-# orphan for the rest of its sleep, however well the bound works.
-FETCH_PID=$(head -n1 "$LIVE/ssh.pids" 2>/dev/null)
-if [ -n "$FETCH_PID" ] && ! kill -0 "$FETCH_PID" 2>/dev/null; then
-  ok "the fetch gave up within its bound (its git process is gone)"
-else bad "the fetch gave up within its bound (git fetch ${FETCH_PID:-?} is still waiting on the transport)"; fi
-expect_fail_end
+# is the `git ls-remote` that asked about the base, and that is the process a
+# bound has to stop.
+ASK_PID=$(head -n1 "$LIVE/ssh.pids" 2>/dev/null)
+if [ -n "$ASK_PID" ] && ! kill -0 "$ASK_PID" 2>/dev/null; then
+  ok "the base ask gave up within its bound (its git process is gone)"
+else bad "the base ask gave up within its bound (git ${ASK_PID:-?} is still waiting on the transport)"; fi
 dispatcher_stop
 git remote set-url origin "$ORIGIN"
 git config --unset core.sshCommand

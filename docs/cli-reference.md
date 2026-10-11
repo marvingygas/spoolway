@@ -468,6 +468,11 @@ exists neither locally nor on `origin`
 Nothing was dispatched.
 ```
 
+Each question to `origin` about a base is given up after 10 seconds. An `origin` that cannot be
+asked, because it is offline, refuses the connection or does not answer in time, does not refuse the
+start. The running dispatcher holds that one task and asks again on the next pass. An `origin`
+that answers that it has no such branch does refuse the start.
+
 See [Tasks and the queue](tasks.md#what-only-holds-across-a-set) for the other two shapes and for
 what happens to the same problems once a run is already going.
 

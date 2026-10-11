@@ -2544,46 +2544,93 @@ fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> String {
 /// fetch was stopped and what to do about it.
 const CUT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run `git fetch origin <base>` in `repo`, and stop it, with everything it
-/// started, once `timeout` has passed. Returns `true` if it was stopped.
-/// Every other failure is swallowed: the caller falls through to naming
-/// `base` bare.
+/// How a git command run by [`git_within`] ended.
+pub(crate) enum GitWithin {
+    /// It could not be started.
+    NotRun,
+    /// It was still running at the deadline and has been stopped.
+    TimedOut,
+    /// It ended on its own, with whether it succeeded and what it printed.
+    Finished { success: bool, stdout: Vec<u8> },
+}
+
+/// Run `git <args>` in `repo`, and stop it, with everything it started, once
+/// `timeout` has passed. Prompts are off and stderr is dropped. Stdout is
+/// kept only when `capture_stdout` is set; otherwise it goes nowhere and
+/// [`GitWithin::Finished`] carries none.
 ///
-/// The fetch gets a process group of its own because git runs the transport
+/// Every command here talks to `origin`, and `GIT_TERMINAL_PROMPT=0` does not
+/// reach an ssh passphrase or host-key prompt, or a transport that is only
+/// slow. The dispatcher runs these inside its pass, where nothing else runs
+/// while they wait, so one stuck transport would hold up every other task.
+///
+/// The command gets a process group of its own because git runs the transport
 /// (`ssh`, or a person's `core.sshCommand`) as a child, and killing git alone
 /// would leave the transport running on. The group is asked to stop with
-/// `SIGTERM` first, so git can remove its lock files: the fetch runs in the
+/// `SIGTERM` first, so git can remove its lock files: a fetch runs in the
 /// person's own checkout, and a lock left behind there would fail every later
 /// fetch of that ref. Git gets a second to go, is killed if it does not, and
 /// [`crate::headless::kill_group`] then sweeps what its group still holds.
 ///
 /// The group is no longer the dispatcher's, so a stop aimed at the
 /// dispatcher's group does not reach it. A dispatcher killed during the wait
-/// leaves the fetch to run on past the deadline, since nothing is left to
+/// leaves the command to run on past the deadline, since nothing is left to
 /// enforce it.
-fn fetch_within(repo: &Path, base: &str, timeout: Duration) -> bool {
+pub(crate) fn git_within(
+    repo: &Path,
+    args: &[&str],
+    timeout: Duration,
+    capture_stdout: bool,
+) -> GitWithin {
+    use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
     let Ok(mut child) = std::process::Command::new("git")
-        .args(["fetch", "origin", base])
+        .args(args)
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if capture_stdout {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
     else {
-        return false;
+        return GitWithin::NotRun;
     };
+    // Read on a thread, so a command that prints more than a pipe holds
+    // cannot stall on a full pipe while this loop is only polling for its
+    // exit.
+    let mut pipe = child.stdout.take();
+    let reader = capture_stdout.then(|| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(pipe) = pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    });
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => return false,
+            Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(HERDR_POLL),
-            _ => break,
+            _ => break None,
         }
+    };
+    if let Some(status) = status {
+        let stdout = reader
+            .map(|reader| reader.join().unwrap_or_default())
+            .unwrap_or_default();
+        return GitWithin::Finished {
+            success: status.success(),
+            stdout,
+        };
     }
     // The leader is asked first and reaped before the group is swept.
     // `kill_group` treats a zombie as alive on a Mac, and git is still our
@@ -2599,7 +2646,24 @@ fn fetch_within(repo: &Path, base: &str, timeout: Duration) -> bool {
     let _ = child.kill();
     let _ = child.wait();
     crate::headless::kill_group(child.id());
-    true
+    // The reader is left to end on its own and its output is thrown away.
+    // Joining it would wait on every holder of the pipe, and the sweep above
+    // does not promise to have closed them all: `kill_group` gives up after
+    // a few seconds, and a descendant that started a session of its own is
+    // outside the group. Either would hold this pass for as long as it
+    // lives, which is the hang this function exists to end.
+    drop(reader);
+    GitWithin::TimedOut
+}
+
+/// Run `git fetch origin <base>` in `repo` under [`git_within`]. Returns
+/// `true` if it was stopped. Every other failure is swallowed: the caller
+/// falls through to naming `base` bare.
+fn fetch_within(repo: &Path, base: &str, timeout: Duration) -> bool {
+    matches!(
+        git_within(repo, &["fetch", "origin", base], timeout, false),
+        GitWithin::TimedOut
+    )
 }
 
 /// The commit-ish a fresh branch is cut from: `base` itself when this
@@ -4311,6 +4375,41 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&origin).ok();
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// A command that gives up at its deadline returns even when a
+    /// descendant in a session of its own still holds the pipe that carries
+    /// its stdout. The group sweep cannot reach that descendant, so a wait for
+    /// the pipe to close would last as long as the descendant does.
+    #[test]
+    fn a_timed_out_command_does_not_wait_for_a_pipe_holder_outside_its_group() {
+        if std::process::Command::new("setsid")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            eprintln!("skipped: no setsid to put a descendant outside the group");
+            return;
+        }
+        let work = crate::scratch::root("mux-git-within-pipe-holder");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+
+        let started = Instant::now();
+        let outcome = git_within(
+            &work,
+            &["-c", "alias.hold=!setsid sleep 20 & sleep 20", "hold"],
+            Duration::from_millis(500),
+            true,
+        );
+
+        assert!(matches!(outcome, GitWithin::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the stop waited for the stdout pipe's last holder: {:?}",
+            started.elapsed()
+        );
         std::fs::remove_dir_all(&work).ok();
     }
 

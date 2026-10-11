@@ -873,6 +873,13 @@ The failure counts toward the launch-failure ceiling described under [Restarts, 
 escalation](#restarts-laps-and-escalation). A dispatcher that is killed while it waits leaves
 the fetch running.
 
+Before a pass cuts that worktree, it asks `origin` whether the base exists there, with `git ls-remote
+--heads origin <base>`. The dispatcher waits at most 10 seconds for the answer, then stops the
+command and the transport it started. A task whose base is not a local branch and whose `origin`
+does not answer is held for that pass. The hold reads ``task `cart-totals` is based on
+`task/gh-412-checkout`, which is not a local branch, and `origin` could not be asked whether it has
+it``. Other tasks go on, and the held task is tried again on the next pass.
+
 When a task reaches `done`:
 
 1. A lane that is still mid-turn is waited for while its transcript keeps moving. Closing its
