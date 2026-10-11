@@ -289,7 +289,19 @@ else bad "the command is running"; fi
 WRAPPER=$(wrapper_of cmdk)
 COMMAND=$(awk '$1 == "cmdk" && $2 == "start" {print $3; exit}' "$RUNS/log" 2>/dev/null)
 kill -KILL "$WRAPPER" 2>/dev/null
-if [ -n "$WRAPPER" ] && poll_while 5 kill -0 "$WRAPPER" && kill -0 "$COMMAND" 2>/dev/null; then
+# The command is read at once. A pass that finds the wrapper dead stops the
+# run's processes (#892), so waiting first can find the command already gone
+# for that reason. The wrapper is the dispatcher's child and stays a zombie
+# until a pass reaps it, which `kill -0` still finds, so a zombie counts as
+# dead here.
+COMMAND_ALIVE=0
+kill -0 "$COMMAND" 2>/dev/null && COMMAND_ALIVE=1
+wrapper_dead() {
+  local stat
+  stat=$(ps -o stat= -p "$WRAPPER" 2>/dev/null | tr -d ' ')
+  [ -z "$stat" ] || [ "${stat#Z}" != "$stat" ]
+}
+if [ -n "$WRAPPER" ] && [ "$COMMAND_ALIVE" = 1 ] && poll_until 5 wrapper_dead; then
   ok "SIGKILL took the wrapper alone and the command is still running"
 else bad "SIGKILL took the wrapper alone and the command is still running"; fi
 expect_fail D-4 command-step-lifecycle
