@@ -102,8 +102,9 @@ error and no child starts. The moment the child starts, a `Starting
 dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and every other key
 on this page still reach the board underneath it. It closes once the child's first pass has
 claimed a slot or found nothing to claim, and does not open again on a later pass. `enter`
-again, over a running child, opens a popup asking how to stop it, in place of `Starting
-dispatcher` if that is still up:
+again, over a running child, stops it at once when no agent lane or command step is running.
+Otherwise it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
+still up:
 
 ```
 [enter] let running steps finish

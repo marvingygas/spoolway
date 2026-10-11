@@ -175,15 +175,17 @@ yellow, for example `v0.9.0 (0.10.0 available)`. The notice is the same for ever
 check is off when `housekeeping.update_check` is `false` or `SPOOLWAY_SKIP_VERSION_CHECK` is set.
 
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
-dispatch` child the tab starts on `enter` and stops behind a popup the next `enter` opens — the
-tab runs no pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
+dispatch` child the tab starts on `enter` and stops with the next `enter` — the tab runs no
+pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
 with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
 · 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
 turns while that count is above zero. On `enter`, before the child's first pass has claimed
 anything, the tab covers the board with a keyless `Starting dispatcher` popup. See
 [`spoolway`](cli-reference.md#spoolway).
 
-`enter` over a running dispatcher always opens the stop popup, even with nothing running:
+`enter` over a running dispatcher stops it at once when no agent lane or command step is
+running. Queued tasks and scheduled jobs do not count as running. When at least one agent lane
+or command step is running, `enter` opens the stop popup instead:
 
 ```
 ╭─ stop dispatching ──────────────────────────────────────────────────╮

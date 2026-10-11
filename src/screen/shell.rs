@@ -445,8 +445,8 @@ impl DispatchTab {
             self.child = None;
             match ended {
                 Some(panel) => self.popup = Some(Popup::Ended(panel)),
-                // Stopped from the stop popup before its first pass:
-                // nothing is starting any more.
+                // Stopped by `enter` or the stop popup before its first
+                // pass: nothing is starting any more.
                 None => {
                     if matches!(self.popup, Some(Popup::Starting { .. })) {
                         self.popup = None;
@@ -463,24 +463,34 @@ impl DispatchTab {
     }
 
     /// `enter` with no key-reading popup open: over a running child, ask how
-    /// to stop it — every time, even with nothing running, and in place of
-    /// the keyless `Starting` popup if that is still up; with none running,
-    /// ask the start gates, each only when it has something to say, and
-    /// start one. A child already asked to stop is left to finish going, and
-    /// `enter` over it does nothing: there is nothing left to ask. Stopped
-    /// before its first pass, the child is gone with nothing starting, and
-    /// [`DispatchTab::reap`] clears any `Starting` popup once it has exited.
-    fn enter(&mut self, repo: &Repo, cwd: &Path) {
+    /// to stop it when a step is running, in place of the keyless `Starting`
+    /// popup if that is still up. With no agent lane or command step running
+    /// — [`crate::status::anything_running_for_stop`] — the popup's two
+    /// answers would do the same thing, so the child is stopped at once and
+    /// nothing is asked. With no child, ask the start gates, each only when
+    /// it has something to say, and start one. A child already asked to stop
+    /// is left to finish going, and `enter` over it does nothing: there is
+    /// nothing left to ask. Stopped before its first pass, the child is gone
+    /// with nothing starting, and [`DispatchTab::reap`] clears any `Starting`
+    /// popup once it has exited.
+    fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
         match self.child.as_ref() {
             Some(child) if child.stopping() => {}
-            Some(_) => self.popup = Some(Popup::Stop(super::dispatcher::stop_panel())),
+            Some(_) if crate::status::anything_running_for_stop(repo, pipelines) => {
+                self.popup = Some(Popup::Stop(super::dispatcher::stop_panel()))
+            }
+            Some(_) => {
+                self.popup = None;
+                self.stop();
+            }
             None => self.overrides_then_start(repo, cwd),
         }
     }
 
     /// Stop the child, if one is still up — the stop popup's answer either
-    /// way. A child that exited while the popup was open has already been
-    /// reaped, and its own popup replaced this one.
+    /// way, and `enter`'s own when no step is running. A child that exited
+    /// while the popup was open has already been reaped, and its own popup
+    /// replaced this one.
     fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             child.stop();
@@ -605,11 +615,11 @@ impl DispatchTab {
 /// The dispatch tab: the board, drawn from the task files, the lane list and
 /// the ledger exactly as `spoolway dispatch` draws it, with the board's own
 /// keys. `enter` starts dispatching — a `spoolway dispatch` child, see
-/// [`super::dispatcher`] — and `enter` again asks how to stop it. The board is drawn
-/// from what that child writes; this tab runs no pass itself. Redrawn every
-/// [`crate::status::POLL`] while no key is typed, the same wait the board
-/// keeps under a dispatcher, and that redraw is also where a child that has
-/// exited is noticed.
+/// [`super::dispatcher`] — and `enter` again stops it, asking how first when
+/// a step is running. The board is drawn from what that child writes; this
+/// tab runs no pass itself. Redrawn every [`crate::status::POLL`] while no
+/// key is typed, the same wait the board keeps under a dispatcher, and that
+/// redraw is also where a child that has exited is noticed.
 ///
 /// `writer` pushes this past clippy's default argument count, but every
 /// argument here is a distinct piece of the tab's own state — see
@@ -694,7 +704,7 @@ fn dispatch_tab(
                 return Ok(leave);
             }
             if key == Key::Enter {
-                tab.enter(repo, cwd);
+                tab.enter(repo, pipelines, cwd);
                 continue;
             }
         }
@@ -1446,7 +1456,7 @@ mod tests {
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut tab = DispatchTab::default();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('x'));
         assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
@@ -1457,7 +1467,7 @@ mod tests {
         // next `enter` skips the hidden overrides gate.
         tab.answer(&repo, &pipelines, &repo.root, Key::Esc);
         assert!(tab.popup.is_none());
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
     }
 
@@ -1497,7 +1507,7 @@ mod tests {
         assert_ne!(gone, "kept-prompt");
 
         let mut tab = DispatchTab::default();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
         let Some(Popup::Warnings(gate)) = &tab.popup else {
             panic!("the warnings popup should be up");
         };
@@ -1525,7 +1535,7 @@ mod tests {
         .unwrap();
 
         let mut tab = DispatchTab::default();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
         let Some(Popup::Warnings(gate)) = &tab.popup else {
             panic!("the warnings popup should be up");
         };
@@ -1564,7 +1574,7 @@ mod tests {
         std::fs::write(dir.join("broken.yml"), "steps: [not, a, pipeline\n").unwrap();
 
         let mut tab = DispatchTab::default();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
         let Some(Popup::Ended(panel)) = &tab.popup else {
             panic!("the load error should be up");
         };
@@ -1662,10 +1672,11 @@ mod tests {
     }
 
     // A child that ends before its first pass puts `Ended` in the popup's
-    // place; one stopped from the stop popup just takes the popup away.
+    // place; one stopped by `enter` just takes the popup away.
     #[test]
     fn a_child_ending_first_replaces_the_starting_popup() {
-        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-ended");
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-starting-ended");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
         let mut tab = DispatchTab::default();
         tab.started(
             Ok(stand_in("echo refused >&2; exit 1")),
@@ -1683,9 +1694,12 @@ mod tests {
         let mut tab = DispatchTab::default();
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
         let pipelines = Pipelines::builtin();
-        tab.enter(&repo, &repo.root);
-        assert!(matches!(tab.popup, Some(Popup::Stop(_))));
-        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(
+            tab.popup.is_none(),
+            "nothing is running, so nothing is asked"
+        );
+        assert!(stopping(&tab));
         for _ in 0..500 {
             tab.reap(&repo);
             if tab.child.is_none() {
@@ -1712,15 +1726,26 @@ mod tests {
         tab.child.as_ref().is_some_and(|child| child.stopping())
     }
 
-    // `enter` over a running dispatcher asks how to stop it — even with
-    // nothing running — and `esc` leaves it running.
+    // `enter` over a running dispatcher with a command step running asks how
+    // to stop it, and `esc` leaves it running.
     #[cfg(unix)]
     #[test]
     fn enter_over_a_running_dispatcher_asks_and_esc_leaves_it_running() {
-        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::status::testutil::add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(
+            &key,
+            "sleep 30",
+            &repo.root,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Stop(_))));
         assert!(
             tab.popup.as_ref().unwrap().panel()[0]
@@ -1736,6 +1761,45 @@ mod tests {
         assert!(tab.popup.is_none());
         assert!(!stopping(&tab));
         assert!(tab.dispatching());
+        runs.stop(&key);
+    }
+
+    // With no agent lane or command step running, `enter` stops the
+    // dispatcher at once and asks nothing, whether or not tasks are queued.
+    #[cfg(unix)]
+    #[test]
+    fn enter_with_no_step_running_stops_at_once_and_opens_no_popup() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-idle");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::status::testutil::add(&repo, "login", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(
+            tab.popup.is_none(),
+            "{:?}",
+            tab.popup.as_ref().map(Popup::panel)
+        );
+        assert!(stopping(&tab));
+        assert_eq!(repo.task("login").unwrap().stage(), "queued");
+    }
+
+    // When the queue cannot be read, nothing says no step is running, so
+    // `enter` asks rather than stopping at once.
+    #[cfg(unix)]
+    #[test]
+    fn enter_asks_when_what_is_running_cannot_be_read() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-unread");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        // A file where the queue directory belongs makes reading it fail.
+        let queue = repo.queue_dir();
+        std::fs::remove_dir_all(&queue).unwrap();
+        std::fs::write(&queue, "").unwrap();
+        assert!(repo.tasks().is_err());
+        let mut tab = running_tab();
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
+        assert!(matches!(tab.popup, Some(Popup::Stop(_))));
+        assert!(!stopping(&tab));
     }
 
     // `enter` on the popup stops the child and touches no task; a second
@@ -1756,14 +1820,14 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(tab.popup.is_none());
         assert!(stopping(&tab));
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
         assert_eq!(repo.task("login").unwrap().stage(), "handover");
 
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         assert!(tab.popup.is_none(), "a stop under way asks nothing again");
         runs.stop(&key);
     }
@@ -1786,7 +1850,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &repo.root);
+        tab.enter(&repo, &pipelines, &repo.root);
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('i'));
         assert!(
             tab.popup.is_none(),

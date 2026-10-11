@@ -7,13 +7,14 @@
 #
 # What is asserted is the order of the frames it drew: the first is the queue
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
-# a dispatcher and, behind a popup asking how, stops it. While one screen is open, a second `spoolway` or
-# `spoolway dispatch` in the same project refuses. A refusal on the queue tab
-# is drawn in a popup over the tab, and so is what a clean submission queued,
-# ending on whether a dispatcher will pick it up. `→` from the queue tab
-# reaches the routines tab. A full board in a short pane scrolls its task
-# table under a marker row and keeps its key line. Off a terminal, bare
-# `spoolway` still prints the grouped help.
+# a dispatcher and, with no step running, stops it at once with no popup.
+# While one screen is open, a second `spoolway` or `spoolway dispatch` in
+# the same project refuses. A refusal on the queue tab is drawn in a popup
+# over the tab, and so is what a clean submission queued, ending on whether a
+# dispatcher will pick it up. `→` from the queue tab reaches the routines tab.
+# A full board in a short pane scrolls its task table under a marker row and
+# keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
+# help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -105,18 +106,18 @@ has "with dispatch the open tab on the strip" "← [DISPATCH]       QUEUE" "$LAS
 lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
-# again asks how to stop it — even with nothing running — and `enter` on that
-# popup stops it, letting running steps finish. This project's fake models
-# give the warnings gate something to say, so the first `enter` opens that
-# popup first and `x` answers it — hiding it and starting the child. The keys
-# are paced so the child has time to take the lock before the second `enter`,
-# and time to go once asked; the pipe then runs out and the screen ends.
+# again, with no step running, stops it at once and draws no stop popup.
+# This project's fake models give the warnings gate something to say, so the
+# first `enter` opens the warnings popup first and `x` answers it — hiding it
+# and starting the child. The keys are paced so the child has time to take
+# the lock before the second `enter`, and time to go once asked; the pipe then
+# runs out and the screen ends.
 # Nothing is queued, which a child the screen started waits on rather than
 # exiting — so a frame naming its pid while the queue is empty is also the
 # proof it stayed up.
 RUN="$LIVE/run.txt"
-works "enter on the dispatch tab starts dispatching, and enter then enter stops it" \
-  script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 1; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
+works "enter on the dispatch tab starts dispatching, and enter again stops it" \
+  script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
@@ -131,13 +132,9 @@ if grep -qaE "Good (morning|afternoon|evening)|Working late" "$RUN.plain"; then
 else
   bad "the empty board greets the person (no greeting in $RUN.plain)"
 fi
-has "enter over it asks how to stop, as a popup" "╭─ stop dispatching " "$RUN.plain"
-has "saying no new steps will start" "No new steps will be started." "$RUN.plain"
-has "offering enter to let running steps finish" "[enter] let running steps finish" "$RUN.plain"
-has "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back" "$RUN.plain"
+lacks "enter over it with no step running draws no stop popup" "─ stop dispatching " "$RUN.plain"
 lacks "the start was not refused" "the dispatcher did not start" "$RUN.plain"
-has "enter on the popup stops it" "dispatcher stopped" "$LAST"
-lacks "and closes the popup" "No new steps will be started." "$LAST"
+has "enter stops it at once" "dispatcher stopped" "$LAST"
 has "and offers to start it again" "[enter] start dispatching" "$LAST"
 lacks "with no popup about a stop it was asked for" "the dispatcher stopped" "$LAST"
 LOCKFILE="$SPOOLWAY_PROJECT_HOME/dispatch.pid"

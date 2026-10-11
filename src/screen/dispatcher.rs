@@ -211,10 +211,11 @@ pub(crate) fn popup(ran: bool, reason: &str) -> Vec<String> {
 }
 
 /// The popup `enter` opens over a running dispatcher: whether its running
-/// steps finish, or are interrupted now. Asked on every stop, even with
-/// nothing running — the choice is the person's each time, never
-/// remembered. Laid out line by line rather than wrapped, so it reads
-/// exactly as the plan's mockup draws it.
+/// steps finish, or are interrupted now. Asked only while an agent lane or
+/// command step is running — with none, the two answers would do the same
+/// thing and `enter` stops the dispatcher without asking. The choice is the
+/// person's each time, never remembered. Laid out line by line rather than
+/// wrapped, so the box keeps its drawn shape.
 pub(crate) fn stop_panel() -> Vec<String> {
     let body = [
         "",
