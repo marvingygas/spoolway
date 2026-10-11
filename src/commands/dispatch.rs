@@ -254,9 +254,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let mut consecutive_working: u32 = 0;
 
     // Whatever the last stop interrupted — the dispatch tab's stop popup,
-    // `i` — goes back to work before the first pass, so that pass launches
-    // it. Here rather than in the tab, so a start typed at a terminal
-    // resumes the same tasks. See `crate::status::resume_stop_parked`.
+    // `interrupt them now` — goes back to work before the first pass, so
+    // that pass launches it. Here rather than in the tab, so a start typed
+    // at a terminal resumes the same tasks. See `crate::status::resume_stop_parked`.
     for problem in crate::status::resume_stop_parked(repo, pipelines)? {
         crate::problem_log::append(repo, &problem);
         println!("  ! {problem}");
@@ -616,31 +616,61 @@ fn overrides_gate_with(
     // every early return above constructs no guard at all, so a dispatch
     // with no layer, or one already acknowledged, hides and shows nothing.
     let _term = term.map(|term| term());
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    print_overrides_notice(out, &rows)?;
-    writeln!(
-        out,
-        "  [enter] start the run   [esc] back   [x] don't ask again until this changes"
-    )?;
-
+    let mut cursor = 0;
     loop {
+        // The whole screen again on every move of the cursor: the notice
+        // above the answers is a few rows, and a screen redrawn whole needs
+        // no cursor addressing to move one `>`.
+        let _ = write!(out, "\x1b[2J\x1b[H");
+        print_overrides_notice(out, &rows)?;
+        print_answers(out, "  ", &OVERRIDES_ANSWERS, cursor)?;
         match crate::screen::read_key(input) {
-            Some(crate::screen::Key::Enter) => return Ok(true),
-            Some(crate::screen::Key::Esc) => return Ok(false),
-            Some(crate::screen::Key::Char('x' | 'X')) => {
-                crate::overrides::ack_write(&repo.home, &fingerprint)?;
+            Some(crate::screen::Key::Enter) => {
+                if cursor == HIDE {
+                    crate::overrides::ack_write(&repo.home, &fingerprint)?;
+                }
                 return Ok(true);
             }
+            Some(crate::screen::Key::Esc) => return Ok(false),
             // The tty went away mid-question — a closed pane, say. Nothing
             // here may hang waiting for an answer that can no longer come.
             None => return Ok(true),
-            _ => {}
+            Some(key) => cursor = crate::screen::move_cursor(cursor, OVERRIDES_ANSWERS.len(), key),
         }
     }
 }
 
+/// The overrides gate's answers, in the terminal and in the dispatch tab's
+/// popup alike: start, or start and hide the gate until the layer changes.
+const OVERRIDES_ANSWERS: [&str; 2] = ["start dispatching", "don't ask again until this changes"];
+
+/// The warnings gate's answers, in the terminal and in the dispatch tab's
+/// popup alike: start, or start and hide these findings until they change.
+const WARNINGS_ANSWERS: [&str; 2] = ["start dispatching", "hide until these change"];
+
+/// Which of [`OVERRIDES_ANSWERS`] and [`WARNINGS_ANSWERS`] hides its gate
+/// as well as starting the run.
+const HIDE: usize = 1;
+
+/// A gate's `answers` under its printed notice, the cursor on the
+/// `cursor`th, each row led by `indent` so the answers line up with the
+/// notice above them. The notice already ends on a blank row, so the one
+/// [`crate::screen::answer_rows`] opens on is left out.
+fn print_answers(
+    out: &mut impl std::io::Write,
+    indent: &str,
+    answers: &[&str],
+    cursor: usize,
+) -> Result<()> {
+    let answers: Vec<String> = answers.iter().map(|a| a.to_string()).collect();
+    for row in crate::screen::answer_rows(&answers, cursor).iter().skip(1) {
+        writeln!(out, "{indent}{row}")?;
+    }
+    Ok(())
+}
+
 /// What the overrides gate keys its "don't ask again" on, shared by
-/// [`overrides_gate_with`] and [`overrides_popup`] so `x` in either hides
+/// [`overrides_gate_with`] and [`overrides_popup`] so hiding either one hides
 /// both. The layer's own fingerprint first: a tracked-file edit alone must
 /// not reopen a gate the layer itself has not moved. An entry can stop
 /// fitting with no override file touched, though — a pull renames the step
@@ -813,29 +843,29 @@ fn warnings_gate_with(
     }
 
     let _term = term.map(|term| term());
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    print_warnings_notice(out, &settings, &files, &problems)?;
-    // Flush left, in the same column as the headings above it — the
-    // mockup's own footer, unlike the overrides gate's, sits under a body
-    // that is not itself indented two columns.
-    writeln!(
-        out,
-        "[enter] start the run   [esc] back   [x] hide until these change"
-    )?;
-
+    let mut cursor = 0;
     loop {
+        // Redrawn whole on every move of the cursor, the same as
+        // `overrides_gate_with`'s own screen.
+        let _ = write!(out, "\x1b[2J\x1b[H");
+        print_warnings_notice(out, &settings, &files, &problems)?;
+        // Flush left, in the same column as the headings above it — unlike
+        // the overrides gate's answers, which sit under a body that is
+        // itself indented two columns.
+        print_answers(out, "", &WARNINGS_ANSWERS, cursor)?;
         match crate::screen::read_key(input) {
-            Some(crate::screen::Key::Enter) => return Ok(true),
-            Some(crate::screen::Key::Esc) => return Ok(false),
-            Some(crate::screen::Key::Char('x' | 'X')) => {
-                crate::overrides::warnings_ack_write(&repo.home, &fingerprint)?;
+            Some(crate::screen::Key::Enter) => {
+                if cursor == HIDE {
+                    crate::overrides::warnings_ack_write(&repo.home, &fingerprint)?;
+                }
                 return Ok(true);
             }
+            Some(crate::screen::Key::Esc) => return Ok(false),
             // The tty went away mid-question. Nothing here may hang waiting
             // for an answer that can no longer come — see
             // `overrides_gate_with`'s own copy of this same reasoning.
             None => return Ok(true),
-            _ => {}
+            Some(key) => cursor = crate::screen::move_cursor(cursor, WARNINGS_ANSWERS.len(), key),
         }
     }
 }
@@ -867,25 +897,80 @@ fn warnings_fingerprint(settings: &[String], files: &[String], problems: &[Strin
 }
 
 /// One of the two gates bare `spoolway`'s dispatch tab asks before it starts
-/// a dispatcher, drawn as a popup over the board — the same notice
-/// [`overrides_gate`] and [`warnings_gate`] draw as a screen of their own
-/// for `spoolway dispatch`, and hidden by the same acknowledgement, so `x`
-/// in either place quiets both.
+/// a dispatcher, drawn as a popup over the board — the same notice and the
+/// same answers [`overrides_gate`] and [`warnings_gate`] draw as a screen of
+/// their own for `spoolway dispatch`, and hidden by the same
+/// acknowledgement, so hiding it in either place quiets both.
 pub(crate) struct GatePopup {
-    /// The boxed panel, key line included, for the board to overlay.
-    pub(crate) panel: Vec<String>,
+    title: &'static str,
+    body: Vec<String>,
+    /// Which of the two answers the cursor is on.
+    cursor: usize,
     fingerprint: String,
     overrides: bool,
 }
 
 impl GatePopup {
-    /// `x`: don't ask again until what the popup names changes.
+    /// The boxed panel, answers and key row included, for the board to
+    /// overlay.
+    pub(crate) fn panel(&self) -> Vec<String> {
+        crate::screen::ask(
+            self.title,
+            &self.body,
+            &self.answers().map(str::to_string),
+            self.cursor,
+        )
+    }
+
+    /// The answers [`Self::panel`] lists, counted by [`Self::move_cursor`]
+    /// too so the cursor reaches the last of them.
+    fn answers(&self) -> [&'static str; 2] {
+        match self.overrides {
+            true => OVERRIDES_ANSWERS,
+            false => WARNINGS_ANSWERS,
+        }
+    }
+
+    /// The popup with its cursor moved by `key`.
+    pub(crate) fn move_cursor(&mut self, key: crate::screen::Key) {
+        self.cursor = crate::screen::move_cursor(self.cursor, self.answers().len(), key);
+    }
+
+    /// Whether `enter` here answers `hide`, the second answer, as well as
+    /// starting.
+    pub(crate) fn hides(&self) -> bool {
+        self.cursor == HIDE
+    }
+
+    /// The second answer's own half: don't ask again until what the popup
+    /// names changes.
     pub(crate) fn hide(&self, repo: &Repo) -> Result<()> {
         match self.overrides {
             true => crate::overrides::ack_write(&repo.home, &self.fingerprint),
             false => crate::overrides::warnings_ack_write(&repo.home, &self.fingerprint),
         }
     }
+}
+
+/// The dispatch tab's two start gates, drawn once each with made-up
+/// content — for the test that walks every popup in the project that asks
+/// something; see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn dispatch_asking_panels() -> Vec<(&'static str, Vec<String>)> {
+    let gate = |title, overrides| GatePopup {
+        title,
+        body: vec![String::new(), "pipelines/impl.yml  2 keys".to_string()],
+        cursor: 0,
+        fingerprint: String::new(),
+        overrides,
+    };
+    vec![
+        (
+            "overrides",
+            gate("overrides are active for this project", true).panel(),
+        ),
+        ("start warnings", gate("before dispatching", false).panel()),
+    ]
 }
 
 /// The overrides popup, or `None` when [`overrides_gate`] would not ask:
@@ -900,16 +985,14 @@ pub(crate) fn overrides_popup(repo: &Repo) -> Result<Option<GatePopup>> {
     if !crate::overrides::ack_needed(&repo.home, &fingerprint) {
         return Ok(None);
     }
-    // One blank row above the rows; `panel` puts the one under them, above
-    // the key line, as step 19 of the dispatch tab's mockup draws it.
+    // One blank row above the rows; `ask` puts the one under them, above
+    // the answers.
     let mut body = vec![String::new()];
     body.extend(overrides_lines(&rows));
     Ok(Some(GatePopup {
-        panel: crate::screen::panel(
-            "overrides are active for this project",
-            &body,
-            "[enter] start dispatching   [esc] back   [x] don't ask again until this changes",
-        ),
+        title: "overrides are active for this project",
+        body,
+        cursor: 0,
         fingerprint,
         overrides: true,
     }))
@@ -939,14 +1022,12 @@ pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GateP
         &problems,
         WARNINGS_POPUP_WRAP,
     ));
-    // One blank row above the findings; `panel` puts the one under them,
-    // above the key line, as step 20 of the dispatch tab's mockup draws it.
+    // One blank row above the findings; `ask` puts the one under them,
+    // above the answers.
     Some(GatePopup {
-        panel: crate::screen::panel(
-            "before dispatching",
-            &body,
-            "[enter] start dispatching   [esc] back   [x] hide until these change",
-        ),
+        title: "before dispatching",
+        body,
+        cursor: 0,
         fingerprint,
         overrides: false,
     })
@@ -2264,12 +2345,13 @@ mod tests {
         assert!(printed.contains("pipelines/default.yml"), "{printed}");
     }
 
-    /// `enter` starts an otherwise ordinary run — no acknowledgement is
-    /// written, since the mockup reserves that for `x` alone.
+    /// `enter` on the first answer starts an otherwise ordinary run — no
+    /// acknowledgement is written, since that is the second answer's alone.
+    /// `x`, the letter that used to hide the gate, is ignored on the way.
     #[test]
     fn overrides_gate_enter_proceeds_without_acknowledging() {
         let (repo, _root_guard) = fixture_with_layer("overrides-gate-enter");
-        let mut input = keys("\r");
+        let mut input = keys("x\r");
         let mut out = Vec::new();
         assert!(
             overrides_gate_with(
@@ -2314,16 +2396,16 @@ mod tests {
         ));
     }
 
-    /// `x` starts the run and records the layer's own fingerprint — and once
-    /// recorded, an unchanged layer never asks again, exactly as "don't ask
-    /// again until this changes" promises: the second call needs no input at
-    /// all, or it would hang rather than pass.
+    /// The second answer starts the run and records the layer's own
+    /// fingerprint — and once recorded, an unchanged layer never asks again,
+    /// exactly as "don't ask again until this changes" promises: the second
+    /// call needs no input at all, or it would hang rather than pass.
     #[test]
-    fn overrides_gate_x_acknowledges_and_is_not_asked_again() {
+    fn overrides_gate_hide_acknowledges_and_is_not_asked_again() {
         let (repo, _root_guard) = fixture_with_layer("overrides-gate-x");
         let fingerprint = crate::version::layer_fingerprint(&repo).unwrap();
 
-        let mut input = keys("x");
+        let mut input = keys("\x1b[B\r");
         let mut out = Vec::new();
         assert!(
             overrides_gate_with(
@@ -2336,6 +2418,19 @@ mod tests {
             .unwrap()
         );
         assert!(!crate::overrides::ack_needed(&repo.home, &fingerprint));
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("    don't ask again until this changes"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("  > don't ask again until this changes"),
+            "the cursor moved onto it: {printed}"
+        );
+        assert!(
+            printed.contains("  [enter] confirm   [esc] close"),
+            "{printed}"
+        );
 
         let mut no_input = keys("");
         let mut out = Vec::new();
@@ -2516,15 +2611,16 @@ mod tests {
         row.trim_matches(['│', ' '])
     }
 
-    /// Step 19 of the dispatch tab's mockup: a blank row, the layer's rows,
-    /// one blank row, the key line, and the border straight under it.
+    /// A blank row, the layer's rows, one blank row, the two answers with the
+    /// cursor on the first, one blank row, the key row, and the border
+    /// straight under it.
     #[test]
     fn the_overrides_popup_reads_as_the_dispatch_tab_draws_it() {
         let (repo, _root_guard) = fixture_with_layer("overrides-popup-layout");
         let panel = overrides_popup(&repo)
             .unwrap()
             .expect("a layer to name")
-            .panel;
+            .panel();
         let n = panel.len();
         assert!(
             panel[0].starts_with(&format!(
@@ -2537,25 +2633,28 @@ mod tests {
             popup_row(&panel[2]).starts_with("pipelines/default.yml"),
             "{panel:?}"
         );
+        assert_eq!(popup_row(&panel[n - 2]), "[enter] confirm   [esc] close");
         assert_eq!(popup_row(&panel[n - 3]), "", "{panel:?}");
         assert_eq!(
-            popup_row(&panel[n - 2]),
-            "[enter] start dispatching   [esc] back   [x] don't ask again until this changes"
+            popup_row(&panel[n - 4]),
+            "don't ask again until this changes"
         );
+        assert_eq!(popup_row(&panel[n - 5]), "> start dispatching");
+        assert_eq!(popup_row(&panel[n - 6]), "", "{panel:?}");
         assert!(
-            !popup_row(&panel[n - 4]).is_empty(),
-            "one blank row above the keys: {panel:?}"
+            !popup_row(&panel[n - 7]).is_empty(),
+            "one blank row above the answers: {panel:?}"
         );
     }
 
-    /// Step 20: the same shape, the key line straight on the border.
+    /// The warnings popup: the same shape, its own second answer.
     #[test]
     fn the_warnings_popup_reads_as_the_dispatch_tab_draws_it() {
         let (mut repo, _root_guard) = fixture("warnings-popup-layout");
         repo.config.unattended.enabled = true;
         let panel = warnings_popup(&repo, &Pipelines::builtin())
             .expect("unattended with no ceiling is worth a warning")
-            .panel;
+            .panel();
         let n = panel.len();
         assert!(
             panel[0].starts_with(&format!("{TOP_LEFT}─ before dispatching ")),
@@ -2563,18 +2662,18 @@ mod tests {
         );
         assert_eq!(popup_row(&panel[1]), "", "{panel:?}");
         assert_eq!(popup_row(&panel[2]), "settings", "{panel:?}");
-        assert_eq!(
-            popup_row(&panel[n - 2]),
-            "[enter] start dispatching   [esc] back   [x] hide until these change"
-        );
+        assert_eq!(popup_row(&panel[n - 2]), "[enter] confirm   [esc] close");
         assert_eq!(popup_row(&panel[n - 3]), "", "{panel:?}");
+        assert_eq!(popup_row(&panel[n - 4]), "hide until these change");
+        assert_eq!(popup_row(&panel[n - 5]), "> start dispatching");
+        assert_eq!(popup_row(&panel[n - 6]), "", "{panel:?}");
         assert!(
-            !popup_row(&panel[n - 4]).is_empty(),
-            "one blank row above the keys: {panel:?}"
+            !popup_row(&panel[n - 7]).is_empty(),
+            "one blank row above the answers: {panel:?}"
         );
     }
 
-    /// `x` on the warnings popup quiets both surfaces: the popup is not
+    /// Hiding the warnings popup quiets both surfaces: the popup is not
     /// asked again, and neither is `spoolway dispatch`'s own 80-column
     /// screen, though the popup wraps the same findings narrower.
     #[test]
@@ -2603,7 +2702,7 @@ mod tests {
     }
 
     /// A failing task hook lands under `problems`, and a second failure
-    /// changes the popup's fingerprint, so a popup hidden with `x` over the
+    /// changes the popup's fingerprint, so a popup hidden over the
     /// first asks again.
     #[test]
     fn a_second_hook_failure_brings_a_hidden_warnings_popup_back() {
@@ -2626,7 +2725,8 @@ mod tests {
 
         fail("first");
         let popup = warnings_popup(&repo, &pipelines).expect("a failed hook to name");
-        let body: Vec<&str> = popup.panel.iter().map(|row| popup_row(row)).collect();
+        let panel = popup.panel();
+        let body: Vec<&str> = panel.iter().map(|row| popup_row(row)).collect();
         assert!(body.contains(&"problems"), "{body:#?}");
         assert!(
             body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
@@ -2646,7 +2746,7 @@ mod tests {
         );
     }
 
-    /// `x` on the overrides popup does the same for the overrides gate.
+    /// Hiding the overrides popup does the same for the overrides gate.
     #[test]
     fn hiding_the_overrides_popup_hides_the_cli_gate_too() {
         let (repo, _root_guard) = fixture_with_layer("overrides-popup-hide");
@@ -2672,7 +2772,7 @@ mod tests {
 
     /// An override can stop fitting with no override file touched: here the
     /// tracked pipeline the patch names is renamed away, as a pull might do.
-    /// That newly ignored entry must reopen a gate hidden with `x`, on the
+    /// That newly ignored entry must reopen a hidden gate, on the
     /// dispatch tab and on `spoolway dispatch`'s own screen alike, though
     /// the layer's own fingerprint has not moved.
     #[test]
@@ -2713,11 +2813,11 @@ mod tests {
             .expect("a newly ignored entry asks again");
         assert!(
             popup
-                .panel
+                .panel()
                 .iter()
                 .any(|row| popup_row(row).contains("ignored — names pipeline `default`")),
             "{:#?}",
-            popup.panel
+            popup.panel()
         );
 
         let mut out = Vec::new();
@@ -2763,17 +2863,18 @@ mod tests {
         assert!(printed.contains("files"), "{printed}");
     }
 
-    /// `enter` starts the run without writing an acknowledgement — the
-    /// mockup reserves that for `x` alone, the same rule
-    /// `overrides_gate_with` follows. `unattended.enabled` with no ceiling
-    /// set is what guarantees this screen has a setting worth reading,
-    /// rather than skipping itself for having nothing to say.
+    /// `enter` on the first answer starts the run without writing an
+    /// acknowledgement — that is the second answer's alone, the same rule
+    /// `overrides_gate_with` follows, and `x`, the letter that used to hide
+    /// the screen, is ignored on the way. `unattended.enabled` with no
+    /// ceiling set is what guarantees this screen has a setting worth
+    /// reading, rather than skipping itself for having nothing to say.
     #[test]
     fn warnings_gate_enter_proceeds_without_acknowledging() {
         let (mut repo, _root_guard) = fixture("warnings-gate-enter");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
-        let mut input = keys("\r");
+        let mut input = keys("x\r");
         let mut out = Vec::new();
         assert!(
             warnings_gate_with(
@@ -2785,6 +2886,10 @@ mod tests {
                 Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
+        );
+        assert!(
+            warnings_popup(&repo, &pipelines).is_some(),
+            "enter must not count as an acknowledgement"
         );
     }
 
@@ -2810,17 +2915,17 @@ mod tests {
         );
     }
 
-    /// `x` starts the run and records a fingerprint of the rendered lines —
-    /// and once recorded, the same unchanged lines never ask again: the
-    /// second call needs no input at all, or it would hang rather than pass,
-    /// and it draws nothing.
+    /// The second answer starts the run and records a fingerprint of the
+    /// rendered lines — and once recorded, the same unchanged lines never ask
+    /// again: the second call needs no input at all, or it would hang rather
+    /// than pass, and it draws nothing.
     #[test]
-    fn warnings_gate_x_acknowledges_and_is_not_asked_again() {
+    fn warnings_gate_hide_acknowledges_and_is_not_asked_again() {
         let (mut repo, _root_guard) = fixture("warnings-gate-x");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
 
-        let mut input = keys("x");
+        let mut input = keys("\x1b[B\r");
         let mut out = Vec::new();
         assert!(
             warnings_gate_with(
@@ -2853,8 +2958,8 @@ mod tests {
         );
     }
 
-    /// Review finding 2: the footer sits flush left, in the same column as
-    /// the headings above it — unlike the overrides gate's own footer, whose
+    /// The answers and their key row sit flush left, in the same column as
+    /// the headings above them — unlike the overrides gate's own, whose
     /// indent matches a body that is itself indented two columns, this
     /// screen's headings are not.
     #[test]
@@ -2875,8 +2980,12 @@ mod tests {
         .unwrap();
         let printed = String::from_utf8(out).unwrap();
         assert!(
-            printed.contains("\n[enter] start the run"),
-            "footer must not be indented: {printed:?}"
+            printed.contains("\n> start dispatching\n  hide until these change\n"),
+            "answers must not be indented: {printed:?}"
+        );
+        assert!(
+            printed.contains("\n[enter] confirm   [esc] close"),
+            "the key row must not be indented: {printed:?}"
         );
     }
 }

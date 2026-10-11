@@ -115,19 +115,22 @@ Otherwise it opens a popup asking how to stop it, in place of `Starting dispatch
 still up:
 
 ```
-[enter] let running steps finish
-[i] interrupt them now   [esc] back
+> let running steps finish
+  interrupt them now
+
+[enter] confirm   [esc] close
 ```
 
-`enter` there stops the child the way `ctrl-c` does: nothing is torn down, and every lane keeps
-running. `i` interrupts every live agent turn and kills every running command step first, parks
-each of those tasks on `paused`, then stops the child. `esc` leaves the dispatcher running, and
+`↑` and `↓` move between the answers. `enter` on `let running steps finish` stops the child the
+way `ctrl-c` does: nothing is torn down, and every lane keeps running. `enter` on `interrupt them
+now` interrupts every live agent turn and kills every running command step first, parks each of
+those tasks on `paused`, then stops the child. `esc` leaves the dispatcher running, and
 a second `enter` while a stop is already going does nothing. Starting dispatching again resumes
 every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
-finishing` for one, left out once none are). `r`, `p`, `s` and `u`/`U` work whether or not a
-child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
+finishing` for one, left out once none are). `r` and the `o` options menu work whether or not
+a child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
@@ -165,14 +168,32 @@ board's branch.
 | `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
-| `g` | With the tasks pane focused, set or clear a `gate_at` on the highlighted task |
-| `o` | With the tasks pane focused, open the highlighted task in your editor |
+| `o` | Open the options menu of the row the focused pane highlights, titled with its name |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show or hide done groups. A queued group never appears |
-| `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
-| `s` | Save the highlighted group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
 
-`g` opens a picker of the steps the pending task will run. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
+The options menu follows focus. Over the tasks pane it offers these items for the highlighted
+task, in this order:
+
+| Item | What it does |
+|---|---|
+| `open` | Open the task in your editor |
+| `gate` | Set or clear a `gate_at` on the task |
+
+Over the groups pane it offers these for the highlighted group, and a group with no tasks says
+`nothing to do here`. To reach them from the tasks pane, press `tab` first.
+
+| Item | What it does |
+|---|---|
+| `trial` | Fork the group into a trial. See [Trials](planning.md#trials) |
+| `save as routine` | Save the group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
+
+`enter` runs the item under the cursor and `esc` closes the menu. See
+[Options menu](planning.md#options-menu).
+
+`gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
+under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
+with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that fails validation is
@@ -200,16 +221,17 @@ Below the list, a line says whether a dispatcher will pick the work up: `Dispatc
 or `Start the dispatcher to begin working`. `enter` closes the popup back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
-requirements. A requirement this machine does not meet draws a gate naming what is unmet:
-`enter` queues the group with `tracking: off` written onto every task, and `esc` returns to
-the queue screen with nothing queued. A task queued with `tracking: off` fires no
+requirements. A requirement this machine does not meet draws a gate naming what is unmet, with
+one answer: `enter` on `queue anyway, without issue tracking` queues the group with `tracking:
+off` written onto every task, and `esc` returns to the queue screen with nothing queued. A task queued with `tracking: off` fires no
 `[issue_tracking]` hook event and is never held waiting on one. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
 
 When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
 before it opens any ticket. The question names the tracker and lists every task in the batch.
-`enter` opens the tickets and queues, `n` queues the batch with `tracking: off` written onto
-every task instead, and `esc` returns to the queue screen with nothing queued. Once the hook
+`enter` on `create and queue` opens the tickets and queues, `enter` on `queue only` queues the
+batch with `tracking: off` written onto every task instead, and `esc` returns to the queue screen
+with nothing queued. Once the hook
 runs, a popup fills in each task's row as the hook answers it and takes `enter` only once every
 row is done. Queueing a routine from the routines tab asks the same question. A trial never
 asks and opens no ticket. See
@@ -341,7 +363,7 @@ While a dispatcher runs, the command routes on the pipelines that dispatcher loa
 
 ### `spoolway queue pause <task>`
 
-Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. The board's `p` key does the same.
+Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. `pause` in the board's options menu does the same.
 
 ```
 spoolway queue pause <task> [--force]
@@ -361,8 +383,9 @@ A task that is still `queued`, has a live lane or running command on its step, o
 
 Carry a not-started task back to the pending directory, with every reserved key,
 `hook_paused:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
-files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
-carries the same task and every unstarted task that depends on it; this command has no panel
+files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
+`unqueue` in the board's options menu carries the same task and every unstarted task that depends
+on it; this command has no panel
 to list a chain on, so it refuses instead.
 
 ```
@@ -373,7 +396,7 @@ spoolway queue unqueue <task> --force
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--all` | | Every not-started task, the way the board's `U` does. Refused together with `--force` |
+| `--all` | | Every not-started task at once. Refused together with `--force` |
 | `--force` | | Interrupt any live lane, stop every command run the task left, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
 
 A task that has started is refused, naming its stage, its checkout when it has one, and both
@@ -459,7 +482,7 @@ Queueing a batch while another dispatcher already holds the lock works the same 
 is written, and the running dispatcher picks it up on its own next pass.
 
 When an [overrides layer](configuration.md#the-overrides-layer) is active, it shows what is
-patched and waits for a key:
+patched and waits for an answer:
 
 ```
   overrides are active for this project
@@ -468,7 +491,10 @@ patched and waits for a key:
     prompts/reviewer          whole file
     config.toml               1 key       agents.claude.concurrency
 
-  [enter] start the run   [esc] back   [x] don't ask again until this changes
+  > start dispatching
+    don't ask again until this changes
+
+  [enter] confirm   [esc] close
 ```
 
 An entry the load left out draws its own row instead of its keys, labelled the same way:
@@ -477,13 +503,14 @@ An entry the load left out draws its own row instead of its keys, labelled the s
     pipelines/release.yml  publish  ignored — names both `run:` and `agent:`
 ```
 
-Every other row, the title and the three keys, `[x]` included, are unchanged. `[x]` hides the
-screen until the layer changes or the set of ignored entries changes. An entry that stops fitting
+Every other row, the title and the answers are unchanged. `↑` and `↓` move between the answers.
+`don't ask again until this changes` starts the run and hides the screen until the layer changes
+or the set of ignored entries changes. An entry that stops fitting
 with no override file touched brings the screen back. See [the overrides
 layer](configuration.md#the-overrides-layer).
 
 It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
-a key:
+an answer:
 
 ```
 before this run starts
@@ -501,20 +528,23 @@ problems
     paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log:
     ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
-[enter] start the run   [esc] back   [x] hide until these change
+> start dispatching
+  hide until these change
+
+[enter] confirm   [esc] close
 ```
 
 A line names the setting and its state, and nothing else. What to do about it is in
 [Configuration](configuration.md). A failed task hook is the exception: its row under `problems`
 also names the event, the task, the exit code, the command that clears it and the log path. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Each section is skipped when it has nothing to say, and the
-whole screen is skipped, with nothing drawn, when all three are empty. `x` stores its own
-fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
+whole screen is skipped, with nothing drawn, when all three are empty. `hide until these change`
+starts the run and stores its own fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
 as soon as any line differs from it.
 
 `esc` on either screen ends the command. Bare `spoolway`'s dispatch tab asks the same two things
-as popups of its own before it starts a dispatcher — see [`spoolway`](#spoolway) — so `x` there
-quiets this screen too, and the other way round.
+as popups of its own, with the same answers, before it starts a dispatcher — see
+[`spoolway`](#spoolway) — so hiding one there quiets this screen too, and the other way round.
 
 The overrides screen, the warnings screen and the workspace notice below each take the alternate
 screen before drawing, the same way bare `spoolway`'s screen does: that is what keeps a herdr pane
@@ -560,9 +590,15 @@ the right pane is titled `new job`.
 | Key | What it does |
 |---|---|
 | `n` | Write a new job: pick the routine, type the schedule, pick the pipeline |
-| `e` | Edit the highlighted job through the same three panels |
-| `space` | Pause or resume the highlighted job |
-| `x` | Delete the highlighted job, after confirming |
+| `o` | Open the options menu of the highlighted job, titled with its name |
+
+The options menu offers these items for the highlighted job, in this order:
+
+| Item | What it does |
+|---|---|
+| `edit` | Edit the job through the same three panels |
+| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it |
+| `delete` | Delete the job, after a popup whose one answer is `delete` |
 
 See [Jobs](jobs.md).
 
@@ -742,7 +778,7 @@ The session line reads `abandoned, already banked` when the usage ledger already
 |---|---|---|
 | `-m`, `--message <TEXT>` | `restarted by hand — fresh session` | Note for the status log |
 
-The board's `s` key does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
+`restart` in the board's options menu does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
 
 While a dispatcher runs, the step is checked against the pipelines it loaded at start. See
 [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).

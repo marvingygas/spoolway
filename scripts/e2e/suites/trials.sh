@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The queue tab's `t` picker, driven end to end — the one path no unit test
+# The queue tab's trial picker (`o`, then trial), driven end to end — the one path no unit test
 # can drive, since `run_screen` is exercised headlessly in Rust already, but
 # never as the whole binary reading real keystrokes off a real pipe, under
-# the pty `on_screen` gives it. `t` forks a whole group once per pipeline:
+# the pty `on_screen` gives it. trial forks a whole group once per pipeline:
 # pipelines ticked on the first popup, one skip set per ticked pipeline on the
 # second, and one full copy of the group per tick, each copy in a group of its
 # own named `<group>-<pipeline>`, every arm under one freshly minted trial id.
@@ -35,7 +35,7 @@ new_repo "$LIVE/proj"
 configure_project plan/live
 
 # Two pending documents sharing one group, `beta` depending on `alpha` — the
-# unit `t` forks whole. `spoolway init` writes exactly the two built-in
+# unit trial forks whole. `spoolway init` writes exactly the two built-in
 # pipelines, `default` and `bugfix`, under `.spoolway/pipelines/`, and
 # `trial_pipeline_names` lists them in the same alphabetical order
 # (`bugfix`, `default`) the pick screen draws its rows in.
@@ -48,9 +48,10 @@ pending_doc alpha "$BODY" "group: audits" "pipeline:"
 pending_doc beta "$BODY" "group: audits" "pipeline:" \
   "depends_on: [alpha]"
 
-# `Tab` focuses the tasks pane on a task inside the group (`alpha`, first in
-# reading order since it is the dependency), proving `t` reaches the whole
-# group from a selected task too, not only from the groups pane. `t` opens
+# `o` over the groups pane, where the screen opens on `audits`, opens the
+# group's options menu; `enter` picks its first item, trial. The tasks pane's
+# menu offers no trial, so the group has to be reached from the groups pane.
+# Trial opens
 # the pick-pipelines popup with nothing ticked and the cursor on `bugfix`,
 # the first row: `space` ticks it, `j` moves onto `default` and `space`
 # ticks that too. `enter` then advances to the skips screen, one page per
@@ -63,7 +64,7 @@ pending_doc beta "$BODY" "group: audits" "pipeline:" \
 # `enter` mints and writes all four arms and goes back to browsing; the
 # trailing `n` is noise the screen ignores, and the pipe running dry ends it
 # the same way `esc` would.
-on_screen '\tt j \rj \033[Cjj \rn' /dev/null
+on_screen 'o\r j \rj \033[Cjj \rn' /dev/null
 
 # Two copies of the two-task chain, ids numbered in pipeline order: the
 # `bugfix` copy is `alpha-1`, `beta-1`, the `default` copy `alpha-2`,
@@ -143,11 +144,11 @@ works "both source tasks are left exactly where they were" \
 # A second template, this one already run through a pipeline once: its sole
 # document lives in the archive, carrying every key spoolway stamped on that
 # run — `stage:` chief among them, which `parse_submission` refuses outright.
-# `list_groups` lists such a group from `archive/index.jsonl`, and `t` opens
+# `list_groups` lists such a group from `archive/index.jsonl`, and trial opens
 # its one `archive/<id>.md` by name and reads it verbatim, so forking it is
-# `t` over exactly the shape a task archived earlier has. Not `queue/`: the queue tab never lists a queued group, and
+# trial over exactly the shape a task archived earlier has. Not `queue/`: the queue tab never lists a queued group, and
 # its filter never reaches one. `f` narrows to it by name, `enter` leaves the search
-# box keeping the query, and `t` then reaches it straight from the groups
+# box keeping the query, and `o`, `enter` then reach trial straight from the groups
 # pane, with no `Tab` needed. Nothing is ticked, since the task names no
 # pipeline, and `enter` will not advance until something is: `j` moves onto
 # `default` and `space` ticks it, `enter` advances past the pick screen, and
@@ -164,7 +165,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/archive/old-run.md" old-run "$BODY" \
   "attempts: 2" \
   "pipeline:"
 
-on_screen 'fold-run\rtj \r\rn' /dev/null
+on_screen 'fold-run\ro\rj \r\rn' /dev/null
 
 works "the reset lets a stamped task reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -175,7 +176,7 @@ lacks "the reset held: no stamped stage on the forked arm" "stage: done" \
 lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 
-# The source document goes now that the arm is forked off it: `t` leaves a
+# The source document goes now that the arm is forked off it: trial leaves a
 # source exactly where it found it, and this one was written straight into
 # `archive/` with no `pipeline:` on purpose, a record no real run left. The
 # runtime half below asserts on what the archive holds after a real
@@ -226,7 +227,7 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # waiting on or asserting over a third arm.
 #
 # One ordinary task beside them, queued the everyday way and never touched by
-# `t` — same pipeline, same shape of work, so the only thing that can explain
+# trial — same pipeline, same shape of work, so the only thing that can explain
 # a difference in what happens to it and to the arms is trial mode itself.
 TRIAL_ID=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md" | awk '{print $2}')
 task_doc "$LIVE/control.md" control "$BODY" "group: control-live" \
@@ -327,8 +328,8 @@ works "and compares every other arm against the first, one delta line each" \
 # now, mid-flight, with nothing waiting on them to finish.
 #
 # A trial of its own group, so the discard below has nothing in common with
-# the two arms already settled. `t`'s minimal form: `f` narrows to the group
-# by name, `enter` leaves the search box keeping the query, `t` opens the
+# the two arms already settled. trial's minimal form: `f` narrows to the group
+# by name, `enter` leaves the search box keeping the query, `o`, `enter` opens the
 # picker with the task's own `default` already ticked, two `enter`s take
 # both screens' defaults and queue the trial as one copy under it;
 # the trailing `n` is noise it ignores, and the pipe running dry ends the
@@ -361,7 +362,7 @@ for pipeline_file in .spoolway/pipelines/*.yml; do
 done
 
 pending_doc oneoff "$BODY" "group: oneoff"
-on_screen 'foneoff\rt\r\rn' /dev/null
+on_screen 'foneoff\ro\r\r\rn' /dev/null
 
 works "the one-task trial's arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"

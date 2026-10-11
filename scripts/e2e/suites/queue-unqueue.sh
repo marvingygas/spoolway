@@ -321,7 +321,8 @@ has "the gate draws over an unmet gh version" \
 has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
 has "in a popup over the queue screen" "╭─ issue tracking " "$GATE_ESC_OUT"
 has "whose keys read as drawn" \
-  "[enter] queue anyway, without issue tracking   [esc] back" "$GATE_ESC_OUT"
+  "> queue anyway, without issue tracking" "$GATE_ESC_OUT"
+has "under the shared key row" "[enter] confirm   [esc] close" "$GATE_ESC_OUT"
 works "esc leaves the task in pending, unqueued" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-esc.md"
 works "and nothing reached the queue" \
@@ -355,7 +356,8 @@ PATH="$LOWVER_BIN:$PATH" python3 "$PTY_DRIVER" \
   "$SPOOLWAY" queue add --from "$SPOOLWAY_PROJECT_HOME/pending/gate-from.md" \
   >"$GATE_FROM_OUT" 2>&1
 has "the gate's popup reaches the terminal over \`--from\` too" \
-  "[enter] queue anyway, without issue tracking   [esc] back" "$GATE_FROM_OUT"
+  "> queue anyway, without issue tracking" "$GATE_FROM_OUT"
+has "under the same shared key row" "[enter] confirm   [esc] close" "$GATE_FROM_OUT"
 lacks "and \`--from\` never enters the alternate screen either" \
   $'\033[?1049h' "$GATE_FROM_OUT"
 works "esc leaves that task in pending too, unqueued" \

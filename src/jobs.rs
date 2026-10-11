@@ -12,8 +12,8 @@
 //!
 //! Reads dominate. The two stores are written only by the `spoolway jobs`
 //! screen, through [`write`] and [`delete`] — nothing else stamps a schedule —
-//! and by the routines tab's `x`, which deletes every job pointing into the
-//! routine it removes.
+//! and by the routines tab's delete, which deletes every job pointing into
+//! the routine it removes.
 //! A missing store is an empty list, not an error, so a project with no job in
 //! it lists nothing and the dispatcher behaves exactly as it does today.
 //!
@@ -1143,7 +1143,7 @@ mod tests {
              pipeline = \"impl\"\nroutine = \"nightly\"\nnotify = \"slack\"\n",
         );
 
-        // Re-save with a changed schedule, the way `e` does.
+        // Re-save with a changed schedule, the way the jobs tab's edit does.
         write(
             &repo,
             Scope::User,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The board's confirm-panel keys, driven end to end: real keystrokes read off
+# The board's options menu and confirm panels, driven end to end: real keystrokes read off
 # a real pipe by bare `spoolway`'s dispatch tab, dispatching through a real
 # `spoolway dispatch` child, over a real headless lane that is genuinely
 # mid-turn.
@@ -13,15 +13,21 @@
 # off a real `PATH` and running it, which is the one part of the board no
 # unit test can stand up — the last section covers it.
 #
-# `p` and the dispatch tab's stop popup carry most of the suite, since
-# pausing and stopping with `i` are the two answers that can also abort a
-# live lane; `U` gets one pass through the same `enter`/`esc` answers near
-# the bottom, to cover the other panels, and a park off `queued` is checked
+# Row actions are reached through `o`, which opens a menu of what the
+# cursor's row can take: open, pause, restart, unqueue. The menu runs the
+# action's own check again on `enter`, so each section picks its item and
+# then answers the panel it opens. `p`, `s`, `u` and `U` are no longer board
+# keys; `U` gets one pass that proves it does nothing, and
+# `spoolway queue unqueue --all` does its job.
+#
+# Pausing from the menu and the dispatch tab's stop popup carry most of the
+# suite, since pausing and stopping with `i` are the two answers that can
+# also abort a live lane; a park off `queued` is checked
 # for the `parked_from` record it leaves; `r` proves it sends that
 # same kind of row straight back to `queued`, dependency or not, and opens
-# the step picker on a real gate beside it. `s` restarts a parked row's
-# step from its own panel and is checked for the new session the step comes
-# back on. Last of all is the pass-yields
+# the step picker on a real gate beside it. Restart from the menu restarts a
+# parked row's step from its own panel and is checked for the new session the
+# step comes back on. Last of all is the pass-yields
 # section, which queues six more hang lanes of its own — placed after the
 # `r` section simply so it does not disturb the state that section's own
 # assertions read, not because anything here is scarce enough to make the
@@ -113,6 +119,25 @@ board_start() {
 }
 
 board_stop() { screen_stop; }
+
+# pick_item <downs>
+#
+# Open the options menu on the cursor's row and take the item `downs` rows
+# under the first. Which item that is depends on the row: pause is 1 down
+# on a running or queued row, restart is 2 on a running or queued-then-started
+# one and 1 on a paused one, unqueue is 2 on a queued one. A frame is waited
+# for between the keys, because esc or `o` followed at once by an arrow key
+# is read as one sequence.
+pick_item() {
+  local downs=$1 i
+  press o
+  next_frame
+  for ((i = 0; i < downs; i++)); do
+    press $'\x1b[B'
+    next_frame
+  done
+  press $'\r'
+}
 
 # One keystroke into the board. `\x1b` for esc and `\r` for enter are what a
 # terminal actually sends, and `src/screen.rs` decodes them the same way
@@ -292,10 +317,10 @@ _row_time() {
     grep -Eo '[0-9]+h [0-9]{2}m|[0-9]+m [0-9]{2}s|[0-9]+s' | tail -1
 }
 
-# ------------------------------------------- `p` over a live agent lane
-# The cursor's own panel: it names the step, calls it an agent turn, and says
-# the turn is interrupted rather than killed — the one thing a person
-# answering `enter` needs to know before they do.
+# ------------------------------- pause from the menu over a live agent lane
+# The cursor's own panel: it names the step, calls it an agent turn, and lists
+# its two answers under the text — `pause now` and `pause when <step>
+# finishes` — with the cursor on the first.
 #
 # Turned on here, for the rest of the suite: a stand-in writes no transcript
 # by default (agents/transcript.sh), so with nothing else `record_usage`
@@ -311,22 +336,39 @@ else bad "the lane is really mid-turn"; fi
 draws "the board draws the run" "mid-turn"
 
 # The cursor starts on the first row on its own now — mid-turn is the only
-# row here — so `p` reaches it with no `down` needed first.
-press p
+# row here — so the menu reaches it with no `down` needed first. It lists
+# open, pause and restart for a running row, with the cursor on open.
+press o
+draws "\`o\` over a live lane opens a menu titled with the task" "╭─ mid-turn ─"
+draws "listing open first, under the cursor" "> open"
+draws "then pause" "  pause"
+draws "then restart" "  restart"
+draws "under the shared key row" "[enter] confirm   [esc] close"
+stage_stays "the task file is untouched while the menu is open" mid-turn implement
+press $'\x1b'
+stops_drawing "esc closes the menu" "╭─ mid-turn ─"
+next_frame
+pick_item 1
 
-draws "\`p\` over a live lane opens a panel naming the task" "pause mid-turn"
+draws "picking pause over a live lane opens a panel naming the task" "pause mid-turn"
 draws "the panel names the step and calls it an agent turn" "implement    agent"
-draws "and says the turn is only interrupted" "The turn is interrupted, not killed."
-draws "and offers enter on its own line" "[enter] pause it"
-draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
+draws "and says pausing aborts it" "Pausing aborts the step it is on:"
+draws "and lists pause now first, under the cursor" "> pause now"
+draws "with the scheduled pause as the second answer" "pause when implement finishes"
+draws "and the one key row every popup shares" "[enter] confirm   [esc] close"
 stage_stays "the task file is untouched while the panel is open" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# A key that is neither leaves the panel open and acts on nothing.
+# A letter does not answer anything — not `s`, which once scheduled — so
+# it leaves the panel open and acts on nothing.
 press x
+press s
 settle_frames 2
 stage_stays "a stray key over the panel changes nothing" mid-turn implement
+if grep -qF "gate_at:" "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"; then
+  bad "and \`s\` no longer schedules a pause"
+else ok "and \`s\` no longer schedules a pause"; fi
 draws "and the panel is still up" "pause mid-turn"
 
 press $'\x1b'
@@ -335,12 +377,14 @@ stage_stays "and leaves the task where it was" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and leaves the lane running"
 else bad "and leaves the lane running"; fi
 
-# `s` leaves the turn running and writes a schedule instead of an interrupt —
-# the NEXT column carries it, and the task's own file gains `gate_at`.
-press p
+# The second answer leaves the turn running and writes a schedule instead of
+# an interrupt — the NEXT column carries it, and the task's own file gains
+# `gate_at`.
+pick_item 1
 next_frame
-press s
-stops_drawing "\`s\` closes the panel without aborting anything" "pause mid-turn"
+press $'\x1b[B'
+press $'\r'
+stops_drawing "the second answer closes the panel without aborting anything" "pause mid-turn"
 stage_stays "the task stays right where it was" mid-turn implement
 has "and gains a schedule naming its own step" "gate_at: implement" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
@@ -348,16 +392,20 @@ draws "and the NEXT column says where it is headed" "paused after implement"
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# Pressing `s` again, over a fresh panel on the same still-live step, clears
-# the schedule it just wrote.
-press p
+# Answering it again, over a fresh panel on the same still-live step, clears
+# the schedule it just wrote: the answer now reads `cancel the scheduled
+# pause`.
+pick_item 1
 next_frame
-press s
-stops_drawing "pressing \`s\` again closes the panel too" "pause mid-turn"
+draws "the second answer reads as a cancel while a schedule stands" \
+  "cancel the scheduled pause"
+press $'\x1b[B'
+press $'\r'
+stops_drawing "answering it again closes the panel too" "pause mid-turn"
 lacks "and clears the schedule it named" "gate_at:" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
 
-press p
+pick_item 1
 next_frame
 press $'\r'
 stage_reaches "enter parks the task" mid-turn paused 25
@@ -393,9 +441,9 @@ else
   tail -30 "$BOARD_LOG" | sed 's/^/        /'
 fi
 
-# ------------------------------- stopping with `i` over a live lane
-# `enter` over a running dispatcher asks how to stop it: `enter` again lets
-# running steps finish, `i` interrupts them. `i` parks each task it
+# ------------------- stopping from the stop popup over a live lane
+# `enter` over a running dispatcher asks how to stop it: `let running steps
+# finish` waits, `interrupt them now` interrupts them. That answer parks each task it
 # interrupted with a mark saying the stop parked it, and leaves everything
 # else — here `behind`, which has nothing running — exactly where it was.
 # Starting again resumes exactly the marked tasks.
@@ -408,8 +456,9 @@ else bad "a second lane is mid-turn"; fi
 press $'\r'
 draws "\`enter\` over a running dispatcher opens the stop popup" "╭─ stop dispatching"
 draws "saying no new steps will start" "No new steps will be started."
-draws "offering enter to let running steps finish" "[enter] let running steps finish"
-draws "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back"
+draws "offering to let running steps finish first" "> let running steps finish"
+draws "and to interrupt them" "interrupt them now"
+draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "no task file is written while the popup is open" busy implement
 
 press $'\x1b'
@@ -424,7 +473,11 @@ press $'\r'
 draws_since_waited "\`enter\` asks again" "No new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
 press i
-stage_reaches "\`i\` parks the task it interrupted" busy paused 25
+settle_frames 2
+stage_stays "\`i\` no longer answers the stop popup" busy implement
+press $'\x1b[B'
+press $'\r'
+stage_reaches "interrupt them now parks the task it interrupted" busy paused 25
 if poll_while 15 kill -0 "$BUSY_PID"; then ok "and the turn it interrupted is over"
 else bad "and the turn it interrupted is over"; fi
 has "marking the park as the stop's" "parked_by_stop: true" \
@@ -451,7 +504,7 @@ stage_stays "the task a person paused stays paused" mid-turn paused
 # The rest of this suite wants `busy` stopped, and its dependents parked off
 # `queued` for `R` to reach below. `P` used to do that in one key; with it
 # gone, each goes through `spoolway queue pause`, the same `park` the board's
-# `p` writes.
+# pause item writes.
 must "pausing busy by hand" "$SPOOLWAY" queue pause busy
 stage_reaches "busy parks" busy paused 25
 lacks "and a park by hand carries no stop mark" "parked_by_stop:" \
@@ -463,9 +516,13 @@ must "pausing late by hand" "$SPOOLWAY" queue pause late
 
 # ----------------------------------------------- a paused row is a no-op
 MARK=$(wc -l < "$BOARD_LOG")
-press p
+press o
 settle_frames 2
-never_draws "\`p\` over an already-paused row opens nothing" "Pausing aborts" "$MARK"
+draws_since "the menu on an already-paused row opens" "> open" "$MARK"
+draws_since "and offers restart" "  restart" "$MARK"
+never_draws "but offers no pause to pick" "    pause    " "$MARK"
+press $'\x1b'
+next_frame
 
 # ------------------------------- pausing a task that never started at all
 # Nothing live, nothing declared for `queued` in any pipeline, so this parks
@@ -487,33 +544,29 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
-# --------------------------------------- `U` answers only to enter now
-# The other panels this task hands the same two answers `p`'s own already
-# had: `U` still opens unconditionally, but the letter that opened it no
-# longer closes it — only `enter` does, the same rule proven above for the
-# pause panel. Two tasks sit on `queued` now: `stalled`, and `never-run`
-# back where its resume put it.
+# --------------------------------------------- `U` is no longer a board key
+# Unqueueing everything unstarted is `spoolway queue unqueue --all` now. Two
+# tasks sit on `queued`: `stalled`, and `never-run` back where its resume put
+# it. `U` on the board opens nothing and writes nothing; the command still
+# carries both back to pending.
 queue_idle stalled never-run
 next_frame
-press U
-draws "\`U\` opens the unqueue-all panel" "2 tasks have not started:"
-draws "answered with enter or esc, and nothing else" "[enter] unqueue them   [esc] cancel"
-stage_stays "nothing is written while the panel is open" stalled queued
-
+MARK=$(wc -l < "$BOARD_LOG")
 press U
 settle_frames 2
-stage_stays "the old confirming letter no longer answers the panel" stalled queued
-draws "and the panel is still up" "2 tasks have not started:"
+never_draws "\`U\` opens no unqueue-all panel" "tasks have not started:" "$MARK"
+stage_stays "and writes nothing" stalled queued
+stage_stays "to any queued task" never-run queued
 
 _gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
-press $'\r'
-if poll_until 25 _gone stalled; then ok "enter carries out the unqueue"
-else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+must "unqueue --all carries out what U used to" "$SPOOLWAY" queue unqueue --all
+if poll_until 25 _gone stalled; then ok "the task leaves the queue"
+else bad "the task leaves the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 has "the task lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
-# ------------------------------------------- `u` carries a dependent chain
-# The reach this task adds: `u` on a task a still-queued task depends on no
+# --------------------------- unqueue from the menu carries a dependent chain
+# The reach this task adds: unqueue on a task a still-queued task depends on no
 # longer refuses outright — it lists the whole chain of unstarted tasks that
 # reach it through `depends_on` and carries every one of them back to
 # pending together. Restarted fresh, with its own group sorted ahead of
@@ -527,11 +580,10 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 # run, the way `queue_idle` does for every other idle task here, is not
 # available inside a fresh group of its own. A live lane that never returns is: with nothing
 # to make it `Done`, `chain-head` never becomes ready, and is still
-# genuinely `queued` — not already off running its own pipeline — when `u`
-# is pressed. The cursor already opens on `chain-gate`, the first row of its
+# genuinely `queued` — not already off running its own pipeline — when unqueue
+# is picked. The cursor already opens on `chain-gate`, the first row of its
 # own fresh group; `chain-gate` sorts above `chain-head` within it, so it
-# takes one `down` rather than two to reach the row `u` is this section's
-# own.
+# takes one `down` rather than two to reach the row this section picks on.
 board_stop
 mkdir -p "$CTL"
 echo hang > "$CTL/chain-gate"
@@ -552,12 +604,13 @@ draws "the board draws the chain" "chain-tail"
 
 press $'\x1b[B'
 next_frame
-press u
+pick_item 2
 
-draws "\`u\` on the chain's head opens a panel naming both" "unqueue chain-head"
+draws "unqueue on the chain's head opens a panel naming both" "unqueue chain-head"
 draws "the dependent, marked with what it depends on" \
   "chain-tail   (depends on chain-head)"
-draws "and offers enter for both, esc to cancel" "[enter] unqueue them   [esc] cancel"
+draws "and offers one answer for both" "> unqueue them"
+draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "nothing moves while the panel is open" chain-head queued
 stage_stays "not even the dependent" chain-tail queued
 
@@ -571,11 +624,11 @@ has "the head's task lands back in pending" "id: chain-head" \
 has "and so does the dependent's" "id: chain-tail" \
   "$SPOOLWAY_PROJECT_HOME/pending/chain-tail.md"
 
-# ------------------------------------ `p` reaches a blocked row with a live lane
+# ------------------------- pause reaches a blocked row with a live lane
 #
 # The reach this task adds: the unblocker can be mid-turn on a `blocked` row
 # exactly as an implementer can be mid-turn on `implement`, once the run is
-# unattended, and `p` interrupts that turn the same way. This needs a
+# unattended, and pause interrupts that turn the same way. This needs a
 # restart — `unattended.enabled` is fixed in the lock at launch and
 # `blocked_agent` is baked into the pipelines when they load — so this task
 # is queued straight into the live queue directory, on `blocked` already,
@@ -618,9 +671,9 @@ refuses "\`spoolway queue resume\` refuses it too" \
 if [ "$(cat "$STUCK_FILE")" = "$STUCK_BEFORE" ]; then ok "the refused resumes left the task file alone"
 else bad "the refused resumes left the task file alone"; fi
 
-press p
+pick_item 1
 
-draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"
+draws "pause over the blocked row opens a panel naming the task" "pause stuck"
 draws "the panel names the blocked step and calls it an agent turn" "blocked    agent"
 stage_stays "the task file is untouched while the panel is open" stuck blocked
 
@@ -693,9 +746,9 @@ if poll_until 30 _launched_past 0; then ok "the dispatcher launches the restarte
 else bad "the dispatcher launches the restarted step"; fi
 must "the restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
 
-# ---------------------------------------- `s` restarts a step from the board
-# The same restart, reached from the board: `s` on `stuck`'s row opens the
-# restart panel, and `s` again inside it carries the restart out. `stuck` is
+# ------------------------------ restart picked from the menu on the board
+# The same restart, reached from the board: restart in `stuck`'s menu opens
+# the restart panel, and `enter` inside it carries the restart out. `stuck` is
 # parked off `implement` now, a row a restart accepts, and the lane that ran
 # there opened a session of its own. The stand-in echoes its argv into the
 # lane's log, which is appended to across launches, and `pi` is pinned with
@@ -704,8 +757,9 @@ must "the restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause 
 # proof the step came back on a new session rather than its old one.
 #
 # The suite does not track which row the cursor is on, so it walks the rows
-# from the top the way the `r` section below does. Other rows a restart
-# accepts open a panel too; each is closed with `esc`, and nothing is touched.
+# from the top the way the `r` section below does. The menu is titled with the
+# task, so a row that is not `stuck` is closed with `esc` and nothing is touched.
+# `stuck` is parked, so its menu is open and restart, and restart is one down.
 OLD_SESSION=$(last_session)
 OLD_LAUNCHES=$(launches)
 if [ -n "$OLD_SESSION" ]; then ok "the parked lane's session is in its log before the restart"
@@ -716,29 +770,37 @@ next_frame 3
 SAW_RESTART=""
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   MARK=$(wc -l < "$BOARD_LOG")
-  press s
+  press o
   next_frame 3
   SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-  if grep -qF -- "╭─ restart stuck ─" <<<"$SINCE"; then
+  if grep -qF -- "╭─ stuck ─" <<<"$SINCE"; then
+    press $'\x1b[B'
+    next_frame 3
+    press $'\r'
+    next_frame 3
+    SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
     SAW_RESTART=stuck
-    for want in "step      implement" "lane      stuck · implement" \
-      "is briefed from" "[s] restart   [esc] cancel"; do
+    for want in "╭─ restart stuck ─" "step      implement" "lane      stuck · implement" \
+      "is briefed from" "> restart" "[enter] confirm   [esc] close"; do
       if grep -qF -- "$want" <<<"$SINCE"; then ok "the restart panel says: $want"
       else bad "the restart panel says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
     done
     press s
     next_frame 3
+    stage_stays "a stray \`s\` over the restart panel restarts nothing" stuck paused
+    press $'\r'
+    next_frame 3
     break
-  elif grep -qF -- "╭─ restart " <<<"$SINCE"; then
+  else
     press $'\x1b'
     next_frame 3
   fi
   press $'\x1b[B'
   next_frame 3
 done
-if [ "$SAW_RESTART" = stuck ]; then ok "\`s\` on the parked row opens the restart panel"
-else bad "\`s\` on the parked row opens the restart panel"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-stage_reaches "\`s\` in the panel sends the task back to the step it held" stuck implement 25
+if [ "$SAW_RESTART" = stuck ]; then ok "restart in the parked row's menu opens the restart panel"
+else bad "restart in the parked row's menu opens the restart panel"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+stage_reaches "enter on the panel's restart sends the task back to the step it held" stuck implement 25
 if poll_until 30 _launched_past "${OLD_LAUNCHES:-0}"; then ok "the dispatcher launches the step again"
 else bad "the dispatcher launches the step again"; fi
 NEW_SESSION=$(last_session)
@@ -753,7 +815,7 @@ else bad "and the restart key is spent by that launch"; fi
 must "the board-restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
 
 # ------------------------- a schedule catches a failing step, not only a pass
-# `s` above already proved it writes and clears `gate_at`; what a schedule
+# The pause panel above already proved it writes and clears `gate_at`; what a schedule
 # does once the step it names actually fails, rather than passes, is
 # `commands::report`'s own road, not a keypress this suite can watch — so
 # this drives it with a canned patch that cannot apply, the mock's own way of
@@ -865,7 +927,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   MARK=$(wc -l < "$BOARD_LOG")
   press r
   next_frame 3
-  if grep -qF -- "] pick" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
+  if grep -qF -- "╭─ resume " < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
     grep -qF -- "resume gate-edit" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG") && SAW_PICKER=gate-edit
     press $'\r'
     next_frame 3
@@ -884,10 +946,10 @@ else bad "\`enter\` on the picker's preselected row resumes the gate"; fi
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
-# --------------------------- one `i` interrupts every live lane at once
-# The stop's `i` reaches every running step in the run, not only the one a
-# cursor sits on: six live lanes, one keypress, six parks, each marked as the
-# stop's. The dispatcher keeps passing while the popup's `i` writes those
+# --------- interrupting from the stop popup reaches every live lane at once
+# The stop popup's `interrupt them now` reaches every running step in the run,
+# not only the one a cursor sits on: six live lanes, one answer, six parks,
+# each marked as the stop's. The dispatcher keeps passing while the popup writes those
 # parks, and a pass holding a copy of a task read before the park cannot
 # overwrite it — `persist_task`'s own fingerprint check, proven at the unit
 # level by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
@@ -903,9 +965,10 @@ MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
 draws_since_waited "\`enter\` opens the stop popup again" "No new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
-press i
+press $'\x1b[B'
+press $'\r'
 for n in 0 1 2 3 4 5; do
-  stage_reaches "\`i\` parks every live lane" "pass-race-$n" paused 30
+  stage_reaches "interrupt them now parks every live lane" "pass-race-$n" paused 30
   has "each marked as the stop's" "parked_by_stop: true" \
     "$SPOOLWAY_PROJECT_HOME/queue/pass-race-$n.md"
 done

@@ -332,7 +332,8 @@ fn host(
                     crate::commands::queue_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
                 // Its routine folders are read again on every visit, so a
-                // routine saved with `s` on the queue tab is already listed.
+                // routine saved with save as routine on the queue tab is
+                // already listed.
                 Tab::Routines => {
                     crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
@@ -382,15 +383,19 @@ enum Popup {
         panel: Vec<String>,
         since: std::time::SystemTime,
     },
-    /// How to stop the running dispatcher — [`super::dispatcher::stop_panel`].
-    Stop(Vec<String>),
+    /// How to stop the running dispatcher — [`super::dispatcher::stop_panel`],
+    /// its cursor on the answer this holds.
+    Stop(usize),
 }
 
 impl Popup {
-    fn panel(&self) -> &[String] {
+    /// The popup as drawn: built afresh for the ones that ask something,
+    /// whose cursor moves between draws.
+    fn panel(&self) -> Vec<String> {
         match self {
-            Popup::Overrides(gate) | Popup::Warnings(gate) => &gate.panel,
-            Popup::Ended(panel) | Popup::Stop(panel) | Popup::Starting { panel, .. } => panel,
+            Popup::Overrides(gate) | Popup::Warnings(gate) => gate.panel(),
+            Popup::Stop(cursor) => super::dispatcher::stop_panel(*cursor),
+            Popup::Ended(panel) | Popup::Starting { panel, .. } => panel.clone(),
         }
     }
 
@@ -477,7 +482,7 @@ impl DispatchTab {
         match self.child.as_ref() {
             Some(child) if child.stopping() => {}
             Some(_) if crate::status::anything_running_for_stop(repo, pipelines) => {
-                self.popup = Some(Popup::Stop(super::dispatcher::stop_panel()))
+                self.popup = Some(Popup::Stop(0))
             }
             Some(_) => {
                 self.popup = None;
@@ -567,33 +572,39 @@ impl DispatchTab {
         }
     }
 
-    /// A key read while a popup is open. `enter` on a gate goes on to the
-    /// next one, or starts; `x` hides the gate until what it names changes
-    /// and then goes on the same way; `esc` backs out having started
-    /// nothing. On the stop popup, `enter` stops the child and leaves every
-    /// running step to finish, `i` interrupts them first, and `esc` leaves
-    /// the dispatcher running. Every other key is ignored.
+    /// A key read while a popup is open. On a gate and on the stop popup
+    /// the arrows move the cursor between its answers. `enter` on a gate's
+    /// first answer goes on to the next gate, or starts; on its second it
+    /// first hides the gate until what it names changes, then goes on the
+    /// same way; `esc` backs out having started nothing. On the stop popup,
+    /// `enter` on the first answer stops the child and leaves every running
+    /// step to finish, on the second it interrupts them first, and `esc`
+    /// leaves the dispatcher running. Every other key is ignored.
     fn answer(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path, key: Key) {
         let Some(popup) = self.popup.take() else {
             return;
         };
         match (popup, key) {
-            (Popup::Overrides(gate), Key::Char('x' | 'X')) => {
+            (Popup::Overrides(gate), Key::Enter) => {
                 // Best-effort: an acknowledgement that could not be written
                 // only means the gate asks again next time.
-                let _ = gate.hide(repo);
+                if gate.hides() {
+                    let _ = gate.hide(repo);
+                }
                 self.warnings_then_start(repo, cwd);
             }
-            (Popup::Overrides(_), Key::Enter) => self.warnings_then_start(repo, cwd),
-            (Popup::Warnings(gate), Key::Char('x' | 'X')) => {
-                let _ = gate.hide(repo);
+            (Popup::Warnings(gate), Key::Enter) => {
+                if gate.hides() {
+                    let _ = gate.hide(repo);
+                }
                 self.start(cwd);
             }
-            (Popup::Warnings(_), Key::Enter) => self.start(cwd),
-            (Popup::Stop(_), Key::Enter) => self.stop(),
-            (Popup::Stop(_), Key::Char('i' | 'I')) => {
-                // Stopped whatever came of the interrupt: stopping is what
-                // the person asked for. A failure is said once it is.
+            // `let running steps finish`, the first of `STOP_ANSWERS`.
+            (Popup::Stop(0), Key::Enter) => self.stop(),
+            // `interrupt them now`. Stopped whatever came of the interrupt:
+            // stopping is what the person asked for. A failure is said once
+            // it is.
+            (Popup::Stop(_), Key::Enter) => {
                 let interrupted = crate::status::interrupt_for_stop(repo, pipelines);
                 self.stop();
                 if let Err(err) = interrupted {
@@ -607,6 +618,18 @@ impl DispatchTab {
             }
             (Popup::Overrides(_) | Popup::Warnings(_) | Popup::Stop(_), Key::Esc)
             | (Popup::Ended(_), Key::Enter) => {}
+            (Popup::Overrides(mut gate), key) => {
+                gate.move_cursor(key);
+                self.popup = Some(Popup::Overrides(gate));
+            }
+            (Popup::Warnings(mut gate), key) => {
+                gate.move_cursor(key);
+                self.popup = Some(Popup::Warnings(gate));
+            }
+            (Popup::Stop(cursor), key) => {
+                let answers = super::dispatcher::STOP_ANSWERS.len();
+                self.popup = Some(Popup::Stop(super::move_cursor(cursor, answers, key)));
+            }
             (popup, _) => self.popup = Some(popup),
         }
     }
@@ -791,7 +814,7 @@ fn board_frame_rows(
 ) -> Option<Vec<String>> {
     let popup = tab.popup.as_ref().map(Popup::panel);
     let frame = board
-        .hosted_frame(repo, pipelines, tab.dispatching(), popup)
+        .hosted_frame(repo, pipelines, tab.dispatching(), popup.as_deref())
         .ok()?;
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
@@ -812,7 +835,8 @@ fn draw_board_from_memory(
     out: &mut impl Write,
 ) {
     let popup = tab.popup.as_ref().map(Popup::panel);
-    let frame = board.hosted_frame_from_memory(repo, pipelines, tab.dispatching(), popup);
+    let frame =
+        board.hosted_frame_from_memory(repo, pipelines, tab.dispatching(), popup.as_deref());
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
     writer.write_frame(&rows, pane_size, out);
@@ -1347,8 +1371,8 @@ mod tests {
     }
 
     // `→` from the queue tab opens routines, reading the routine folders on
-    // that visit: a routine saved with `s` a moment earlier on the queue tab
-    // is already listed. `→` again moves on to jobs.
+    // that visit: a routine saved with save as routine a moment earlier on
+    // the queue tab is already listed. `→` again moves on to jobs.
     #[test]
     fn right_from_queue_opens_routines_with_a_routine_just_saved_then_jobs() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
@@ -1358,9 +1382,10 @@ mod tests {
         )
         .unwrap();
 
-        // `s` opens the save panel named after the group, `enter` saves it,
+        // `o` opens the group's options menu, `↓` `enter` picks save as
+        // routine, whose panel is named after the group; `enter` saves it,
         // `enter` closes the notice, `→` opens routines.
-        let frames = drive_host(&repo, "s\r\r\x1b[C");
+        let frames = drive_host(&repo, "o\x1b[B\r\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
             last.contains("DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL"),
@@ -1369,7 +1394,7 @@ mod tests {
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
+            last.contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
             "{last}"
         );
 
@@ -1423,12 +1448,12 @@ mod tests {
             "{last}"
         );
         assert!(last.contains("pipelines/default.yml"), "{last}");
+        assert!(last.contains("> start dispatching"), "{last}");
         assert!(
-            last.contains(
-                "[enter] start dispatching   [esc] back   [x] don't ask again until this changes"
-            ),
+            last.contains("  don't ask again until this changes"),
             "{last}"
         );
+        assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
         assert!(last.contains("dispatcher stopped"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
     }
@@ -1446,12 +1471,13 @@ mod tests {
         assert_eq!(crate::lock::Lock::holder(&repo.lock_file()).unwrap(), None);
     }
 
-    // `x` on the overrides popup hides it and goes on to the warnings gate,
-    // just as `enter` would — and the overrides gate does not ask again.
+    // The overrides popup's second answer hides it and goes on to the
+    // warnings gate, just as the first would — and the overrides gate does
+    // not ask again. `x`, the letter that used to hide it, does nothing.
     // `unattended.enabled` guarantees the warnings gate has something to
     // say, so nothing here reaches a start.
     #[test]
-    fn x_on_the_overrides_popup_hides_it_and_asks_the_warnings_next() {
+    fn hiding_the_overrides_popup_asks_the_warnings_next() {
         let (mut repo, _root_guard) = fixture_with_layer("shell-host-overrides-x");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
@@ -1459,6 +1485,15 @@ mod tests {
         tab.enter(&repo, &pipelines, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('x'));
+        assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
+        assert!(crate::commands::overrides_popup(&repo).unwrap().is_some());
+        tab.answer(&repo, &pipelines, &repo.root, Key::Down);
+        let panel = tab.popup.as_ref().unwrap().panel().join("\n");
+        assert!(
+            panel.contains("> don't ask again until this changes"),
+            "{panel}"
+        );
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
         assert!(tab.child.is_none());
         assert!(crate::commands::overrides_popup(&repo).unwrap().is_none());
@@ -1511,7 +1546,7 @@ mod tests {
         let Some(Popup::Warnings(gate)) = &tab.popup else {
             panic!("the warnings popup should be up");
         };
-        let text = gate.panel.join("\n");
+        let text = gate.panel().join("\n");
         assert!(
             !text.contains(&format!("prompt `{gone}`")),
             "a prompt of a deleted pipeline was reported: {text}"
@@ -1520,7 +1555,8 @@ mod tests {
     }
 
     /// A pipeline added since startup, whose prompt file is missing, is
-    /// reported, and `x` hides the popup until that finding changes.
+    /// reported, and hiding the popup keeps it hidden until that finding
+    /// changes.
     #[test]
     fn the_warnings_popup_names_the_missing_prompt_of_a_pipeline_added_since_startup() {
         let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-added");
@@ -1539,10 +1575,10 @@ mod tests {
         let Some(Popup::Warnings(gate)) = &tab.popup else {
             panic!("the warnings popup should be up");
         };
-        assert!(gate.panel.join("\n").contains("prompt `added-prompt`"));
+        assert!(gate.panel().join("\n").contains("prompt `added-prompt`"));
 
-        // `x` writes the acknowledgement through the gate itself; it is
-        // called directly because the key would go on to start a child.
+        // Hiding writes the acknowledgement through the gate itself; it is
+        // called directly because answering it would go on to start a child.
         let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();
         let Some(gate) = crate::commands::warnings_popup(&repo, &pipelines) else {
             panic!("the gate should still have something to say");
@@ -1561,7 +1597,7 @@ mod tests {
         let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();
         let again = crate::commands::warnings_popup(&repo, &pipelines)
             .expect("a changed finding is asked again");
-        assert!(again.panel.join("\n").contains("prompt `another-prompt`"));
+        assert!(again.panel().join("\n").contains("prompt `another-prompt`"));
     }
 
     /// Pipelines on disk that do not load stop the start with the load
@@ -1832,11 +1868,12 @@ mod tests {
         runs.stop(&key);
     }
 
-    // `i` interrupts what is running, parks it with the stop's mark, then
-    // stops the child.
+    // The stop popup's second answer interrupts what is running, parks it
+    // with the stop's mark, then stops the child. `i`, the letter that used
+    // to answer it, does nothing.
     #[cfg(unix)]
     #[test]
-    fn i_on_the_stop_popup_interrupts_parks_and_stops() {
+    fn interrupting_from_the_stop_popup_parks_and_stops() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-i");
         crate::status::testutil::add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -1852,6 +1889,12 @@ mod tests {
         let mut tab = running_tab();
         tab.enter(&repo, &pipelines, &repo.root);
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('i'));
+        assert!(matches!(tab.popup, Some(Popup::Stop(0))));
+        assert!(!stopping(&tab), "a letter answers nothing");
+        tab.answer(&repo, &pipelines, &repo.root, Key::Down);
+        let panel = tab.popup.as_ref().unwrap().panel().join("\n");
+        assert!(panel.contains("> interrupt them now"), "{panel}");
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(
             tab.popup.is_none(),
             "{:?}",
@@ -1865,30 +1908,27 @@ mod tests {
         runs.stop(&key);
     }
 
-    // While a board confirm panel is open it reads every key: `→` there is
-    // the panel's to ignore, not the shell's, so the screen stays on the
-    // board rather than opening the queue tab.
+    // While a board menu or confirm panel is open it reads every key: `→`
+    // there is the menu's to ignore, not the shell's, so the screen stays on
+    // the board rather than opening the queue tab.
     #[test]
     fn an_open_board_panel_keeps_the_arrows_from_the_shell() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[DU\x1b[C");
+        let frames = drive_host(&repo, "\x1b[Do\x1b[C");
         let last = frames.last().unwrap();
-        assert!(
-            last.contains("not started"),
-            "the panel is still up: {last}"
-        );
+        assert!(last.contains("> open"), "the menu is still up: {last}");
         assert!(!last.contains("─ groups"), "{last}");
     }
 
-    // Once the panel is answered — `enter`, which carries the unqueue out —
-    // the board is at rest again and `→` is the shell's: it reaches the
-    // queue tab.
+    // Once the panel is answered — `unqueue` picked from the menu, then
+    // `enter`, which carries the unqueue out — the board is at rest again
+    // and `→` is the shell's: it reaches the queue tab.
     #[test]
     fn an_answered_board_panel_gives_the_arrows_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel-answered");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[DU\r\x1b[C");
+        let frames = drive_host(&repo, "\x1b[Do\x1b[B\x1b[B\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(last.contains("─ groups"), "{last}");
     }
@@ -2016,7 +2056,7 @@ mod tests {
 
         let mut board = crate::status::Board::for_test();
         let mut tab = DispatchTab {
-            popup: Some(Popup::Stop(crate::screen::dispatcher::stop_panel())),
+            popup: Some(Popup::Stop(0)),
             ..Default::default()
         };
         let mut writer = crate::screen::frame_writer::FrameWriter::new();

@@ -260,7 +260,7 @@ names each ignored entry in the overrides popup it asks before it starts a dispa
 draws the entry's row as `ignored — <reason>` in place of its keys, with every other row
 unchanged. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
 
-The popup's `[x]` hides it until the layer changes or the set of ignored entries changes. An
+The popup's `don't ask again until this changes` answer hides it until the layer changes or the set of ignored entries changes. An
 entry that stops fitting with no override file touched, such as a step a pull renamed, brings the
 popup back.
 
@@ -491,7 +491,7 @@ The submission is refused, naming the group, when no task in a group sets
 
 On the queue screen, `enter` asks before any of this runs. The question names the tracker,
 the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
-every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with
+every task in the batch: `enter` on `create and queue` creates the tickets and queues, `enter` on `queue only` queues the batch with
 `tracking: off` written onto every task instead, and `esc` goes back with nothing queued.
 Queueing a routine asks the same question. A trial never asks and opens no ticket. See
 [`spoolway queue`](cli-reference.md#spoolway-queue) and
@@ -542,7 +542,7 @@ shape in the line is reported as unreadable rather than interpreted.
 
 Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a job the
 dispatcher fires — checks the same lines before it opens any ticket. A tool below its floor,
-or missing from PATH, gates the submission. On a screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written
+or missing from PATH, gates the submission. On a screen it shows what is unmet as a popup: `enter` on `queue anyway, without issue tracking` queues with `tracking: off` written
 onto every task, `esc` backs out. `spoolway queue add --from` at a terminal prints the notice and
 asks for the same two keys. Anywhere else it prints the same notice and proceeds the same way.
 A job the dispatcher fires never asks, even when the dispatcher runs in a terminal. It prints the

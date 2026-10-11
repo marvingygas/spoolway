@@ -7,8 +7,8 @@
 # installed binary.
 #
 # What is asserted is the TOML the screen writes: a completed walk lands a
-# `[jobs.<name>]` table in the user store, `space` pauses it, `x`+`enter`
-# removes it. Nothing here drives a dispatcher — `install_agents`/`new_forge`
+# `[jobs.<name>]` table in the user store, the `o` menu's pause and resume
+# flip it, and its delete item removes it. Nothing here drives a dispatcher — `install_agents`/`new_forge`
 # are not needed, the same reason `routines.sh` needs neither.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
@@ -53,22 +53,29 @@ lacks "enabled by default, so no key for it" "enabled" "$STORE"
 
 says "and jobs list now shows it" "nightly" "$SPOOLWAY" jobs list
 
-# space over the highlighted job pauses it; the screen then ends as the pipe
-# drains, the same as the walk above.
-on_screen '\033[C\033[C ' /dev/null
-has "space pauses the job" "enabled = false" "$STORE"
+# o opens the options menu on the highlighted job; down moves to pause and
+# enter picks it. The screen then ends as the pipe drains, the same as the
+# walk above.
+on_screen '\033[C\033[Co\033[B\r' /dev/null
+has "the menu's pause pauses the job" "enabled = false" "$STORE"
 
-# space again resumes it — the key is dropped, not written back as true.
-on_screen '\033[C\033[C ' /dev/null
-lacks "space again resumes it" "enabled" "$STORE"
+# The same two keys now pick resume — the key is dropped, not written back
+# as true.
+on_screen '\033[C\033[Co\033[B\r' /dev/null
+lacks "the menu's resume resumes it" "enabled" "$STORE"
 
-# x asks, esc keeps.
-on_screen '\033[C\033[Cx\033' /dev/null
-has "x then esc keeps the job" "[jobs.nightly]" "$STORE"
+# The old row keys are gone: space and x change nothing.
+on_screen '\033[C\033[C x\r' /dev/null
+has "space and x no longer reach the job" "[jobs.nightly]" "$STORE"
+lacks "and space did not pause it" "enabled" "$STORE"
 
-# x asks, enter confirms.
-on_screen '\033[C\033[Cx\r' /dev/null
-lacks "x then enter deletes the job" "[jobs.nightly]" "$STORE"
+# The menu's delete asks, esc keeps.
+on_screen '\033[C\033[Co\033[B\033[B\r\033' /dev/null
+has "the menu's delete then esc keeps the job" "[jobs.nightly]" "$STORE"
+
+# The menu's delete asks, enter confirms.
+on_screen '\033[C\033[Co\033[B\033[B\r\r' /dev/null
+lacks "the menu's delete then enter deletes the job" "[jobs.nightly]" "$STORE"
 
 # One task on its own: two `→`s open the jobs tab; n opens the routines
 # browser; `tab` moves the cursor onto `nightly`'s tasks pane, on

@@ -195,15 +195,18 @@ or command step is running, `enter` opens the stop popup instead:
 │  Interrupting stops agents and commands. When resumed, agents pick  │
 │  up where they left off and commands restart.                       │
 │                                                                     │
-│  [enter] let running steps finish                                   │
-│  [i] interrupt them now   [esc] back                                │
+│  > let running steps finish                                         │
+│    interrupt them now                                               │
+│                                                                     │
+│  [enter] confirm   [esc] close                                      │
 ╰─────────────────────────────────────────────────────────────────────╯
 ```
 
-`enter` there stops the child the way `ctrl-c` does: nothing is interrupted, and every lane
-keeps running. `i` interrupts every live agent turn and kills every running command step first,
-parking each of those tasks on `paused` with a mark saying the stop parked it, then stops the
-child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
+`↑` and `↓` move the cursor between the two answers, and it opens on the first. `enter` on `let
+running steps finish` stops the child the way `ctrl-c` does: nothing is interrupted, and every
+lane keeps running. `enter` on `interrupt them now` interrupts every live agent turn and kills
+every running command step first, parking each of those tasks on `paused` with a mark saying
+the stop parked it, then stops the child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
 nothing: there is nothing left to ask.
 
 Starting dispatching again, from the tab or with `spoolway dispatch`, resumes every task the
@@ -318,8 +321,8 @@ stateDiagram-v2
 | `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
-| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step from the board with `s`. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
-| `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
+| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
+| `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
@@ -346,7 +349,7 @@ A cause in brackets follows when the route alone does not explain the move.
 | `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
 | `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, or was killed three times in a row. |
 | `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, or was killed three times in a row. |
-| `stopped on <step>, moved to paused (manually)` | A person pressed `p` on the board, or Escape in the lane's pane. |
+| `stopped on <step>, moved to paused (manually)` | A person picked `pause` from the board's options menu, or pressed Escape in the lane's pane. |
 | `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
 | `stopped on <step>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
 | `stopped on <step>, moved to paused (escalated)` | The dispatcher stopped the lane in an attended run. The task file's `## Status Log` gives the exact reason. |
@@ -368,18 +371,54 @@ Errors from a pass go to `~/.spoolway/logs/<project>.log`.
 
 ### Keys
 
-Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whole run.
+The key line under the board reads `[enter] start dispatching   [o] options   [q] quit`. It
+reads `stop dispatching` while the dispatcher is running, and `q` shows only inside the dispatch
+tab. `[r] resume` joins it, between the `enter` pair and `[o] options`, only while the `▸`
+cursor sits on a row it can resume.
 
 | Key | What it does |
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
-| `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
+| `o` | Open the options menu of the row under the cursor. See [Options menu](#options-menu). |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
-| `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
-| `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). On an open pause panel, schedule the pause instead of carrying it out. |
-| `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
-| `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
+
+Every menu and panel these keys open lists its answers under its text, with `>` on the
+cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
+with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
+such as `open` or `pause now`, and on the `(next)` step in the resume picker.
+
+### Options menu
+
+`o` opens a menu titled with the task's id. It lists only what that row can do right now, always
+in this order, and the cursor opens on the first item:
+
+```
+╭─ cart-empty-state ──────────────╮
+│  > open                         │
+│    pause                        │
+│    restart                      │
+│                                 │
+│  [enter] confirm   [esc] close  │
+╰─────────────────────────────────╯
+```
+
+| Item | Listed on | What it does |
+|---|---|---|
+| `open` | Every row, `done` ones included. | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
+| `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
+| `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
+| `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
+
+So a running row lists `open`, `pause` and `restart`. A paused row that can be resumed lists
+`open` and `restart`, and is resumed with `r`. A queued row lists `open`, `pause` and `unqueue`,
+and a done row lists `open` alone. A row whose task file is gone opens the menu with
+`nothing to do here` over `[esc] close`.
+
+`enter` runs exactly what the item names, through the same check that decided the list. A row
+that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
+The board has no key that unqueues every task at once: `spoolway queue unqueue --all` does that
+from a shell.
 
 ### Resume picker
 
@@ -392,9 +431,9 @@ paused at review — it passed
 
   reproduce   on fail
   review      paused
-▸ document    on pass (next)
+> document    on pass (next)
 
-[↑↓] pick   [enter] resume   [esc] cancel
+[enter] confirm   [esc] close
 ```
 
 | Label | Meaning |
@@ -412,21 +451,42 @@ When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `
 | `enter` on any other row | The same as `spoolway resume <task> --stage <step>`. |
 | `esc` | Close the picker and change nothing. |
 
-An `enter` the resume refuses leaves the picker open and prints the reason under the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
+An `enter` the resume refuses leaves the picker open and prints the reason above the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
+
+### Pause panel
+
+`pause` from the options menu of a row with a running agent turn or command opens a panel titled
+`pause <task>`. It names the step it would abort and lists two answers:
+
+```
+╭─ pause cart-empty-state ────────────╮
+│  Pausing aborts the step it is on:  │
+│                                     │
+│  implement    agent    2m 21s       │
+│                                     │
+│  > pause now                        │
+│    pause when implement finishes    │
+│                                     │
+│  [enter] confirm   [esc] close      │
+╰─────────────────────────────────────╯
+```
 
 When the board cannot route the task for an `r`, the picker lists no steps and shows the reason. Its key line offers only `esc`, which closes it.
 
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
-a command step kills the run, and the command runs again in full on resume.
+a command step kills the run, and the command runs again in full on resume. On a command step
+the panel says so in two lines above the answers: `Pausing terminates the command's process.`
+and `Resuming restarts the command.`
 
-`s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
-the named task pauses itself once that step reports, whatever it reports. For a command step,
-the task pauses once the command exits, whatever the exit code. Press `s` again on a
-row that already has a scheduled pause to clear it.
+`pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
+named, so the named task pauses itself once that step reports, whatever it reports. For a
+command step, the task pauses once the command exits, whatever the exit code. On a row that
+already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
+it.
 
 ### Restart panel
 
-`s` on a row opens a panel titled `restart <task>`. It names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
+`restart` from a row's options menu opens a panel titled `restart <task>`. It names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
 
 ```
 ╭─ restart login ─────────────────────────────────────╮
@@ -438,16 +498,18 @@ row that already has a scheduled pause to clear it.
 │ The lane is torn down and `review` is briefed from  │
 │ scratch. Its conversation is not kept.              │
 │                                                     │
-│ [s] restart   [esc] cancel                          │
+│ > restart                                           │
+│                                                     │
+│ [enter] confirm   [esc] close                       │
 ╰─────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |
 |---|---|
-| `s` | The same as `spoolway restart <task>`. |
+| `enter` on `restart` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The panel opens for a task that `spoolway restart` accepts. A queued, done or hook-held row opens nothing, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the two closing lines. When the task has moved to another step since the panel opened, `s` restarts nothing and says so.
+The options menu lists `restart` only for a task that `spoolway restart` accepts. A queued, done or hook-held row does not list it, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Footer
 
@@ -479,7 +541,7 @@ While a dispatcher is running, these commands route a task on that copy and not 
 - `spoolway resume` and `spoolway queue resume`
 - `spoolway queue route`
 - `spoolway restart`
-- the `r` picker and the `s` key on the board
+- the `r` picker and `restart` in the board's options menu
 - `spoolway queue add`
 - the NEXT column of the board and of `spoolway queue list`
 
@@ -539,8 +601,8 @@ Other things put a task on `paused`:
 
 | Cause | How the task file records it |
 |---|---|
-| `p` on the board | `parked_from: <step>` |
-| The dispatch tab's stop popup, `i` | `parked_from: <step>` and `parked_by_stop: true` |
+| `pause` from the board's options menu | `parked_from: <step>` |
+| The dispatch tab's stop popup, `interrupt them now` | `parked_from: <step>` and `parked_by_stop: true` |
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
 | A failing `[issue_tracking]` hook on `queued`, `started` or `done` | `hook_paused: queued`, `hook_paused: started` or `hook_paused: done` |
@@ -552,7 +614,7 @@ time dispatching starts — from the tab or from `spoolway dispatch` — and its
 `→ <step> — resumes when dispatching starts` until then. A paused task's pane survives a stop of
 the dispatcher.
 
-A `p` or Escape park also goes back onto its step without a key press, once its own lane is seen
+A board `pause` or an Escape park also goes back onto its step without a key press, once its own lane is seen
 `Working` again — a person typed a follow-up straight into the pane instead of pressing `r`. The
 next pass restores it straight away; nothing is relaunched, since the lane never left. A report
 that lane sends while the task is still parked is applied the same way, as if the task were
@@ -601,7 +663,7 @@ unanswered. A repeated reminder does not restart the time.
 The task's own stage does not move. A usage limit clears by itself, and the row
 reads `running` again once the lane writes a turn. A lane that will never answer, such as a
 dead pane or an out-of-date harness, stays silent. Nothing escalates it, so restart the step
-from the board with `s`.
+with `restart` in the board's options menu.
 
 ## A step that carries its own session
 

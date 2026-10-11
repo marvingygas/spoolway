@@ -627,9 +627,9 @@ pub struct Dispatcher<'a> {
     ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
     /// A fingerprint of each task's whole rendered file, as this pass first
     /// read it, by task id — not `last_report.at` alone: a key typed on the
-    /// board mid-pass (`p`, `r`, `u` — see `status::on_key`) writes the file
-    /// too, and none of them touch `last_report`. Comparing the whole file
-    /// is what [`Dispatcher::persist`] needs to tell *any* mid-pass write
+    /// board mid-pass (`pause`, `unqueue` or `r` — see `status::on_key`) writes
+    /// the file too, and none of them touch `last_report`. Comparing the whole
+    /// file is what [`Dispatcher::persist`] needs to tell *any* mid-pass write
     /// apart from its own stale in-memory copy, not just a lane's `spoolway
     /// report`. Rebuilt at the top of every [`Dispatcher::run_pass`]. See
     /// review finding 2, and the pass-yields task that widened this from
@@ -1181,8 +1181,8 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Save `task`, but only under its per-task lock and only if nothing —
-    /// a lane's `spoolway report`, a `p`/`r`/`u` typed on the board — has
-    /// landed on the file since this pass last read or wrote it itself; see
+    /// a lane's `spoolway report`, a `pause`, `unqueue` or `r` from the board —
+    /// has landed on the file since this pass last read or wrote it itself; see
     /// [`Dispatcher::file_seen`] and review finding 2. When something has
     /// landed, the pass's in-memory copy is stale: the write is dropped and
     /// the next pass redoes this pass's bookkeeping against what actually
@@ -1858,9 +1858,9 @@ impl<'a> Dispatcher<'a> {
                     }
 
                     // A gate holds a command step's exit the way it holds an
-                    // agent's report: a task's own `gate_at` (the board's `s`)
-                    // catches either outcome, and the step's own `gate: true`
-                    // a pass. Only `report` ever asked, so a command that
+                    // agent's report: a task's own `gate_at` (the board's pause
+                    // panel) catches either outcome, and the step's own
+                    // `gate: true` a pass. Only `report` ever asked, so a command that
                     // finished simply moved on. The `last_report` filed here
                     // is what `spoolway resume` reads to send a held fail
                     // down `on_fail` rather than `on_pass`.
@@ -1940,8 +1940,8 @@ impl<'a> Dispatcher<'a> {
                             }
                             tasks[index].set_stage(&destination, message.as_deref());
                             // `persist` answers `false` when something —
-                            // a `spoolway report`, a `p`/`r`/`u` on the
-                            // board — landed mid-pass and dropped this
+                            // a `spoolway report`, a `pause`, `unqueue` or `r`
+                            // on the board — landed mid-pass and dropped this
                             // write — the same discipline `reap_stale_runs`'
                             // own caller keeps, a few dozen lines above.
                             // Forgetting anyway on that path is the exact
@@ -3157,11 +3157,11 @@ impl<'a> Dispatcher<'a> {
     /// unlocked, and the diff is against this pass's [`Dispatcher::ledger`]
     /// snapshot rather than a fresh read — criterion 3's one-read-per-pass.
     /// The lock covers the paths that are *not* the dispatcher: `sweep` and
-    /// `bank_lane` (a `queue pause`, a board `p` or the dispatch tab's stop,
-    /// in another process). The dispatcher is the only writer of lane lines in the common
-    /// case, so its own appends are serial. The one gap is a `bank_lane`
-    /// racing this call for the *same carried session* — a narrow window
-    /// accepted in favour of not re-reading the ledger per lane.
+    /// `bank_lane` (a `queue pause`, a board `pause` or the dispatch tab's
+    /// stop, in another process). The dispatcher is the only writer of lane
+    /// lines in the common case, so its own appends are serial. The one gap is
+    /// a `bank_lane` racing this call for the *same carried session* — a narrow
+    /// window accepted in favour of not re-reading the ledger per lane.
     ///
     /// Answers whether a line was actually appended — `false` on any early
     /// return below. A caller that keeps `record` in `self.lanes`
@@ -3589,7 +3589,7 @@ impl<'a> Dispatcher<'a> {
         })
     }
 
-    /// Park `task` on `paused` the same way the board's `p` key does — see
+    /// Park `task` on `paused` the same way the board's `pause` does — see
     /// [`crate::status::park`] — for a lane whose own transcript says a
     /// person's Escape, not a forgotten report, is why it settled. Neither
     /// nudged nor escalated: [`Dispatcher::check_unreported`] is never
@@ -3618,7 +3618,7 @@ impl<'a> Dispatcher<'a> {
     /// Put a `paused` task back on `parked_from` by itself, once its own
     /// lane for that step is seen `Working` again — a person typed a
     /// follow-up straight into the pane after a person's own Escape or the
-    /// board's `p`, without ever pressing `r`. `route_reserved_stage`
+    /// board's `pause`, without ever pressing `r`. `route_reserved_stage`
     /// otherwise leaves every `paused` task alone, so nothing else would
     /// ever notice that lane came back on its own — see the "typed into the
     /// pane after Escape" case bug gh group `parked-task-resume` opens with.
@@ -3630,9 +3630,9 @@ impl<'a> Dispatcher<'a> {
     /// (`tear_down_and_escalate`'s own road, which a person's own hand is
     /// expected to look at), a gate (`paused_at` set — waiting on a decision,
     /// not a lane), a stop's own park (`parked_by_stop` — the stop popup's
-    /// `i` interrupts the lane, and the mux can still read `Working` for a
-    /// pass or two before it dies; restoring then would undo the stop
-    /// mid-teardown), or a lane not seen `Working`. `Blocked` deliberately does
+    /// `interrupt them now` interrupts the lane, and the mux can still read
+    /// `Working` for a pass or two before it dies; restoring then would undo
+    /// the stop mid-teardown), or a lane not seen `Working`. `Blocked` deliberately does
     /// not qualify: a pane right after Escape can still read `Blocked` for a
     /// tick before the mux catches up, and restoring on that reading would
     /// race the Escape park itself rather than wait the one pass it takes to
@@ -3869,7 +3869,7 @@ impl<'a> Dispatcher<'a> {
 
     /// Close a lane spoolway has given up on, and move its task to `paused`
     /// with the last of what its pane said — the same landing the board's own
-    /// `p` key gives a person's interrupt, with `parked_from` naming the step
+    /// `pause` gives a person's interrupt, with `parked_from` naming the step
     /// so `spoolway resume` carries it back rather than making a person name
     /// it by hand. An unattended run whose pipeline staffs `blocked` sends the
     /// task there instead, through [`Dispatcher::escalate`], for the unblocker
@@ -5991,8 +5991,8 @@ pub(crate) fn file_fingerprint(task: &Task) -> u64 {
 /// have no `self` to reach the pass's `file_seen` through. Same rule: take
 /// the task's per-task lock, and skip the write when the file on disk no
 /// longer matches what this pass last read or wrote itself — a lane's
-/// `spoolway report` most often, but just as much a `p`, `r` or `u` typed on
-/// the board mid-pass (see `status::on_key`), since none of those touch
+/// `spoolway report` most often, but just as much a `pause`, `unqueue` or `r`
+/// from the board mid-pass (see `status::on_key`), since none of those touch
 /// `last_report` either — the lost-update review finding 2 guards against,
 /// widened from `last_report` alone to the whole file. `Ok(false)` is that
 /// dropped write; `Ok(true)` is a save that reached the disk, with
@@ -7070,7 +7070,7 @@ fn prepare_boot(
     // declares `session: true` would find its own earlier session and walk
     // straight back into the conversation the restart was meant to abandon.
     let restarting = task.front.restart.as_deref() == Some(step.id.as_str());
-    // A `p` park sets `resume` exactly the way a real block does, so this
+    // A board `pause` sets `resume` exactly the way a real block does, so this
     // launch continues the same lane either way — but it is not the same
     // *fact* to hand the lane back: nothing stopped it, a person's own
     // keypress did. `parked_from` is what survives to tell the two apart
@@ -11656,8 +11656,8 @@ mod tests {
         assert_eq!(on_disk.front.last_report.unwrap().at, 5_000);
     }
 
-    /// The pass-yields task's own reason for widening this guard: a `p`
-    /// typed on the board mid-pass calls `status::park`, which never
+    /// The pass-yields task's own reason for widening this guard: a `pause`
+    /// picked on the board mid-pass calls `status::park`, which never
     /// touches `last_report` at all — so a guard that only ever compared
     /// that one field would let the pass's own later write silently
     /// overwrite the park. Comparing the whole file catches this the same
@@ -11673,7 +11673,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        // A `p` on the board, mid-pass: parked and saved under the task's
+        // A `pause` on the board, mid-pass: parked and saved under the task's
         // own lock, exactly as `status::park_under_lock` does.
         let mut parked = Task::load(&path).unwrap();
         crate::status::park(&mut parked, "paused from the board", false);
@@ -15065,8 +15065,8 @@ mod tests {
         );
     }
 
-    /// `scripts/e2e/suites/board-pause.sh`'s "one `i` interrupts every live
-    /// lane at once" section caught this for real: six live lanes get
+    /// `scripts/e2e/suites/board-pause.sh`'s "interrupting from the stop popup
+    /// reaches every live lane at once" section caught this for real: six live lanes get
     /// `parked_by_stop: true` all at once, but each lane's own process takes
     /// a moment to actually die after the interrupt is sent — so the mux can
     /// still report `Working` for a pass or two after the park has already

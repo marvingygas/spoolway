@@ -194,13 +194,13 @@ pub struct Frontmatter {
     /// resume` to carry it straight back to.
     ///
     /// `blocked_from`'s counterpart for a stop nothing reported — but the two
-    /// can both be set at once: parking a `blocked` row (the board's `p`, or
-    /// `spoolway queue pause`) writes `parked_from: blocked` beside whatever
+    /// can both be set at once: parking a `blocked` row (the board's `pause`,
+    /// or `spoolway queue pause`) writes `parked_from: blocked` beside whatever
     /// `blocked_from` the block already carried, and leaves that field alone.
     /// `resume_road` in `src/commands/report.rs` checks `parked_from`
     /// first, so it is the one that decides where a resume goes when both are
     /// set. Three gestures set it — a person's own keypress (the
-    /// board's `p`), a person's own Escape typed into the pane (see
+    /// board's `pause`), a person's own Escape typed into the pane (see
     /// `Dispatcher::park_after_interrupt`), and a lane `Dispatcher::
     /// escalate_clock` gave up on — and [`Self::escalated`]
     /// is what tells the last of those apart from the first two once a lane
@@ -234,8 +234,9 @@ pub struct Frontmatter {
     pub escalated: bool,
 
     /// Whether this task was parked by the dispatch tab's stop popup — its
-    /// `i`, which interrupts every running step as dispatching stops — rather
-    /// than by a person's own `p`, Escape in the pane, or an escalation.
+    /// `interrupt them now`, which interrupts every running step as
+    /// dispatching stops — rather than by a person's own board `pause`, Escape
+    /// in the pane, or an escalation.
     ///
     /// The one thing that sets a stop's parks apart from every other park:
     /// all of them write the same `parked_from`, and a restarted dispatcher
@@ -420,7 +421,7 @@ pub struct Frontmatter {
     /// this field, letting a queued task walk past the steps that reach
     /// outside the worktree in one pass; that command is gone, and the field
     /// is kept only so an old task file written under it still parses and
-    /// round-trips. Its one writer now is the queue screen's `t` picker,
+    /// round-trips. Its one writer now is the queue screen's trial picker,
     /// which stamps a trial arm's own ticked steps here so a throwaway run
     /// never pushes a branch or opens a pull request — see
     /// `commands::queue::build_trial_arm`.
@@ -428,7 +429,7 @@ pub struct Frontmatter {
     pub skip: Vec<String>,
 
     /// The trial this task is one arm of, minted once per trial and stamped
-    /// on every arm the queue screen's `t` picker forks — see
+    /// on every arm the queue screen's trial picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
     /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
     /// together in the ledger: a trial forks a whole group once per ticked
@@ -1099,7 +1100,7 @@ impl Task {
     /// Move to `stage` and log why, without banking a lap.
     ///
     /// For exactly one round trip: a person parking a task from the board
-    /// with `p`, and putting it back afterwards. Neither direction is a lap
+    /// with `pause`, and putting it back afterwards. Neither direction is a lap
     /// of anything — the task never left the step it was on, so counting one
     /// here would leave a `loop:` budget seeing an arrival no pipeline
     /// routed. See [`Task::set_stage`], which this deliberately does not

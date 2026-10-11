@@ -3,9 +3,9 @@
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
 //! are the only thing that write a job — the jobs tab walks the routine, the
 //! cron expression and the pipeline, then saves through
-//! [`crate::jobs::write`]; the routines tab's `n` skips the routine and goes
-//! through the same last two and the same save, [`NewJobWalk`]. No `jobs
-//! add`, no config key. A job only schedules: nothing here queues its
+//! [`crate::jobs::write`]; the routines tab's new job skips the routine and
+//! goes through the same last two and the same save, [`NewJobWalk`]. No
+//! `jobs add`, no config key. A job only schedules: nothing here queues its
 //! routine, which fires when the dispatcher's clock crosses the schedule —
 //! running a routine now is the routines tab's `enter`.
 
@@ -21,7 +21,9 @@ use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
 use crate::screen::pane::{Items, window};
-use crate::screen::{Key, Notice, PollableRead, key_hint, keys, overlay, pad_to, panel, read_key};
+use crate::screen::{
+    Key, Notice, PollableRead, hint, key_hint, keys, overlay, pad_to, panel, read_key,
+};
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
 /// next and when it last fired. `--json` prints the same rows for a script.
@@ -345,12 +347,13 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 // more — `spoolway jobs` bare now prints its usage instead. It lists both
 // stores' jobs, shows the highlighted one in full, and walks three panels —
 // the routines browser (its keys reused from `queue`), a cron field, and a
-// pipeline picker — to write one. `e` edits through the same three, `space`
-// pauses, `x` deletes, `r` fires now.
+// pipeline picker — to write one. `o` opens a highlighted job's options
+// menu: edit through the same three, pause or resume, or delete.
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the routine → schedule → pipeline
-/// walk. `editing` is `Some` for `e` over an existing job and `None` for `n`;
+/// walk. `editing` is `Some` for the options menu's edit over an existing job
+/// and `None` for `n`;
 /// a new job takes its name from the routine's own leaf, an edited one keeps
 /// the name it had.
 #[derive(Debug, Clone)]
@@ -410,9 +413,9 @@ impl Draft {
 
 /// The schedule popup and then the pipeline popup, and the save at the end
 /// of them — the part of writing a job that both the jobs tab's walk and the
-/// routines tab's `n` go through. Each tab keeps its own way in (the jobs tab
-/// picks a routine first, the routines tab uses the highlighted one) and its
-/// own way out; what happens between the two lives only here, so the two tabs
+/// routines tab's new job go through. Each tab keeps its own way in (the jobs
+/// tab picks a routine first, the routines tab uses the highlighted one) and
+/// its own way out; what happens between the two lives only here, so the two tabs
 /// cannot drift apart on what a schedule or a pipeline accepts, or on which
 /// names a save refuses.
 #[derive(Debug, Clone)]
@@ -448,7 +451,7 @@ impl NewJobWalk {
         NewJobWalk::Schedule(draft)
     }
 
-    /// The routines tab's `n`: a new job over the routine folder at
+    /// The routines tab's new job: a new job over the routine folder at
     /// `folder`, for the user store, named after the folder's leaf exactly
     /// as the jobs tab's own `n` names one. `None` for a folder outside
     /// `routines_dir`, which no job can point at.
@@ -554,16 +557,13 @@ impl NewJobWalk {
     pub(super) fn footer(&self) -> String {
         match self {
             NewJobWalk::Schedule(_) => key_hint(SCHEDULE_KEYS),
-            NewJobWalk::PickPipeline { .. } => key_hint(PIPELINE_KEYS),
+            NewJobWalk::PickPipeline { .. } => hint(&crate::screen::answer_keys()),
         }
     }
 }
 
 /// The schedule popup's keys, in the popup and on the line under the frame.
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
-
-/// The pipeline popup's keys, in the popup and on the line under the frame.
-const PIPELINE_KEYS: &[(&str, &str)] = &[("enter", "choose"), ("esc", "cancel")];
 
 /// The routines tab's popup once its `n` has saved a job: what it runs, when,
 /// on which pipeline, and where to change it.
@@ -620,12 +620,91 @@ enum JobMode {
     /// The cron field and then the pipeline picker — the half of the walk
     /// the routines tab's own `n` shares; see [`NewJobWalk`].
     Walk(NewJobWalk),
-    /// `x` waiting on `enter` to delete or `esc` to keep.
+    /// The options menu's delete, waiting on `enter` to delete or `esc` to
+    /// keep.
     ConfirmDelete(String),
     /// A message in a popup over the list until `enter` closes it — a
     /// refused save, a failed delete — since `draw` clears the screen before
     /// every frame. Every other key is the popup's to ignore.
     Outcome(Notice),
+    /// `o`'s menu over the highlighted job, or over the routine picker's
+    /// highlighted task — see [`JobMenu`]. The arrows move its cursor,
+    /// `enter` runs the item under it and `esc` closes it onto what it was
+    /// opened over.
+    Options(JobMenu),
+}
+
+/// One thing the jobs tab's options menu can do. Each runs what its own key
+/// used to: `e` edit, `space` pause or resume, `x` delete, and the routine
+/// picker's `o` open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobOption {
+    Edit,
+    Pause,
+    Resume,
+    Delete,
+    Open,
+}
+
+impl JobOption {
+    /// The item's line in the menu: its verb alone, since the menu's own
+    /// title already names the row.
+    fn label(self) -> &'static str {
+        match self {
+            JobOption::Edit => "edit",
+            JobOption::Pause => "pause",
+            JobOption::Resume => "resume",
+            JobOption::Delete => "delete",
+            JobOption::Open => "open",
+        }
+    }
+}
+
+/// [`JobMode::Options`]'s state: the menu's title, the items the row could
+/// take when `o` was pressed, and which of them the cursor is on.
+///
+/// Over the list the items act on `jobs[cursor]`. Nothing re-reads the
+/// stores while the menu is open — [`jobs_wait_for_key`] reloads only over
+/// the resting list — so that is still the job the menu was opened on.
+///
+/// `picker` is the routine picker the menu was opened over, when it was:
+/// that picker stays drawn under it, and `esc` goes back there with its
+/// draft and its cursor exactly as they were.
+#[derive(Debug, Clone)]
+struct JobMenu {
+    title: String,
+    items: Vec<JobOption>,
+    cursor: usize,
+    picker: Option<(Draft, RoutineNav)>,
+}
+
+impl JobMenu {
+    /// `o` over the resting list: the menu for `job`, titled with its name.
+    /// It offers edit, then pause for an enabled job or resume for a paused
+    /// one, so the item says what picking it will do, then delete.
+    fn for_job(job: &Job) -> JobMenu {
+        let toggle = match job.spec.enabled {
+            true => JobOption::Pause,
+            false => JobOption::Resume,
+        };
+        JobMenu {
+            title: job.name.clone(),
+            items: vec![JobOption::Edit, toggle, JobOption::Delete],
+            cursor: 0,
+            picker: None,
+        }
+    }
+
+    /// What the menu was opened over, as it was.
+    fn closed(&self) -> JobMode {
+        match &self.picker {
+            Some((draft, nav)) => JobMode::PickRoutine {
+                draft: draft.clone(),
+                nav: nav.clone(),
+            },
+            None => JobMode::List,
+        }
+    }
 }
 
 struct JobsState {
@@ -738,7 +817,22 @@ fn run_jobs_screen(
                 _ => {}
             },
 
-            JobMode::List => handle_list_key(repo, pipelines, &mut jobs, &mut state, key),
+            JobMode::List => handle_list_key(pipelines, &jobs, &mut state, key),
+
+            JobMode::Options(menu) => match key {
+                Key::Esc => state.mode = menu.closed(),
+                Key::Enter => {
+                    if let Some(&item) = menu.items.get(menu.cursor) {
+                        let menu = menu.clone();
+                        run_option(repo, &routines, &mut jobs, &mut state, &menu, item);
+                    }
+                }
+                _ => {
+                    let mut menu = menu.clone();
+                    menu.cursor = crate::screen::move_cursor(menu.cursor, menu.items.len(), key);
+                    state.mode = JobMode::Options(menu);
+                }
+            },
 
             JobMode::PickRoutine { draft, nav } => match key {
                 Key::Esc => state.mode = JobMode::List,
@@ -756,17 +850,20 @@ fn run_jobs_screen(
                         state.mode = JobMode::Walk(NewJobWalk::schedule(draft));
                     }
                 }
-                // `o` over the tasks pane: open the highlighted task
-                // in an editor pane, exactly the shape the queue screen's own
-                // routines pane gives it — see
-                // `open_highlighted_job_routine`. Gated the same way: live
-                // only with a task actually under the cursor.
-                Key::Char('o')
-                    if nav.focus == Focus::Tasks
-                        && highlighted_routine_task(&routines, nav).is_some() =>
-                {
-                    let draft = draft.clone();
-                    state.mode = open_highlighted_job_routine(repo, &routines, nav, draft);
+                // `o` over the tasks pane: the menu for the highlighted
+                // task, titled with its id, offering open — the same menu
+                // the queue screen's own routines pane opens on a routine's
+                // task. Live only with a task actually under the cursor: a
+                // folder has no file of its own to open.
+                Key::Char('o') if nav.focus == Focus::Tasks => {
+                    if let Some(task) = highlighted_routine_task(&routines, nav) {
+                        state.mode = JobMode::Options(JobMenu {
+                            title: task.id.clone(),
+                            items: vec![JobOption::Open],
+                            cursor: 0,
+                            picker: Some((draft.clone(), nav.clone())),
+                        });
+                    }
                 }
                 _ => {
                     let (mut nav, draft) = (nav.clone(), draft.clone());
@@ -810,20 +907,14 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
 /// One key over the resting list.
 ///
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
-/// walk, not this state — so `e`, `space` and `x` are gated on the list
-/// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
-/// Quitting is not among these keys any more — `ctrl-c` is caught by bare
-/// `spoolway`'s own screen rather than read as a key at all, and `q` over
-/// the resting list is [`crate::screen::shell::leave_on`]'s to read, ahead
-/// of this handler.
-fn handle_list_key(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    jobs: &mut Vec<Job>,
-    state: &mut JobsState,
-    key: Key,
-) {
-    let has_jobs = !jobs.is_empty();
+/// walk, not this state — so `o` is gated on the list not being empty and
+/// always opens the menu for `jobs[cursor]`. `n` starts the walk. `e`,
+/// `space` and `x` do nothing: they used to run what the menu's edit,
+/// pause or resume, and delete now do. Quitting is not among these keys
+/// either — `ctrl-c` is caught by bare `spoolway`'s own screen rather than
+/// read as a key at all, and `q` over the resting list is
+/// [`crate::screen::shell::leave_on`]'s to read, ahead of this handler.
+fn handle_list_key(pipelines: &Pipelines, jobs: &[Job], state: &mut JobsState, key: Key) {
     match key {
         Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
         Key::Down | Key::Char('j') => {
@@ -835,36 +926,71 @@ fn handle_list_key(
                 nav: RoutineNav::new(),
             };
         }
-        Key::Char('e') if has_jobs => {
-            state.mode = JobMode::PickRoutine {
-                draft: Draft::from_job(&jobs[state.cursor]),
-                nav: RoutineNav::new(),
-            };
+        Key::Char('o') => {
+            if let Some(job) = jobs.get(state.cursor) {
+                state.mode = JobMode::Options(JobMenu::for_job(job));
+            }
         }
-        Key::Char(' ') if has_jobs => {
-            let job = &jobs[state.cursor];
+        _ => {}
+    }
+}
+
+/// `item` picked off `menu`: exactly what its old key ran. Edit opens the
+/// routine picker over a draft of the job, pause and resume flip its
+/// `enabled` and write it back, delete asks first, and open opens the
+/// picker's highlighted task.
+fn run_option(
+    repo: &Repo,
+    routines: &[RoutineFolder],
+    jobs: &mut Vec<Job>,
+    state: &mut JobsState,
+    menu: &JobMenu,
+    item: JobOption,
+) {
+    if let Some((draft, nav)) = &menu.picker {
+        state.mode = match item {
+            JobOption::Open => open_highlighted_job_routine(repo, routines, nav, draft.clone()),
+            // The list's items are never put on the picker's menu.
+            JobOption::Edit | JobOption::Pause | JobOption::Resume | JobOption::Delete => {
+                menu.closed()
+            }
+        };
+        return;
+    }
+    // `o` opens the list's menu only over a job, and nothing removes one
+    // while the menu is open, so this is the job the menu was opened on.
+    let Some(job) = jobs.get(state.cursor) else {
+        state.mode = JobMode::List;
+        return;
+    };
+    state.mode = match item {
+        JobOption::Edit => JobMode::PickRoutine {
+            draft: Draft::from_job(job),
+            nav: RoutineNav::new(),
+        },
+        JobOption::Pause | JobOption::Resume => {
             let mut spec = job.spec.clone();
             spec.enabled = !spec.enabled;
             let (scope, name, verb) = (job.scope, job.name.clone(), pause_verb(spec.enabled));
             match jobs::write(repo, scope, &name, &spec) {
-                Ok(()) => reload(repo, jobs),
-                Err(err) => {
-                    state.mode = JobMode::Outcome(Notice::new(
-                        verb,
-                        format!(
-                            "Could not {verb} the job `{name}` in `{}`: {err:#}. Check the \
-                             file is writable and try again.",
-                            store_label(repo, &store_of(repo, scope)),
-                        ),
-                    ));
+                Ok(()) => {
+                    reload(repo, jobs);
+                    JobMode::List
                 }
+                Err(err) => JobMode::Outcome(Notice::new(
+                    verb,
+                    format!(
+                        "Could not {verb} the job `{name}` in `{}`: {err:#}. Check the file is \
+                         writable and try again.",
+                        store_label(repo, &store_of(repo, scope)),
+                    ),
+                )),
             }
         }
-        Key::Char('x') if has_jobs => {
-            state.mode = JobMode::ConfirmDelete(jobs[state.cursor].name.clone());
-        }
-        _ => {}
-    }
+        JobOption::Delete => JobMode::ConfirmDelete(job.name.clone()),
+        // The picker's item is never put on the list's menu.
+        JobOption::Open => JobMode::List,
+    };
 }
 
 /// `resume`/`pause` for the message the pause toggle prints on failure — the
@@ -965,13 +1091,13 @@ fn picked_task(
     relative_routine(&task.path, routines_dir)
 }
 
-/// `o` over the routine picker's own tasks pane: open the highlighted
-/// task in an editor pane, the same shape [`crate::commands::queue`]'s
+/// The routine picker's open, picked off the menu `o` opens over its own
+/// tasks pane: open the highlighted task in an editor pane, the same shape [`crate::commands::queue`]'s
 /// own `open_highlighted_routine` gives the queue screen's routines pane,
 /// including the same [`JobMode::Outcome`] a backend with no pane to open
 /// one in is surfaced through. Returns to [`JobMode::PickRoutine`] with
 /// `nav` and `draft` exactly as they were rather than [`JobMode::List`],
-/// since this key never leaves the walk the way the queue screen's `o` has
+/// since this item never leaves the walk the way the queue screen's open has
 /// nothing of its own to stay in.
 fn open_highlighted_job_routine(
     repo: &Repo,
@@ -1093,33 +1219,50 @@ fn jobs_wait_for_key(
 fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     let footer = jobs_footer(&state.mode);
     let lay = layout(&footer);
-    let in_walk = matches!(state.mode, JobMode::PickRoutine { .. } | JobMode::Walk(_));
+    // The menu opened over the routine picker is still part of the walk,
+    // so the panes under the picker stay as the walk draws them.
+    let in_walk = matches!(
+        state.mode,
+        JobMode::PickRoutine { .. }
+            | JobMode::Walk(_)
+            | JobMode::Options(JobMenu {
+                picker: Some(_),
+                ..
+            })
+    );
 
-    // Build the overlay panel first. The headless frame is only as tall as its
-    // own content (`queue::two_pane_frame` with `rows: None`), so both panes
-    // have to be padded to at least the panel's height plus its border, or
-    // `overlay` writes the panel into rows that do not exist and the firing
-    // lines, the key line and the bottom border are silently dropped.
-    let overlay_panel: Option<Vec<String>> = match &state.mode {
-        JobMode::PickRoutine { nav, .. } => Some(routine_panel(ctx, nav)),
-        JobMode::Walk(walk) => Some(walk.panel(ctx.pipelines)),
-        JobMode::ConfirmDelete(name) => Some(panel(
-            "delete this job",
-            &[
-                String::new(),
-                clip(&format!("  {name}")),
-                "  its schedule is removed from the store.".to_string(),
-            ],
-            &keys(&[("enter", "delete"), ("esc", "keep")]),
-        )),
+    // Build the overlay panels first, bottom one first. The headless frame is
+    // only as tall as its own content (`queue::two_pane_frame` with `rows:
+    // None`), so both panes have to be padded to at least the tallest
+    // panel's height plus its border, or `overlay` writes the panel into
+    // rows that do not exist and the firing lines, the key line and the
+    // bottom border are silently dropped.
+    let overlay_panels: Vec<Vec<String>> = match &state.mode {
+        JobMode::PickRoutine { nav, .. } => vec![routine_panel(ctx, nav)],
+        JobMode::Walk(walk) => vec![walk.panel(ctx.pipelines)],
+        JobMode::ConfirmDelete(name) => vec![delete_panel(name)],
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border.
-        JobMode::Outcome(notice) => Some(
+        JobMode::Outcome(notice) => vec![
             notice.panel(crate::screen::NOTICE_WRAP.min((lay.left + lay.right).saturating_sub(1))),
-        ),
-        JobMode::List => None,
+        ],
+        // Over the routine picker the menu is drawn on top of it, so the
+        // task it was opened on stays in sight.
+        JobMode::Options(menu) => {
+            let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
+            let options = crate::screen::options(&menu.title, &items, menu.cursor);
+            match &menu.picker {
+                Some((_, nav)) => vec![routine_panel(ctx, nav), options],
+                None => vec![options],
+            }
+        }
+        JobMode::List => Vec::new(),
     };
-    let min_rows = overlay_panel.as_ref().map_or(0, |panel| panel.len() + 4);
+    let min_rows = overlay_panels
+        .iter()
+        .map(|panel| panel.len() + 4)
+        .max()
+        .unwrap_or(0);
 
     let (mut left, left_focus) = jobs_list_lines(jobs, state, lay.left, in_walk);
     // The right pane is titled for what it is, not for the job it shows:
@@ -1167,7 +1310,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
         lay,
     );
 
-    if let Some(panel) = &overlay_panel {
+    for panel in &overlay_panels {
         overlay(&mut frame, panel);
     }
 
@@ -1187,25 +1330,29 @@ fn jobs_footer(mode: &JobMode) -> String {
         // `q` only inside bare `spoolway`'s jobs tab, the one place it quits.
         // The same line under a notice, which reads only the `enter` its own
         // popup names: this is the line the list reads again once it closes.
-        JobMode::List | JobMode::Outcome(_) => key_hint(
-            &[
-                [
-                    ("n", "new"),
-                    ("e", "edit"),
-                    ("space", "pause"),
-                    ("x", "delete"),
+        // The same line under the options menu too, which names its own keys
+        // in its popup and is one step on the way to an action this line
+        // already names as `o options`.
+        JobMode::List | JobMode::Outcome(_) | JobMode::Options(JobMenu { picker: None, .. }) => {
+            key_hint(
+                &[
+                    [("n", "new"), ("o", "options")].as_slice(),
+                    crate::screen::shell::quit_hint(),
                 ]
-                .as_slice(),
-                crate::screen::shell::quit_hint(),
-            ]
-            .concat(),
-        ),
+                .concat(),
+            )
+        }
         // Names exactly the keys `run_jobs_screen`'s own `PickRoutine` arm
         // and `handle_routine_key` read, the same set the queue screen's own
-        // routines pane names — `o` included, gated the same way there.
-        JobMode::PickRoutine { .. } => key_hint(ROUTINE_KEYS),
+        // routines pane names — `o` included, gated the same way there. Kept
+        // under the menu opened over the picker, for the same reason the
+        // list's line is kept under the list's menu.
+        JobMode::PickRoutine { .. }
+        | JobMode::Options(JobMenu {
+            picker: Some(_), ..
+        }) => key_hint(ROUTINE_KEYS),
         JobMode::Walk(walk) => walk.footer(),
-        JobMode::ConfirmDelete(_) => key_hint(&[("enter", "delete"), ("esc", "keep")]),
+        JobMode::ConfirmDelete(_) => hint(&crate::screen::answer_keys()),
     }
 }
 
@@ -1391,6 +1538,11 @@ fn clip(s: &str) -> String {
     format!("{kept}…")
 }
 
+/// How wide an answer's own text may be: [`PANEL_BODY_WIDTH`], less the
+/// two columns [`crate::screen::answer_rows`] puts before every answer row
+/// for its `>`.
+const ANSWER_WIDTH: usize = PANEL_BODY_WIDTH - 2;
+
 /// The schedule field's overlay: the expression as typed, the same expression
 /// in words, and the next three firings — recomputed on every keystroke. An
 /// expression that will not parse says so in place of the three lines.
@@ -1429,38 +1581,69 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     )
 }
 
+/// The options menu's delete, as a popup over job `name`: what deleting it removes, and its one
+/// answer.
+fn delete_panel(name: &str) -> Vec<String> {
+    crate::screen::ask(
+        "delete this job",
+        &[
+            String::new(),
+            clip(&format!("  {name}")),
+            "  its schedule is removed from the store.".to_string(),
+        ],
+        &["delete".to_string()],
+        0,
+    )
+}
+
 /// The pipeline picker's overlay: every pipeline the repo defines, narrowed by
-/// the typed query, the highlighted one showing the first line of its own
-/// description.
+/// the typed query, as answers — the highlighted one showing the first line
+/// of its own description under its name, and a blank row under that.
 fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<String> {
     let matches = pipeline_matches(pipelines, query);
     let cursor = cursor.min(matches.len().saturating_sub(1));
-    let mut body = vec![
-        String::new(),
-        clip(&format!("  find: {query}_")),
-        String::new(),
-    ];
+    let mut body = vec![String::new(), clip(&format!("  find: {query}_"))];
 
     if matches.is_empty() {
+        body.push(String::new());
         body.push("  no pipeline matches".to_string());
     }
-    for (index, name) in matches.iter().enumerate() {
-        let marker = if index == cursor { ">" } else { " " };
-        body.push(clip(&format!("{marker} {name}")));
-        if index == cursor {
-            if let Ok(pipeline) = pipelines.get(name)
-                && let Some(description) = &pipeline.description
-            {
-                body.push(clip(&format!(
-                    "    {}",
-                    crate::fmt::first_line(description)
-                )));
+    let answers: Vec<String> = matches
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut answer = clip_to(name.clone(), ANSWER_WIDTH);
+            if index == cursor {
+                if let Ok(pipeline) = pipelines.get(name)
+                    && let Some(description) = &pipeline.description
+                {
+                    answer.push('\n');
+                    answer.push_str(&clip_to(
+                        format!("  {}", crate::fmt::first_line(description)),
+                        ANSWER_WIDTH,
+                    ));
+                }
+                answer.push('\n');
             }
-            body.push(String::new());
-        }
-    }
+            answer
+        })
+        .collect();
 
-    panel("which pipeline", &body, &keys(PIPELINE_KEYS))
+    crate::screen::ask("which pipeline", &body, &answers, cursor)
+}
+
+/// Every popup on the jobs tab that asks something, drawn once each with
+/// made-up content — for the test that walks every such popup in the
+/// project; see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        ("delete job", delete_panel("nightly-audit")),
+        (
+            "jobs pipeline picker",
+            pipeline_panel(&Pipelines::builtin(), "", 0),
+        ),
+    ]
 }
 
 /// The routine picker's keys, in its popup and on the line under the frame.
@@ -1469,7 +1652,7 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 const ROUTINE_KEYS: &[(&str, &str)] = &[
     ("space", "select"),
     ("enter", "use it"),
-    ("o", "open task"),
+    ("o", "options"),
     ("tab", "tasks"),
     ("esc", "cancel"),
 ];
@@ -1898,8 +2081,116 @@ mod tests {
         );
     }
 
+    /// `o` on an enabled job opens a menu titled with its name over the
+    /// list, listing edit, pause and delete in that order, the cursor on
+    /// edit, with the list's own key line still under it.
     #[test]
-    fn space_pauses_and_resumes_the_highlighted_job() {
+    fn o_on_an_enabled_job_lists_edit_pause_and_delete() {
+        let (repo, _root_guard) = fixture("jobs-screen-options-enabled");
+        one_job(&repo);
+
+        let drawn = drive(&repo, "o");
+        let frame = last_frame(&drawn);
+        let menu = [
+            format!("{TOP_LEFT}─ nightly ─"),
+            "│  > edit".to_string(),
+            "│    pause".to_string(),
+            "│    delete".to_string(),
+            "│  [enter] confirm   [esc] close".to_string(),
+        ];
+        let rows: Vec<usize> = menu
+            .iter()
+            .map(|row| {
+                frame
+                    .lines()
+                    .position(|line| line.contains(row.as_str()))
+                    .unwrap_or_else(|| panic!("no `{row}` in:\n{frame}"))
+            })
+            .collect();
+        assert!(rows.windows(2).all(|w| w[0] < w[1]), "in order: {frame}");
+        assert!(!frame.contains("resume"), "{frame}");
+        assert!(frame.contains("[n] new   [o] options"), "{frame}");
+    }
+
+    /// The same menu on a paused job reads resume in pause's place, so the
+    /// item says what picking it does.
+    #[test]
+    fn o_on_a_paused_job_lists_resume_in_place_of_pause() {
+        let (repo, _root_guard) = fixture("jobs-screen-options-disabled");
+        seed_routines(&repo);
+        jobs::write(
+            &repo,
+            Scope::User,
+            "nightly",
+            &JobSpec {
+                schedule: "@daily".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                enabled: false,
+                base: None,
+            },
+        )
+        .unwrap();
+
+        let drawn = drive(&repo, "o");
+        let frame = last_frame(&drawn);
+        assert!(frame.contains(&format!("{TOP_LEFT}─ nightly ─")), "{frame}");
+        assert!(frame.contains("│  > edit"), "{frame}");
+        assert!(frame.contains("│    resume"), "{frame}");
+        assert!(frame.contains("│    delete"), "{frame}");
+        assert!(!frame.contains("│    pause"), "{frame}");
+    }
+
+    /// `o` with no job in either store has no row to act on and opens
+    /// nothing, the same as the keys it replaced.
+    #[test]
+    fn o_with_no_jobs_does_nothing() {
+        let (repo, _root_guard) = fixture("jobs-screen-options-empty");
+        seed_routines(&repo);
+        let before = drive(&repo, "");
+        let after = drive(&repo, "o");
+        assert_eq!(last_frame(&after), last_frame(&before));
+    }
+
+    /// `e`, `space` and `x` used to edit, pause and delete the highlighted
+    /// job. They are no keys at all now: the frame stays as it was and the
+    /// job is untouched.
+    #[test]
+    fn e_space_and_x_do_nothing_on_the_list() {
+        let (repo, _root_guard) = fixture("jobs-screen-old-keys");
+        one_job(&repo);
+        let before = drive(&repo, "");
+        for key in ["e", " ", "x"] {
+            let after = drive(&repo, key);
+            assert_eq!(last_frame(&after), last_frame(&before), "`{key}`");
+        }
+        let jobs = jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].spec.enabled);
+    }
+
+    /// The menu's edit opens the routine picker, as `e` did; `esc` closes
+    /// the menu onto the list having done nothing.
+    #[test]
+    fn the_menu_s_edit_opens_the_routine_picker_and_esc_closes_it() {
+        let (repo, _root_guard) = fixture("jobs-screen-options-edit");
+        one_job(&repo);
+        let edit = drive(&repo, "o\r");
+        assert!(
+            last_frame(&edit).contains(&format!("{TOP_LEFT}─ which routine ")),
+            "{}",
+            last_frame(&edit)
+        );
+
+        let before = drive(&repo, "");
+        let closed = drive(&repo, "o\x1b");
+        assert_eq!(last_frame(&closed), last_frame(&before));
+    }
+
+    /// The menu's second item pauses an enabled job and resumes a paused
+    /// one, as `space` did.
+    #[test]
+    fn the_menu_pauses_and_resumes_the_highlighted_job() {
         let (repo, _root_guard) = fixture("jobs-screen-pause");
         seed_routines(&repo);
         jobs::write(
@@ -1916,15 +2207,16 @@ mod tests {
         )
         .unwrap();
 
-        drive(&repo, " q");
+        drive(&repo, "o\x1b[B\rq");
         assert!(!jobs::load(&repo).unwrap()[0].spec.enabled, "paused");
 
-        drive(&repo, " q");
+        drive(&repo, "o\x1b[B\rq");
         assert!(jobs::load(&repo).unwrap()[0].spec.enabled, "resumed");
     }
 
+    /// The menu's delete asks first, as `x` did, and `enter` deletes.
     #[test]
-    fn x_then_enter_deletes_the_highlighted_job() {
+    fn the_menu_s_delete_then_enter_deletes_the_highlighted_job() {
         let (repo, _root_guard) = fixture("jobs-screen-delete");
         seed_routines(&repo);
         jobs::write(
@@ -1941,12 +2233,22 @@ mod tests {
         )
         .unwrap();
 
-        drive(&repo, "x\r");
+        let asked = drive(&repo, "o\x1b[B\x1b[B\r");
+        let frame = last_frame(&asked);
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ delete this job ")),
+            "{frame}"
+        );
+        assert!(frame.contains("│  > delete"), "{frame}");
+        assert_eq!(jobs::load(&repo).unwrap().len(), 1, "asked first");
+
+        drive(&repo, "o\x1b[B\x1b[B\r\r");
         assert!(jobs::load(&repo).unwrap().is_empty());
     }
 
+    /// `esc` over the delete question keeps the job.
     #[test]
-    fn x_then_esc_keeps_the_highlighted_job() {
+    fn the_menu_s_delete_then_esc_keeps_the_highlighted_job() {
         let (repo, _root_guard) = fixture("jobs-screen-delete-esc");
         seed_routines(&repo);
         jobs::write(
@@ -1963,7 +2265,7 @@ mod tests {
         )
         .unwrap();
 
-        drive(&repo, "x\x1b");
+        drive(&repo, "o\x1b[B\x1b[B\r\x1b");
         assert_eq!(jobs::load(&repo).unwrap().len(), 1);
     }
 
@@ -2081,7 +2383,7 @@ mod tests {
         );
         assert!(
             frame.contains(
-                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+                "[space] select   [enter] use it   [o] options   [tab] tasks   [esc] cancel"
             ),
             "{frame}"
         );
@@ -2208,13 +2510,12 @@ mod tests {
         seed_routines(&repo);
 
         // Hosted, as bare `spoolway`'s jobs tab is, so the line carries the
-        // quit hint the mockup draws after `[x] delete`.
+        // quit hint the mockup draws after `[o] options`.
         let hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Jobs);
         let resting = drive(&repo, "q").to_string();
         drop(hosting);
         assert!(
-            last_frame(&resting)
-                .contains("[n] new   [e] edit   [space] pause   [x] delete   [q] quit"),
+            last_frame(&resting).contains(" [n] new   [o] options   [q] quit"),
             "{}",
             last_frame(&resting)
         );
@@ -2222,7 +2523,7 @@ mod tests {
         let walking = drive(&repo, "n").to_string();
         assert!(
             last_frame(&walking).contains(
-                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+                "[space] select   [enter] use it   [o] options   [tab] tasks   [esc] cancel"
             ),
             "{}",
             last_frame(&walking)
@@ -2258,15 +2559,16 @@ mod tests {
     }
 
     /// `o` does nothing while the folders pane has focus — a folder has no
-    /// task of its own to open — the same gate the queue screen's own
-    /// routines pane gives it.
+    /// task of its own to open — so no menu opens over the picker.
     #[test]
     fn o_does_nothing_while_the_folders_pane_has_focus_in_the_routine_picker() {
         let (repo, _root_guard) = fixture("jobs-screen-open-folders-focus");
         seed_routines(&repo);
 
-        let drawn = drive(&repo, "no\x1bq");
+        let before = drive(&repo, "n");
+        let drawn = drive(&repo, "no");
 
+        assert_eq!(last_frame(&drawn), last_frame(&before));
         assert!(
             !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the folders pane focused must never reach `JobMode::Outcome`:\n{drawn}"
@@ -2274,21 +2576,51 @@ mod tests {
         assert!(jobs::load(&repo).unwrap().is_empty());
     }
 
-    /// `o` on a headless run has no pane to open an editor in, in the routine
-    /// picker exactly as it does on the queue screen's own routines pane —
-    /// see `open_highlighted_job_routine`'s own doc comment. The refusal
-    /// surfaces as `JobMode::Outcome`, same as any other; staying on the
-    /// picker rather than falling back to `JobMode::List` is what its `Ok`
-    /// path does once a pane actually opens, not this one.
+    /// `o` over the routine picker's tasks pane opens a menu titled with the
+    /// highlighted task's id, offering open, drawn over the picker with the
+    /// picker's own key line under it. `esc` closes it back onto the picker
+    /// with its focus where it was.
     #[test]
-    fn pressing_o_in_the_routine_picker_with_no_multiplexer_surfaces_the_refusal() {
+    fn o_over_the_routine_picker_s_tasks_opens_a_menu_with_open() {
+        let (repo, _root_guard) = fixture("jobs-screen-picker-options");
+        seed_routines(&repo);
+
+        let drawn = drive(&repo, "n\to");
+        let frame = last_frame(&drawn);
+        assert!(frame.contains(&format!("{TOP_LEFT}─ audit ─")), "{frame}");
+        assert!(frame.contains("│  > open"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ which routine ")),
+            "the picker under it: {frame}"
+        );
+        assert!(
+            frame.contains(
+                "[space] select   [enter] use it   [o] options   [tab] tasks   [esc] cancel"
+            ),
+            "{frame}"
+        );
+
+        let closed = drive(&repo, "n\to\x1b");
+        let picker = drive(&repo, "n\t");
+        assert_eq!(last_frame(&closed), last_frame(&picker));
+    }
+
+    /// The menu's open on a headless run has no pane to open an editor in,
+    /// in the routine picker exactly as on the queue screen's own routines
+    /// pane — see `open_highlighted_job_routine`'s own doc comment. The
+    /// refusal surfaces as `JobMode::Outcome`, same as any other; staying on
+    /// the picker rather than falling back to `JobMode::List` is what its
+    /// `Ok` path does once a pane actually opens, not this one.
+    #[test]
+    fn opening_from_the_routine_picker_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("jobs-screen-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_routines(&repo);
 
         // `n` opens the routine picker, `tab` focuses the tasks pane on
-        // `nightly`'s own `audit`, `o` tries to open it.
-        let drawn = drive(&repo, "n\to");
+        // `nightly`'s own `audit`, `o` `enter` tries to open it.
+        let drawn = drive(&repo, "n\to\r");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -2322,7 +2654,7 @@ mod tests {
         assert!(last.contains("sweep   sweep the cache"), "{last}");
         assert!(
             last.contains(
-                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+                "[space] select   [enter] use it   [o] options   [tab] tasks   [esc] cancel"
             ),
             "{last}"
         );

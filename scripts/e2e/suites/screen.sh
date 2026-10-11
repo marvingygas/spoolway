@@ -108,8 +108,8 @@ lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
 # again, with no step running, stops it at once and draws no stop popup.
 # This project's fake models give the warnings gate something to say, so the
-# first `enter` opens the warnings popup first and `x` answers it — hiding it
-# and starting the child. The keys are paced so the child has time to take
+# first `enter` opens the warnings popup first and `↓` `enter` picks its
+# second answer — hiding it and starting the child. The keys are paced so the child has time to take
 # the lock before the second `enter`, and time to go once asked; the pipe then
 # runs out and the screen ends.
 # Nothing is queued, which a child the screen started waits on rather than
@@ -117,13 +117,16 @@ lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 # proof it stayed up.
 RUN="$LIVE/run.txt"
 works "enter on the dispatch tab starts dispatching, and enter again stops it" \
-  script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
+  script -qec "{ printf '\\033[D\\r'; sleep 1; printf '\\033[B\\r'; sleep 5; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "enter asks the warnings gate first, as a popup" "─ before dispatching " "$RUN.plain"
-has "whose keys read as drawn" "[enter] start dispatching   [esc] back   [x] hide until these change" "$RUN.plain"
+has "listing its answers, the first under the cursor" "> start dispatching" "$RUN.plain"
+has "with the hide answer under it" "hide until these change" "$RUN.plain"
+has "and the shared key row" "[enter] confirm   [esc] close" "$RUN.plain"
+lacks "with no letter answer left" "[x] hide until" "$RUN.plain"
 has "the header names the child's pid while it runs" "dispatcher running · pid " "$RUN.plain"
 has "and enter is offered to stop it" "[enter] stop dispatching" "$RUN.plain"
 has "and it stays up on an empty queue" "Nothing queued" "$RUN.plain"
@@ -311,7 +314,7 @@ has "→ reaches the routines tab" \
 has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
-  "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit" "$LAST"
+  "[space] select   [enter] queue   [o] options   [tab] tasks   [q] quit" "$LAST"
 
 # A full board in a short pane scrolls its task table rather than cutting the
 # frame off at the bottom. Thirty queued tasks in six groups are more than a
@@ -333,7 +336,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"
 has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
-has "the key line is still drawn under it" "[o] open task" "$LAST"
+has "the key line is still drawn under it" "[o] options" "$LAST"
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns
 # no row of the full board touches column 0 or column 119. Each row ends in the

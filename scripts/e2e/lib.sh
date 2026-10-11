@@ -540,8 +540,10 @@ screen_board() {
 
 # Onto the dispatch tab, and dispatching. `enter` there asks the start gates —
 # the overrides popup and then doctor's warnings, each only when it has
-# something to say — and `x` answers each by hiding it until what it names
-# changes, which also starts the run once the last is answered. Done once the
+# something to say — and its second answer, `hide until these change`, hides
+# it until what it names changes, which also starts the run once the last is
+# answered. Down moves the cursor onto it and `enter` picks it; a letter
+# answers nothing. Done once the
 # header names the child's pid. Fails the suite's setup if it never does.
 screen_dispatch() {
   local mark i
@@ -551,7 +553,8 @@ screen_dispatch() {
     mark=$(wc -l < "$E2E_SCREEN_LOG")
     poll_until 10 _screen_started_or_asked "$mark"
     if screen_drew_since "$mark" "dispatcher running · pid "; then return 0; fi
-    screen_drew_since "$mark" "[x] hide until" && screen_press x
+    screen_drew_since "$mark" "hide until these change" &&
+      screen_press $'\x1b[B' && screen_press $'\r'
   done
   poll_until 10 screen_drew_since "$mark" "dispatcher running · pid " && return 0
   printf '  \033[31mSETUP\033[0m the dispatch tab never started dispatching\n' >&2
@@ -559,7 +562,7 @@ screen_dispatch() {
   exit 2
 }
 _screen_started_or_asked() {
-  screen_drew_since "$1" "dispatcher running · pid " || screen_drew_since "$1" "[x] hide until"
+  screen_drew_since "$1" "dispatcher running · pid " || screen_drew_since "$1" "hide until these change"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and
