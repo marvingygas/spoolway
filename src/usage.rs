@@ -261,6 +261,15 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_group: Option<String>,
 
+    /// The routine this task is a queued copy of, banked verbatim from
+    /// `task.front.routine` — see [`crate::task::Frontmatter::routine`].
+    /// `spoolway eval --by task` labels a run by it, so every run of one
+    /// routine reads under the routine's own name rather than its copy's
+    /// numbered id. Absent on every task queued any other way, and on every
+    /// line written before the field existed: those keep their id as label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<String>,
+
     /// The watched root — see [`crate::config::Config::watch_roots`] — a
     /// session's `cwd` sat under, when this line was banked by
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
@@ -3082,15 +3091,15 @@ pub(crate) fn reported_spend_moved(cost: Option<f64>, reported: Option<f64>) -> 
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial`, `trial_group`, `round` and `pipeline_version` are
-/// copied onto the
-/// new line, so spend recovered by a sweep lands in the same `spoolway eval`
-/// row the lane's own turns did rather than in a pipeline-less one no group
-/// owns — and under the version the lane actually ran, not whatever a
-/// pipeline file says by the time the sweep runs. `None` for [`bank_lane`]'s
-/// caller — the headless interrupt has a lane name and a transcript, not a
-/// loaded pipeline — where those fields stay blank the way a line written
-/// before they existed carries them.
+/// `plan`, `run`, `trial`, `trial_group`, `routine`, `round` and
+/// `pipeline_version` are copied onto the new line, so spend recovered by a
+/// sweep lands in the same `spoolway eval` row the lane's own turns did rather
+/// than in a pipeline-less one no group owns — and under the version the lane
+/// actually ran, not whatever a pipeline file says by the time the sweep runs.
+/// `None` for [`bank_lane`]'s caller — the headless interrupt has a lane name
+/// and a transcript, not a loaded pipeline — where those fields stay blank the
+/// way a line written before they existed carries them, bar `routine`, which
+/// is read off the task's own file.
 #[allow(clippy::too_many_arguments)]
 fn bank_lane_at(
     repo: &Repo,
@@ -3136,6 +3145,15 @@ fn bank_lane_at(
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
         trial_group: carry.and_then(|c| c.trial_group.clone()),
+        // With no line to carry it from — the headless interrupt's bank —
+        // the routine is read off the task's own file instead, so a routine
+        // copy paused mid-turn still banks a line eval labels by its routine.
+        // Only there: a carry is a line already banked for this task, so it
+        // already holds whatever the task's file would say.
+        routine: match carry {
+            Some(c) => c.routine.clone(),
+            None => repo.task(task).ok().and_then(|t| t.front.routine),
+        },
         dir: None,
         // Copied like the columns above: a catch-up of a hand session's own
         // line stays a hand line, and [`sweep_dirs`] marks the first one by
@@ -3854,6 +3872,7 @@ fn bank_dir_session(
         run: None,
         trial: None,
         trial_group: None,
+        routine: None,
         dir: Some(dir.to_string()),
         hand: false,
         command: None,
@@ -5519,6 +5538,7 @@ mod tests {
             run: Some("r00001".into()),
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,
@@ -5558,6 +5578,22 @@ mod tests {
         assert_eq!(back.trial_group, None);
     }
 
+    /// `routine` is a routine copy's alone: a line for any other task never
+    /// writes the key, so it reads exactly as it did before the field
+    /// existed, and a copy's line writes the routine's id as it was given.
+    #[test]
+    fn routine_is_absent_on_an_ordinary_line_and_written_on_a_copys() {
+        let ordinary = serde_json::to_string(&minimal_entry("plain")).unwrap();
+        assert!(!ordinary.contains("routine"), "{ordinary}");
+
+        let mut copy = minimal_entry("release-6");
+        copy.routine = Some("release".into());
+        let line = serde_json::to_string(&copy).unwrap();
+        assert!(line.contains("\"routine\":\"release\""), "{line}");
+        let back: Entry = serde_json::from_str(&ordinary).unwrap();
+        assert_eq!(back.routine, None);
+    }
+
     fn minimal_entry(task: &str) -> Entry {
         Entry {
             tier_tokens: Default::default(),
@@ -5583,6 +5619,7 @@ mod tests {
             run: None,
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,
@@ -6425,6 +6462,7 @@ mod tests {
             run: None,
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,
@@ -6717,7 +6755,8 @@ mod tests {
 
     /// The catch-up line stands in the same `spoolway eval` row the lane's own
     /// turns did: `task`, `step`, `pipeline`, `agent`, `plan`, `run`, `trial`,
-    /// `trial_group` and `round` are copied from the session's most recent lane line. It
+    /// `trial_group`, `routine` and `round` are copied from the session's most
+    /// recent lane line. It
     /// carries no `outcome` — the turns swept up here were never judged.
     #[test]
     fn the_catch_up_line_copies_the_lanes_own_columns_and_carries_no_outcome() {
@@ -6733,6 +6772,7 @@ mod tests {
             run: Some("r1234".into()),
             trial: Some("t9".into()),
             trial_group: Some("demo-group".into()),
+            routine: Some("demo-routine".into()),
             outcome: Some("pass".into()),
             session: "s".into(),
             tokens: Tokens {
@@ -6756,6 +6796,7 @@ mod tests {
         assert_eq!(line.run.as_deref(), Some("r1234"));
         assert_eq!(line.trial.as_deref(), Some("t9"));
         assert_eq!(line.trial_group.as_deref(), Some("demo-group"));
+        assert_eq!(line.routine.as_deref(), Some("demo-routine"));
         assert_eq!(line.outcome, None, "late turns were never judged");
     }
 
@@ -7450,6 +7491,41 @@ mod tests {
         let harvest = harvest_file("claude", &path, &BTreeMap::new()).unwrap();
         assert_eq!(harvest.reported_usd, Some(2.5));
         assert!(harvest.reported_models.is_empty());
+    }
+
+    /// The headless interrupt banks with no line to carry from, so a routine
+    /// copy's line takes its routine from the task's own file. Fails while
+    /// only a carry could supply it: the line had no routine.
+    #[test]
+    fn a_line_banked_with_no_carry_reads_the_routine_off_its_task() {
+        let (repo, path, _root_guard) = fixture("bank-no-carry-routine");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("release-6.md"),
+            "---\nid: release-6\nroutine: release\nstage: implement\n---\n## Goal\ndemo\n",
+        )
+        .unwrap();
+        std::fs::write(&path, transcript(&[("", 10)])).unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+
+        let bank = |task: &str, session: &str| {
+            bank_lane_from(
+                &repo,
+                "claude",
+                session,
+                task,
+                "implement",
+                chrono::Utc::now(),
+                &harvest,
+            )
+            .expect("a banked line")
+        };
+        assert_eq!(bank("release-6", "s1").routine.as_deref(), Some("release"));
+        assert_eq!(
+            bank("plain", "s2").routine,
+            None,
+            "no task file, no routine"
+        );
     }
 
     /// A reported total that lands after the lane was banked, with no new turn

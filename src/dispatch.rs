@@ -777,6 +777,7 @@ fn bank_command_run(
         run: task.front.run.clone(),
         trial: task.front.trial.clone(),
         trial_group: task.front.trial_group.clone(),
+        routine: task.front.routine.clone(),
         dir: None,
         hand: false,
         command: Some(crate::usage::CommandRun {
@@ -3342,6 +3343,7 @@ impl<'a> Dispatcher<'a> {
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
+            routine: task.and_then(|t| t.front.routine.clone()),
             dir: None,
             hand: false,
             command: None,
@@ -16277,6 +16279,61 @@ mod tests {
         assert_eq!(line.trial_group.as_deref(), Some("demo"), "{banked:?}");
     }
 
+    /// A routine copy's ledger line carries its routine's id, copied off the
+    /// task the same way `trial` is, so `spoolway eval` can label every run
+    /// of one routine by that name rather than by each copy's numbered id.
+    #[test]
+    fn a_routine_copys_banked_line_carries_its_routine() {
+        let (mut repo, _root_guard) = fixture("routine-copy-banks-routine");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "release-6", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.routine = Some("release".into());
+        }));
+
+        let session = "routine-copy";
+        let kind = local_kind(&repo);
+        write_entry(
+            &repo,
+            "release-6",
+            "implement",
+            &kind,
+            "priced-model",
+            session,
+        );
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "release-6 · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "release-6 · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .rfind(|e| e.session == session)
+            .expect("the finished lane's own bank");
+        assert_eq!(line.routine.as_deref(), Some("release"), "{banked:?}");
+    }
+
     /// A held lane's `wall_s` is a delta against what the hold-time line
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
@@ -16327,6 +16384,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17276,6 +17334,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17317,6 +17376,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17399,6 +17459,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -21343,6 +21404,7 @@ mod tests {
                     run: None,
                     trial: None,
                     trial_group: None,
+                    routine: None,
                     dir: None,
                     hand: false,
                     project: String::new(),
@@ -22604,6 +22666,26 @@ mod tests {
         assert_eq!(rows[0].command.as_ref().unwrap().exit, Some(0));
         assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
         assert!(!rows[0].blocked);
+        assert_eq!(rows[0].routine, None, "the task is no routine's copy");
+    }
+
+    /// A command step's row for a routine copy carries the routine's id, the
+    /// same as a lane's line does.
+    #[test]
+    fn a_routine_copys_command_row_carries_its_routine() {
+        let (repo, _root_guard) = fixture("command-ledger-routine");
+        let path = add_task_with_worktree(&repo, "release-6", "implement");
+        let mut task = reload(&path);
+        task.front.routine = Some("release".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].routine.as_deref(), Some("release"));
     }
 
     /// A run's wall time is rounded to the nearest second, not cut down to

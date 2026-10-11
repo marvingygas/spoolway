@@ -455,7 +455,8 @@ fn grouped_listing(base: &clap::Command) -> String {
 pub enum EvalBy {
     /// A task's `group:` — every run its tasks made.
     Group,
-    /// One row per run of a task, with its pipeline, version and date.
+    /// One row per run of a task, named by its routine where it is a
+    /// routine's copy, with its pipeline, version and start time.
     Task,
     /// One row per pipeline. What the screen opens on.
     Pipeline,

@@ -124,6 +124,7 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
         run: None,
         trial: None,
         trial_group: None,
+        routine: None,
         dir: None,
         hand: false,
         command: None,
