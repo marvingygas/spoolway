@@ -8928,6 +8928,7 @@ mod tests {
         let path = repo.queue_dir().join(format!("{id}.md"));
         let mut front = Frontmatter {
             id: id.to_string(),
+            routine: None,
             title: String::new(),
             stage: stage.to_string(),
             depends_on: Vec::new(),

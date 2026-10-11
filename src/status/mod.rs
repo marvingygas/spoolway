@@ -175,6 +175,12 @@ pub enum Phase {
 
 pub struct Row {
     pub id: String,
+    /// The routine this task is a queued copy of, from its `routine:` —
+    /// [`crate::task::Task::routine`]'s own answer. The board's TASK column
+    /// draws it in place of [`Self::id`], whose `-N` only keeps two runs'
+    /// files apart. `None` on a task queued any other way, on a copy whose
+    /// line was edited away, and on every archived row — see [`done_rows`].
+    pub routine: Option<String>,
     /// The group this task came from, verbatim. `None` is a task queued
     /// outside any group — see [`NO_GROUP`].
     pub group: Option<String>,
@@ -285,6 +291,13 @@ pub struct Row {
 }
 
 impl Row {
+    /// What the board's TASK column draws: the [`Self::routine`] a queued
+    /// copy was made from, and the id otherwise. Everything that acts on a
+    /// row — the cursor, a key, a command — still goes by [`Self::id`].
+    pub fn name(&self) -> &str {
+        self.routine.as_deref().unwrap_or(&self.id)
+    }
+
     /// Where this row sorts. Group first and always: the outer order is the
     /// group's name, so a group stays where a reader last found it rather than
     /// moving up the board as its tasks get into trouble.
@@ -2721,12 +2734,11 @@ fn build(
     };
 
     // Archived tasks stay on the board, dimmed, only as long as their group
-    // still has something in the queue — so the groups worth pulling from
-    // the archive are exactly the ones already among the active rows.
-    let active_groups: BTreeSet<String> =
-        active_rows.iter().filter_map(|r| r.group.clone()).collect();
+    // still has something in the queue — `done_rows` reads which groups
+    // those are, and which of them are routines, off the active rows.
+    let done = done_rows(repo, pipelines, &active_rows)?;
     let mut rows = active_rows;
-    rows.extend(done_rows(repo, pipelines, &active_groups)?);
+    rows.extend(done);
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
 
     let totals = group_totals(&ledger, &rows);
@@ -4082,6 +4094,7 @@ fn build_rows(
         };
         rows.push(Row {
             id: task.id().to_string(),
+            routine: task.routine().map(str::to_string),
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
             after: stacked_after(repo, tasks, task),
@@ -4512,6 +4525,7 @@ fn unroutable_row(
 ) -> Row {
     Row {
         id: task.id().to_string(),
+        routine: task.routine().map(str::to_string),
         group: task.front.group.clone(),
         issue_url: issue_url_of(task),
         after: stacked_after(repo, tasks, task),
@@ -4573,25 +4587,43 @@ fn issue_url_of(task: &crate::task::Task) -> Option<String> {
 }
 
 /// Every task whose file has moved to the project's own `archive/`, as
-/// dimmed `● done` rows — but only for a group named among `active_groups`. A
-/// group with nothing left in the queue is not on the board at all, so its
-/// archived tasks are not either: this is what keeps a finished group from
-/// lingering on the board forever.
-fn done_rows(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    active_groups: &BTreeSet<String>,
-) -> Result<Vec<Row>> {
+/// dimmed `● done` rows — but only for a group one of the `live` rows
+/// belongs to. A group with nothing left in the queue is not on the board at
+/// all, so its archived tasks are not either: this is what keeps a finished
+/// group from lingering on the board forever.
+///
+/// A group with a live row carrying [`Row::routine`] gets no archived rows
+/// either. Its archive holds every earlier run of the routine, and drawing
+/// them would add every run's spend to the group's total line, which
+/// [`view::group_totals`] sums over the rows drawn. That covers copies
+/// archived before `routine:` existed too, since the rule reads the live
+/// copy, never the archived ones.
+fn done_rows(repo: &Repo, pipelines: &Pipelines, live: &[Row]) -> Result<Vec<Row>> {
+    let mut active_groups: BTreeSet<&str> = BTreeSet::new();
+    let mut routine_groups: BTreeSet<&str> = BTreeSet::new();
+    for row in live {
+        let Some(group) = row.group.as_deref() else {
+            continue;
+        };
+        active_groups.insert(group);
+        if row.routine.is_some() {
+            routine_groups.insert(group);
+        }
+    }
     let archived = cached_archive(&repo.archive_dir())?;
     Ok(archived
         .iter()
         .filter_map(|entry| {
             let group = Some(entry.group.clone()).filter(|group| !group.is_empty())?;
-            if !active_groups.contains(&group) {
+            if !active_groups.contains(group.as_str()) || routine_groups.contains(group.as_str()) {
                 return None;
             }
             Some(Row {
                 id: entry.id.clone(),
+                // The archive index keeps no `routine:`. A group with a live
+                // routine copy draws no archived row at all, so a done row
+                // only ever shows its id.
+                routine: None,
                 group: Some(group),
                 issue_url: entry.url.clone(),
                 // An archived task's own group has already landed, so the
@@ -7313,14 +7345,56 @@ mod tests {
         .unwrap();
 
         let active = rows(&repo, &pipelines).unwrap();
-        let active_groups: BTreeSet<String> =
-            active.iter().filter_map(|r| r.group.clone()).collect();
-        let done = done_rows(&repo, &pipelines, &active_groups).unwrap();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
 
         let ids: Vec<&str> = done.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["signup"], "`finished-group` has nothing queued");
         assert!(matches!(done[0].state, State::Done));
         assert_eq!(done[0].group.as_deref(), Some("auth"));
+    }
+
+    /// A group whose live task is a routine copy gets no archived rows, even
+    /// from copies archived before `routine:` existed. A plan's group keeps
+    /// them, and so does a copy whose `routine:` was edited away: the rule
+    /// reads the live task's line and nothing else.
+    #[test]
+    fn a_group_with_a_live_routine_copy_draws_no_archived_rows() {
+        let (repo, _root_guard) = fixture("done-rows-routine");
+        let pipelines = Pipelines::builtin();
+        let queue_copy = |id: &str, group: &str, routine: &str| {
+            add_to(&repo, id, &[], Some("implement"), Some(group));
+            let mut task = repo.task(id).unwrap();
+            task.front.routine = Some(routine.into());
+            task.save().unwrap();
+        };
+        queue_copy("release-6", "release", "release");
+        queue_copy("fix-2", "fix", " ");
+        add_to(&repo, "login", &[], Some("implement"), Some("auth"));
+
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        for (id, group) in [
+            ("release-4", "release"),
+            ("release-5", "release"),
+            ("fix-1", "fix"),
+            ("signup", "auth"),
+        ] {
+            std::fs::write(
+                repo.archive_dir().join(format!("{id}.md")),
+                format!("---\nid: {id}\nstage: done\ngroup: {group}\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let active = rows(&repo, &pipelines).unwrap();
+        let copy = active.iter().find(|r| r.id == "release-6").unwrap();
+        assert_eq!(copy.routine.as_deref(), Some("release"));
+        let blank = active.iter().find(|r| r.id == "fix-2").unwrap();
+        assert_eq!(blank.routine, None, "a blank line counts as edited away");
+
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
+        let mut ids: Vec<&str> = done.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["fix-1", "signup"]);
     }
 
     /// `cached_archive` reads the directory once and again only past a
@@ -7367,7 +7441,10 @@ mod tests {
         use crate::archive_index::testutil::*;
         let (repo, _root_guard) = fixture("done-rows-index");
         let pipelines = Pipelines::builtin();
-        let active: BTreeSet<String> = ["auth".to_string()].into();
+        let active = [Row {
+            group: Some("auth".into()),
+            ..crate::status::testutil::row("login")
+        }];
         let url = "url: https://acme.example/1\n";
         let rows_now = || {
             let rows = done_rows(&repo, &pipelines, &active).unwrap();
@@ -7571,9 +7648,7 @@ mod tests {
         let hotfix_row = active.iter().find(|r| r.id == "hotfix").unwrap();
         assert_eq!(hotfix_row.pipeline, "bugfix");
 
-        let active_groups: BTreeSet<String> =
-            active.iter().filter_map(|r| r.group.clone()).collect();
-        let done = done_rows(&repo, &pipelines, &active_groups).unwrap();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
         assert_eq!(
             done[0].pipeline, "retired",
             "a deleted pipeline's name still prints — done_rows must never fail the board over it"

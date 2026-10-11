@@ -283,7 +283,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 
 | Column | What it shows |
 |---|---|
-| TASK | The task id. |
+| TASK | The task id. For a copy of a routine, the routine's name. See [Routines](planning.md#routines). |
 | PIPELINE | The pipeline the task runs on. |
 | STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
@@ -326,7 +326,7 @@ stateDiagram-v2
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
-| `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
+| `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
 ### Recent moves

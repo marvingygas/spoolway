@@ -929,6 +929,11 @@ pub(super) struct Style {
     /// prints the band, TASK, PIPELINE, STEP, STATE and NEXT only — the same
     /// rows, the same grouping, none of the spend.
     figures: bool,
+    /// Whether TASK draws a routine copy under its routine's name — see
+    /// [`Row::name`]. The board's alone: `queue list` keeps the id, because
+    /// what it prints is read back into `spoolway resume` and `grep`, and a
+    /// routine's name is no task id either one could find.
+    routine_names: bool,
 }
 
 impl Style {
@@ -937,6 +942,7 @@ impl Style {
             colour: true,
             clip_to: Some(pane),
             figures: true,
+            routine_names: true,
         }
     }
 
@@ -945,6 +951,15 @@ impl Style {
             colour: false,
             clip_to: None,
             figures: false,
+            routine_names: false,
+        }
+    }
+
+    /// What `row`'s TASK cell reads in this style.
+    fn task_name<'a>(&self, row: &'a Row) -> &'a str {
+        match self.routine_names {
+            true => row.name(),
+            false => &row.id,
         }
     }
 
@@ -1104,7 +1119,7 @@ pub(super) fn table_laid_out(
     let total_width =
         |of: &dyn Fn(&GroupTotal) -> usize| totals.values().map(of).max().unwrap_or(0);
 
-    let id_w_natural = width(&|r| r.id.chars().count(), 4);
+    let id_w_natural = width(&|r| style.task_name(r).chars().count(), 4);
     // "PIPELINE", 8 characters — the widest thing in the column on almost
     // every board, since a project's pipeline names are usually shorter than
     // the header naming them.
@@ -1499,7 +1514,7 @@ pub(super) fn table_laid_out(
                 false => padded,
             }
         };
-        let id_text = clip(&row.id, id_w);
+        let id_text = clip(style.task_name(row), id_w);
         let id_cell = cell(&id_text, id_w);
         // Always dim, on the board and nowhere else — the same `paint` every
         // other plain-text cell uses, just never conditioned on the row's
@@ -2684,10 +2699,9 @@ mod tests {
         .unwrap();
 
         let active = rows(&repo, &pipelines).unwrap();
-        let active_groups: BTreeSet<String> =
-            active.iter().filter_map(|r| r.group.clone()).collect();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
         let mut all = active;
-        all.extend(done_rows(&repo, &pipelines, &active_groups).unwrap());
+        all.extend(done);
         all.sort_by(|a, b| a.key().cmp(&b.key()));
 
         // Banked against `signup`, which appears here only as its archived
@@ -2722,6 +2736,66 @@ mod tests {
         assert!(plain.contains("▌auth"), "the band — {plain}");
         assert!(!plain.contains("total"), "{plain}");
         assert!(!plain.contains("CTX"), "{plain}");
+    }
+
+    /// A routine's group, queued again with two earlier runs in the archive,
+    /// draws only the live copy, under its routine's name, and its total line
+    /// sums that copy's ledger lines alone. `queue list` keeps the id, which
+    /// is what `spoolway resume` and `grep` are given.
+    #[test]
+    fn a_routine_group_draws_its_live_copy_by_name_and_totals_it_alone() {
+        let (repo, _root_guard) = fixture("routine-group-total");
+        let pipelines = Pipelines::builtin();
+        add_to(
+            &repo,
+            "release-spoolway-6",
+            &[],
+            Some("implement"),
+            Some("release-spoolway"),
+        );
+        let mut copy = repo.task("release-spoolway-6").unwrap();
+        copy.front.routine = Some("release-spoolway".into());
+        copy.save().unwrap();
+
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let mut ledger = Vec::new();
+        for (id, usd) in [
+            ("release-spoolway-4", 19.0),
+            ("release-spoolway-5", 10.81),
+            ("release-spoolway-6", 8.77),
+        ] {
+            if id != "release-spoolway-6" {
+                std::fs::write(
+                    repo.archive_dir().join(format!("{id}.md")),
+                    format!("---\nid: {id}\nstage: done\ngroup: release-spoolway\n---\n"),
+                )
+                .unwrap();
+            }
+            let mut entry = banked(id, "implement", id, Some(usd));
+            entry.plan = Some("release-spoolway".into());
+            ledger.push(entry);
+        }
+
+        let active = rows(&repo, &pipelines).unwrap();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
+        assert_eq!(done.len(), 0, "no archived copy is drawn");
+        let mut all = active;
+        all.extend(done);
+        let totals = group_totals(&ledger, &all);
+
+        let board = strip(&table(&all, Style::board(200), &totals, None));
+        assert!(
+            board
+                .lines()
+                .any(|l| l.contains("release-spoolway ") && l.contains("implement")),
+            "{board}"
+        );
+        assert!(!board.contains("release-spoolway-"), "{board}");
+        assert!(board.contains("$8.77"), "{board}");
+        assert!(!board.contains("$38.58"), "{board}");
+
+        let plain = plain_table(&all);
+        assert!(plain.contains("release-spoolway-6"), "{plain}");
     }
 
     /// The board wraps the group name — and only the name — in an OSC 8

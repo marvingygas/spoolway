@@ -451,6 +451,12 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 /// recorded field rather than rebuilding a shape of its own. A value starting
 /// with `-` would also reach `gh pr view` as a flag — so a task may not
 /// name a branch at all.
+///
+/// `routine` is here because only the routines tab and a job may say a task
+/// is a copy of a routine: they stamp it onto the parsed task after
+/// [`validate_batch`] (see [`stamp_routines`]), never into the text it
+/// reads. Being reserved also makes unqueueing drop it, so a copy carried
+/// back to pending and queued again is an ordinary task.
 pub(crate) const RESERVED_KEYS: &[&str] = &[
     "stage",
     "run",
@@ -459,6 +465,7 @@ pub(crate) const RESERVED_KEYS: &[&str] = &[
     "trial",
     "trial_group",
     "branch",
+    "routine",
 ];
 
 pub fn queue_add(
@@ -3844,10 +3851,11 @@ impl TicketLog for PopupTickets<'_> {
     }
 }
 
-/// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
-/// answered with, when it was asked, over the count queued; or, with no
-/// ticket to show, the count over every task it queued. Then the tasks it
-/// left out, `not_queued`, when there are any — see [`not_queued_lines`].
+/// [`Mode::Queued`] for a batch that queued `names`, one per task, each its
+/// [`Task::display_name`]: the tickets the hook answered with, when it was
+/// asked, over the count queued; or, with no ticket to show, the count over
+/// every task it queued. Then the tasks it left out, `not_queued`, when
+/// there are any — see [`not_queued_lines`].
 /// Either ends on `dispatcher` — [`dispatcher_line`] — a blank row below the
 /// list, and then the [`crate::screen::confirm`] row. `routines` is the
 /// routines pane the batch was queued from, or `None` over the pending
@@ -3856,18 +3864,18 @@ impl TicketLog for PopupTickets<'_> {
 /// A batch that queued nothing at all, every task left out, draws only what
 /// it left out, under the title `not queued`.
 fn queued_panel(
-    ids: &[String],
+    names: &[String],
     tickets: &[String],
     not_queued: &[NotQueued],
     dispatcher: Option<&str>,
     routines: Option<RoutineNav>,
 ) -> Mode {
-    let queued = format!("queued {}", plural(ids.len(), "task"));
-    let mut lines = if ids.is_empty() {
+    let queued = format!("queued {}", plural(names.len(), "task"));
+    let mut lines = if names.is_empty() {
         Vec::new()
     } else if tickets.is_empty() {
         std::iter::once(queued)
-            .chain(ids.iter().map(|id| format!("  {id}")))
+            .chain(names.iter().map(|name| format!("  {name}")))
             .collect()
     } else {
         let mut lines = tickets.to_vec();
@@ -3883,7 +3891,7 @@ fn queued_panel(
     if let Some(dispatcher) = dispatcher {
         lines.extend([String::new(), dispatcher.to_string()]);
     }
-    let title = if ids.is_empty() {
+    let title = if names.is_empty() {
         "not queued"
     } else if tickets.is_empty() {
         "queued"
@@ -8385,11 +8393,7 @@ fn after_routine_delete(
 ///
 /// Only top-level routines can be ticked, and no two of them share a task
 /// file, so no task is ever gathered twice.
-fn routine_batch_tasks(
-    repo: &Repo,
-    routines: &[RoutineFolder],
-    nav: &RoutineNav,
-) -> Vec<(String, String)> {
+fn routine_batch_tasks(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNav) -> RoutineBatch {
     let tasks: Vec<&RoutineTask> = routines
         .iter()
         .filter(|folder| nav.selected.contains(&folder.path))
@@ -8405,8 +8409,9 @@ fn routine_batch_tasks(
 /// job both run once they have the list of tasks to queue. `tasks` is
 /// already deduped and in the order the batch should keep. Nothing is
 /// written: the returned `(source path, rewritten task)` pairs are the
-/// shape [`validate_batch`] takes.
-fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, String)> {
+/// shape [`validate_batch`] takes, and the names beside them are what
+/// [`stamp_routines`] writes onto the tasks it hands back.
+fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> RoutineBatch {
     let mut minted: std::collections::BTreeSet<String> = Default::default();
     let mut id_map: BTreeMap<String, String> = BTreeMap::new();
     for task in tasks {
@@ -8415,7 +8420,7 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
         id_map.insert(task.id.clone(), id);
     }
 
-    tasks
+    let docs = tasks
         .iter()
         .map(|task| {
             let mut doc = with_frontmatter_field(&task.doc, "id", &id_map[&task.id]);
@@ -8432,7 +8437,45 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 
             (task.path.display().to_string(), doc)
         })
-        .collect()
+        .collect();
+    let names = id_map
+        .into_iter()
+        .map(|(routine, minted)| (minted, routine))
+        .collect();
+    (docs, names)
+}
+
+/// A routine batch ready for [`validate_batch`]: the `(source path,
+/// rewritten task)` pairs, and each minted id mapped to the routine file's
+/// own `id:` it was minted from.
+///
+/// The names travel beside the text rather than inside it because
+/// `routine:` is one of the [`RESERVED_KEYS`], which `parse_submission`
+/// refuses on sight. Keyed by minted id rather than by position, so nothing
+/// depends on the order `validate_batch` hands its tasks back in.
+type RoutineBatch = (Vec<(String, String)>, BTreeMap<String, String>);
+
+/// Write `routine:` onto every task a routine path validated: the routine
+/// file's own `id:` its minted id was made from. Read from `names`, never
+/// worked out by cutting the `-N` [`mint_id`] added, so an ordinary task
+/// called `fix-2` can never pass for a copy of a routine called `fix`.
+fn stamp_routines(tasks: &mut [Task], names: &BTreeMap<String, String>) {
+    for task in tasks {
+        task.front.routine = names.get(task.id()).cloned();
+    }
+}
+
+/// The one-entry [`RoutineBatch`] a single routine task queues as, with its
+/// `depends_on` emptied: a lone task names no sibling in this batch, so a
+/// real `depends_on` would be refused by `check_dependencies_set`. Shared by
+/// [`begin_routine_solo`] and a job naming one file in
+/// [`queue_routine_target`].
+fn mint_routine_solo(repo: &Repo, task: &RoutineTask) -> RoutineBatch {
+    let id = mint_id(repo, &task.id, &Default::default());
+    let mut doc = with_frontmatter_field(&task.doc, "id", &id);
+    doc = with_frontmatter_field(&doc, "depends_on", "[]");
+    let names = BTreeMap::from([(id, task.id.clone())]);
+    (vec![(task.path.display().to_string(), doc)], names)
 }
 
 /// Why a job's routine folder cannot be queued: the files in it that will
@@ -8495,7 +8538,7 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
-    let mut submitted = if target.is_dir() {
+    let (mut submitted, names) = if target.is_dir() {
         let folder = super::routines::read_folder_at(target)?;
         if let Some(refusal) = folder.refusal() {
             bail!("{refusal}");
@@ -8508,14 +8551,7 @@ pub(crate) fn queue_routine_target(
         let tasks: Vec<&RoutineTask> = folder.tasks.iter().collect();
         mint_routine_batch(repo, &tasks)
     } else {
-        let task = super::routines::read_task_at(target)?;
-        let id = mint_id(repo, &task.id, &Default::default());
-        let mut doc = with_frontmatter_field(&task.doc, "id", &id);
-        // Emptied for the same reason `begin_routine_solo` empties it: a
-        // lone task names no sibling in this batch, so a real
-        // `depends_on` would be refused by `check_dependencies_set`.
-        doc = with_frontmatter_field(&doc, "depends_on", "[]");
-        vec![(task.path.display().to_string(), doc)]
+        mint_routine_solo(repo, &super::routines::read_task_at(target)?)
     };
 
     for (_, doc) in &mut submitted {
@@ -8535,6 +8571,7 @@ pub(crate) fn queue_routine_target(
             None => err,
         }
     })?;
+    stamp_routines(&mut tasks, &names);
     // No task to write ids back into — see `open_and_prefix`. The
     // dispatcher firing a job has no screen and nobody to answer it, even
     // when its own stdin and stdout happen to be a terminal (a dispatcher
@@ -8624,25 +8661,26 @@ fn begin_routine_queue(
     }
     // Nothing to queue leaves the pane as it stands: the routines tab has
     // no pending screen behind it to drop back to.
-    let tasks = routine_batch_tasks(repo, routines, nav);
-    if tasks.is_empty() {
+    let batch = routine_batch_tasks(repo, routines, nav);
+    if batch.0.is_empty() {
         return Mode::Routines(nav.clone());
     }
-    let task_files = readable_task_files(&tasks);
+    let task_files = readable_task_files(&batch.0);
     finish_routine_mode(
         repo,
         pipelines,
         base,
-        (&tasks, &task_files),
+        (&batch, &task_files),
         nav,
         tracking,
         redraw,
     )
 }
 
-/// The end both routine submits share: validate `batch` — the tasks
-/// and the task files behind them — stop at the tool-requirements gate and
-/// the issue question when each has something to ask, and queue it. `nav`
+/// The end both routine submits share: validate `batch` — the tasks with
+/// the routine each was minted from, and the task files behind them — stamp
+/// each task's `routine:`, stop at the tool-requirements gate and the issue
+/// question when each has something to ask, and queue it. `nav`
 /// is the routines pane it came from: a refusal is drawn over it, and the
 /// gate and the question name it as the place `esc` goes back to. A landed
 /// batch says what it queued over it too, and closing that goes back to it
@@ -8651,16 +8689,17 @@ fn finish_routine_mode(
     repo: &Repo,
     pipelines: &Pipelines,
     base: &str,
-    batch: (&[(String, String)], &[String]),
+    batch: (&RoutineBatch, &[String]),
     nav: &RoutineNav,
     tracking: Tracking,
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
-    let (tasks, task_files) = batch;
+    let ((tasks, names), task_files) = batch;
     let mut tasks = match validate_batch(repo, pipelines, Some(base), tasks) {
         Ok(tasks) => tasks,
         Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     };
+    stamp_routines(&mut tasks, names);
     // Which of the two submits this was, for `enter` on the gate to run
     // again: a batch built from ticked folders, or one task on its own.
     let then = match nav.focus {
@@ -8673,7 +8712,10 @@ fn finish_routine_mode(
     if let Some(question) = issue_question(repo, tracking, &tasks, then) {
         return question;
     }
-    let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
+    let names: Vec<String> = tasks
+        .iter()
+        .map(|task| task.display_name().to_string())
+        .collect();
     let mut tickets = PopupTickets::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
     match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
@@ -8683,7 +8725,13 @@ fn finish_routine_mode(
             // same routine a second time.
             let mut after = nav.clone();
             after.selected.clear();
-            queued_panel(&ids, &tickets.rows, &[], dispatcher_line(repo), Some(after))
+            queued_panel(
+                &names,
+                &tickets.rows,
+                &[],
+                dispatcher_line(repo),
+                Some(after),
+            )
         }
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
@@ -8714,16 +8762,13 @@ fn begin_routine_solo(
         return Mode::Routines(nav.clone());
     };
 
-    let id = mint_id(repo, &task.id, &Default::default());
-    let mut doc = with_frontmatter_field(&task.doc, "id", &id);
-    doc = with_frontmatter_field(&doc, "depends_on", "[]");
-    let tasks = vec![(task.path.display().to_string(), doc)];
-    let task_files = readable_task_files(&tasks);
+    let batch = mint_routine_solo(repo, task);
+    let task_files = readable_task_files(&batch.0);
     finish_routine_mode(
         repo,
         pipelines,
         base,
-        (&tasks, &task_files),
+        (&batch, &task_files),
         nav,
         tracking,
         redraw,
@@ -10563,6 +10608,7 @@ mod tests {
             "trial",
             "trial_group",
             "branch",
+            "routine",
         ] {
             let text = task_text("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
             let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
@@ -16714,6 +16760,109 @@ mod tests {
             "{:?}",
             solo.front.depends_on
         );
+    }
+
+    /// Every way a routine reaches the queue — `enter` on its folder, `space`
+    /// on one of its tasks, and a job naming the folder or the one file —
+    /// writes `routine:` with the routine file's own `id:`, right under the
+    /// minted id. The folder is named apart from the id on purpose: the
+    /// value is the file's `id:`, never the folder's name.
+    #[test]
+    fn every_routine_path_writes_the_routine_files_own_id_as_routine() {
+        let seed = |name: &str| {
+            let (repo, root) = fixture(name);
+            let path = write_routine(
+                &repo,
+                "nightly",
+                "audit-deps",
+                &task_text("audit-deps", "group: nightly\n", BODY),
+            );
+            (repo, root, path)
+        };
+        let check = |repo: &Repo, how: &str| {
+            let copy = queued(repo, "audit-deps-1");
+            assert_eq!(copy.front.routine.as_deref(), Some("audit-deps"), "{how}");
+            let raw = std::fs::read_to_string(&copy.path).unwrap();
+            assert!(
+                raw.starts_with("---\nid: audit-deps-1\nroutine: audit-deps\n"),
+                "{how}: {raw}"
+            );
+        };
+
+        let (repo, _root, _) = seed("routine-name-enter");
+        routines_exit(&repo, " \r");
+        check(&repo, "enter on the folder");
+
+        let (repo, _root, _) = seed("routine-name-space");
+        routines_exit(&repo, "\t ");
+        check(&repo, "space on the task");
+
+        let (repo, _root, _) = seed("routine-name-job-folder");
+        let folder = repo.routines_dir().join("nightly");
+        queue_routine_target(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &folder,
+            "bugfix",
+        )
+        .unwrap();
+        check(&repo, "a job naming the folder");
+
+        let (repo, _root, file) = seed("routine-name-job-file");
+        queue_routine_target(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &file,
+            "bugfix",
+        )
+        .unwrap();
+        check(&repo, "a job naming the file");
+    }
+
+    /// The `queued` popup a routine opens lists the routine's own name, not
+    /// the numbered id its copy is filed under.
+    #[test]
+    fn the_queued_popup_names_a_routine_copy_by_its_routine() {
+        let (repo, _root_guard) = fixture("routine-name-popup");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+
+        let drawn = routines_screen(&repo, " \r");
+        let last = last_frame(&drawn);
+        assert!(last.contains("queued 1 task"), "{last}");
+        assert!(last.contains("  audit-deps "), "{last}");
+        assert!(!last.contains("audit-deps-1"), "{last}");
+        assert!(repo.task("audit-deps-1").is_ok(), "the file keeps its id");
+    }
+
+    /// Unqueueing a routine copy drops its `routine:` with the other keys
+    /// spoolway owns, so the pending task it leaves is an ordinary one: `queue
+    /// add` takes it, and what that queues has no routine of its own.
+    #[test]
+    fn unqueue_drops_routine_so_the_copy_queues_again_as_an_ordinary_task() {
+        let (repo, _root_guard) = fixture("routine-name-unqueue");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        routines_exit(&repo, " \r");
+        assert!(queued(&repo, "audit-deps-1").front.routine.is_some());
+
+        crate::status::unqueue_task(&repo, "audit-deps-1").unwrap();
+        let pending = repo.pending_dir().join("audit-deps-1.md");
+        let raw = std::fs::read_to_string(&pending).unwrap();
+        assert!(!raw.contains("routine:"), "{raw}");
+
+        let again = parse_submission("audit-deps-1.md", &raw, Some("plan/demo")).unwrap();
+        assert_eq!(again.front.routine, None);
     }
 
     /// Save as routine on a highlighted pending group opens the save panel, and `enter`

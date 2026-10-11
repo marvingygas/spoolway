@@ -258,6 +258,14 @@ The tab reads the routine folders again each time you switch to it, so a routine
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.
 
+Each copy also carries `routine: <id>`, the `id:` of the routine file it was copied from. The
+board's TASK column and the `queued` popup show that name in place of the numbered id. A copy
+whose `routine:` line is removed shows its id and still runs. `spoolway queue list` always prints
+the numbered id.
+
+A group with a live copy of a routine draws only its live copies. Earlier runs of the routine do
+not come back onto the board, so the group's total line is the cost of the run in flight.
+
 Pick `save as routine` from a pending group's options menu to save it as a routine. The panel is prefilled with the group's
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
 run are removed on the way. A folder that already holds tasks is refused.

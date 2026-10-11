@@ -148,6 +148,7 @@ pub fn arrivals(n: usize) -> VecDeque<RecentEvent> {
 pub fn row(id: &str) -> Row {
     Row {
         id: id.into(),
+        routine: None,
         group: Some("demo".into()),
         issue_url: None,
         after: None,

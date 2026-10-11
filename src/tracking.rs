@@ -1006,6 +1006,7 @@ mod tests {
     fn task(id: &str, edit: impl FnOnce(&mut Frontmatter)) -> Task {
         let mut front = Frontmatter {
             id: id.to_string(),
+            routine: None,
             title: String::new(),
             stage: crate::pipeline::QUEUED.to_string(),
             depends_on: Vec::new(),
