@@ -519,8 +519,14 @@ impl WorkspaceLock {
                         path: path.to_path_buf(),
                     });
                 }
-                Ok(false) => match Lock::holder(path)? {
-                    Some(pid) => {
+                Ok(false) => match Lock::holder_if_present(path)? {
+                    // The holder released between our link and our read. Try
+                    // the link again and remove nothing, as `TaskLock` does:
+                    // another joiner may already have linked its own lock
+                    // into that gap, and deleting it would let two joins
+                    // write `project.toml` at once and lose an entry.
+                    None => {}
+                    Some(Some(pid)) => {
                         if std::time::Instant::now() >= deadline {
                             bail!(
                                 "workspace lock at {} is still held by pid {pid} after {:?}",
@@ -530,7 +536,7 @@ impl WorkspaceLock {
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     }
-                    None => {
+                    Some(None) => {
                         let _ = std::fs::remove_file(path);
                     }
                 },

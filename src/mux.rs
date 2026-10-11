@@ -2405,10 +2405,11 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
     let path_arg = path.display().to_string();
     let exists = run(repo, "git", &["rev-parse", "--verify", "--quiet", branch]).is_ok();
     let base_ref;
+    let mut fetch_timed_out = false;
     let args: Vec<&str> = match exists {
         true => vec!["worktree", "add", &path_arg, branch],
         false => {
-            base_ref = resolve_cut_base(repo, base);
+            (base_ref, fetch_timed_out) = resolve_cut_base_noting_timeout(repo, base);
             // `--no-track`: git's own `branch.autoSetupMerge` default sets
             // this new branch's upstream to `origin/<base>` when the start
             // point is a remote-tracking ref, which a cut from a local base
@@ -2427,9 +2428,100 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
             ]
         }
     };
-    run(repo, "git", &args)
-        .with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
+    run(repo, "git", &args).with_context(|| {
+        cut_failure(
+            &format!("could not cut a worktree for `{branch}` at {path_arg}"),
+            base,
+            fetch_timed_out,
+        )
+    })?;
     Ok(())
+}
+
+/// The reason a cut failed, with the fetch's part in it when it was stopped.
+///
+/// The bare base is what failed, and when the fetch was cut short that is
+/// because the base never arrived, not because it is wrong. Without this the
+/// block reads as a bad `base:` and names neither the fetch nor its bound.
+fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> String {
+    match fetch_timed_out {
+        true => format!(
+            "{cut}; `git fetch origin {base}` did not finish within {}s and was \
+             stopped, so `{base}` may exist on origin but not here. Run \
+             `git fetch origin {base}` in the repository yourself, then resume \
+             the task",
+            CUT_FETCH_TIMEOUT.as_secs()
+        ),
+        false => cut.to_string(),
+    }
+}
+
+/// How long the fetch in [`resolve_cut_base`] may take before it is stopped.
+///
+/// It runs inside the dispatcher's pass, twice per cut of a remote-only base,
+/// and nothing else in the pass runs while it waits. Ten seconds is ample for
+/// one ref over a working connection. A fetch that takes longer, whether its
+/// transport is stuck on a prompt or only slow, is given up on too: the cut
+/// then names the base bare, and if that fails, [`cut_worktree`] says the
+/// fetch was stopped and what to do about it.
+const CUT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `git fetch origin <base>` in `repo`, and stop it, with everything it
+/// started, once `timeout` has passed. Returns `true` if it was stopped.
+/// Every other failure is swallowed: the caller falls through to naming
+/// `base` bare.
+///
+/// The fetch gets a process group of its own because git runs the transport
+/// (`ssh`, or a person's `core.sshCommand`) as a child, and killing git alone
+/// would leave the transport running on. The group is asked to stop with
+/// `SIGTERM` first, so git can remove its lock files: the fetch runs in the
+/// person's own checkout, and a lock left behind there would fail every later
+/// fetch of that ref. Git gets a second to go, is killed if it does not, and
+/// [`crate::headless::kill_group`] then sweeps what its group still holds.
+///
+/// The group is no longer the dispatcher's, so a stop aimed at the
+/// dispatcher's group does not reach it. A dispatcher killed during the wait
+/// leaves the fetch to run on past the deadline, since nothing is left to
+/// enforce it.
+fn fetch_within(repo: &Path, base: &str, timeout: Duration) -> bool {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let Ok(mut child) = std::process::Command::new("git")
+        .args(["fetch", "origin", base])
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return false,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(HERDR_POLL),
+            _ => break,
+        }
+    }
+    // The leader is asked first and reaped before the group is swept.
+    // `kill_group` treats a zombie as alive on a Mac, and git is still our
+    // own unreaped child here, so handing it a group whose leader had
+    // already exited would make it wait out its patience for nothing.
+    // SAFETY: `kill` with a negative pid signals a process group; the pid is
+    // the child's own, which `process_group(0)` made its group's leader.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+    let grace = Instant::now() + Duration::from_secs(1);
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < grace {
+        std::thread::sleep(HERDR_POLL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    crate::headless::kill_group(child.id());
+    true
 }
 
 /// The commit-ish a fresh branch is cut from: `base` itself when this
@@ -2444,9 +2536,16 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
 /// <commit-ish>` only ever makes `<branch>`, whatever `<commit-ish>` names,
 /// and a fetch only ever updates `refs/remotes/origin/*`.
 pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
+    resolve_cut_base_noting_timeout(repo, base).0
+}
+
+/// [`resolve_cut_base`], plus whether its fetch had to be stopped at
+/// [`CUT_FETCH_TIMEOUT`]. [`cut_worktree`] needs the second half to say so
+/// when the cut then fails on a base the fetch never brought in.
+fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
     let local = format!("refs/heads/{base}");
     if run(repo, "git", &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
-        return base.to_string();
+        return (base.to_string(), false);
     }
     // Best-effort, and prompts off: a base this checkout has never fetched
     // may be gone by the time this runs, offline, or (private remote) behind
@@ -2457,14 +2556,16 @@ pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
     // turned off for the same reason `Repo::remote_branch_exists` turns it
     // off: this must fail outright rather than hang the dispatcher waiting
     // on a password (review finding 5).
-    let _ = std::process::Command::new("git")
-        .args(["fetch", "origin", base])
-        .current_dir(repo)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output();
+    //
+    // `GIT_TERMINAL_PROMPT=0` does not reach an ssh passphrase or host-key
+    // prompt, or an ssh transport that is only slow, so the fetch is also
+    // given [`CUT_FETCH_TIMEOUT`]. Ssh options such as `BatchMode` are not
+    // added through `GIT_SSH_COMMAND`, because that outranks a person's own
+    // `core.sshCommand`.
+    let timed_out = fetch_within(repo, base, CUT_FETCH_TIMEOUT);
     let remote = format!("origin/{base}");
     let remote_ref = format!("refs/remotes/{remote}");
-    match run(
+    let resolved = match run(
         repo,
         "git",
         &["rev-parse", "--verify", "--quiet", &remote_ref],
@@ -2473,7 +2574,8 @@ pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
     {
         true => remote,
         false => base.to_string(),
-    }
+    };
+    (resolved, timed_out)
 }
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
@@ -4116,5 +4218,94 @@ mod tests {
 
         std::fs::remove_dir_all(&origin).ok();
         std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// A base fetch that never finishes — here an ssh transport named by the
+    /// person's own `core.sshCommand` that sits for half a minute — is given
+    /// up on, and the cut falls through exactly as it does for a fetch that
+    /// failed: `base` is named bare. The fetch is not allowed to hold the
+    /// dispatcher's pass for as long as the transport cares to take.
+    #[test]
+    fn a_base_fetch_that_hangs_is_given_up_on_and_the_cut_names_the_base_bare() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // `GIT_SSH_COMMAND` and `GIT_SSH` outrank `core.sshCommand`, so with
+        // either set the fake transport below never runs and the fetch goes
+        // to the real network instead. The variables cannot be removed here,
+        // since the environment is shared with every concurrent test.
+        for var in ["GIT_SSH_COMMAND", "GIT_SSH"] {
+            if std::env::var_os(var).is_some() {
+                eprintln!("skipped: {var} is set and outranks the core.sshCommand under test");
+                return;
+            }
+        }
+
+        let work = crate::scratch::root("mux-cut-hung-fetch-work");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://spoolway-test.invalid/nowhere.git",
+            ],
+        )
+        .unwrap();
+
+        let started = work.join("transport-started");
+        let finished = work.join("transport-finished");
+        let script = work.join("slow-ssh.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nsleep 30\ntouch '{}'\n",
+                started.display(),
+                finished.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &work,
+            "git",
+            &["config", "core.sshCommand", script.to_str().unwrap()],
+        )
+        .unwrap();
+
+        let (got, timed_out) = resolve_cut_base_noting_timeout(&work, "task/remote-only");
+
+        assert!(
+            started.exists(),
+            "the fetch went through the person's own core.sshCommand"
+        );
+        assert!(
+            !finished.exists(),
+            "the fetch returned while the transport was still running, not after it"
+        );
+        assert_eq!(
+            got, "task/remote-only",
+            "a fetch given up on leaves the base named bare, as a failed fetch does"
+        );
+        assert!(timed_out, "the stopped fetch is reported to the caller");
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// A cut that fails after its fetch was stopped says so, with the bound
+    /// and the command to run; one whose fetch finished adds nothing, so an
+    /// ordinary bad `base:` keeps the plain reason it always had.
+    #[test]
+    fn a_cut_failure_after_a_stopped_fetch_names_the_fetch() {
+        let stopped = cut_failure("could not cut", "task/big", true);
+        assert!(stopped.starts_with("could not cut; "), "{stopped}");
+        assert!(stopped.contains("git fetch origin task/big"), "{stopped}");
+        assert!(stopped.contains("10s"), "{stopped}");
+        assert_eq!(
+            cut_failure("could not cut", "task/big", false),
+            "could not cut"
+        );
     }
 }

@@ -736,6 +736,23 @@ so the next dispatcher re-cuts onto it. Otherwise, choose one:
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
+A base that only `origin` has is fetched before the worktree is cut. The dispatcher runs
+`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. It runs this
+fetch twice for each cut, so a pass can wait up to about 22 seconds. The fetch uses your own
+`core.sshCommand`.
+
+When the fetch does not finish in 10 seconds, the dispatcher stops it and the transport it
+started. The cut then uses the base name as written in the task. If your checkout has that branch,
+the task starts. If it does not, the cut fails and the failure names the fetch:
+
+```
+could not cut a worktree for `task/cart-totals` at <path>; `git fetch origin task/gh-412-checkout` did not finish within 10s and was stopped, so `task/gh-412-checkout` may exist on origin but not here. Run `git fetch origin task/gh-412-checkout` in the repository yourself, then resume the task
+```
+
+The failure counts toward the launch-failure ceiling described under [Restarts, laps and
+escalation](#restarts-laps-and-escalation). A dispatcher that is killed while it waits leaves
+the fetch running.
+
 When a task reaches `done`:
 
 1. A lane that is still mid-turn is waited for while its transcript keeps moving. Closing its
