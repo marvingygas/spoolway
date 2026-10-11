@@ -26,6 +26,11 @@ changes one key and leaves every other byte alone. It refuses a key the file doe
 hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
 created on first write.
 
+A key that `config set` creates is written where `spoolway sync` would put it, with no comment
+above it. The keys after it move down. The first `[models."<glob>"]` row also removes an empty
+`[models]` header. A file that only `config set` has changed is therefore not behind, and `sync`
+leaves it as it is.
+
 A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
 points at. If the link points at a file that does not exist yet, `config set` creates that file.
 

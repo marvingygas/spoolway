@@ -10,9 +10,12 @@
 //! performed as a side effect of an unrelated edit, at a moment nobody was
 //! being asked about a migration.
 //!
-//! So the two edits are split. [`set`] changes one key here, and every other
-//! byte of the file is copied through unread — that is what `config set` does,
-//! and setting a value is never the moment to migrate anything.
+//! So the two edits are split. [`set`] changes one key here, and the rest of
+//! the file is copied through unread — that is what `config set` does, and
+//! setting a value is never the moment to migrate anything. The exception is a
+//! key the file never had: it is written where the rendering would put it, so
+//! the keys after it move down and a table header the rendering would not
+//! write is dropped.
 //!
 //! Bringing a whole file forward is `spoolway sync`, and there the answer is
 //! the opposite one: it rewrites the file from [`crate::config::Config::render`]
@@ -28,8 +31,6 @@ use anyhow::{Context, Result};
 use toml::Value;
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::config::comment_block;
-
 /// Read a dotted path out of a serialised config.
 pub fn at<'v>(value: &'v Value, parts: &[&str]) -> Option<&'v Value> {
     let mut cursor = value;
@@ -39,23 +40,46 @@ pub fn at<'v>(value: &'v Value, parts: &[&str]) -> Option<&'v Value> {
     Some(cursor)
 }
 
-/// Set one key in the document, leaving every other byte where it was.
+/// Set one key in the document, leaving every other byte where it was except
+/// where a key the file never had is placed, as described below.
 ///
 /// A key already in the file keeps its comment: what is being changed is a
-/// value, and the note above it is as true afterwards as it was before. A key
-/// the file never had is added with its note, because a setting that appears
-/// without its explanation is the one thing this file is meant never to have.
-pub fn set(text: &str, parts: &[&str], value: &Value, note: Option<&str>) -> Result<String> {
+/// value, and the note above it is as true afterwards as it was before.
+///
+/// A key the file never had is written where `rendered` — the config as
+/// [`crate::config::Config::render`] writes it — would have put it: after the
+/// keys that come before it there, and under whatever comment `rendered`
+/// stands above it, which is none for nearly every key. `spoolway sync`
+/// rewrites a file from that same rendering, so a key added anywhere else, or
+/// with a note the rendering does not carry, would leave a file `sync` and
+/// `doctor` call behind although nothing in it is out of date.
+pub fn set(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<String> {
     let mut doc: DocumentMut = text.parse().context("this file is not valid TOML")?;
+    let template: DocumentMut = rendered
+        .parse()
+        .context("the rendered config is not valid TOML")?;
     let (leaf, path) = parts.split_last().context("a config key cannot be empty")?;
 
+    // Tables that held nothing before this key arrived: a rendering writes no
+    // header for a table that holds only tables, so once one of these has a
+    // table inside it, its bare header is the line `sync` would remove.
+    let mut emptied = Vec::new();
+    // The first table on the path the file did not have; every one below it is
+    // new as well.
+    let mut created_from = None;
     let mut table = doc.as_table_mut();
-    for part in path {
+    for (depth, part) in path.iter().enumerate() {
+        if created_from.is_none() && !table.contains_key(part) {
+            created_from = Some(depth);
+        }
         table = table
             .entry(part)
             .or_insert_with(|| Item::Table(Table::new()))
             .as_table_mut()
             .with_context(|| format!("`{part}` is not a table"))?;
+        if table.is_empty() {
+            emptied.push(depth);
+        }
     }
 
     // Read before the write, because inserting replaces the whole entry —
@@ -67,19 +91,195 @@ pub fn set(text: &str, parts: &[&str], value: &Value, note: Option<&str>) -> Res
         .map(str::to_string);
     let had_it = table.contains_key(leaf);
 
-    table.insert(leaf, item(value)?);
+    if had_it {
+        table.insert(leaf, item(value)?);
+        if let Some(prefix) = existing
+            && let Some(mut key) = table.key_mut(leaf)
+        {
+            key.leaf_decor_mut().set_prefix(prefix);
+        }
+    } else {
+        let template = path.iter().try_fold(template.as_table(), |table, part| {
+            table.get(part).and_then(Item::as_table)
+        });
+        insert_in_render_order(table, leaf, item(value)?, template);
+    }
 
-    let prefix = match had_it {
-        true => existing,
-        false => note.map(comment_block),
+    // Walked again from the top: the borrow above ends with the write.
+    for depth in emptied {
+        let mut table = Some(doc.as_table_mut());
+        for part in &path[..=depth] {
+            table = table
+                .and_then(|table| table.get_mut(part))
+                .and_then(Item::as_table_mut);
+        }
+        let Some(table) = table else { continue };
+        let has_comment = table
+            .decor()
+            .prefix()
+            .and_then(|prefix| prefix.as_str())
+            .is_some_and(|prefix| prefix.contains('#'));
+        if !has_comment && table.iter().all(|(_, item)| !item.is_value()) {
+            table.set_implicit(true);
+        }
+    }
+
+    // Never a top-level table: those are the config's own sections, and a file
+    // that lacks one is already behind a `sync` that would add it, so the
+    // bytes above a one-key edit stay where they were.
+    if let Some(from) = created_from.filter(|from| *from > 0) {
+        place_new_tables(&mut doc, &template, path, from);
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Stand the tables `set` just created, `path[from..]`, where the rendering
+/// lists them among their sibling tables.
+///
+/// A document prints its tables in the order of their positions, and a table
+/// with none is printed after the ones before it, so a new `[models."aaa"]`
+/// would follow `[models."foo"]` where the rendering, which sorts its rows,
+/// writes it first. The new tables are given the position of the first table
+/// that follows them in the rendering and that the file has, and every table
+/// from there on moves up to make room. With no such sibling the tables keep
+/// the place they were created in, which is last.
+fn place_new_tables(doc: &mut DocumentMut, template: &DocumentMut, path: &[&str], from: usize) {
+    let Some(parent) = path[..from]
+        .iter()
+        .try_fold(template.as_table(), |table, part| {
+            table.get(part).and_then(Item::as_table)
+        })
+    else {
+        return;
     };
+    let siblings: Vec<&str> = parent
+        .iter()
+        .filter(|(_, item)| item.is_table())
+        .map(|(key, _)| key)
+        .collect();
+    let Some(at) = siblings.iter().position(|key| *key == path[from]) else {
+        return;
+    };
+    let Some(file_parent) = path[..from].iter().try_fold(doc.as_table(), |table, part| {
+        table.get(part).and_then(Item::as_table)
+    }) else {
+        return;
+    };
+    let Some(first) = siblings[at + 1..].iter().find_map(|key| {
+        file_parent
+            .get(key)
+            .and_then(Item::as_table)
+            .and_then(first_position)
+    }) else {
+        return;
+    };
+
+    shift_positions(doc.as_table_mut(), first, (path.len() - from) as isize);
+    for (offset, depth) in (from..path.len()).enumerate() {
+        let mut table = Some(doc.as_table_mut());
+        for part in &path[..=depth] {
+            table = table
+                .and_then(|table| table.get_mut(part))
+                .and_then(Item::as_table_mut);
+        }
+        if let Some(table) = table {
+            table.set_position(Some(first + offset as isize));
+        }
+    }
+}
+
+/// Where `table` first appears in the printed document.
+///
+/// A table written only to hold other tables, as `[models."bbb"]` is when the
+/// file has just `[models."bbb".above_100k_tokens]`, is implicit and has no
+/// position of its own. It prints where its first descendant does, so that is
+/// the place a table meant to stand before it must take.
+fn first_position(table: &Table) -> Option<isize> {
+    table.position().or_else(|| {
+        table
+            .iter()
+            .filter_map(|(_, item)| item.as_table())
+            .filter_map(first_position)
+            .min()
+    })
+}
+
+/// Move every table at position `from` or after it `by` places later.
+fn shift_positions(table: &mut Table, from: isize, by: isize) {
+    if let Some(position) = table.position()
+        && position >= from
+    {
+        table.set_position(Some(position + by));
+    }
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => shift_positions(child, from, by),
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    shift_positions(child, from, by);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Add `leaf` to `table` at the place `template`, the same table as the
+/// rendering writes it, lists it.
+///
+/// A rendering writes a struct's fields in field order, and a file that only
+/// ever grew by `config set` does not: the new key would land last. The key is
+/// put after the last key of the file that the rendering lists before it, and
+/// the file's keys that came after that point are written back behind it, with
+/// their comments, so the order of everything else is the file's own.
+fn insert_in_render_order(table: &mut Table, leaf: &str, value: Item, template: Option<&Table>) {
+    let rendered: Vec<&str> = template
+        .map(|template| {
+            template
+                .iter()
+                .filter(|(_, item)| item.is_value())
+                .map(|(key, _)| key)
+                .collect()
+        })
+        .unwrap_or_default();
+    let prefix = template
+        .and_then(|template| template.key(leaf))
+        .and_then(|key| key.leaf_decor().prefix())
+        .and_then(|prefix| prefix.as_str())
+        .map(str::to_string);
+
+    let present: Vec<String> = table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .map(|(key, _)| key.to_string())
+        .collect();
+    let before = rendered.iter().position(|key| *key == leaf);
+    let anchor = before.and_then(|at| {
+        present
+            .iter()
+            .rposition(|key| rendered[..at].contains(&key.as_str()))
+    });
+    // A key the rendering has no place for is appended, as it always was.
+    let behind: Vec<String> = match (before, anchor) {
+        (None, _) => Vec::new(),
+        (Some(_), Some(anchor)) => present[anchor + 1..].to_vec(),
+        (Some(_), None) => present,
+    };
+
+    let moved: Vec<(toml_edit::Key, Item)> = behind
+        .iter()
+        .filter_map(|key| table.remove_entry(key))
+        .collect();
+    table.insert(leaf, value);
     if let Some(prefix) = prefix
         && let Some(mut key) = table.key_mut(leaf)
     {
         key.leaf_decor_mut().set_prefix(prefix);
     }
-
-    Ok(doc.to_string())
+    for (key, item) in moved {
+        table.insert_formatted(&key, item);
+    }
 }
 
 /// Take one key out of the document, leaving every other byte where it was —
@@ -452,7 +652,7 @@ auto_commit = true
             text,
             &["dispatch", "lane_quiet"],
             &Value::String("30s".into()),
-            crate::confkv::note("dispatch.lane_quiet"),
+            &Config::default().render().unwrap(),
         )
         .unwrap();
 
@@ -469,20 +669,119 @@ auto_commit = true
         );
     }
 
+    /// A key the file never had lands where the rendering lists it and carries
+    /// no comment, because `sync` writes it that way: any other spelling would
+    /// leave a file that is called behind when nothing in it is out of date.
     #[test]
-    fn a_key_the_file_never_had_arrives_with_its_note() {
-        let text = "[dispatch]\nlane_quiet = \"10s\"\n";
+    fn a_key_the_file_never_had_arrives_where_the_rendering_puts_it() {
+        let text = "[dispatch]\nlane_quiet = \"10s\"\npriority = \"any\"\n";
+        let rendered = Config::default().render().unwrap();
         let edited = set(
             text,
             &["dispatch", "auto_commit"],
             &Value::Boolean(false),
-            crate::confkv::note("dispatch.auto_commit"),
+            &rendered,
         )
         .unwrap();
 
-        assert!(edited.contains("auto_commit = false"));
-        assert!(edited.contains("# Whether spoolway commits"));
-        assert!(edited.starts_with("[dispatch]\nlane_quiet = \"10s\"\n"));
+        assert_eq!(
+            edited,
+            "[dispatch]\nlane_quiet = \"10s\"\nauto_commit = false\npriority = \"any\"\n"
+        );
+    }
+
+    /// A model row's first field makes its table, and the bare `[models]`
+    /// header the file held while it was empty goes, as it does in a rendering.
+    #[test]
+    fn a_first_model_row_leaves_no_bare_models_header() {
+        let text = "[dispatch]\nlane_quiet = \"10s\"\n\n[models]\n";
+        let rendered = Config::default().render().unwrap();
+        let edited = set(
+            text,
+            &["models", "foo-model", "input"],
+            &Value::Float(5.0),
+            &rendered,
+        )
+        .unwrap();
+
+        assert_eq!(
+            edited,
+            "[dispatch]\nlane_quiet = \"10s\"\n\n[models.foo-model]\ninput = 5.0\n"
+        );
+    }
+
+    /// A model row whose glob sorts before one the file has is written before
+    /// it, as the rendering sorts its rows; written last, `sync` would move it.
+    #[test]
+    fn a_new_model_row_stands_where_the_rendering_sorts_it() {
+        let mut config = Config::default();
+        config.models.insert(
+            "foo-model".into(),
+            crate::usage::ModelPrice {
+                input: 5.0,
+                ..Default::default()
+            },
+        );
+        let text = config.render().unwrap();
+        config.models.insert(
+            "aaa-model".into(),
+            crate::usage::ModelPrice {
+                input: 1.0,
+                ..Default::default()
+            },
+        );
+        let rendered = config.render().unwrap();
+
+        let edited = set(
+            &text,
+            &["models", "aaa-model", "input"],
+            &Value::Float(1.0),
+            &rendered,
+        )
+        .unwrap();
+
+        assert_eq!(edited, rendered);
+    }
+
+    /// A row the file holds only as a tier table, `[models."bbb".above_100k_tokens]`,
+    /// has no header and no position of its own. A row that sorts before it
+    /// still has to stand above that tier table; given no place, it was
+    /// written after it and `sync` moved it.
+    #[test]
+    fn a_new_model_row_stands_before_a_row_held_only_as_a_tier() {
+        let mut config = Config::default();
+        config.models.insert(
+            "bbb".into(),
+            crate::usage::ModelPrice {
+                tier: Some(crate::usage::PriceTier {
+                    above_k: 100,
+                    rates: crate::usage::Rates {
+                        input: 2.0,
+                        ..Default::default()
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+        let text = config.render().unwrap();
+        config.models.insert(
+            "aaa".into(),
+            crate::usage::ModelPrice {
+                input: 1.0,
+                ..Default::default()
+            },
+        );
+        let rendered = config.render().unwrap();
+
+        let edited = set(
+            &text,
+            &["models", "aaa", "input"],
+            &Value::Float(1.0),
+            &rendered,
+        )
+        .unwrap();
+
+        assert_eq!(edited, rendered);
     }
 
     /// What `sync` reads back out of a rewrite, so its report is the rewrite's

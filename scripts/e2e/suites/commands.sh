@@ -1377,13 +1377,21 @@ works "and the refused price was not saved" \
 
 # A compaction threshold at or above the profile's block ceiling blocks the
 # step before it compacts. `set` saves it and warns in doctor's own words.
+# The step is the first one this fixture runs on the claude agent, read out of
+# the file: the fixture's mixed profile puts `implement` on pi, which takes no
+# compaction setting. Its model is rewritten whatever it holds, because
+# `set_models` has already replaced every blank `model: ""`.
 COMPACT_PIPELINE=.spoolway/pipelines/default.yml
 cp "$COMPACT_PIPELINE" "$LIVE/default.yml.before-compact"
-sed -i '0,/model: ""/s//model: "e2e-compact"/' "$COMPACT_PIPELINE"
+COMPACT_STEP=$(awk '/^  - id: / { id = $3 } /^    agent: claude$/ { print id; exit }' \
+  "$COMPACT_PIPELINE")
+sed -i "/^  - id: $COMPACT_STEP\$/,/^\$/s/^\(    model:\).*/\1 \"e2e-compact\"/" "$COMPACT_PIPELINE"
+works "a claude step now runs the e2e-compact model" \
+  test -n "$COMPACT_STEP" -a "$(grep -cF 'model: "e2e-compact"' "$COMPACT_PIPELINE")" = 1
 must "a block ceiling on the claude agent" \
   "$SPOOLWAY" config set agents.claude.session_blocked_ctx 40
 says "config set warns when a compaction threshold leaves a step blocked first" \
-  'fails its check "pipeline `default` step `implement`": agents.claude.session_blocked_ctx = 40 is at or below models."e2e-compact".compact_ctx = 50' \
+  "fails its check \"pipeline \`default\` step \`$COMPACT_STEP\`\": agents.claude.session_blocked_ctx = 40 is at or below models.\"e2e-compact\".compact_ctx = 50" \
   "$SPOOLWAY" config set models.e2e-compact.compact_ctx 50
 works "and the value is saved" \
   test "$("$SPOOLWAY" config get models.e2e-compact.compact_ctx)" = "50"
@@ -1392,6 +1400,14 @@ says "and doctor fails the step with the same words" \
   "$SPOOLWAY" doctor --no-live
 must "compaction put back below block" "$SPOOLWAY" config set models.e2e-compact.compact_ctx 30
 cp "$LIVE/default.yml.before-compact" "$COMPACT_PIPELINE"
+
+# A key `config set` creates is written where `sync` would put it, so the file
+# is not "behind" and `doctor` has no sync to ask for.
+must "a concurrency on the claude agent" \
+  "$SPOOLWAY" config set agents.claude.concurrency 2
+silent_about "doctor names no file behind after config set adds a concurrency" \
+  "behind this spoolway" "$SPOOLWAY" doctor --no-live
+must "concurrency put back" "$SPOOLWAY" config set agents.claude.concurrency 0
 
 # Calls that run at the same time, as an agent issuing several tool calls at
 # once does, each save their own key. A call that lost the race may be

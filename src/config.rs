@@ -1991,9 +1991,10 @@ impl Config {
     /// [`crate::confkv::set`], which is the only thing that knows whether a
     /// typed value means anything. What happens here is the narrowest edit that
     /// achieves it: the one key's value is replaced in the document, or the key
-    /// is added with its note if the file never had it, and every other byte —
-    /// every comment, every blank line, the order of everything — is copied
-    /// through unread.
+    /// is added where [`Config::render`] would put it if the file never had it,
+    /// and the rest — every comment, every blank line, the order of everything —
+    /// is copied through unread. A new key moves the keys that follow it down,
+    /// and a table header the rendering would not write is dropped.
     ///
     /// The result is parsed back and compared against `self` before it lands,
     /// so a document edit that somehow did not mean what the struct means is a
@@ -2019,6 +2020,7 @@ impl Config {
             keys.push(format!("{profile}.permission_mode"));
         }
 
+        let rendered = self.render()?;
         let mut edited = text;
         for key in &keys {
             let parts = crate::confkv::parts(self, key);
@@ -2030,7 +2032,7 @@ impl Config {
             // was rendered from, and `agrees_with` below would refuse it
             // anyway.
             edited = match crate::confdoc::at(&value, &parts) {
-                Some(new) => crate::confdoc::set(&edited, &parts, new, crate::confkv::note(key))
+                Some(new) => crate::confdoc::set(&edited, &parts, new, &rendered)
                     .with_context(|| format!("editing {}", path.display()))?,
                 None => crate::confdoc::remove(&edited, &parts)
                     .with_context(|| format!("editing {}", path.display()))?,
@@ -2193,15 +2195,11 @@ fn annotate_watch_dirs(rendered: &str) -> Result<String> {
 
 /// One note, as the comment lines that stand above its key.
 ///
-/// The single spelling of a note-as-comment: `config set` uses it in
-/// [`crate::confdoc`] when it adds a key the file never had, so that a key
-/// arriving alone still carries its one-sentence explanation. Everywhere
-/// else about the surface — the reference table [`Config::render`] writes on
-/// top of a whole file — reads the same sentence straight out of
-/// [`crate::confkv::REFERENCE`] rather than through a comment at all, with
-/// one exception: [`annotate_watch_dirs`] calls this too, to stand
-/// `watch.dirs`'s sentence above that one key on every render, not only
-/// when `config set` adds it.
+/// The single spelling of a note-as-comment. The reference table
+/// [`Config::render`] writes on top of a whole file reads each sentence
+/// straight out of [`crate::confkv::REFERENCE`] rather than through a comment
+/// at all, with one exception: [`annotate_watch_dirs`] calls this to stand
+/// `watch.dirs`'s sentence above that one key on every render.
 pub(crate) fn comment_block(note: &str) -> String {
     let mut out = String::new();
     for chunk in wrap(note, 74) {
@@ -2547,7 +2545,7 @@ mod tests {
 
     /// The one key whose sentence is written twice: once in the header table
     /// every key gets, and again right above `dirs` itself, in the same
-    /// wrapped voice [`comment_block`] gives every other note it writes.
+    /// wrapped voice [`comment_block`] gives it.
     #[test]
     fn written_config_explains_watch_dirs_above_the_key_too() {
         let rendered = Config::default().render().unwrap();
