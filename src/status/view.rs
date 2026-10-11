@@ -138,6 +138,7 @@ impl State {
         match self {
             State::Paused => "● paused",
             State::Running => "● running",
+            State::Silent { .. } => "● silent",
             State::Starting => "◌ starting",
             State::Finished => "✓ finished",
             State::Blocked => "● blocked",
@@ -157,6 +158,11 @@ impl State {
             // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
+            // Amber, as the stops a person answers are, but not bold like
+            // them: a silent lane may be a usage limit that clears by
+            // itself, so it is something to look at rather than a stop
+            // that waits on a key.
+            State::Silent { .. } => format!("{AMBER}{word}{RESET}"),
             // Running's own colour: the dispatcher is working this task, it
             // is only that the agent is not up yet. The hollow dot is what
             // tells the two apart.
@@ -1700,21 +1706,44 @@ pub(super) fn table_window(
     shown
 }
 
-/// The full text of a row's STATE cell: the state's own word, with nothing
-/// after it. Kept as its own function, rather than a direct call to
-/// [`State::word`] at each of its two call sites, for the plain-text and
-/// coloured cells to stay the same shape — no board row draws a `· <clock>`
-/// or a reason after its state word any more; that suffix belonged to
-/// `Parked`, which left with the park fields behind it.
+/// The full text of a row's STATE cell: the state's own word, and for a
+/// `Silent` row how long the lane has been silent after it, in
+/// [`state_age`]'s clock — `● silent · 31m`. Kept as its own function,
+/// rather than a direct call to [`State::word`] at each of its call sites,
+/// for the plain-text and coloured cells to stay the same shape.
 fn state_cell_text(row: &Row) -> String {
-    row.state.word().to_string()
+    format!("{}{}", row.state.word(), state_suffix(row.state))
+}
+
+/// What a STATE cell draws after the state's word: ` · <time>` on a
+/// `Silent` row, nothing on any other. Drawn uncoloured, so the word alone
+/// carries the state's colour as it does on every other row.
+fn state_suffix(state: State) -> String {
+    match state {
+        State::Silent { secs } => format!(" · {}", state_age(secs)),
+        _ => String::new(),
+    }
+}
+
+/// An age drawn in the STATE column: seconds under a minute, whole minutes
+/// under an hour, then hours and minutes — `42s`, `31m`, `1h 04m`. Coarser
+/// than [`human_secs`] below the hour on purpose: an age in the STATE column
+/// is read at a glance, not timed, so it keeps the whole-minute shape the
+/// board's ages are drawn in rather than the TIME column's seconds.
+fn state_age(total: i64) -> String {
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    match (h, m) {
+        (0, 0) => format!("{s}s"),
+        (0, _) => format!("{m}m"),
+        _ => format!("{h}h {m:02}m"),
+    }
 }
 
 impl Style {
     fn paint_state(&self, row: &Row) -> String {
         match self.colour {
-            true => row.state.dot(),
-            false => row.state.word().to_string(),
+            true => format!("{}{}", row.state.dot(), state_suffix(row.state)),
+            false => state_cell_text(row),
         }
     }
 
@@ -2438,9 +2467,14 @@ mod tests {
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
         assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
+        assert_eq!(
+            State::Silent { secs: 60 }.dot(),
+            format!("{AMBER}● silent{RESET}")
+        );
         for state in [
             State::Paused,
             State::Running,
+            State::Silent { secs: 60 },
             State::Starting,
             State::Finished,
             State::Blocked,
@@ -2452,6 +2486,57 @@ mod tests {
         ] {
             assert!(!state.dot().contains(RED), "{}", state.word());
         }
+    }
+
+    /// A silent row draws how long its lane has been silent after the word,
+    /// in whole minutes below the hour, in `spoolway queue list` and on the
+    /// board alike — and the column widens for it, so NEXT still lines up
+    /// with the row above.
+    #[test]
+    fn a_silent_row_draws_its_silent_time_after_the_word() {
+        let running = Row {
+            state: State::Running,
+            next: "→ review".into(),
+            ..row("running-task")
+        };
+        let silent = Row {
+            state: State::Silent { secs: 1864 },
+            next: "→ review".into(),
+            ..row("silent-task")
+        };
+        let rows = vec![running, silent];
+        let plain = plain_table(&rows);
+        let line = |id: &str| {
+            plain
+                .lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("no line for {id}: {plain}"))
+                .to_string()
+        };
+        assert!(line("silent-task").contains("● silent · 31m "), "{plain}");
+        assert!(!line("running-task").contains(" · "), "{plain}");
+        // By column, not byte: the `·` is two bytes wide in UTF-8.
+        let next_column = |id: &str| line(id).split("→ review").next().unwrap().chars().count();
+        assert_eq!(
+            next_column("silent-task"),
+            next_column("running-task"),
+            "{plain}"
+        );
+
+        let painted = Style::board(120).paint_state(&rows[1]);
+        assert_eq!(painted, format!("{AMBER}● silent{RESET} · 31m"));
+        assert_eq!(strip_ansi(&painted), state_cell_text(&rows[1]));
+
+        // Seconds only under a minute, hours and minutes past the hour.
+        let at = |secs| {
+            state_cell_text(&Row {
+                state: State::Silent { secs },
+                ..row("silent-task")
+            })
+        };
+        assert_eq!(at(42), "● silent · 42s");
+        assert_eq!(at(8 * 60 + 5), "● silent · 8m");
+        assert_eq!(at(3840), "● silent · 1h 04m");
     }
 
     /// The outer order is the group's name and nothing else, so a group

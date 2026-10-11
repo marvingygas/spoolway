@@ -327,6 +327,17 @@ pub(crate) struct LaneRecord {
     /// `reminder_unanswered` to show how long a lane has been silent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_model_turn: Option<i64>,
+    /// The lane's last write before the first reminder it left unanswered,
+    /// in Unix seconds, kept while that reminder and every one sent again
+    /// after it stay unanswered, and cleared with `reminder_unanswered`.
+    ///
+    /// What the board's `● silent` counts from when there is no
+    /// `last_model_turn` to count from. `last_progress` cannot stand in: a
+    /// reminder sent again moves it, by changing the pane's hash or by being
+    /// written to the transcript itself, so a lane dead for hours would read
+    /// as quiet for a few minutes after every one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quiet_since: Option<i64>,
     /// Session id handed to this lane's agent, and what its transcript is
     /// found by once the lane settles. Empty for a lane started by a spoolway
     /// that predates the ledger, or by a project whose `args` drop
@@ -434,6 +445,22 @@ impl LaneRecord {
         self.busy_s = 0;
     }
 
+    /// When this lane last spoke, if its last reminder is still unanswered,
+    /// in Unix seconds: the board's `● silent` counts from here. `None` for a
+    /// lane that was never reminded or answered its last reminder.
+    ///
+    /// The model's own last turn where one was read. Otherwise the lane's
+    /// last write before the first reminder it left unanswered — see
+    /// `quiet_since` — and `last_progress` only for a record saved before
+    /// that field existed.
+    pub(crate) fn silent_since(&self) -> Option<i64> {
+        self.reminder_unanswered.then(|| {
+            self.last_model_turn
+                .or(self.quiet_since)
+                .unwrap_or(self.last_progress)
+        })
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and
@@ -450,6 +477,7 @@ impl LaneRecord {
             reminder_unanswered: false,
             reminder_sent_at: None,
             last_model_turn: None,
+            quiet_since: None,
             session: String::new(),
             kind: String::new(),
             agent: String::new(),
@@ -2498,6 +2526,7 @@ impl<'a> Dispatcher<'a> {
             // earlier reminder the lane has since got past.
             if lane.status == LaneStatus::Working {
                 record.reminder_unanswered = false;
+                record.quiet_since = None;
             }
         }
     }
@@ -3132,6 +3161,11 @@ impl<'a> Dispatcher<'a> {
                 record.last_progress <= reminded_at
             }
         });
+        // An answered lane is not silent, and its next silence counts from
+        // the next reminder it leaves unanswered.
+        if !record.reminder_unanswered {
+            record.quiet_since = None;
+        }
 
         // A second signal, independent of the transcript above: a lane mid
         // tool-call is holding a process it started, and that process writes
@@ -3478,6 +3512,13 @@ impl<'a> Dispatcher<'a> {
         let record = self.lanes.get(&lane.name);
         let reminders = record.map_or(0, |r| r.reminders);
         let unanswered = record.is_some_and(|r| r.reminder_unanswered);
+        // Kept from the first reminder that drew no answer while this one is
+        // sent again, or else the last write, read before the nudge below
+        // moves `last_progress` — see `quiet_since`.
+        let quiet_since = record
+            .filter(|r| r.reminder_unanswered)
+            .and_then(|r| r.quiet_since)
+            .or(record.map(|r| r.last_progress));
         let since_reminder = record
             .filter(|r| r.reminder_unanswered)
             .and_then(|r| r.reminder_sent_at)
@@ -3517,6 +3558,11 @@ impl<'a> Dispatcher<'a> {
             record.reminded_at = Some(record.last_progress);
             record.reminder_unanswered = true;
             record.reminder_sent_at = Some(now_secs());
+            // Set again whatever the `note_progress` above made of it. On a
+            // lane judged by any write, the nudge can move `last_progress`
+            // past the last reminder, which reads there as an answer and
+            // clears this with the flag.
+            record.quiet_since = quiet_since;
             // The reminder before this one drew no answer, so it never counted
             // and this one takes its place.
             if !unanswered {
@@ -4440,6 +4486,7 @@ impl<'a> Dispatcher<'a> {
                             reminder_unanswered: false,
                             reminder_sent_at: None,
                             last_model_turn: None,
+                            quiet_since: None,
                             session: started.session,
                             kind: pending[i].kind.clone(),
                             agent: pending[i].agent_name.clone(),
@@ -6812,7 +6859,10 @@ pub(crate) fn lane_session_in(
     ledger: &[crate::usage::Entry],
     lane: &str,
 ) -> Option<(String, String)> {
-    if let Some(record) = load_lane_records(repo).get(lane)
+    // `peek_lane_records`, not `load_lane_records`: the board calls this for
+    // every live lane on every frame, and a corrupt file must not be logged
+    // to the problem log once a second while it stays open.
+    if let Some(record) = peek_lane_records(repo).get(lane)
         && !record.session.is_empty()
         && !record.kind.is_empty()
     {
@@ -7131,6 +7181,21 @@ pub(crate) fn live_lane_sessions(repo: &Repo) -> HashSet<String> {
         .map(|record| record.session)
         .filter(|session| !session.is_empty())
         .collect()
+}
+
+/// `lanes.json` as it stands, for a reader that never saves it back: the
+/// board, which reads it every frame, and a lookup of one lane's session.
+///
+/// A file that does not parse reads as no records, and nothing is written.
+/// [`load_lane_records`] keeps a `.bad` copy and logs it to the problem log,
+/// which is right once, before a pass overwrites the file. Done by a board on
+/// every frame, it appended the same line once a second for as long as the
+/// board stayed open, about a pass that was not running.
+pub(crate) fn peek_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
+    std::fs::read_to_string(lanes_path(repo))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
@@ -14427,6 +14492,37 @@ mod tests {
         }
     }
 
+    /// The board's silent time keeps growing across reminders sent again. A
+    /// lane with no transcript is read by its pane's hash, and every reminder
+    /// typed into the pane changes that hash and moves `last_progress` to the
+    /// pass that sent it, so a clock read off that restarted at each one.
+    #[test]
+    fn a_silent_lane_counts_its_silence_from_before_the_first_reminder() {
+        let (repo, _root_guard) = fixture("silence-keeps-counting");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+        let silent_for = || {
+            let record = &load_lane_records(&repo)["demo · implement"];
+            now_secs() - record.silent_since().expect("silent")
+        };
+
+        for round in 1..=3 {
+            age_lane(&repo, "demo · implement", Duration::from_secs(700));
+            mux.clear_calls();
+            run_pass(&repo, &mux);
+            assert_eq!(mux.did("prompt").len(), 1, "round {round}");
+            let secs = silent_for();
+            assert!(
+                (700 * round..700 * round + 10).contains(&secs),
+                "round {round}: {secs}"
+            );
+        }
+    }
+
     /// The unblocker's own lane is silenced by a limit just as the lane it was
     /// sent after was, and used to be moved to `paused` for it. It is reminded
     /// again where it is.
@@ -15506,6 +15602,9 @@ mod tests {
             *at -= how_long.as_secs() as i64;
         }
         if let Some(at) = &mut record.reminder_sent_at {
+            *at -= how_long.as_secs() as i64;
+        }
+        if let Some(at) = &mut record.quiet_since {
             *at -= how_long.as_secs() as i64;
         }
         if let Some(at) = &mut record.launch_grace_since {

@@ -315,6 +315,7 @@ stateDiagram-v2
 | `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
+| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step from the board with `s`. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
@@ -568,6 +569,16 @@ A lane whose multiplexer reports it `blocked` is on a permission prompt. The boa
 live off the lane list every redraw: the row draws `● prompt` with the pane named in NEXT, and
 nothing is sent to it. The task's own stage does not move. Answer the prompt and the row reads
 `running` again on the next redraw.
+
+A lane whose last reminder is unanswered is silent. The board and `spoolway queue list` read
+this from the lane's record in `lanes.json` and draw `● silent · <time>`, for example
+`● silent · 31m`. The time counts from the model's last turn, in whole minutes below an hour.
+A lane with no model turn counts from its last write before the first reminder it left
+unanswered. A repeated reminder does not restart the time.
+The task's own stage does not move. A usage limit clears by itself, and the row
+reads `running` again once the lane writes a turn. A lane that will never answer, such as a
+dead pane or an out-of-date harness, stays silent. Nothing escalates it, so restart the step
+from the board with `s`.
 
 ## A step that carries its own session
 
