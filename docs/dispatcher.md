@@ -77,7 +77,7 @@ flowchart TD
   A[Fire any cron job due this minute] --> B[Reconcile every task]
   B --> B1[A lane settled: read its report, move the stage]
   B --> B2[A queued task whose dependencies are archived: mark it ready]
-  B --> B3[A silent lane: remind or escalate]
+  B --> B3[A lane that ended without reporting: remind, or escalate after three answered reminders]
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
   D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done, and started for a queued task about to launch]
@@ -546,16 +546,23 @@ go back to. `spoolway resume` forgets the hook's failed run, so it fires again. 
 A lane can end its turn without calling `spoolway report`. If the lane still has opening
 messages to receive, the pass types the next one instead. Otherwise:
 
-1. The next pass sends the report contract into the pane again.
-2. Each later pass where the transcript has grown sends another reminder, up to three.
-3. A lane whose transcript has not grown since the last reminder is escalated, with the last of
-   what the pane said in the task's `## Blocker`. An attended run parks the task on `paused`. An
-   unattended run sends it to `blocked`. `spoolway resume` restarts the step on the same session,
-   unless its last reply is past `prompt_cache_ttl`, in which case it opens fresh.
-4. A fourth due reminder escalates the task instead.
+1. Once the transcript has been quiet for `dispatch.lane_quiet`, the pass sends the report
+   contract into the pane.
+2. A reminder counts as answered when the lane writes a turn after it. On a claude lane the
+   turn must be the model's own. The reply Claude Code writes itself, such as a usage-limit
+   notice, does not answer anything.
+3. A reminder that was not answered is sent again after the next `lane_quiet` of silence. The
+   task stays on its step, in attended and unattended runs alike, and the repeat is not counted.
+   The lane record in `lanes.json` holds whether the last reminder is unanswered and when the
+   model last wrote a turn.
+4. A lane that has answered three reminders and still has not reported is escalated in place of
+   a fourth, with the last of what the pane said in the task's `## Blocker`. An attended run
+   parks the task on `paused`. An unattended run sends it to `blocked`. `spoolway resume`
+   restarts the step on the same session, unless its last reply is past `prompt_cache_ttl`, in
+   which case it opens fresh.
 
 A lane that still holds a process it started, such as a long build, is excused from reminders
-until `dispatch.lane_child_ceiling` (one hour by default), then escalated.
+until `dispatch.lane_child_ceiling` (one hour by default), then escalated the same way.
 
 A lane whose multiplexer reports it `blocked` is on a permission prompt. The board reads this
 live off the lane list every redraw: the row draws `● prompt` with the pane named in NEXT, and
@@ -593,7 +600,7 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
-| Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
+| Reminder loop | Three answered reminders. A silent lane is reminded again and never counted. | Anything the lane writes to its transcript. On a claude lane, a turn the model wrote. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
 When a loop budget runs out, the task parks on `blocked`.
@@ -606,8 +613,8 @@ or to `paused`, depending on the cause and the run.
 | Cause | Attended run | [Unattended run](pipelines.md#unattended-runs) |
 |---|---|---|
 | A step reported a block, a launch failed, or a loop budget ran out | `blocked` | `blocked` |
-| A lane ended without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
-| The `blocked` lane itself went quiet | `paused` | `paused` |
+| A lane answered three reminders without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
+| The `blocked` lane itself answered three reminders without reporting | `paused` | `paused` |
 
 In an attended run the board marks a `blocked` row amber and names the pane in NEXT. The task
 waits for `spoolway resume`. A task on `paused` waits for `spoolway resume` too.

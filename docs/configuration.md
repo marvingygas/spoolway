@@ -217,7 +217,7 @@ auto_commit = true
 | Key | Default | What it controls |
 |---|---|---|
 | `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
-| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
+| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
