@@ -1756,6 +1756,9 @@ else
 fi
 says "eval --step shows a command step's rows instead of refusing" "redgate" \
   "$SPOOLWAY" eval --by step --step redgate
+# Still queued on `blocked`, and the pipelines below have no `redgate` step,
+# which `pipeline check` reports for a live task.
+forget ledgered
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 

@@ -199,7 +199,8 @@ works "eval prices a line's tier_tokens at the tier's rates in the four class co
 # gets data: the object with empty rows, or the CSV header alone.
 works "eval --json with no rows prints the object with empty rows and nothing else" \
   bash -c '"$0" eval --pipeline no-such-pipeline --json 2>/dev/null | jq -e "
-    (keys | sort) == [\"by\", \"rows\", \"total\"] and .rows == []"' "$SPOOLWAY"
+    (keys | sort) == [\"by\", \"commands\", \"rows\", \"total\"]
+    and .rows == [] and .commands.rows == []"' "$SPOOLWAY"
 works "eval --csv with no rows prints the header and no prose" \
   bash -c 'out=$("$0" eval --pipeline no-such-pipeline --csv 2>/dev/null) &&
     [ "$(wc -l <<<"$out")" -le 2 ] && head -n 1 <<<"$out" | grep -q "," &&
