@@ -454,6 +454,7 @@ cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 schedule = "* * * * *"
 pipeline = "default"
 routine = "tick"
+base = "plan/faults"
 TOML
 # A dispatcher on a terminal stops before it starts to list what `doctor` has
 # found, and waits for a key; this fixture's stand-in models and unused prompts

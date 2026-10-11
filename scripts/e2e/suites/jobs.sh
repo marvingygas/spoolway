@@ -176,10 +176,11 @@ env SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_BIN="$SPOOLWAY" E2E_PIDFILE="$GATED_PID" \
   "$GATED_LOG" <"$GATED_FIFO" >/dev/null 2>&1 &
 disown
 poll_until 10 test -s "$GATED_PID" || bad "the pty dispatcher never started"
-# On a terminal `dispatch` first asks doctor's start gate. `x` answers it by
-# hiding what it shows, and is not a key the tool gate's own prompt takes, so
-# a firing that waits on a key is not answered by it.
-poll_until 10 grep -qaF "[x] hide until" "$GATED_LOG" && printf x >&8
+# On a terminal `dispatch` first asks doctor's start gate. `↓` `enter` picks
+# its second answer, hiding what it shows, as `screen_dispatch` does. The gate
+# is answered before any pass runs, so a firing that then waited on a key
+# would still sit on its own prompt, which `queue anyway` below looks for.
+poll_until 10 grep -qaF "hide until these change" "$GATED_LOG" && printf '\033[B\r' >&8
 
 gated_queued() {
   compgen -G "$SPOOLWAY_PROJECT_HOME/queue/gated-audit-*.md" >/dev/null \
