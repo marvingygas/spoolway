@@ -403,7 +403,7 @@ Prompts call this when their work is done. You rarely run it yourself.
 spoolway report --pass -m "implemented and tests pass"
 spoolway report --fail -m "acceptance criterion 2 is not met"
 spoolway report --block -m "needs a credential I do not have"
-spoolway report --pause -m "only a person can clear this"   # only on `blocked`
+spoolway report --pause -m "needs a decision from a person"   # only on `blocked`
 spoolway report --pass --stage implement -m "done"           # only on `blocked`
 ```
 

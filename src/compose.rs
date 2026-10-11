@@ -607,9 +607,12 @@ const BLOCKED_PASS_STAGE: Form = (
 
 const BLOCKED_PAUSE: Form = (
     "    spoolway report --pause -m \"<what needs a person, and why>\"",
-    "  The cause is still there, and only a person can clear it. Never\n  \
-     pause once the cause is gone. Say plainly what they\n  \
-     need to do, and end with: then resume it on the board.",
+    "  The cause lies outside spoolway, and nothing a lane can run or\n  \
+     change will remove it: only a person can provide or decide it.\n  \
+     Whatever spoolway itself did, in how it ran, timed, counted or\n  \
+     routed this task, is never that cause. Clear it and pass.\n  \
+     Say plainly what they need to do, and end with: then resume it\n  \
+     on the board.",
 );
 
 const HANDOFF: Form = (
