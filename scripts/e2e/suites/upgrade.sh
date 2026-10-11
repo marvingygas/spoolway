@@ -280,7 +280,17 @@ stage() {
 # release.
 assert_init_reused_everything() {
   local version=$1 out="$WORK/$1/init.out"
-  lacks "the $version fixture's second init wrote anything at all" "  wrote" "$out"
+  # Every fixture predates the version stamp `init` leaves in the setup folder
+  # (`sync::VERSION_MARKER`), so that one row is this run's to write; every
+  # file the fixture already has must still read `kept`.
+  grep -vF "  wrote    .spoolway/spoolway-version" "$out" >"$out.files"
+  lacks "the $version fixture's second init wrote nothing but the version stamp" \
+    "  wrote" "$out.files"
+  local stamp want
+  stamp=$(cat "$WORK/$version/proj/.spoolway/spoolway-version" 2>/dev/null)
+  want=$("$SPOOLWAY" --version | awk '{ print $2 }')
+  if [ "$stamp" = "$want" ]; then ok "and stamped the project with this binary's version"
+  else bad "and stamped the project with this binary's version (found '$stamp', want '$want')"; fi
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
   has "and installed the skills the fixture never carried" \
