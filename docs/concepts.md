@@ -219,6 +219,8 @@ pass, fail, block, or a loop-max bound for `blocked`. A `gate_at` is spent when 
 task pauses once, and a later report from the same step runs straight through unless something
 writes a fresh `gate_at`. `spoolway resume` sends a caught pass or fail on by `on_pass`, and
 sends a caught block or loop-max to `blocked`, the same place it would have reached unheld.
+`blocked` has no `on_pass`. A `gate_at: blocked` that caught the unblocker's pass sends the task
+to the `on_pass` of the step it stopped at, and hands a command step back to itself.
 A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
 exit, and `gate_at` holds any exit. `spoolway resume` sends a held failing command exit down the
 step's `on_fail`.

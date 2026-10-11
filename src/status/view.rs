@@ -489,11 +489,12 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
     body.extend((picker.listed..picker.rows.len()).map(line));
     body.extend(error);
     body.push(String::new());
-    body.push(crate::screen::keys(&[
-        ("↑↓", "pick"),
-        ("enter", "resume"),
-        ("esc", "cancel"),
-    ]));
+    // A picker with no steps is a refusal opened by `Board::refuse_resume`:
+    // there is nothing to pick and `enter` would resume nothing.
+    body.push(match picker.rows.is_empty() {
+        true => crate::screen::keys(&[("esc", "close")]),
+        false => crate::screen::keys(&[("↑↓", "pick"), ("enter", "resume"), ("esc", "cancel")]),
+    });
     body.push(String::new());
     crate::screen::boxed(&format!("resume {}", picker.id), &body)
 }

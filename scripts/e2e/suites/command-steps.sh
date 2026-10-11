@@ -82,6 +82,26 @@ add_command_step() {
   sed -i "0,/^    on_pass: review$/s//    on_pass: $id/" "$file"
 }
 
+# Drops a task a case left blocked on a step its next case's pipeline no
+# longer has. `spoolway pipeline check` names a live task its pipeline would
+# strand, so the checks of every case after it would fail on a leftover rather
+# than on their own pipeline.
+#
+# Taken out the way the case at the herdr stub does it: `dispatcher_stop`
+# first, because `unqueue` refuses while a dispatcher is up that could be
+# mid-turn on the task and a running one could write a deleted file back, then
+# `--force` because a task that got as far as `blocked` has a worktree of its
+# own. Deleting the queue file instead left that worktree and any live lane
+# behind it. The next `drive` starts a dispatcher again.
+forget() {
+  local id
+  dispatcher_stop
+  for id in "$@"; do
+    [ -e "$SPOOLWAY_PROJECT_HOME/queue/$id.md" ] || continue
+    must "$id is taken out of the queue" "$SPOOLWAY" queue unqueue "$id" --force
+  done
+}
+
 # The pristine pipeline, kept so each case below can put back whatever it
 # edited. Every case works by writing a step into the shipped file the way a
 # project would, then restoring this.
@@ -361,6 +381,8 @@ has "and it was gate's own loop: 2 that refused the third arrival" \
   "\`e2e\` may not send this to \`gate\` a 3rd time — \`gate\` has \`loop: 2\`" \
   $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
 
+forget gated gated-twice
+
 # --------------------------------------------------------- a launch that never succeeds
 # The other half of a command step's own trouble: not one that ran and
 # failed, like `build` and `gate` above, but one that never got to run at
@@ -440,6 +462,8 @@ else
   bad "nor does the problem log grow while it sits blocked (found $PROBLEM_HITS_AFTER)"
 fi
 
+forget cant-launch
+
 # ------------------------------------------- a launch that fails for another reason
 # The other kind of launch that never succeeds: the step is fine, and what
 # stops it is around it. Here `task/branch-taken` already exists and the task
@@ -468,6 +492,7 @@ has "blocked_from names the step that could not start" \
 lacks "and the task never went down the step's on_fail" \
   "→ \`review\`" $SPOOLWAY_PROJECT_HOME/queue/branch-taken.md
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+forget branch-taken
 
 # --------------------------------------------------- report --pass --stage, off blocked
 # `spoolway report --pass --stage <step>` names where a cleared block lands,
@@ -667,6 +692,8 @@ has "blocked_from names the step it was actually pulled out of, not \`scratch\` 
 # rest of the suite — its own task has already moved on to `blocked`, so
 # nothing is waiting on it any more.
 touch "$SCRATCH_HOLD"
+
+forget scratch-fail
 
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
@@ -1425,6 +1452,8 @@ else
 (never reached blocked; at \`$(stage_of tick-check)\`)"
 fi
 
+forget tick-check
+
 # ------------------------------------------------------------- a run line that execs
 # `exec` replaces the shell it runs in. The line used to run in the wrapper
 # itself, so an `exec` took the wrapper's exit trap with it: no exit code was
@@ -1730,5 +1759,86 @@ says "eval --step shows a command step's rows instead of refusing" "redgate" \
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
+
+
+forget walked
+
+# ------------------------------------------- an unblocker that keeps passing a red gate
+# Last in the file, because an unattended run also resumes every task an
+# earlier case left blocked, which would answer for them instead of for this.
+# A command step that fails goes to `blocked`; an unattended run staffs
+# `blocked` with an unblocker, whose pass hands the command back to itself,
+# and leaving `blocked` wipes every `loop:` count. Nothing in the graph can
+# stop that cycle, so spoolway counts the laps itself. The pass after the
+# third lap parks the task on `paused`. The mock unblocker always passes, so
+# the command being always red is the whole case.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default redgate "echo 'CI would fail here' >&2; exit 1" review ""
+works "a pipeline whose red gate has no loop to bound it checks out" \
+  "$SPOOLWAY" pipeline check
+must "an unattended run" "$SPOOLWAY" config set unattended.enabled true
+
+task_doc "$LIVE/redgate.md" redgate "$BODY" "group: redgate"
+must "a task whose gate is always red" "$SPOOLWAY" queue add --from "$LIVE/redgate.md"
+if drive redgate paused 150; then
+  ok "an unblocker that keeps passing a red gate ends on paused, not another lap"
+else
+  bad "an unblocker that keeps passing a red gate ends on paused \
+(at \`$(stage_of redgate)\`)"
+fi
+has "the Status Log names the step and the laps" \
+  "\`redgate\` failed again after 3 unblocker passes had sent the task back to it" \
+  $SPOOLWAY_PROJECT_HOME/queue/redgate.md
+has "and the task keeps the step to hand back to" "paused_at: redgate" \
+  $SPOOLWAY_PROJECT_HOME/queue/redgate.md
+counter "three laps were handed back to the gate, not a fourth" \
+  steps "blocked->redgate" 3 $SPOOLWAY_PROJECT_HOME/queue/redgate.md
+
+# ---------------------------- an unblocker that keeps passing a gate that never turns green
+# The shape of "a gate that never turns green" above, with nobody at the board:
+# `gate` fails back to the agent step `e2e` (`on_fail`), and its `loop: 1`
+# sends the task to `blocked` from `e2e`, not from `gate`. The unblocker's
+# pass is carried past `e2e` onto `gate` again, so `gate` is never the step the
+# task stopped at. The bound has to count the landing, not the step stopped
+# at, and keep the count across `e2e`.
+forget redgate
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+{
+  printf '\n  - id: e2e\n'
+  printf "    description: A stand-in for a mechanical gate's own agent step.\n"
+  printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
+  printf '    on_pass: gate\n    on_fail: blocked\n'
+  printf '\n  - id: gate\n'
+  printf '    description: Always red, so the loop it bounds is what this case is about.\n'
+  printf "    run: echo 'CI would fail here' >&2; exit 1\n"
+  printf '    loop: 1\n'
+  printf '    on_pass: document\n    on_fail: e2e\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: document\$/s//    on_pass: e2e/" .spoolway/pipelines/default.yml
+works "a pipeline whose gate loops back to the agent step checks out unattended" \
+  "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/gated-unattended.md" gated-unattended "$BODY" "group: gated-unattended"
+must "a task whose gate never turns green, unattended" \
+  "$SPOOLWAY" queue add --from "$LIVE/gated-unattended.md"
+if drive gated-unattended paused 150; then
+  ok "an unblocker that keeps passing a gate that never turns green ends on paused"
+else
+  bad "an unblocker that keeps passing a gate that never turns green ends on paused \
+(at \`$(stage_of gated-unattended)\`)"
+fi
+has "the Status Log names the gate and the laps" \
+  "\`gate\` failed again after 3 unblocker passes had sent the task back to it" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
+has "and the task keeps the agent step it stopped at to hand back to" "paused_at: e2e" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
+counter "three laps were handed back to the gate, not a fourth" \
+  steps "blocked->gate" 3 $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
+lacks "and it never reached the step the gate guards" "→ \`document\`" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
+
+must "unattended off again, so nothing later in this file inherits it" \
+  "$SPOOLWAY" config set unattended.enabled false
+dispatcher_stop
 
 finish

@@ -67,6 +67,7 @@ as JSON.
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
+| `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back onto each command step. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
@@ -317,6 +318,11 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
+
+A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the `on_pass` of the
+step the task stopped at, which is where an unheld pass would have gone. A command step it stopped
+at runs again. The board's resume picker says the block was cleared. When the stopped step has
+`gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
 
 A `gate_at` that caught a command step's failing exit sends a plain resume down that step's
 `on_fail`, the route the exit code chose.

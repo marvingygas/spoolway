@@ -836,7 +836,10 @@ impl Board {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
         };
-        let rows = rows(repo, pipelines)?;
+        let rows = match rows(repo, pipelines) {
+            Ok(rows) => rows,
+            Err(err) => return self.refuse_resume(repo, &id, &err),
+        };
         let Some(row) = rows.iter().find(|r| r.id == id) else {
             return Ok(());
         };
@@ -846,6 +849,13 @@ impl Board {
         let Ok(task) = repo.task(&id) else {
             return Ok(());
         };
+        // The picker's `(next)` row must name the step `enter` resumes to,
+        // and `resume_task` routes on the dispatcher's copy of the pipelines.
+        let routed = match routed_for(repo, pipelines, &id) {
+            Ok(routed) => routed,
+            Err(err) => return self.refuse_resume(repo, &id, &err),
+        };
+        let pipelines = &*routed;
         if let Ok(crate::commands::ResumeRoad::Queued | crate::commands::ResumeRoad::HookDone) =
             crate::commands::resume_road(&task, pipelines)
         {
@@ -855,6 +865,30 @@ impl Board {
         // the queue every frame.
         let dependents = crate::dispatch::queue_dependents(repo, &task)?;
         self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines, dependents)?);
+        Ok(())
+    }
+
+    /// Opens the picker with no steps and `err` under it, for an `r` refused
+    /// before there was a list to draw: the board's own reading failed, or
+    /// the dispatcher's copy of the pipelines changed between that reading
+    /// and the key and now refuses the task. The dispatch loop drops an `Err` out of `on_key` without
+    /// a word, so returning it would leave a key that does nothing and says
+    /// nothing; the person gets the refusal, with its remedy, instead. Silent
+    /// about a task the queue no longer has, like `r` itself.
+    fn refuse_resume(&mut self, repo: &Repo, id: &str, err: &anyhow::Error) -> Result<()> {
+        let Ok(task) = repo.task(id) else {
+            return Ok(());
+        };
+        self.mode = BoardMode::ResumePicker(ResumePicker {
+            id: id.to_string(),
+            hold: Hold::of(&task),
+            header: format!("`{id}` cannot be resumed from the board right now."),
+            rows: Vec::new(),
+            listed: 0,
+            labelled: None,
+            cursor: 0,
+            error: Some(format!("{err:#}")),
+        });
         Ok(())
     }
 
@@ -1428,7 +1462,24 @@ fn picker_header(
         );
     }
     if task.front.paused_at.is_some() {
+        // A gated command step held on an unblocker's pass reads as a caught
+        // pass to `caught_at`, but the command never exited 0 — the (next)
+        // row hands it back to the step, so the header says its block was
+        // cleared.
+        let handed_back = pipeline
+            .step(step)
+            .is_some_and(|s| crate::commands::command_pass_handed_back(task, s, step));
+        // `gate_at: blocked` holds an unblocker's pass with `paused_at` on
+        // `blocked` and `blocked_from` still naming the step the task stopped
+        // at. `caught_at` reads that step as a caught block, but the
+        // unblocker cleared it, so the header says that instead.
+        let held_unblocker = task
+            .front
+            .paused_at
+            .as_deref()
+            .is_some_and(|gated| crate::commands::held_unblocker_pass(task, gated));
         let caught = match crate::commands::caught_at(task, step) {
+            _ if handed_back || held_unblocker => " — its block was cleared",
             Some(crate::commands::Caught::Pass) => " — it passed",
             Some(crate::commands::Caught::Fail) => " — it failed",
             Some(crate::commands::Caught::Blocked) => " — it blocked",
@@ -1465,9 +1516,9 @@ fn picker_header(
 /// `blocked` or `done`, one pinned row under the steps names it, since
 /// neither is a row anyone may pick on purpose. A stopped step the pipeline
 /// no longer has leaves no `(next)` row at all: `resume_road` either refuses
-/// it, sends the task back onto that same missing step, or falls back to a
-/// step the task never stopped at. The cursor starts on the first step
-/// instead, for a person to pick a real one.
+/// it or, for a block whose `blocked_from` is gone, falls back to the step it
+/// last reported from. The cursor starts on the first step instead, for a
+/// person to pick a real one.
 fn resume_picker(
     task: &crate::task::Task,
     pipelines: &Pipelines,
@@ -3347,9 +3398,11 @@ fn landed(
 }
 
 /// The NEXT column of a blocked row parked for a person, prefixed for the
-/// column. Always `resume_target`, the step `spoolway resume` sends the task
+/// column. Normally `resume_target`, the step `spoolway resume` sends the task
 /// back to, and the only way off a parked block — so the row names one step
-/// whether or not the key is on offer yet.
+/// whether or not the key is on offer yet. A block whose recorded steps the
+/// pipeline dropped is the exception: a plain resume refuses it, so the row
+/// names the missing step and says to pick one instead of promising the entry.
 ///
 /// The key, then the arrow, exactly like a paused row's own `next` below.
 /// No command follows, because the key opens the step picker. The key shows
@@ -3368,6 +3421,13 @@ fn blocked_next(
     resumable: bool,
     dependents: usize,
 ) -> String {
+    if let Some(missing) = crate::commands::stranded_step(task, pipeline) {
+        let note = format!("pick a step — `{missing}` is gone");
+        return match resumable {
+            true => format!("[r] {note}"),
+            false => note,
+        };
+    }
     let target = crate::commands::resume_target(task, pipeline);
     let target = landed(pipeline, task, target, dependents);
     match resumable {
@@ -3386,9 +3446,13 @@ fn blocked_next(
 /// `commands::caught_at`: a pause raised from `blocked` itself resumes to
 /// `cleared_block_target`, a caught block or loop-max (`Caught::Blocked`)
 /// resumes straight to `blocked` — exactly where it would have landed
-/// unheld — a command step's caught fail resumes by its own `on_fail`, and
-/// everything else, a plain gated pass or a schedule's caught fail at an
-/// agent step, resumes by the step's own `on_pass`. A `parked_from` with no
+/// unheld — a command step's caught fail resumes by its own `on_fail`, a
+/// command step held on a pass `blocked` gave rather than its own exit
+/// resumes onto the step itself, an unblocker's pass held by `gate_at:
+/// blocked` resumes through `cleared_block_target` to the `on_pass` of the
+/// step the task stopped at, and everything else, a plain gated pass or a
+/// schedule's caught fail at an agent step, resumes by the step's own
+/// `on_pass`. A `parked_from` with no
 /// gate — a person's own keypress, or a lane `escalate_clock` gave up on —
 /// names nothing to pass: `unpark` sends the task straight back onto that
 /// exact step, so this names the step itself rather than whatever comes
@@ -3406,8 +3470,18 @@ fn paused_next(
         let step = pipeline.step(gated)?;
         let caught = crate::commands::caught_at(task, gated);
         let target = match caught {
+            // A pass an unblocker gave in place of a command that never exited 0:
+            // handed back to the step itself — see `resume_road`.
+            _ if crate::commands::command_pass_handed_back(task, step, gated) => gated.to_string(),
             None if task.front.blocked_from.as_deref() == Some(gated) => {
                 crate::commands::cleared_block_target(task, pipeline, false)
+            }
+            // `gate_at: blocked` held an unblocker's pass: it resumes where the
+            // pass would have gone unheld — see `resume_road`.
+            Some(crate::commands::Caught::Pass)
+                if crate::commands::held_unblocker_pass(task, gated) =>
+            {
+                crate::commands::cleared_block_target(task, pipeline, true)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
             // A command step's held failure resumes down the `on_fail` its
@@ -3424,7 +3498,12 @@ fn paused_next(
         };
         return Some(landed(pipeline, task, target, dependents));
     }
-    task.front.parked_from.clone()
+    // A park on a step the pipeline dropped is refused by a plain resume, so
+    // naming it as the destination would promise a resume that fails.
+    task.front
+        .parked_from
+        .clone()
+        .filter(|from| pipeline.step(from).is_some())
 }
 
 /// The word this pause caught, prefixed onto the arrow the NEXT column draws
@@ -3484,6 +3563,22 @@ fn build_rows(
     ledger: &[crate::usage::Entry],
     grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
+    // Every row's NEXT names the step a resume takes, and while a dispatcher
+    // runs `spoolway resume` takes it on the dispatcher's copy of the
+    // pipelines. So both readers of these rows — the board and `queue list`
+    // — route here, on each reading, rather than on whatever files their
+    // caller loaded: a dispatcher can start or stop while a board is open.
+    // A task naming a pipeline that dispatcher never loaded is drawn as an
+    // unroutable row in the loop below, so one such task does not stop the
+    // board redrawing every other.
+    let (routed, refused) = match crate::pipeline_snapshot::for_tasks(repo, tasks) {
+        Some(snapshot) => (
+            std::borrow::Cow::Owned(snapshot.pipelines),
+            snapshot.refused,
+        ),
+        None => (std::borrow::Cow::Borrowed(pipelines), BTreeMap::new()),
+    };
+    let pipelines = &*routed;
     // The dispatcher's own record of what it has started outside a lane. Built
     // once: it is a handle on a directory, and every task below asks it the
     // same question.
@@ -3504,6 +3599,10 @@ fn build_rows(
     let claims = crate::claim::live(repo);
     let mut rows: Vec<Row> = Vec::new();
     for task in tasks {
+        if let Some(refusal) = refused.get(task.id()) {
+            rows.push(unroutable_row(repo, tasks, graph, task, refusal));
+            continue;
+        }
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
         // Read off the graph this frame already built, for every step NEXT
@@ -3686,8 +3785,8 @@ fn build_rows(
                         }
                         (Some(step), true) => format!("[r] {arrow} {step}"),
                         (Some(step), false) => format!("{arrow} {step}"),
-                        // Nothing to name: `paused_at` names a step the
-                        // pipeline no longer has, a gated step has no pass
+                        // Nothing to name: `paused_at` or `parked_from`
+                        // names a step the pipeline no longer has, a gated step has no pass
                         // destination, or neither `paused_at` nor
                         // `parked_from` is set, as on a task an issue-tracking
                         // hook paused on `done`. The row must still say
@@ -4163,6 +4262,40 @@ fn cached_queue_in(
     tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems, parsed))
+}
+
+/// The row for a task the running dispatcher's copy of the pipelines cannot
+/// route, with `refusal` in NEXT.
+///
+/// Drawn from the task alone: its pipeline is the one thing nothing can read
+/// a step, a state or a destination from. It reads `unknown` and offers no
+/// resume, since `spoolway resume` refuses it with the same restart.
+fn unroutable_row(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    graph: &Graph,
+    task: &crate::task::Task,
+    refusal: &str,
+) -> Row {
+    Row {
+        id: task.id().to_string(),
+        group: task.front.group.clone(),
+        issue_url: issue_url_of(task),
+        after: stacked_after(repo, tasks, task),
+        stage: task.stage().to_string(),
+        arrivals: task.rounds_at(task.stage()),
+        pipeline: task.front.pipeline.clone().unwrap_or_default(),
+        state: State::Unknown,
+        depth: graph.depth(task.id()),
+        steps_left: 0,
+        dependents: graph.dependents(task.id()),
+        ctx: None,
+        out: None,
+        cost: None,
+        lane_time: None,
+        next: refusal.to_string(),
+        resumable: false,
+    }
 }
 
 /// The other group `task`'s own group stacks on, if any — the bare group its
@@ -4688,6 +4821,13 @@ fn into_paused(
                 cause: None,
             },
             Some(Outcome::Block | Outcome::Fail) => held(None),
+            // A pass is on file and `paused_at` is set, with no gate named:
+            // `route`'s unattended lap bound parks an unblocker's pass this
+            // way. So does `Dispatcher::escalate` when the next unblocker
+            // lane hits the launch ceiling, if an earlier lane's pass is
+            // still the last report on file. The file cannot tell the two
+            // apart, so this says what the pass did and names no cause.
+            Some(Outcome::Pass) if front.paused_at.is_some() => held(None),
             // `Dispatcher::escalate`'s road off `blocked`, which reports
             // nothing and stamps the step to resume in `paused_at`.
             _ if front.paused_at.is_some() => stopped(Some(Cause::Escalated)),
@@ -8019,6 +8159,75 @@ mod tests {
         assert_eq!(line, "stopped on blocked, moved to paused (escalated)");
     }
 
+    /// An unattended unblocker's pass that spoolway's own lap bound parked:
+    /// the lane reported a pass, so the line must not read as the dispatcher
+    /// giving up on it, which `(escalated)` says. It names no cause, because
+    /// the file cannot tell this park from the escalation below.
+    #[test]
+    fn a_pass_parked_by_the_unblocker_lap_limit_reads_passed() {
+        let line = line_after(
+            "road-blocked-lap-limit",
+            "blocked",
+            |task| {
+                task.front.blocked_from = Some("test".into());
+                task.front
+                    .unblock_laps
+                    .insert("test".into(), crate::commands::UNBLOCK_LAP_LIMIT);
+            },
+            |repo, pipelines| {
+                let mut task = repo.task("t").unwrap();
+                let pipeline = pipelines.for_task(&task).unwrap().clone();
+                let routed = crate::commands::route(
+                    &mut task,
+                    &pipeline,
+                    crate::pipeline::BLOCKED,
+                    Outcome::Pass,
+                    true,
+                    None,
+                    0,
+                )
+                .unwrap();
+                assert_eq!(routed.destination, crate::pipeline::PAUSED);
+                task.front.last_report = Some(crate::task::LastReport {
+                    step: crate::pipeline::BLOCKED.into(),
+                    outcome: Outcome::Pass.as_str().into(),
+                    at: chrono::Utc::now().timestamp(),
+                    at_ms: 0,
+                    blocked: false,
+                });
+                task.set_stage(&routed.destination, routed.pause_note.as_deref());
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed blocked, moved to paused");
+    }
+
+    /// `Dispatcher::escalate` on a `blocked` lane that could not be started,
+    /// after an earlier unblocker lane's pass: that pass is still the last
+    /// report on file and the park leaves the same fields as the lap bound's,
+    /// so the line reads as that park does, without a cause, rather than
+    /// guess `(escalated)` or any other. Pins the one case the file cannot
+    /// settle.
+    #[test]
+    fn a_blocked_lane_escalated_after_an_earlier_pass_reads_without_a_cause() {
+        let line = line_after(
+            "road-blocked-escalated-stale-pass",
+            "blocked",
+            |task| {
+                task.front.blocked_from = Some("test".into());
+                reported(task, crate::pipeline::BLOCKED, Outcome::Pass);
+            },
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.reset_loop_counts();
+                task.front.paused_at = task.front.blocked_from.clone();
+                task.set_stage(crate::pipeline::PAUSED, Some("could not start `blocked`"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed blocked, moved to paused");
+    }
+
     #[test]
     fn a_block_reported_by_a_lane_reads_reported() {
         let line = line_after(
@@ -9442,6 +9651,144 @@ mod tests {
         assert_eq!(repo.task("running").unwrap().stage(), loaded_next);
     }
 
+    /// A gate passed at `implement`, on a board whose own graph was read
+    /// from files edited since the run started — `implement` passes to
+    /// `document` there, and to the builtin's own step in the dispatcher's
+    /// copy. Returns `(board's graph, dispatcher's copy, the step the copy
+    /// resumes to)`, and holds the project lock under a snapshot of the copy
+    /// until the returned guard drops.
+    fn gate_on_edited_pipeline(repo: &Repo, id: &str) -> (Pipelines, String, crate::lock::Lock) {
+        let loaded = Pipelines::builtin();
+        let loaded_next = loaded
+            .get("default")
+            .unwrap()
+            .step("implement")
+            .unwrap()
+            .on_pass
+            .clone()
+            .unwrap();
+        let mut edited = loaded.clone();
+        edited
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_pass = Some("document".into());
+        assert_ne!(loaded_next, "document", "the edit must change the route");
+
+        add_to(repo, id, &[], Some("implement"), Some(id));
+        let mut task = repo.task(id).unwrap();
+        task.front.paused_at = Some("implement".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(repo, &loaded).unwrap();
+        (edited, loaded_next, lock)
+    }
+
+    /// The `(next)` row the `r` picker preselects sits on the step `enter`
+    /// resumes to — the dispatcher's copy of the pipeline — and not on the
+    /// step the board's own, since edited, files name.
+    #[test]
+    fn the_resume_pickers_next_row_names_the_step_the_running_dispatcher_resumes_to() {
+        let (repo, _root_guard) = fixture("picker-next-on-snapshot");
+        let (edited, loaded_next, _lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let mut board = Board::for_test();
+        board.cursor = Some("gate".into());
+        board
+            .on_key(&repo, &edited, crate::screen::Key::Char('r'))
+            .unwrap();
+        let picker = open_picker(&board);
+        let next = picker.rows.iter().find(|row| row.next).unwrap();
+        assert_eq!(next.step, loaded_next);
+        assert_eq!(
+            picker.cursor,
+            picker.rows.iter().position(|r| r.next).unwrap()
+        );
+
+        press(&mut board, &repo, &edited, &[crate::screen::Key::Enter]);
+        assert_eq!(repo.task("gate").unwrap().stage(), loaded_next);
+    }
+
+    /// A row's NEXT — the board's column and `queue list`'s — names the step
+    /// `spoolway resume` takes: the dispatcher's copy while one runs, the
+    /// files once none does.
+    #[test]
+    fn a_rows_next_names_the_step_the_running_dispatcher_resumes_to() {
+        let (repo, _root_guard) = fixture("rows-next-on-snapshot");
+        let (edited, loaded_next, lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let next = |repo: &Repo| {
+            let rows = rows(repo, &edited).unwrap();
+            rows.iter().find(|r| r.id == "gate").unwrap().next.clone()
+        };
+        assert!(
+            next(&repo).ends_with(&format!("→ {loaded_next}")),
+            "{}",
+            next(&repo)
+        );
+        assert!(!next(&repo).contains("document"));
+
+        drop(lock);
+        assert!(next(&repo).ends_with("→ document"), "{}", next(&repo));
+    }
+
+    /// A task on a pipeline the running dispatcher never loaded — one the
+    /// board's own queue tab can still queue — is drawn as a row that says so,
+    /// and the reading goes on drawing every other task on the dispatcher's
+    /// copy. Failing the reading instead would stop the board redrawing.
+    #[test]
+    fn a_task_the_running_dispatcher_cannot_route_gets_a_row_that_says_so() {
+        let (repo, _root_guard) = fixture("row-unroutable-by-snapshot");
+        let (mut edited, loaded_next, _lock) = gate_on_edited_pipeline(&repo, "gate");
+        let default = edited.pipelines.get("default").unwrap().clone();
+        edited.pipelines.insert("added".into(), default);
+        add_to(&repo, "newcomer", &[], Some("implement"), Some("newcomer"));
+        let mut task = repo.task("newcomer").unwrap();
+        task.front.pipeline = Some("added".into());
+        task.save().unwrap();
+
+        let rows = rows(&repo, &edited).unwrap();
+        let row = rows.iter().find(|r| r.id == "newcomer").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(!row.resumable);
+        assert!(row.next.contains("restart the dispatcher"), "{}", row.next);
+        assert_eq!(row.pipeline, "added");
+        let gate = rows.iter().find(|r| r.id == "gate").unwrap();
+        assert!(
+            gate.next.ends_with(&format!("→ {loaded_next}")),
+            "{}",
+            gate.next
+        );
+    }
+
+    /// An `r` the dispatcher's copy refuses after the row was read — it
+    /// changed in between — opens the picker with the refusal rather than
+    /// doing nothing, and with only `esc` offered: there is no step to pick.
+    #[test]
+    fn a_refused_resume_opens_a_picker_that_shows_why_and_offers_only_esc() {
+        let (repo, _root_guard) = fixture("resume-refused-picker");
+        let (_edited, _, _lock) = gate_on_edited_pipeline(&repo, "gate");
+
+        let mut board = Board::for_test();
+        board
+            .refuse_resume(&repo, "gate", &anyhow::anyhow!("restart the dispatcher"))
+            .unwrap();
+        let picker = open_picker(&board);
+        assert_eq!(picker.error.as_deref(), Some("restart the dispatcher"));
+        assert!(picker.rows.is_empty());
+        let panel = view::resume_picker_panel(picker, None).join("\n");
+        assert!(panel.contains("restart the dispatcher"), "{panel}");
+        assert!(panel.contains("esc"), "{panel}");
+        assert!(!panel.contains("enter"), "{panel}");
+        assert_eq!(repo.task("gate").unwrap().stage(), crate::pipeline::PAUSED);
+    }
+
     /// A task a stop parked and a person then resumed by hand, then parked
     /// again with `p`, is the person's park now: neither `r` nor `p` leaves
     /// the stop's mark behind for the next start to find.
@@ -9977,6 +10324,180 @@ mod tests {
         assert_eq!(
             paused_next(&task, agent, 0).as_deref(),
             Some(on_pass.as_str())
+        );
+    }
+
+    /// A gated command step held for a pass its command never gave — an
+    /// unblocker's, filed from `blocked` — is shown going back onto the step,
+    /// the way `resume_road` sends it. The command's own held pass, filed from
+    /// the step, still shows `on_pass`.
+    #[test]
+    fn the_next_column_names_a_gated_command_step_an_unblocker_passed() {
+        let (repo, _root_guard) = fixture("next-unblocker-command-pass");
+        let yaml = "steps:\n  \
+                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("deploy"));
+        let mut task = repo.task("login").unwrap();
+        task.front.paused_at = Some("deploy".into());
+        task.front.paused_by = Some("gate".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            at_ms: 0,
+            blocked: false,
+        });
+
+        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("deploy"));
+
+        task.front.last_report.as_mut().unwrap().step = "deploy".into();
+        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("done"));
+    }
+
+    /// A `gate_at: blocked` hold on an unblocker's pass shows the step the
+    /// pass would have reached unheld, not `blocked` again, which has no
+    /// `on_pass` for the row to read.
+    #[test]
+    fn the_next_column_names_where_a_held_unblocker_pass_goes() {
+        let (repo, _root_guard) = fixture("next-gate-at-blocked");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("blocked"));
+        let mut task = repo.task("login").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.front.paused_at = Some("blocked".into());
+        task.front.paused_by = Some("gate".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            at_ms: 0,
+            blocked: false,
+        });
+
+        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("review"));
+    }
+
+    /// The picker's header on a `gate_at: blocked` hold of an unblocker's pass
+    /// says the block was cleared. `blocked_from` still names the stopped step
+    /// for the resume to read, which `caught_at` reads as a caught block, so
+    /// without the check the header says the unblocker blocked while the
+    /// `(next)` row names the step it passed to.
+    #[test]
+    fn the_picker_header_says_a_held_unblocker_pass_cleared_the_block() {
+        let (repo, _root_guard) = fixture("picker-gate-at-blocked");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("blocked"));
+        let mut task = repo.task("login").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.front.paused_at = Some("blocked".into());
+        task.front.paused_by = Some("schedule".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            at_ms: 0,
+            blocked: false,
+        });
+
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("implement")),
+            format!("{} at implement — its block was cleared", task.stage())
+        );
+
+        // An unblocker that blocked again is still a caught block.
+        task.front.last_report.as_mut().unwrap().outcome = "block".into();
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("implement")),
+            format!("{} at implement — it blocked", task.stage())
+        );
+    }
+
+    /// The picker's header for the same task says the block was cleared, not
+    /// that the command passed: it never exited 0. The command's own held
+    /// pass, filed from the step, still reads as a pass.
+    #[test]
+    fn the_picker_header_does_not_say_an_unblockers_pass_was_the_commands() {
+        let (repo, _root_guard) = fixture("picker-unblocker-command-pass");
+        let yaml = "steps:\n  \
+                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("deploy"));
+        let mut task = repo.task("login").unwrap();
+        task.front.paused_at = Some("deploy".into());
+        task.front.paused_by = Some("gate".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            at_ms: 0,
+            blocked: false,
+        });
+
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("deploy")),
+            format!("{} at deploy — its block was cleared", task.stage())
+        );
+
+        task.front.last_report.as_mut().unwrap().step = "deploy".into();
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("deploy")),
+            format!("{} at deploy — it passed", task.stage())
+        );
+    }
+
+    /// A plain resume refuses a task whose recorded step the pipeline no
+    /// longer has, so the NEXT column must not promise it a destination: a
+    /// stranded block names the missing step and says to pick one, and a
+    /// park on a missing step names nothing. A step that still exists reads
+    /// as it always did.
+    #[test]
+    fn the_next_column_promises_nothing_a_plain_resume_refuses() {
+        let (repo, _root_guard) = fixture("stranded-next-column");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+        task.front.blocked_from = Some("old-name".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "old-name".into(),
+            outcome: "block".into(),
+            at: 1,
+            at_ms: 0,
+            blocked: false,
+        });
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] pick a step — `old-name` is gone"
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, false, 0),
+            "pick a step — `old-name` is gone"
+        );
+
+        task.front.blocked_from = Some("implement".into());
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] → implement",
+            "a recorded step the pipeline still has is the destination"
+        );
+
+        task.front.paused_at = None;
+        task.front.parked_from = Some("old-name".into());
+        assert_eq!(paused_next(&task, pipeline, 0), None);
+        task.front.parked_from = Some("implement".into());
+        assert_eq!(
+            paused_next(&task, pipeline, 0).as_deref(),
+            Some("implement")
         );
     }
 

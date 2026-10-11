@@ -685,7 +685,7 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
         !blocked && step.destination(Outcome::Fail) == step.destination(Outcome::Block);
 
     // Where this task actually stopped — `blocked` alone, and only to ask
-    // two questions of it: whether the first gated step at or after there
+    // two questions of it: whether the first gated step on the route from there
     // bounds `--stage`, and whether the origin itself is that step, in which
     // case a plain `--pass` is held there too. Empty for the sample task
     // `spoolway prompt contract` renders with no real task, which carries no
@@ -741,13 +741,15 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
     // `blocked` asks this of the step it stands in for, not of itself: a
     // plain `--pass` is taken at the unblocker's word for `origin`, so
     // `origin`'s own `gate: true` is what would hold it — never `blocked`'s,
-    // which no pipeline may even declare. A task's own `gate_at` plays no
-    // part here: it catches this step's outcome before the task ever reaches
-    // `blocked` — see `commands::report::route`'s own doc.
+    // which no pipeline may even declare. Only an agent origin is held: a
+    // command step has no work for the unblocker to stand in for, so `route`
+    // hands it straight back to run again, with no person asked. A task's own
+    // `gate_at` plays no part here: it catches this step's outcome before the
+    // task ever reaches `blocked` — see `commands::report::route`'s own doc.
     let gate = match &origin {
         Some(origin) => pipeline
             .step(origin)
-            .filter(|step| step.gate)
+            .filter(|step| step.gate && step.kind() == crate::pipeline::StepKind::Agent)
             .map(|_| crate::commands::Gate::Step),
         None => {
             let hypothetical_destination = step

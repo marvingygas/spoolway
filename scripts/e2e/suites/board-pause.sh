@@ -606,6 +606,18 @@ if [ -n "$STUCK_PID" ]; then ok "the unblocker is really mid-turn on the blocked
 else bad "the unblocker is really mid-turn on the blocked row"; fi
 draws "the board draws the staffed blocked row" "stuck"
 
+# While the unblocker is mid-turn, a resume from the command line would start
+# a second lane in the same worktree and lose its verdict, so both commands
+# refuse and name the pause that takes the task from it.
+STUCK_FILE="$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+STUCK_BEFORE=$(cat "$STUCK_FILE")
+refuses "\`spoolway resume\` refuses a blocked task whose unblocker is live" \
+  "queue pause stuck" "$SPOOLWAY" resume stuck
+refuses "\`spoolway queue resume\` refuses it too" \
+  "queue pause stuck" "$SPOOLWAY" queue resume stuck
+if [ "$(cat "$STUCK_FILE")" = "$STUCK_BEFORE" ]; then ok "the refused resumes left the task file alone"
+else bad "the refused resumes left the task file alone"; fi
+
 press p
 
 draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"
@@ -767,6 +779,24 @@ draws "and the board's NEXT column names what it caught" "implement blocked → 
 must "resuming it sends the caught fail on to blocked, exactly where it would have landed unheld" \
   "$SPOOLWAY" resume pause-fail-catch
 stage_reaches "and it lands there" pause-fail-catch blocked 25
+
+# ------------------- a schedule on `blocked` holds the unblocker's own pass
+# `unattended.blocked_agent` is still `pi` here, whose default turn reports a
+# pass. The task is seeded stopped on `blocked` the way a real block leaves
+# it, with the schedule on `blocked` itself. `blocked` declares no `on_pass`,
+# so the held pass has to go where it would have gone unheld: the `on_pass` of
+# `review`, the step it stopped at (not the entry, whose `on_pass` is a
+# different step), and not back onto `blocked` for a second unblocker lane
+# whose verdict would be thrown away.
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/hold-unblock.md" hold-unblock "$BODY" \
+  "stage: blocked" "blocked_from: review" "gate_at: blocked" "group: hold-unblock"
+stage_reaches "the unblocker's pass is held on paused" hold-unblock paused 30
+has "at blocked, the step whose pass it caught" "paused_at: blocked" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hold-unblock.md"
+draws "the board's NEXT column names review's on_pass, not blocked" "[r] → document" 30
+must "resuming it carries the pass on" "$SPOOLWAY" resume hold-unblock
+stage_reaches "and it lands on review's on_pass, with no second unblocker" \
+  hold-unblock document 25
 
 # --------------------------- a gated stop offers a key before every command
 # The mockup this task built: a report that lands a task on `paused` names

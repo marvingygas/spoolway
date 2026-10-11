@@ -9,9 +9,9 @@
 //!
 //! So the dispatcher that holds the project's lock writes what it loaded
 //! here, right after taking the lock, and `report`, `resume`, `queue resume`,
-//! the board's `r` and `queue add` route on this copy for as long as that
-//! dispatcher lives. Each decodes only
-//! the pipelines its own task names, so a pipeline file somebody broke
+//! `queue route`, `queue list`, the board's rows and its `r` and `queue add`
+//! route on this copy for as long as that dispatcher lives. Each decodes only
+//! the pipelines its own tasks name, so a pipeline file somebody broke
 //! mid-run no longer fails every lane's report — the dispatcher validated
 //! this copy when it started, and nothing here reads the files again.
 //!
@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pipeline::{Pipeline, Pipelines};
 use crate::repo::Repo;
+use crate::task::Task;
 
 /// Beside the dispatcher's own lock file, in the project home.
 pub const SNAPSHOT_FILE: &str = "dispatch-pipelines.json";
@@ -261,10 +262,11 @@ impl LoadedPipelines {
 /// dispatcher is running, and then the caller routes on the files it loaded,
 /// as it always did.
 ///
-/// Every entry that moves a task one step goes through this —
-/// `spoolway report`, `spoolway resume`, `spoolway queue resume` and the
-/// board's `r` — because they all end in the same routing, and one left on
-/// the files is a road onto a step the dispatcher never loaded.
+/// Every entry that moves a task one step, or names where a resume would
+/// move it, goes through this — `spoolway report`, `spoolway resume`,
+/// `spoolway queue resume`, `spoolway queue route` and the board's `r` —
+/// because they all end in the same routing, and one left on the files is a
+/// road onto a step the dispatcher never loaded.
 ///
 /// Only `task`'s own pipeline is decoded, so a pipeline file broken mid-run
 /// fails nothing but a task on that pipeline. A task that cannot be read, or
@@ -280,6 +282,72 @@ pub fn for_task(repo: &Repo, task: Option<&str>) -> Option<Result<Pipelines>> {
         .and_then(|task| task.front.pipeline);
     let names: Vec<&str> = name.as_deref().into_iter().collect();
     Some(loaded.pipelines(&names))
+}
+
+/// What a reader that shows many tasks at once routes on while a dispatcher
+/// runs — see [`for_tasks`].
+pub struct Routed {
+    /// The dispatcher's copy of every pipeline `tasks` name that it can
+    /// route, and nothing else.
+    pub pipelines: Pipelines,
+    /// Each task the dispatcher's copy cannot route, by id, with the reason
+    /// in a sentence a row can print.
+    pub refused: BTreeMap<String, String>,
+}
+
+/// The routing graph for a reader that shows many tasks at once, such as
+/// `queue list` and the board's rows: that dispatcher's copy of the
+/// pipelines `tasks` name. `None` when no dispatcher is running.
+///
+/// Such a reader cannot name one pipeline up front the way [`for_task`]
+/// does, and each row it draws names the step a resume takes — which is the
+/// step in the dispatcher's copy.
+///
+/// A task whose pipeline the dispatcher never loaded, or whose entry will
+/// not decode, comes back in [`Routed::refused`] instead of failing the
+/// reading. One such task is a pipeline added since the run started, which
+/// the board's own queue tab can still queue, and a reading that failed on
+/// it would stop the board redrawing for every other task. A task naming no
+/// pipeline adds nothing here, and the reader's own read of that task fails
+/// with its own message.
+pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
+    let loaded = LoadedPipelines::live(repo)?;
+    let mut routed = Pipelines {
+        pipelines: BTreeMap::new(),
+        ignored_overrides: Vec::new(),
+    };
+    let mut refusals: BTreeMap<&str, String> = BTreeMap::new();
+    let mut refused = BTreeMap::new();
+    for task in tasks {
+        let Some(name) = task.front.pipeline.as_deref() else {
+            continue;
+        };
+        if !refusals.contains_key(name) && !routed.pipelines.contains_key(name) {
+            match loaded.pipelines(&[name]) {
+                Ok(one) => routed.pipelines.extend(one.pipelines),
+                // A name the dispatcher never loaded gets a sentence short
+                // enough for a table cell; anything else is an entry that
+                // will not decode, and says so in the error's own words.
+                Err(err) => {
+                    let reason = match loaded.written.pipelines.contains_key(name) {
+                        true => format!("{err:#}"),
+                        false => format!(
+                            "pipeline `{name}` is not one the running dispatcher loaded — \
+                             restart the dispatcher to use it"
+                        ),
+                    };
+                    refusals.insert(name, reason);
+                }
+            }
+        }
+        if let Some(refusal) = refusals.get(name) {
+            refused.insert(task.id().to_string(), refusal.clone());
+        }
+    }
+    Some(Routed {
+        pipelines: routed,
+        refused,
+    })
 }
 
 /// The files edited since the running dispatcher started, or nothing when no

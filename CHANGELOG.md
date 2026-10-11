@@ -60,6 +60,7 @@ bookkeeping out of them and describe user-visible outcomes.
 - A worktree cut that fails holds only its own task instead of stopping the whole pass. (#810)
 - `spoolway stack` treats a base branch deleted on the remote as landed even when a stale local or `origin/` ref survives, and opens against the base it landed in. (#839)
 - A `[models]` row no step routes to is still named by `spoolway doctor` but no longer opens the warnings popup before a run. (#836)
+- An unattended run no longer goes round for ever when a command step fails every time and the unblocker keeps passing it. Leaving `blocked` resets every `loop:` count, so no `loop:` could stop the cycle, and only `unattended.max_output_tokens` and `max_cost_usd`, which default to no ceiling, did. After three unblocker passes that send the task back onto the same command step, the fourth unblocker pass parks the task on `paused` and its Status Log names the step and the laps. This covers a gate that fails back to an agent step too. A pass onto an agent step is unchanged, and the ceilings and their defaults are unchanged.
 
 ### Platform and packaging
 - macOS works for command steps and stops: the command wrapper runs from a file instead of being typed into the pane, process and group checks ask the kernel instead of `/proc`, and an interrupted run no longer records exit 0. Every pull request now runs the tests and the command-steps suite on macOS. (#790, #793, #826)

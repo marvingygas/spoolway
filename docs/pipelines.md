@@ -173,6 +173,17 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
   `blocked`. This stops a cycle whose only `loop:` is on a step the task skips.
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
+- That reset cannot stop a command step that fails every time while an unattended unblocker
+  keeps passing it. So spoolway counts those laps itself. Each unblocker pass that sends the
+  task back onto a command step is a lap. It counts whether the task stopped at the command
+  step or at an agent step behind it, as it does for a gate that fails back to that agent.
+  The pass after the third lap parks the task on `paused` instead. The unblocker lane that
+  makes that pass has already run, so four unblocker lanes run in all, and no fifth starts.
+  `## Status Log` names the command step and the three laps. A person's `spoolway resume`
+  starts the count again. It sends the task back to the step it stopped at, which is the
+  command step itself, or the agent step behind a gate that failed back to it. A pass that
+  lands on an agent step, a pass that names a step with `--stage`, and a command that
+  passes on its next run end the count rather than add to it.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
   limit, so delete the line to keep the meaning 0.7 gave `loop: 0`. `loop: 1` is not the same:
   it blocks the task on its second arrival. `spoolway sync` refuses a file carrying it, and
@@ -210,9 +221,9 @@ flowchart LR
   D -->|pause| F[paused, for a person]
 ```
 
-The unblocker lane continues the lane that stopped, with everything it had read. A `gate:`
-still waits for a person. A lane that keeps dying at launch is retried with a doubling delay,
-up to an hour.
+The unblocker lane continues the lane that stopped, with everything it had read. A `gate:` on an
+agent step still waits for a person. A lane that keeps dying at launch is retried with a doubling
+delay, up to an hour.
 
 ### Staffing `blocked`
 
@@ -242,15 +253,21 @@ refuses `blocked.session=false` while `blocked_session` in `[unattended]` is `tr
 lane without a session, set `blocked_session = false` in the config.
 
 - A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
-  and back to itself for a command step. `--pass --stage <step>` sends it to `<step>` instead,
-  bounded by the steps this task has already run.
-- The gate belongs to the step, whoever does its work: if the step this task blocked on is
-  `gate: true`, a plain `--pass` lands on `paused` at that step's own gate instead, exactly as it
-  would have if that step's own lane had reported the pass. `--stage` may not name a step past a
-  gate this task's pass has not yet answered for — naming the gate step itself, or a step before
-  it, still works. See [Gates](#gates).
+  and back to itself for a command step. The fourth pass in a row onto the same command step
+  parks the task on `paused`. See [Loops](#loops). `--pass --stage <step>` sends it to `<step>`
+  instead, bounded by the steps this task has already run.
+- If the step this task blocked on is a `gate: true` agent step, a plain `--pass` lands on
+  `paused` at that step's own gate, as if that step's own lane had reported the pass. A gated
+  command step is handed back to itself and runs again, because its command never exited 0.
+  `--stage` may not name a step past a gate this task's pass has not yet answered for. Naming the
+  gate step itself, or a step before it, still works. A step is past the gate when the `on_pass`
+  route from the blocked step reaches it after the gate. The order of the steps in the file does
+  not matter. A step the route never reaches counts as past the gate when the file lists it after
+  both the gate and the blocked step. See [Gates](#gates).
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
+- `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
+  or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
 - `spoolway pipeline show` marks where each pipeline's `blocked` step comes from.
 
@@ -271,6 +288,10 @@ max_cost_usd = 20.0
 
 Reaching either starts no further lane. Live lanes finish, then the dispatcher stops. Tasks
 stay where they are, and the next `spoolway dispatch` picks them up.
+
+The brake is not what ends a command step that keeps failing under an unblocker that keeps
+passing. Spoolway's own count of those laps does, and parks the task on `paused` on the
+fourth unblocker pass whatever the ceilings are. See [Loops](#loops).
 
 ## Command steps
 
@@ -493,11 +514,12 @@ lets the task past. Pick another step to send the task there instead.
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing
   where the fail goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
-- A gate holds an unblocker's `--pass` from `blocked` too, at the gate of the step this pass
-  stands in for rather than of `blocked` itself: `spoolway resume` still takes that step's own
-  `on_pass`. `--pass --stage <step>` off `blocked` may not name a step past a gate it has not
-  answered for — naming the gate step itself, or a step before it, still works. See
-  [Staffing `blocked`](#staffing-blocked).
+- A gate holds an unblocker's `--pass` from `blocked` too when the blocked step is a gated agent
+  step. The task waits at that step's own gate, not at `blocked`, and `spoolway resume` takes
+  that step's `on_pass`. A gated command step is not held: the pass sends the task back to the
+  command, which runs again. `--pass --stage <step>` off `blocked` may not name a step past a
+  gate it has not answered for. Naming the gate step itself, or a step before it, still works.
+  See [Staffing `blocked`](#staffing-blocked).
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.
 

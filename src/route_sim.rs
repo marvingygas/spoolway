@@ -228,17 +228,19 @@ mod tests {
     /// `blocked` is deliberately exempt from." A command step hands a
     /// cleared block straight back to itself (see `cleared_block_target`),
     /// so an unblocker session that keeps saying pass and a command that
-    /// keeps failing can bounce between the two forever — by design, held
-    /// only by `unattended.max_output_tokens`/`max_cost_usd`, a brake this
-    /// walk has no `Repo` to read and `route` never touches. What this walk
-    /// still proves at that boundary is [`walk_from_blocked`]'s own job: a
-    /// task that actually stopped at some real step, seeded with that
+    /// keeps failing bounce between the two only so long: in an unattended
+    /// run `route` parks the task on `paused` once `UNBLOCK_LAP_LIMIT` such
+    /// passes have sent it back onto the command (`Task::unblock_laps`). This
+    /// walk never takes those laps, because it treats `blocked` as resting
+    /// and so never routes a pass from it back onto the command a second
+    /// time. `unattended.max_output_tokens`/`max_cost_usd` stay the money
+    /// brake behind that bound, one this walk has no `Repo` to read. What
+    /// this walk still proves at that boundary is [`walk_from_blocked`]'s own
+    /// job: a task that actually stopped at some real step, seeded with that
     /// step's own `blocked_from`, is routed and checked for the rounds
     /// properties on every outcome — including the one hop a `--pass` takes
     /// back into real work, which this walk then carries on from exactly as
-    /// it would any other arrival — without this walk also having to prove
-    /// that a lane bouncing off `blocked` forever eventually gives up, which
-    /// routing alone was never the thing bounding.
+    /// it would any other arrival.
     fn is_resting(stage: &str) -> bool {
         stage == crate::pipeline::DONE
             || stage == crate::pipeline::PAUSED

@@ -288,7 +288,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -351,6 +351,7 @@ A cause in brackets follows when the route alone does not explain the move.
 | `stopped on <step>, moved to blocked (escalated)` | The dispatcher stopped the lane in an unattended run, and the unblocker takes the task. The `## Blocker` section gives the exact reason. |
 | `stopped before starting, moved to paused (branch <name> missing)` | The branch the task starts from does not exist. |
 | `stopped on <step>, moved to paused` | The task file names no cause for the step the task left. A cause counts only when the file names that step. |
+| `passed blocked, moved to paused` | The `blocked` lane reported a pass and the task still stopped on `paused`. This is the unblocker lap limit, or the dispatcher stopping a later `blocked` lane. The `## Status Log` gives the exact reason. |
 | `reported a pause on blocked, moved to paused` | The `blocked` lane reported a pause. |
 | `reported a block on blocked, moved to paused` | The `blocked` lane reported a block. The same holds for `failed blocked` when it reported a fail. |
 | `stopped on blocked, moved to paused (escalated)` | The dispatcher stopped the `blocked` lane, in any run. The `## Status Log` gives the exact reason. |
@@ -410,6 +411,8 @@ When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `
 | `esc` | Close the picker and change nothing. |
 
 An `enter` the resume refuses leaves the picker open and prints the reason under the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
+
+When the board cannot route the task for an `r`, the picker lists no steps and shows the reason. Its key line offers only `esc`, which closes it.
 
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
 a command step kills the run, and the command runs again in full on resume.
@@ -472,12 +475,19 @@ While a dispatcher is running, these commands route a task on that copy and not 
 
 - `spoolway report`
 - `spoolway resume` and `spoolway queue resume`
+- `spoolway queue route`
 - `spoolway restart`
 - the `r` picker and the `s` key on the board
 - `spoolway queue add`
+- the NEXT column of the board and of `spoolway queue list`
 
-Each reads only the pipeline its own task names. With no dispatcher running, they read the
+Each reads only the pipelines its own tasks name. With no dispatcher running, they read the
 pipeline files.
+
+`spoolway queue route`, `spoolway queue list` and the board therefore name the step that
+`spoolway resume` takes. A task whose pipeline the running dispatcher did not load shows as
+`unknown`, with NEXT telling you to restart the dispatcher. While a dispatcher runs,
+`spoolway queue list` still answers when a pipeline file does not parse.
 
 An edit to a pipeline file changes nothing until the dispatcher restarts. A pipeline override
 follows the same rule: `spoolway pipeline override` writes a patch file, and the running
