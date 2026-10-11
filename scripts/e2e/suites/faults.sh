@@ -201,16 +201,26 @@ if shoot teardown-during-remove; then ok "the dispatcher died inside git worktre
 else bad "the dispatcher died inside git worktree remove"; fi
 RMA_WT=$(registered_worktree rma)
 RMA_TIP=$(git rev-parse --verify --quiet task/rma || true)
-# The kill lands on the first top-level entry git deletes. Where that is the
-# `.git` link (see below), every tracked file is still there, and the missing
-# link is what the deletion has taken so far.
-RMA_LINK_TAKEN=0
-if [ -n "$RMA_WT" ] && [ -d "$RMA_WT" ] && [ ! -e "$RMA_WT/.git" ]; then RMA_LINK_TAKEN=1; fi
-if [ -n "$RMA_WT" ] && [ -d "$RMA_WT" ] && [ -n "$RMA_TIP" ] \
-   && { [ "$(files_in "$RMA_WT")" -lt "$TRACKED" ] || [ "$RMA_LINK_TAKEN" = 1 ]; }; then
-  ok "the kill left a registered, half-deleted worktree ($(files_in "$RMA_WT") of $TRACKED files)"
+# The kill lands once git has deleted a first top-level entry, whichever the
+# filesystem lists first: a tracked folder, the `.git` link (see below), or
+# the whole tree when the rest goes before the kill does. The registration
+# under `.git/worktrees/` stays in every case. What is gone is read against
+# the files tracked at the task's own tip, not a count of everything in the
+# checkout, which untracked files would hold up.
+tracked_present() {
+  git ls-tree -r --name-only "$2" | (cd "$1" 2>/dev/null && xargs -r -d '\n' ls -d -- 2>/dev/null) | wc -l
+}
+RMA_TOTAL=0 RMA_PRESENT=0 RMA_LINK=present
+if [ -n "$RMA_TIP" ]; then RMA_TOTAL=$(git ls-tree -r --name-only "$RMA_TIP" | wc -l); fi
+if [ -n "$RMA_WT" ] && [ -d "$RMA_WT" ]; then
+  RMA_PRESENT=$(tracked_present "$RMA_WT" "$RMA_TIP")
+  [ -e "$RMA_WT/.git" ] || RMA_LINK=gone
+else RMA_LINK="folder gone"; fi
+if [ -n "$RMA_WT" ] && [ -n "$RMA_TIP" ] \
+   && { [ "$RMA_PRESENT" -lt "$RMA_TOTAL" ] || [ "$RMA_LINK" != present ]; }; then
+  ok "the kill left a registered, half-deleted worktree ($RMA_PRESENT of $RMA_TOTAL tracked files, link $RMA_LINK)"
 else
-  bad "the kill left a registered, half-deleted worktree (${RMA_WT:-none registered})"
+  bad "the kill left a registered, half-deleted worktree (${RMA_WT:-none registered}: $RMA_PRESENT of $RMA_TOTAL tracked files, link $RMA_LINK, tip ${RMA_TIP:-missing})"
 fi
 # git deletes a directory's entries in the order the filesystem lists them,
 # and some filesystems list the `.git` link first. A tree with its link gone
