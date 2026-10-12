@@ -139,7 +139,7 @@ jobs:
       # uploaded nothing and left no evidence behind at all.
       - name: keep the wreckage
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-scratch-${{ inputs.tier }}
           path: |
@@ -177,7 +177,7 @@ jobs:
     if: inputs.run-tests && inputs.macos
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -226,7 +226,7 @@ jobs:
       # fails on the first directory among them it may not read.
       - name: keep the wreckage
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-scratch-macos
           path: |

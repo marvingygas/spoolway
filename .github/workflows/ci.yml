@@ -263,7 +263,7 @@ jobs:
       # the comment there on why `/tmp/tmp.*` never matched anything.
       - name: keep the wreckage
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: dress-rehearsal-scratch
           path: |
