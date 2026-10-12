@@ -43,6 +43,17 @@ pub struct Repo {
     pub home: PathBuf,
 }
 
+/// How long [`Repo::remote_branch_answer`] waits for `origin` to answer.
+///
+/// The dispatcher asks inside its pass, where nothing else runs while it
+/// waits. An ssh transport stuck on a prompt, or only slow, would otherwise
+/// hold every other task back. The ask is then given up on and answers
+/// `None`, the same as an `origin` that is offline: it could not be asked.
+/// Each caller decides what that means; the running pass holds the task and
+/// says so, and the dispatcher's start-up check lets it through. Ten seconds
+/// matches [`crate::mux`]'s bound on the fetch of the same remote.
+const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Repo {
     /// Find the project a command is operating on.
     ///
@@ -428,7 +439,8 @@ impl Repo {
     /// Git's own credential prompt is turned off: a private remote this
     /// process has no terminal to answer for must fail outright rather than
     /// hang a queue submission or a dispatcher start on a password nobody
-    /// is there to type.
+    /// is there to type. Prompts the environment variable does not reach, such
+    /// as an ssh passphrase, are met by [`REMOTE_ASK_TIMEOUT`].
     ///
     /// The failure is kept apart from the answer: `Some` when `origin` really
     /// answered, `None` when it could not be asked — offline, a refused
@@ -445,13 +457,16 @@ impl Repo {
         // real `refs/heads/task/gh-412-checkout` it never named at all
         // (review finding 1).
         let full_ref = format!("refs/heads/{branch}");
-        let output = Command::new("git")
-            .args(["ls-remote", "--heads", "origin", &full_ref])
-            .current_dir(&self.root)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output();
-        match output {
-            Ok(o) if o.status.success() => Some(!o.stdout.is_empty()),
+        match crate::mux::git_within(
+            &self.root,
+            &["ls-remote", "--heads", "origin", &full_ref],
+            REMOTE_ASK_TIMEOUT,
+            true,
+        ) {
+            crate::mux::GitWithin::Finished {
+                success: true,
+                stdout,
+            } => Some(!stdout.is_empty()),
             _ => None,
         }
     }
@@ -5066,6 +5081,65 @@ mod tests {
         assert_eq!(
             repo.remote_branch_answer("task/gh-412-checkout"),
             Some(true)
+        );
+    }
+
+    /// An `origin` whose transport never answers — an ssh command named by
+    /// `core.sshCommand` that sits for half a minute — is given up on, and
+    /// the ask reports that it could not be asked rather than waiting the
+    /// transport out. Without the bound the dispatcher's pass would stand
+    /// still behind one task's slow remote.
+    #[test]
+    fn remote_branch_answer_gives_up_on_a_transport_that_never_answers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // `GIT_SSH_COMMAND` and `GIT_SSH` outrank `core.sshCommand`, so with
+        // either set the fake transport never runs. They cannot be removed
+        // here, since the environment is shared with every concurrent test.
+        for var in ["GIT_SSH_COMMAND", "GIT_SSH"] {
+            if std::env::var_os(var).is_some() {
+                eprintln!("skipped: {var} is set and outranks the core.sshCommand under test");
+                return;
+            }
+        }
+        let (_origin, work, _base_guard) = fixture("remote-branch-hung");
+        let started = work.join("transport-started");
+        let finished = work.join("transport-finished");
+        let script = work.join("slow-ssh.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nsleep 30\ntouch '{}'\n",
+                started.display(),
+                finished.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://spoolway-test.invalid/x.git",
+            ],
+        );
+        git(
+            &work,
+            &["config", "core.sshCommand", script.to_str().unwrap()],
+        );
+        let (repo, _home) = discover_registered(&work).unwrap();
+
+        assert_eq!(repo.remote_branch_answer("task/remote-only"), None);
+
+        assert!(
+            started.exists(),
+            "the ask went through the person's own core.sshCommand"
+        );
+        assert!(
+            !finished.exists(),
+            "the ask returned while the transport was still running, not after it"
         );
     }
 

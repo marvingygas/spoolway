@@ -6055,10 +6055,8 @@ mod tests {
 
     fn lane(task: &str, step: &str, round: u32, outcome: Option<&str>) -> Entry {
         Entry {
-            tier_tokens: Default::default(),
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: task.into(),
-            plan: None,
             step: step.into(),
             pipeline: "default".into(),
             agent: "pi".into(),
@@ -6067,22 +6065,11 @@ mod tests {
             session: format!("{task}-{step}-{round}"),
             round,
             wall_s: 60,
-            turns: 1,
-            tokens: Tokens::default(),
             cost_usd: Some(1.0),
-            reported_usd: None,
-            ctx_peak: None,
-            pipeline_version: "1.0".into(),
             outcome: outcome.map(str::to_string),
-            blocked: false,
             run: Some(format!("r-{task}")),
-            trial: None,
-            trial_group: None,
-            routine: None,
-            dir: None,
-            hand: false,
-            command: None,
             project: "demo".into(),
+            ..Entry::neutral()
         }
     }
 
@@ -7409,37 +7396,21 @@ mod tests {
     /// `pipeline_version` — see `Entry::dir`.
     fn dir_line(dir: &str, session: &str, ts: &str, cost: f64) -> Entry {
         Entry {
-            tier_tokens: Default::default(),
             ts: ts.into(),
-            task: String::new(),
-            plan: None,
-            step: String::new(),
-            pipeline: String::new(),
             agent: String::new(),
-            kind: "claude".into(),
-            model: "claude-opus-5".into(),
             session: session.into(),
-            round: 0,
-            wall_s: 0,
-            turns: 1,
             tokens: Tokens {
                 output: 10,
                 ..Tokens::default()
             },
             cost_usd: Some(cost),
-            reported_usd: None,
-            ctx_peak: None,
             pipeline_version: String::new(),
-            outcome: None,
-            blocked: false,
-            run: None,
-            trial: None,
-            trial_group: None,
-            routine: None,
             dir: Some(dir.into()),
-            hand: false,
-            command: None,
             project: "demo".into(),
+            task: String::new(),
+            step: String::new(),
+            pipeline: String::new(),
+            ..Entry::neutral()
         }
     }
 
@@ -8101,10 +8072,8 @@ mod screen_tests {
         crate::usage::append(
             repo,
             &Entry {
-                tier_tokens: Default::default(),
                 ts: ts.to_string(),
                 task: task.to_string(),
-                plan: None,
                 step: step.to_string(),
                 pipeline: pipeline.to_string(),
                 agent: "pi".to_string(),
@@ -8113,22 +8082,10 @@ mod screen_tests {
                 session: format!("{task}-{step}"),
                 round: 1,
                 wall_s: 60,
-                turns: 1,
-                tokens: Tokens::default(),
                 cost_usd: Some(cost),
-                reported_usd: None,
-                ctx_peak: None,
-                pipeline_version: "1.0".into(),
                 outcome: outcome.map(str::to_string),
-                blocked: false,
                 run: Some(format!("r-{task}")),
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                ..Entry::neutral()
             },
         )
         .unwrap();
@@ -8204,34 +8161,13 @@ mod screen_tests {
         crate::usage::append(
             &repo,
             &Entry {
-                tier_tokens: Default::default(),
                 ts: "2026-08-01T09:30:00+00:00".into(),
-                task: String::new(),
-                plan: None,
-                step: String::new(),
-                pipeline: String::new(),
                 agent: crate::usage::INTERACTIVE_AGENT.into(),
-                kind: "claude".into(),
-                model: "claude-opus-5".into(),
                 session: "interactive-s".into(),
                 round: 1,
-                wall_s: 0,
-                turns: 1,
-                tokens: Tokens::default(),
                 cost_usd: Some(2.0),
-                reported_usd: None,
-                ctx_peak: None,
                 pipeline_version: String::new(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                ..Entry::neutral()
             },
         )
         .unwrap();
@@ -9131,34 +9067,19 @@ mod screen_tests {
 
     fn tests_entry(task: &str, step: &str) -> Entry {
         Entry {
-            tier_tokens: Default::default(),
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: task.into(),
-            plan: None,
             step: step.into(),
             pipeline: "default".into(),
             agent: "pi".into(),
             kind: "pi".into(),
             model: "qwen".into(),
-            session: "s".into(),
             round: 1,
             wall_s: 60,
-            turns: 1,
-            tokens: Tokens::default(),
             cost_usd: Some(1.0),
-            reported_usd: None,
-            ctx_peak: None,
-            pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
-            blocked: false,
-            run: None,
-            trial: None,
-            trial_group: None,
-            routine: None,
-            dir: None,
-            hand: false,
-            command: None,
             project: "demo".into(),
+            ..Entry::neutral()
         }
     }
 
@@ -9549,37 +9470,20 @@ mod screen_tests {
         crate::usage::append(
             repo,
             &Entry {
-                tier_tokens: Default::default(),
                 ts: ts.to_string(),
-                task: String::new(),
-                plan: None,
-                step: String::new(),
-                pipeline: String::new(),
                 agent: String::new(),
-                kind: "claude".to_string(),
-                model: "claude-opus-5".to_string(),
                 session: session.to_string(),
-                round: 0,
-                wall_s: 0,
-                turns: 1,
                 tokens: Tokens {
                     output: 10,
                     ..Tokens::default()
                 },
                 cost_usd: Some(cost),
-                reported_usd: None,
-                ctx_peak: None,
                 pipeline_version: String::new(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
                 dir: Some(dir.to_string()),
-                hand: false,
-                command: None,
-                project: String::new(),
+                task: String::new(),
+                step: String::new(),
+                pipeline: String::new(),
+                ..Entry::neutral()
             },
         )
         .unwrap();
@@ -10239,10 +10143,8 @@ mod screen_tests {
     /// for a test to adjust before it banks or loads it.
     fn lane_entry(task: &str, step: &str) -> Entry {
         Entry {
-            tier_tokens: Default::default(),
             ts: "2026-08-01T09:00:00+00:00".into(),
             task: task.into(),
-            plan: None,
             step: step.into(),
             pipeline: "default".into(),
             agent: "pi".into(),
@@ -10251,22 +10153,10 @@ mod screen_tests {
             session: format!("{task}-{step}"),
             round: 1,
             wall_s: 60,
-            turns: 1,
-            tokens: Tokens::default(),
             cost_usd: Some(1.0),
-            reported_usd: None,
-            ctx_peak: None,
-            pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
-            blocked: false,
             run: Some(format!("r-{task}")),
-            trial: None,
-            trial_group: None,
-            routine: None,
-            dir: None,
-            hand: false,
-            command: None,
-            project: String::new(),
+            ..Entry::neutral()
         }
     }
 

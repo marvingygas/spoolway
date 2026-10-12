@@ -85,6 +85,22 @@ pub struct JobSpec {
     pub base: Option<String>,
 }
 
+#[cfg(test)]
+impl JobSpec {
+    /// An enabled job with no `base`, for a test to spread with `..` and name
+    /// only the fields it cares about, so a field added later breaks no test
+    /// that does not read it.
+    pub(crate) fn neutral() -> JobSpec {
+        JobSpec {
+            schedule: "0 3 * * *".into(),
+            pipeline: "impl".into(),
+            routine: "nightly".into(),
+            enabled: true,
+            base: None,
+        }
+    }
+}
+
 pub(crate) fn enabled_default() -> bool {
     true
 }
@@ -1116,10 +1132,7 @@ mod tests {
     fn spec(schedule: &str) -> JobSpec {
         JobSpec {
             schedule: schedule.to_string(),
-            pipeline: "impl".to_string(),
-            routine: "nightly".to_string(),
-            enabled: true,
-            base: None,
+            ..JobSpec::neutral()
         }
     }
 
@@ -1171,10 +1184,7 @@ mod tests {
             "nightly",
             &JobSpec {
                 schedule: "0 4 * * 1-5".to_string(),
-                pipeline: "impl".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();

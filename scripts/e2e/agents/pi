@@ -68,6 +68,13 @@ esac
 case "$mode" in
   crash) exit 0 ;;          # ends its turn without reporting
   hang | vanish) sleep 300 ;; # never finishes on its own
+  # A turn that leaves a change behind and passes. A task cut straight onto
+  # `blocked` has never run `implement`, so its branch holds nothing, and the
+  # `handover` it is sent to refuses to open a pull request for an empty diff.
+  # Sent back to `blocked` each time, such a task never leaves the queue, which
+  # says nothing about the report that cleared it.
+  work) echo "work for $SPOOLWAY_TASK at $SPOOLWAY_STEP" >> "work-$SPOOLWAY_TASK.txt"
+        "$SPOOLWAY" report --pass -m "did $SPOOLWAY_STEP, leaving a change" ;;
   bail) "$SPOOLWAY" report --block -m "needs a credential no lane can mint" ;;
   *)
     case "$SPOOLWAY_STEP" in

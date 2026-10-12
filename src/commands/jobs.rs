@@ -2125,9 +2125,8 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
                 enabled: false,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2200,9 +2199,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2226,9 +2223,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2258,9 +2253,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2280,9 +2273,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2314,9 +2305,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2451,9 +2440,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();
@@ -2712,9 +2699,7 @@ mod tests {
             &JobSpec {
                 schedule: "@daily".to_string(),
                 pipeline: "bugfix".to_string(),
-                routine: "nightly".to_string(),
-                enabled: true,
-                base: None,
+                ..JobSpec::neutral()
             },
         )
         .unwrap();

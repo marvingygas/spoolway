@@ -1423,7 +1423,14 @@ fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
     // one `base` must cost one `git ls-remote`, not one per task on it.
     let mut remote_cache = crate::dispatch::RemoteCache::new();
     for task in tasks {
-        if let Some((reason, fix)) = crate::dispatch::base_problem(repo, task, &mut remote_cache) {
+        // A base `origin` could not be asked about does not stop the start:
+        // the running pass holds that one task, and the rest go on.
+        if let Some((reason, fix)) = crate::dispatch::base_problem_when_unasked(
+            repo,
+            task,
+            &mut remote_cache,
+            crate::dispatch::WhenOriginUnasked::Allow,
+        ) {
             bail!("refusing to start: {reason}\n  {fix}\n\nNothing was dispatched.");
         }
     }
@@ -1715,6 +1722,24 @@ mod tests {
             message.contains("Set `base:` in cart-totals to a branch that exists."),
             "{message}"
         );
+    }
+
+    /// An `origin` that cannot be asked whether it has a task's base does not
+    /// refuse the start: the running pass holds that one task, and every other
+    /// task goes on. The remote here is a path that does not exist, so the ask
+    /// fails at once rather than waiting out its time bound.
+    #[test]
+    fn check_task_bases_starts_when_origin_cannot_be_asked() {
+        let (repo, _root_guard) = fixture("bases-origin-unasked");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        let mut totals = repo.task("cart-totals").unwrap();
+        totals.front.base = Some("task/gh-412-checkout".to_string());
+        totals.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        assert!(check_task_bases(&repo, &tasks).is_ok());
     }
 
     /// A cut task is not asked to prove its base still exists — its worktree

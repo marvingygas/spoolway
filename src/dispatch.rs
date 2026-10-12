@@ -6200,6 +6200,32 @@ pub(crate) fn base_problem(
     task: &Task,
     remote_cache: &mut RemoteCache,
 ) -> Option<(String, String)> {
+    base_problem_when_unasked(repo, task, remote_cache, WhenOriginUnasked::Hold)
+}
+
+/// What [`base_problem_when_unasked`] makes of a base that exists nowhere
+/// local when `origin` could not be asked about it: offline, refused, or
+/// given up on at the ask's time bound.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhenOriginUnasked {
+    /// Report a problem, saying `origin` could not be asked. A running pass
+    /// holds the task over it, and the hold lifts on the next pass.
+    Hold,
+    /// Report nothing. The start-up check uses this: refusing to start the
+    /// whole dispatcher because one task's remote was slow or offline would
+    /// stop every other task, which is what the bound on that ask is there
+    /// to prevent. The running pass holds that one task instead.
+    Allow,
+}
+
+/// [`base_problem`], with a say in what an `origin` that could not be asked
+/// means.
+pub(crate) fn base_problem_when_unasked(
+    repo: &Repo,
+    task: &Task,
+    remote_cache: &mut RemoteCache,
+    when_unasked: WhenOriginUnasked,
+) -> Option<(String, String)> {
     let id = task.id();
     let base = task.front.base.as_deref()?;
 
@@ -6230,17 +6256,28 @@ pub(crate) fn base_problem(
     // repeat the same network round trip for every task still waiting in a
     // long chain, on roughly a ten-second clock — and one transient failure
     // would hold every one of them on the same false line (review finding 4).
-    // A failed ask reads as missing here: the hold lifts by itself next pass.
-    if branch_known(repo, base, remote_cache).unwrap_or(false) {
-        None
-    } else {
-        Some((
+    match branch_known(repo, base, remote_cache) {
+        Some(true) => None,
+        Some(false) => Some((
             format!(
                 "task `{id}` is based on `{base}`, which exists neither locally nor on \
                  `origin`"
             ),
             format!("Set `base:` in {id} to a branch that exists."),
-        ))
+        )),
+        // Nothing says the branch is missing, so the task is not what is
+        // wrong: the hold lifts by itself on the first pass `origin`
+        // answers.
+        None if when_unasked == WhenOriginUnasked::Allow => None,
+        None => Some((
+            format!(
+                "task `{id}` is based on `{base}`, which is not a local branch, and `origin` \
+                 could not be asked whether it has it"
+            ),
+            "Nothing in the task needs changing. It is tried again on the next pass; check that \
+             `origin` can be reached."
+                .to_string(),
+        )),
     }
 }
 
@@ -9284,6 +9321,37 @@ mod tests {
         assert_eq!(branch_known(&repo, "ghost", &mut cache), None);
     }
 
+    /// An `origin` that could not be asked holds the task in a running pass,
+    /// where the hold lifts next pass, but is no reason for the start-up check
+    /// to refuse the whole dispatcher.
+    #[test]
+    fn an_unasked_origin_holds_a_task_but_does_not_refuse_the_start() {
+        let (repo, _root_guard) = fixture("bases-unasked-origin");
+        let task = reload(&add_task_with(&repo, "demo", "queued", |f| {
+            f.base = Some("ghost".into());
+        }));
+        let mut cache = RemoteCache::new();
+        cache.insert("ghost".to_string(), None);
+
+        let (reason, fix) = base_problem(&repo, &task, &mut cache).unwrap();
+        assert!(
+            reason.contains("could not be asked") && !reason.contains("neither locally nor"),
+            "the hold does not claim the base is missing: {reason}"
+        );
+        assert!(
+            !fix.contains("Set `base:`"),
+            "and does not send a person to edit a task that is right: {fix}"
+        );
+        assert!(
+            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_none()
+        );
+        cache.insert("ghost".to_string(), Some(false));
+        assert!(
+            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_some(),
+            "an origin that answered `no` still refuses"
+        );
+    }
+
     /// The sparing itself, shared by the two stages that park a task in
     /// front of a person. A live lane — so the assertions actually exercise
     /// the stop_lane call rather than passing because there was nothing to
@@ -11729,11 +11797,8 @@ mod tests {
         // A lane reports: `last_report` is stamped and the stage moves.
         let mut reported = Task::load(&path).unwrap();
         reported.front.last_report = Some(crate::task::LastReport {
-            step: "implement".into(),
-            outcome: "pass".into(),
             at: 5_000,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         reported.set_stage("review", Some("done"));
         reported.save().unwrap();
@@ -13309,11 +13374,10 @@ mod tests {
             f.pane_id = Some("w1:p1".into());
             f.branch = Some("task/demo".into());
             f.last_report = Some(crate::task::LastReport {
+                at: now_secs() + 5,
                 step: "implement".into(),
                 outcome: "pass".into(),
-                at: now_secs() + 5,
-                at_ms: 0,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
         let session = "kept-verdict-s1";
@@ -13341,10 +13405,8 @@ mod tests {
         let mut task = reload(&path);
         task.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
-            outcome: "pass".into(),
             at: now_secs() + 10,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.set_stage("done", None);
         task.save().unwrap();
@@ -15811,8 +15873,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 
@@ -15879,8 +15940,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 
@@ -15945,8 +16005,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 
@@ -16358,37 +16417,20 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
-                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: "demo".to_string(),
-                plan: None,
                 step: "implement".to_string(),
                 pipeline: "default".to_string(),
                 agent: "pi".to_string(),
                 kind: kind.clone(),
                 model: "priced-model".to_string(),
                 session: session.to_string(),
-                round: 0,
                 wall_s: 100,
-                turns: 1,
                 tokens: crate::usage::Tokens {
                     input: 500,
                     ..Default::default()
                 },
-                cost_usd: None,
-                reported_usd: None,
-                ctx_peak: None,
-                pipeline_version: "1.0".into(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                ..crate::usage::Entry::neutral()
             },
         )
         .unwrap();
@@ -17311,34 +17353,15 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
-                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: task.to_string(),
-                plan: None,
                 step: step.to_string(),
                 pipeline: "default".to_string(),
                 agent: "pi".to_string(),
                 kind: kind.to_string(),
                 model: model.to_string(),
                 session: session.to_string(),
-                round: 0,
-                wall_s: 0,
-                turns: 1,
-                tokens: crate::usage::Tokens::default(),
-                cost_usd: None,
-                reported_usd: None,
-                ctx_peak: None,
-                pipeline_version: "1.0".into(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                ..crate::usage::Entry::neutral()
             },
         )
         .unwrap();
@@ -17350,37 +17373,16 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
-                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: task.to_string(),
-                plan: None,
-                step: String::new(),
-                pipeline: String::new(),
                 agent: String::new(),
-                kind: "claude".to_string(),
-                model: "claude-opus-5".to_string(),
-                session: "s".to_string(),
-                round: 0,
-                wall_s: 0,
-                turns: 1,
                 tokens: crate::usage::Tokens {
                     output,
                     ..Default::default()
                 },
-                cost_usd: None,
-                reported_usd: None,
-                ctx_peak: None,
-                pipeline_version: "1.0".into(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                step: String::new(),
+                pipeline: String::new(),
+                ..crate::usage::Entry::neutral()
             },
         )
         .unwrap();
@@ -17436,34 +17438,15 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
-                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: "demo".to_string(),
-                plan: None,
                 step: "implement".to_string(),
                 pipeline: "default".to_string(),
                 agent: "pi".to_string(),
                 kind: "pi".to_string(),
                 model: "priced-model".to_string(),
-                session: "s".to_string(),
-                round: 0,
-                wall_s: 0,
-                turns: 1,
-                tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(7.50),
-                reported_usd: None,
-                ctx_peak: None,
-                pipeline_version: "1.0".into(),
-                outcome: None,
-                blocked: false,
-                run: None,
-                trial: None,
-                trial_group: None,
-                routine: None,
-                dir: None,
-                hand: false,
-                command: None,
-                project: String::new(),
+                ..crate::usage::Entry::neutral()
             },
         )
         .unwrap();
@@ -19069,8 +19052,7 @@ mod tests {
                 step: crate::pipeline::BLOCKED.into(),
                 outcome: "block".into(),
                 at: started_at + 30,
-                at_ms: 0,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
 
@@ -19152,7 +19134,7 @@ mod tests {
                 outcome: "block".into(),
                 at: second,
                 at_ms: second * 1000 + 500,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
 
@@ -21158,10 +21140,7 @@ mod tests {
             f.worktree_path = Some(worktree.to_path_buf());
             f.last_report = Some(crate::task::LastReport {
                 step: "implement".into(),
-                outcome: "pass".into(),
-                at: 0,
-                at_ms: 0,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
 
@@ -21381,34 +21360,16 @@ mod tests {
             crate::usage::append(
                 &repo,
                 &crate::usage::Entry {
-                    tier_tokens: Default::default(),
                     ts: chrono::Utc::now().to_rfc3339(),
                     task: "demo".to_string(),
-                    plan: None,
                     step: "implement".to_string(),
                     pipeline: "default".to_string(),
                     agent: "codex".to_string(),
                     kind: "codex".to_string(),
                     model: "m".to_string(),
                     session: session.to_string(),
-                    round: 0,
                     wall_s: 1,
-                    turns: 1,
-                    tokens: Default::default(),
-                    cost_usd: None,
-                    reported_usd: None,
-                    ctx_peak: None,
-                    pipeline_version: "1.0".into(),
-                    outcome: None,
-                    blocked: false,
-                    run: None,
-                    trial: None,
-                    trial_group: None,
-                    routine: None,
-                    dir: None,
-                    hand: false,
-                    project: String::new(),
-                    command: None,
+                    ..crate::usage::Entry::neutral()
                 },
             )
             .unwrap();
@@ -26236,11 +26197,10 @@ exit 0"#,
         priced(&mut repo, "priced-model");
         let path = add_task_with(&repo, "demo", "review", |f| {
             f.last_report = Some(crate::task::LastReport {
+                at: now_secs() - 60,
                 step: "implement".into(),
                 outcome: "pass".into(),
-                at: now_secs() - 60,
-                at_ms: 0,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
         let started_at = now_secs() - 120;
@@ -26273,10 +26233,8 @@ exit 0"#,
         task.front.stage = "document".into();
         task.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
-            outcome: "pass".into(),
             at: now_secs() - 30,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 
@@ -26307,10 +26265,8 @@ exit 0"#,
         add_task_with(&repo, "demo", "document", |f| {
             f.last_report = Some(crate::task::LastReport {
                 step: "review".into(),
-                outcome: "pass".into(),
                 at: now_secs() - 30,
-                at_ms: 0,
-                blocked: false,
+                ..crate::task::LastReport::neutral()
             });
         });
         let started_at = now_secs() - 120;
@@ -26354,11 +26310,11 @@ exit 0"#,
         priced(&mut repo, "priced-model");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.last_report = Some(crate::task::LastReport {
-                step: "implement".into(),
                 outcome: "block".into(),
                 at: now_secs() - 300,
-                at_ms: 0,
                 blocked: true,
+                step: "implement".into(),
+                ..crate::task::LastReport::neutral()
             });
         });
         let started_at = now_secs() - 120;
@@ -26390,10 +26346,8 @@ exit 0"#,
         task.front.stage = "document".into();
         task.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
-            outcome: "pass".into(),
             at: now_secs() - 30,
-            at_ms: 0,
-            blocked: false,
+            ..crate::task::LastReport::neutral()
         });
         task.save().unwrap();
 

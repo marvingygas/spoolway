@@ -16,7 +16,9 @@
 #   1. A pathology. `$CTL/<task>.<step>`, `$CTL/<task>`, or the task id itself
 #      names one: crash, hang, vanish, bail, noland. These cannot be expressed
 #      as a patch — a hang is the absence of an outcome — and they are what
-#      force the dispatcher's counters and escalations.
+#      force the dispatcher's counters and escalations. `work` is the odd one
+#      out: an ordinary pass that leaves a change behind, for a task that
+#      never ran the step which would have made one.
 #
 #   2. A canned patch. `$SOLUTIONS/<task>/<step>.patch`, applied in the lane's
 #      worktree, followed by the fixture's own test command. This is the mode
