@@ -2,15 +2,14 @@
 //! `spoolway report` now goes through — proving dynamically what
 //! [`crate::pipeline::Pipeline::check_bounded_loops`] only proves on paper.
 //!
-//! A task reaches a step five ways, and [`crate::commands::route`] is only the
+//! A task reaches a step four ways, and [`crate::commands::route`] is only the
 //! first: a lane's report. The dispatcher also moves one when a step is
-//! walked past (`skip:`, `first:`, `last:`), when a lane fails to launch, when
-//! its pane stays busy, and when a background command fails late. Every one of
-//! them lands through [`crate::commands::apply_loop_budget`]. This walk takes
-//! the walk-past and the failed launch or busy pane as moves of their own. A
-//! late background failure is not one: it fires once per run of its step, so
-//! it can only repeat by arriving at that step again, and the edge that
-//! carries it from there is the step's own `on_fail`, already walked.
+//! walked past (`skip:`, `first:`, `last:`), when a lane fails to launch, and
+//! when its pane stays busy. Every one of them lands through
+//! [`crate::commands::apply_loop_budget`]. This walk takes the walk-past and
+//! the failed launch or busy pane as moves of their own. A background command
+//! is a sidecar with no verdict: its exit never moves a task, so it adds no
+//! road to walk.
 //!
 //! `check_bounded_loops` shows that a pipeline's own graph always has a way
 //! out. It does not touch the counters that actually gate a loop at

@@ -905,13 +905,13 @@ pub fn route(
 ///
 /// Every move that lands a task on a step goes through here, so no road
 /// round the limit is left. [`report`] asks it for a lane's own account of
-/// itself, and the dispatcher asks it for the other four: a `run:` step's
+/// itself, and the dispatcher asks it for the other three: a `run:` step's
 /// exit code (a mechanical gate failing back to the agent step behind it is
 /// exactly that case), a task found sitting on a step walked past by `skip:`,
-/// `first:` or `last:`, a lane that could not be started or whose pane never
-/// came free, and a background command that failed after its task had moved
-/// on. A walk-past is counted at the step it lands on; the `loop:` of a
-/// step it skips is spent by [`walked_past_budgets`] before this is asked.
+/// `first:` or `last:`, and a lane that could not be started or whose pane
+/// never came free. A walk-past is counted at the step it lands on; the
+/// `loop:` of a step it skips is spent by [`walked_past_budgets`] before this
+/// is asked.
 ///
 /// What it counts is laps, not conversations: a step with `session: true` may
 /// be re-prompted as often as its session survives, with an optional separate

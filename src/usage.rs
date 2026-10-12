@@ -2504,18 +2504,21 @@ pub fn append(repo: &Repo, entry: &Entry) -> Result<()> {
 ///
 /// The dispatcher reads a finished run's exit code on every pass until the
 /// move it chose has landed, and `reap_stale_runs` reads a background run's
-/// code on every pass for as long as nothing routes on it: a zero exit, or a
-/// step with no `on_fail`. Each read reaches this function, so the run's own
-/// id — see [`CommandRun::id`] — is what keeps one run from being banked once
-/// per pass.
+/// code on every pass, since no background code routes anywhere. Each read
+/// reaches this function, so the run's own id — see [`CommandRun::id`] — is
+/// what keeps one run from being banked once per pass.
 pub fn bank_command_run(repo: &Repo, entry: &Entry) -> bool {
     let Some(run) = &entry.command else {
         return false;
     };
-    let seen = read_cached(repo)
+    !command_run_banked(repo, &run.id) && append(repo, entry).is_ok()
+}
+
+/// Whether the ledger already holds a line for the command run with this id.
+pub fn command_run_banked(repo: &Repo, id: &str) -> bool {
+    read_cached(repo)
         .iter()
-        .any(|line| line.command.as_ref().is_some_and(|c| c.id == run.id));
-    !seen && append(repo, entry).is_ok()
+        .any(|line| line.command.as_ref().is_some_and(|c| c.id == id))
 }
 
 /// Every entry, oldest first. A line that will not parse is skipped rather than

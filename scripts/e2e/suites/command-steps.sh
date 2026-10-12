@@ -622,131 +622,60 @@ else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
 fi
 
-# --------------------------------------------------------- background, on_fail
-# The refusal `pipeline check` used to make against `background: true` plus
-# `on_fail:` is gone — a background command that fails now routes the task
-# down its `on_fail`, whichever step the task has since reached. Proven with
-# two file gates rather than a sleep, so the assertion does not race the mock
-# pipeline's own speed (the whole thing above ran in under a second): `scratch`
-# only fails once told to, and `hold`, spliced in right after it, only passes
-# once told to — so the task is provably sitting well past `scratch`, still
-# going, when the failure lands.
+# ------------------------------------------------------- background, its end
+# A background run never moves its task, so its failure would reach nobody:
+# the dispatcher's own report scrolls away. The line in the task's
+# `## Status Log` is what a person or a later agent can still read.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-SCRATCH_FAIL="$LIVE/scratch-fail-now"
-SCRATCH_HOLD="$LIVE/scratch-hold-release"
-rm -f "$SCRATCH_FAIL" "$SCRATCH_HOLD"
+add_command_step default sidecar "exit 3" review --background
+SIDECAR_RELEASE="$LIVE/sidecar.release"
+rm -f "$SIDECAR_RELEASE"
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$SIDECAR_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+dispatcher_restart
+task_doc "$LIVE/sidecar.md" sidecar "$BODY" "group: sidecar"
+must "a task with a failing background step" "$SPOOLWAY" queue add --from "$LIVE/sidecar.md"
+
+# Read while `hold` keeps the task in the queue, so its file is still there.
+if poll_until 300 grep -q "(background) exited 3" "$SPOOLWAY_PROJECT_HOME/queue/sidecar.md"; then
+  ok "a background command that exits non-zero leaves its line in the Status Log"
+else
+  bad "a background command that exits non-zero leaves its line in the Status Log"
+fi
+if [ "$(stage_of sidecar)" = "hold" ]; then
+  ok "and the task is still on the step it was on"
+else
+  bad "and the task is still on the step it was on (at \`$(stage_of sidecar)\`)"
+fi
+touch "$SIDECAR_RELEASE"
+drive sidecar gone 300 || true
+forget sidecar
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+dispatcher_restart
+
+# --------------------------------------------------------- background, on_fail
+# A background run is a sidecar, so a route on its exit is refused at load:
+# `pipeline check` says so and names both ways out.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: scratch\n'
-  printf '    description: A background step whose command fails once told to.\n'
-  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; echo scratch-failed >&2; exit 1\n' \
-    "$SCRATCH_FAIL"
+  printf '    description: A background step that also declares on_fail.\n'
+  printf '    run: exit 1\n'
   printf '    background: true\n'
-  printf '    on_pass: hold\n'
-  printf '    on_fail: blocked\n'
-  printf '\n  - id: hold\n'
-  printf '    description: Holds the task here so the test can prove it moved past scratch.\n'
-  printf '    run: while [ ! -f %q ]; do sleep 0.2; done\n' "$SCRATCH_HOLD"
   printf '    on_pass: review\n'
+  printf '    on_fail: blocked\n'
 } >> .spoolway/pipelines/default.yml
-# The same rewrite `add_command_step` makes, done by hand for this splice:
-# `implement`'s own `on_pass: review` becomes the entry into `scratch`.
-# `implement`'s own `loop: 2` is left alone — a limit now counts arrivals at
-# the step that carries it, and `review` still sends its failure to
-# `implement`.
 sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/default.yml
-works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
-
-dispatcher_restart   # the pipeline it is holding has neither new step in it
-task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: scratch-fail"
-must "a task behind a background step that will later fail" \
-  "$SPOOLWAY" queue add --from "$LIVE/scratch-fail.md"
-
-if drive scratch-fail hold 120; then
-  ok "the task moved on past the background step while its command was still running"
-else
-  bad "the task moved on past the background step while its command was still running \
-(at \`$(stage_of scratch-fail)\`)"
-fi
-
-touch "$SCRATCH_FAIL"
-if drive scratch-fail blocked 120; then
-  ok "the background command's failure still reached the task, at the step it moved on to"
-else
-  bad "the background command's failure still reached the task, at the step it moved on to \
-(at \`$(stage_of scratch-fail)\`)"
-fi
-# The route is narrated on the dispatcher's own record, same as the mockup —
-# not the task's own Status Log, which `set_stage` writes with no message here,
-# the same as every other route a fall-through or a command step's ordinary
-# `on_fail` takes.
-if wait_for_text 20 "$E2E_DISPATCH_LOG" \
-  '`scratch` (background) exited 1 — moving to `blocked`'; then
-  ok "and the route taken is on the record"
-else
-  bad "and the route taken is on the record"
-fi
-has "blocked_from names the step it was actually pulled out of, not \`scratch\` itself" \
-  "blocked_from: hold" $SPOOLWAY_PROJECT_HOME/queue/scratch-fail.md
-
-# Let the stranded `hold` command finish rather than leave it running for the
-# rest of the suite — its own task has already moved on to `blocked`, so
-# nothing is waiting on it any more.
-touch "$SCRATCH_HOLD"
-
-forget scratch-fail
-
-# ------------------------------------------------- background, on_fail, at done
-# The same promise, kept when the task reaches `done` before the check ends:
-# cleanup used to stop the run unread and archive the task as if it had
-# passed. `late` fails only once told to, so the task is provably at `done`,
-# and still in the queue, when the failure lands.
+refuses "a background step that declares on_fail is refused" \
+  "step \`scratch\` runs in the background but declares \`on_fail\`" \
+  "$SPOOLWAY" pipeline check
+refuses "and the refusal offers to keep it a sidecar" \
+  "keep it a sidecar:  delete \`on_fail:\`" "$SPOOLWAY" pipeline check
+refuses "and to make it a check" \
+  "make it a check:    delete \`background:\`, and the step blocks" \
+  "$SPOOLWAY" pipeline check
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-LATE_FAIL="$LIVE/late-fail-now"
-rm -f "$LATE_FAIL"
-{
-  printf '\n  - id: late\n'
-  printf '    description: A background step that fails after its task is done.\n'
-  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; exit 1\n' "$LATE_FAIL"
-  printf '    background: true\n'
-  printf '    on_pass: review\n'
-  printf '    on_fail: blocked\n'
-} >> .spoolway/pipelines/default.yml
-sed -i "0,/^    on_pass: review\$/s//    on_pass: late/" .spoolway/pipelines/default.yml
-works "a background step checked after its task is done checks out" "$SPOOLWAY" pipeline check
-
-dispatcher_restart   # the pipeline it is holding has no `late` step in it
-task_doc "$LIVE/late-fail.md" late-fail "$BODY" "group: late-fail"
-must "a task behind a background step that fails after it is done" \
-  "$SPOOLWAY" queue add --from "$LIVE/late-fail.md"
-
-if drive late-fail done 120; then
-  ok "the task reached done while its background check was still running"
-else
-  bad "the task reached done while its background check was still running \
-(at \`$(stage_of late-fail)\`)"
-fi
-# Long enough for several passes: an archive would take one.
-sleep 3
-if [ "$(stage_of late-fail)" = done ]; then
-  ok "and it is not archived while the check is still going"
-else
-  bad "and it is not archived while the check is still going \
-(at \`$(stage_of late-fail)\`)"
-fi
-
-touch "$LATE_FAIL"
-if drive late-fail blocked 120; then
-  ok "the check's failure reached the task waiting at done"
-else
-  bad "the check's failure reached the task waiting at done \
-(at \`$(stage_of late-fail)\`)"
-fi
-# `done` is not a step a resume can go back to, so the block names the check:
-# a resume runs it again rather than falling back to whatever reported last.
-has "blocked_from names the failed check, not done" \
-  "blocked_from: late" $SPOOLWAY_PROJECT_HOME/queue/late-fail.md
-
-forget late-fail
 
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
@@ -1450,63 +1379,6 @@ dispatcher_restart
 # Only now: the dispatcher stopped by that restart was started under it.
 rm -f "$PADDED_HOME"
 
-# --------------------------------------------------- the wake: acted on fast
-# The split this task makes: a background step's own `.exit` file lands in
-# the commands directory, which wakes `spoolway dispatch`'s own wait the
-# moment it is written — see `crate::screen::DirWatch` — rather than sitting
-# there until the next `dispatch::PROBE_INTERVAL` (ten seconds, fixed rather
-# than `dispatch.interval` now but no faster than it ever was) probe happens
-# to look. There is no tick in the loop any more: the wake breaks the wait
-# outright and lets a fresh pass — the only thing that ever starts a lane or
-# asks the multiplexer anything — run at once. Proven by reaching `blocked`
-# well under the thirty seconds a run with no wake at all would routinely
-# need — see the timing comment below.
-cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-{
-  printf '\n  - id: tick-check\n'
-  printf '    description: A background step that fails at once, to prove the wake alone reroutes it.\n'
-  printf '    run: exit 1\n'
-  printf '    background: true\n'
-  printf '    on_pass: tick-check-landed\n'
-  printf '    on_fail: blocked\n'
-  printf '\n  - id: tick-check-landed\n'
-  printf '    description: Holds the task, so nothing finishes it while the reap has its say.\n'
-  printf '    run: sleep 600\n    on_pass: done\n'
-} >> .spoolway/pipelines/default.yml
-sed -i "0,/^    on_pass: review\$/s//    on_pass: tick-check/" .spoolway/pipelines/default.yml
-works "a background step for the tick check checks out" "$SPOOLWAY" pipeline check
-
-task_doc "$LIVE/tick-check.md" tick-check "$BODY" "group: tick-check"
-START_TS=$(date +%s)
-must "a task behind the tick-check step queues" \
-  "$SPOOLWAY" queue add --from "$LIVE/tick-check.md"
-
-# Timed from the moment the task queues to the moment it lands on `blocked`
-# — everything in between (settling `implement`'s own lane, starting the
-# background command, the reap that reads its exit) has to happen inside
-# that one span. The worst-case alignment against the ten-second probe still
-# needs two of its passes to get `tick-check` started at all — settling
-# `implement`, then starting the background run and moving on to the step
-# that holds the task — so this cannot be timed against zero. What it is
-# timed against is the *third* pass a run with no wake would need, to notice the
-# meanwhile-finished exit code on its own: thirty seconds, worst case,
-# against this cap's twenty-five.
-if drive tick-check blocked 150; then
-  ELAPSED=$(( $(date +%s) - START_TS ))
-  if [ "$ELAPSED" -lt 25 ]; then
-    ok "the wake alone reroutes the finished background step, well inside the ten-second probe \
-(${ELAPSED}s)"
-  else
-    bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
-(took ${ELAPSED}s — no faster than the probe alone would have)"
-  fi
-else
-  bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
-(never reached blocked; at \`$(stage_of tick-check)\`)"
-fi
-
-forget tick-check
-
 # ------------------------------------------------------------- a run line that execs
 # `exec` replaces the shell it runs in. The line used to run in the wrapper
 # itself, so an `exec` took the wrapper's exit trap with it: no exit code was
@@ -1533,50 +1405,6 @@ else
 fi
 lacks "and the dispatcher never took it for an interrupted run" \
   "was interrupted without an exit code" "$E2E_DISPATCH_LOG"
-
-# ------------------------------------------------------------- pulled off a running command
-# A background step that fails late sends its task to `on_fail` from wherever
-# the task is. If the task is on a blocking command at that moment, the pull
-# used to leave that command's run files on disk, and the next visit to the
-# step routed on them without running the command at all. Now the pull stops
-# the run, and arriving back at the step clears whatever run files are left,
-# so the command runs on every visit. The command
-# sleeps past the background step's one-second failure, which is the
-# still-running half; the file it appends to counts how often it really ran.
-cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-PULL_MARK="$LIVE/pull-bg.mark"
-PULL_RAN="$LIVE/pull-c.txt"
-rm -f "$PULL_MARK" "$PULL_RAN"
-{
-  printf '\n  - id: pull-bg\n'
-  printf '    description: Fails once, a second after it starts, and passes after that.\n'
-  printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; sleep 1; exit 1\n' "$PULL_MARK" "$PULL_MARK"
-  printf '    background: true\n    headless: true\n'
-  printf '    on_pass: pull-c\n    on_fail: implement\n'
-  printf '\n  - id: pull-c\n'
-  printf '    description: Still running when the background step fails behind it.\n'
-  printf '    run: echo ran >> %s; sleep 12\n' "$PULL_RAN"
-  printf '    headless: true\n'
-  printf '    on_pass: review\n    on_fail: implement\n'
-} >> .spoolway/pipelines/default.yml
-sed -i "0,/^    on_pass: review\$/s//    on_pass: pull-bg/" .spoolway/pipelines/default.yml
-works "a background step failing back to the agent step checks out" "$SPOOLWAY" pipeline check
-
-task_doc "$LIVE/pulled.md" pulled "$BODY" "group: pulled"
-must "a task for the pull-off case queues" "$SPOOLWAY" queue add --from "$LIVE/pulled.md"
-if drive pulled gone 240; then ok "a task pulled off a running command still reaches the end"
-else bad "a task pulled off a running command still reaches the end (at \`$(stage_of pulled)\`)"; fi
-if [ "$(wc -l < "$PULL_RAN" 2>/dev/null || echo 0)" -eq 2 ]; then
-  ok "the command ran again on the second visit rather than routing on the first run's code"
-else
-  bad "the command ran again on the second visit rather than routing on the first run's code \
-($(wc -l < "$PULL_RAN" 2>/dev/null || echo 0) run(s) in $PULL_RAN, wanted 2)"
-fi
-if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c)" -eq 2 ]; then
-  ok "and the task arrived at it twice"
-else
-  bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c) time(s))"
-fi
 
 # ------------------------------------------------------------- paused after the run exited
 # Pausing a command step kills a run that is still going, and the command runs

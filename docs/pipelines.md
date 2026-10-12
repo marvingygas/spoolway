@@ -167,9 +167,8 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
 - Every way a task reaches a step counts as an arrival: a lane's report, a command's exit code,
   a walk-past by `skip:`, `first:` or `last:`, a lane that cannot start or whose pane stays
-  busy, and a background command that fails after the task moved on. A walk-past counts one
-  arrival at the step it lands on. It also counts one arrival at each step it skips that
-  carries a `loop:`. A skipped step without a `loop:` counts none.
+  busy. A walk-past counts one arrival at the step it lands on. It also counts one arrival at
+  each step it skips that carries a `loop:`. A skipped step without a `loop:` counts none.
 - A walk-past over a step whose `loop:` is spent goes to that step's loop exit, which is
   `blocked`. This stops a cycle whose only `loop:` is on a step the task skips.
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
@@ -320,7 +319,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
   different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
 - `prompt`, `model`, `effort` and `session` are refused. The step takes no slot.
 - `gate: true` holds a passing exit on `paused`. See [Gates](#gates). A `background: true` step
-  passes when it starts, so it has no exit to hold, and `gate` is refused there.
+  passes when it starts, so it has no exit to hold, and `gate` is refused there. So is
+  `on_fail`, because a background run is a sidecar and its exit never moves the task.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
 - Every arrival at a command step runs the command in full. The move onto the step stops any old
@@ -347,9 +347,6 @@ A build, a test suite, a formatter or a deploy script is a command step.
   keeps running after the command exits. A `<task> · <step>.group` record under `commands/`
   names its process group. The next arrival at the step stops it. So does cleanup, which
   stops it before the worktree is deleted. `spoolway queue unqueue --force` stops it too.
-- A late background failure can move a task off a command step. That stops the step's running
-  command and deletes its run files, including an exit code it already wrote. The next visit
-  runs the command again.
 - A blocking command whose task leaves the step by another road, such as a `spoolway report`
   typed by hand or a `last:` walk-past, is stopped on the dispatcher's next pass. Its run files
   are deleted and its exit code never moves the task. Its pane closes.
@@ -363,17 +360,27 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | | Blocking (default) | `background: true` |
 |---|---|---|
 | Next step | starts when the command exits | starts at once |
-| Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. A later non-zero exit sends the task to `on_fail` from wherever it is. |
-| `timeout` | routes to `on_fail` | kills the run, nothing routes |
+| Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. The exit is never read to route. |
+| `on_fail` | allowed | refused when the pipeline loads |
+| `timeout` | routes to `on_fail` | stops the run and writes a Status Log line, nothing routes |
 
-A task that reaches `done` while a background step with `on_fail` is still running stays at
-`done`. It is not archived and its `done` hook does not fire until the run ends. A non-zero
-exit sends the task to `on_fail`. A zero exit lets the task archive. A run that outlives its
-step's `timeout` is stopped, so the task never waits past it. A background step with no
-`on_fail` is stopped when the task is cleaned up.
+A background step is a sidecar with no verdict. Its run never moves the task, however it ends:
+a non-zero exit, a timeout and a pass all leave the task where it is. A task that reaches `done`
+is archived without waiting for the run, and a run still going is stopped when the task is
+cleaned up. A run that ends has its pane closed and is counted once in the ledger.
 
-When the late failure sends the task to `blocked`, the task records the failed background step
-as the step it was blocked from. `spoolway resume` runs that step again.
+A run that exits non-zero, or is stopped at its `timeout:`, leaves one line in the task's
+`## Status Log`. The line is saved even though the task does not move. A run that exits 0 leaves
+no line.
+
+```
+- 2026-10-12 21:40 `observe` (background) exited 3 — the task did not move; log: ~/.spoolway/demo/commands/demo · observe.log
+- 2026-10-12 21:41 `observe` (background) ran past its timeout of 3s and was stopped — the task did not move; log: ~/.spoolway/demo/commands/demo · observe.log
+```
+
+A pipeline that gives a background step an `on_fail` does not load. The message names both
+fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:
+the task then waits for the command, and its exit picks `on_pass` or `on_fail`.
 
 A command step runs in its own pane. `headless: true` runs that command with no pane; this
 step option is separate from the internal test-only dispatcher backend. A pane closes the
@@ -423,8 +430,8 @@ The dispatcher also walks a task past a hidden step it finds the task sitting on
 reach it:
 
 - A task that was waiting its `serial:` turn when a dependent was queued above it.
-- A task sent to a step by a failed lane start's `on_fail`, a background command's late
-  `on_fail`, a resume of a parked task, or an unattended self-resume after an escalation.
+- A task sent to a step by a failed lane start's `on_fail`, a resume of a parked task, or an
+  unattended self-resume after an escalation.
 
 ### `serial:` — one run of the step at a time
 

@@ -4039,20 +4039,8 @@ fn build_rows(
                     (State::Paused, next, resumable)
                 }
             }
-            // A task held at `done` for a background check that can still
-            // fail is not finished. The hold lasts up to the step's
-            // `timeout:`, and a row reading "finished" that neither archives
-            // nor moves would explain nothing for that long.
             None if task.stage() == crate::pipeline::DONE => {
-                let keys = runs.keys_for_task(task.id());
-                match crate::dispatch::awaited_check(pipeline, &runs, task.id(), &keys) {
-                    Some(step_id) => (
-                        State::Waiting,
-                        format!("waiting on background `{step_id}`"),
-                        false,
-                    ),
-                    None => (State::Queued, "finished".to_string(), false),
-                }
+                (State::Queued, "finished".to_string(), false)
             }
             None => (
                 State::Unknown,
@@ -5289,41 +5277,6 @@ fn off_a_step(
         } else {
             Move::Left { from, to }
         };
-    }
-
-    // A background run the task had already walked past, failing into its
-    // own `on_fail` — named only when exactly one such step routes there,
-    // and only when none of `was`'s own routes could have brought the task
-    // here instead: the two roads leave the same file behind.
-    let in_background =
-        |s: &&crate::pipeline::Step| s.background && s.id != was && s.kind() == StepKind::Command;
-    let mut background = pipeline
-        .steps
-        .iter()
-        .filter(in_background)
-        .filter(|s| s.on_fail.as_deref() == Some(stage));
-    if let (Some(run), None) = (background.next(), background.next()) {
-        let own = on_pass == Some(stage) || on_fail == Some(stage) || into_blocked;
-        return match own {
-            true => Move::Left { from, to },
-            false => Move::FailedInBackground {
-                from: run.id.clone(),
-                to,
-            },
-        };
-    }
-    // `reap_stale_runs` sends a background failure through
-    // `apply_loop_budget` too, so one whose `on_fail` has spent its `loop:`
-    // lands on `blocked` instead — the same file a lane dead at launch or a
-    // step's own spent loop leaves. Every cause below would be a guess.
-    if into_blocked
-        && pipeline
-            .steps
-            .iter()
-            .filter(in_background)
-            .any(|s| spent(s.on_fail.as_deref()).is_some())
-    {
-        return Move::Left { from, to };
     }
 
     // A command step never reports: its exit code routes it, and the route
@@ -6936,47 +6889,6 @@ mod tests {
         assert!(rows[0].lane_time.is_some(), "an exited run keeps its time");
     }
 
-    /// A task at `done` held for a background check that can still fail does
-    /// not read "finished": its row names the check, and goes back to
-    /// "finished" once the run is over.
-    #[test]
-    fn a_task_at_done_held_for_a_background_check_names_it_on_the_board() {
-        let (repo, _root_guard) = fixture("board-done-held");
-        let mut pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some(crate::pipeline::DONE));
-        let tasks = repo.tasks().unwrap();
-        let name = pipelines.for_task(&tasks[0]).unwrap().name.clone();
-        let check = pipelines
-            .pipelines
-            .get_mut(&name)
-            .unwrap()
-            .steps
-            .iter_mut()
-            .find(|step| step.id == "handover")
-            .unwrap();
-        check.background = true;
-        check.on_fail = Some(crate::pipeline::BLOCKED.to_string());
-
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("handover", "login");
-        let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{key}.pid")),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-
-        let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
-        assert!(matches!(rows[0].state, State::Waiting));
-        assert_eq!(rows[0].next, "waiting on background `handover`");
-
-        std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
-        assert_eq!(rows[0].next, "finished", "an ended check holds nothing");
-    }
-
     /// A stopped header counts the steps still working, singular for one and
     /// left out at none; a running one reads exactly as it did.
     #[test]
@@ -8282,8 +8194,8 @@ mod tests {
 
     /// A pipeline with one of every road a RECENT sentence tells apart: an
     /// agent step with no `on_fail` (`implement`) and one with
-    /// (`review`), three `loop:` budgets (`review`, `fix` and `e2e`, the
-    /// background step's `on_fail`), a command step
+    /// (`review`), three `loop:` budgets (`review`, `fix` and `e2e`, which
+    /// only a hand move or a walk past reaches), a command step
     /// (`test`), a background one (`suite`), a gated step (`approve`), a
     /// `last:` step (`handover`) and a staffed `blocked`.
     const ROADS: &str = "steps:\n  \
@@ -8291,7 +8203,7 @@ mod tests {
         - id: review\n    agent: pi\n    loop: 2\n    on_pass: test\n    on_fail: fix\n  \
         - id: fix\n    agent: pi\n    loop: 1\n    on_pass: review\n  \
         - id: test\n    run: 'true'\n    on_pass: suite\n    on_fail: fix\n  \
-        - id: suite\n    run: 'true'\n    background: true\n    on_pass: approve\n    on_fail: e2e\n  \
+        - id: suite\n    run: 'true'\n    background: true\n    on_pass: approve\n  \
         - id: e2e\n    agent: pi\n    loop: 1\n    on_pass: approve\n  \
         - id: approve\n    agent: pi\n    gate: true\n    on_pass: handover\n  \
         - id: handover\n    run: 'true'\n    last: true\n    on_pass: done\n  \
@@ -8952,62 +8864,6 @@ mod tests {
             },
         );
         assert_eq!(line, "passed handover, moved to blocked (uncommitted work)");
-    }
-
-    /// `suite` ran in the background while the task walked on to `approve`,
-    /// then exited non-zero: `reap_stale_runs` moves the task down
-    /// `suite`'s `on_fail` from wherever it is.
-    #[test]
-    fn a_background_run_failing_reads_failed_in_the_background() {
-        let line = line_after(
-            "road-background",
-            "approve",
-            |_| {},
-            |repo, pipelines| {
-                let mut task = repo.task("t").unwrap();
-                let pipeline = pipelines.for_task(&task).unwrap().clone();
-                let to = crate::commands::apply_loop_budget(
-                    &pipeline,
-                    &mut task,
-                    "approve",
-                    "e2e".into(),
-                    false,
-                );
-                task.set_stage(&to, None);
-                task.save().unwrap();
-            },
-        );
-        assert_eq!(line, "failed suite in the background, moved to e2e");
-    }
-
-    /// The cause is dropped here: `suite` fails in the background while the
-    /// task works `review`, and `reap_stale_runs` finds `e2e`'s `loop:`
-    /// already spent, so the task lands on `blocked`. `review` sent no
-    /// report and routes a refused launch to `fix`, so without the
-    /// background check this would read as a lane dead at launch.
-    #[test]
-    fn a_background_run_failing_into_a_spent_loop_reads_left_without_a_cause() {
-        let line = line_after(
-            "road-background-spent",
-            "review",
-            |task| walk(task, &["e2e", "review"]),
-            |repo, pipelines| {
-                let mut task = repo.task("t").unwrap();
-                let pipeline = pipelines.for_task(&task).unwrap().clone();
-                let to = crate::commands::apply_loop_budget(
-                    &pipeline,
-                    &mut task,
-                    "review",
-                    "e2e".into(),
-                    false,
-                );
-                assert_eq!(to, crate::pipeline::BLOCKED);
-                crate::commands::set_blocked_from(&mut task, "review");
-                task.set_stage(&to, None);
-                task.save().unwrap();
-            },
-        );
-        assert_eq!(line, "left review, moved to blocked");
     }
 
     /// A lane working `blocked` passes, and the task goes one step past
