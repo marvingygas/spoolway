@@ -575,6 +575,12 @@ step and a `suite` step with `last: true`. No pipeline waits on a pull request's
 `test` and `suite`, but `test` runs `scripts/gate-quick.sh` instead of `scripts/gate.sh`, and
 `suite` runs the `smoke` tier instead of `pr`.
 
+`.spoolway/pipelines/skill.yml` edits a skill that spoolway ships. Its `edit` step uses the
+`skill-editor` prompt, and its `review-prose` step uses the `prose-reviewer` prompt to hold
+every added line to plain English. A `check` command step rebuilds and reinstalls the skill
+copies and fails on any difference between them. Tasks queued on it use the `default` task
+template.
+
 ## The agent path in the shipped `bugfix` pipeline
 
 ```mermaid
