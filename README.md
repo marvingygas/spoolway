@@ -33,7 +33,7 @@ Running one coding agent is easy. Running five is hard: which one is done, which
 stuck, and which one is rewriting a file another one needs. The order lives in your head.
 
 spoolway keeps that order for you. Its dispatcher has no model inside, so scheduling does not
-add model costs or depend on an agent's judgment. 
+add model costs or depend on an agent's judgment.
 
 ## How does it work?
 
@@ -46,26 +46,21 @@ An agent can report four outcomes:
 | Outcome | What happens |
 |---|---|
 | `pass` | Moves to the step's `on_pass` destination. |
-| `fail` | Moves to `on_fail`, often an earlier step, or to `blocked` if none is set. |
-| `block` | Moves to `blocked`. In an unattended run, the configured unblocker agent takes over. |
-| `pause` | Lets an unblocker hand an unresolved issue to a person. |
+| `fail` | Moves to `on_fail` or to `blocked` if none is set. |
+| `block` | Moves to `blocked`, usually handled by a bigger model you configure. |
+| `pause` | Stops the pipeline. It won't resume without you. Only gates or the blocked agent can pause a pipeline. |
 
 A gate can pause a task for a person after a step reports.
 
 ## Features
 
-- **A dispatcher with no model in it.** Every scheduling decision is a counter, a
-  timestamp, or a position in the pipeline file. It costs nothing and is safe to interrupt.
-- **Any mix of agents.** Each step names its own agent and model: a local model for
-  implementation, a cloud model for review, a shell command for the tests.
+- **A dispatcher with no model in it.** A TUI dashboard gives an overview of your queued tasks.
+- **Define agents or commands.** Each step names its own agent and model.
 - **A worktree per task.** Every task works on its own branch in its own checkout.
-  Parallel tasks never touch each other's files.
-- **Optional, token-free GitHub pull requests.** **`spoolway stack`** commits, squashes,
-  pushes and opens a pull request without an LLM call. Dependent tasks can become an ordered
-  stack of pull requests. Where or whether you call the command is up to you.
-- **Session reuse.** A step can resume its prompt's earlier conversation. It stops
-  reusing when the model's window is too full.
-- **Unattended runs.** When a task blocks, a configurable unblocker agent takes over.
+  Made visible through herdr.
+- **Session context configuration.** Set thresholds for when to re-prompt a session,
+  auto-compact, or when to escalate to blocked state.
+- **Unattended runs.** When a task blocks, a configurable prompt takes over.
   It pauses the task for you only when it cannot resolve the issue.
 - **Trials.** Fork a group into one full copy per pipeline you tick, and compare
   the arms in eval.
@@ -91,7 +86,7 @@ From source instead, in a clone of this repository:
 cargo install --path .
 ```
 
-As herdr plugin:
+As a herdr plugin:
 
 ```
 herdr plugin install marvingygas/spoolway
@@ -338,15 +333,15 @@ key_in_names = true          # prefix branch and worktree names with the tracker
 [agents.claude]
 kind = "claude"
 concurrency = 3              # most lanes of this profile at once
-session_reuse_ctx = 50       # % of the window before a carried session restarts fresh
-session_blocked_ctx = 0      # % of the window at which a running lane is stopped and blocked; 0 is off
+session_reuse_ctx = 20       # % of the window before a carried session restarts fresh
+session_blocked_ctx = 40     # % of the window at which a running lane is stopped and blocked; 0 is off
 permission_mode = "auto"
 
 [agents.codex]
 kind = "codex"
 concurrency = 3
-session_reuse_ctx = 50
-session_blocked_ctx = 0
+session_reuse_ctx = 20
+session_blocked_ctx = 40
 permission_mode = "never"
 
 [agents.pi]
