@@ -130,7 +130,7 @@ sweep() {
 # What a person abandoning a task by hand would do — there is no `queue
 # remove`, because there is ordinarily no reason to want one, and a stop no
 # longer reclaims a checkout either. So this suite's own housekeeping does
-# what both used to: the lane's process is killed outright, its worktree and
+# what both used to: the lane's process group is killed outright, its worktree and
 # branch go back with git directly, and the task file itself leaves the
 # queue. Named for the stage the task is still sitting on — a swept task was
 # never a *done* one, so its lane keeps the name of the step it stood on
@@ -143,7 +143,7 @@ forget() {
   local id=$1 lane pid wt
   lane="$id · $(stage_of "$id")"
   pid=$(cat "$SPOOLWAY_PROJECT_HOME/headless/$lane.pid" 2>/dev/null)
-  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+  kill_lane_group "$pid"
   wt=$(worktree_of "$id")
   [ -n "$wt" ] && git worktree remove --force "$wt" 2>/dev/null
   git branch -D "task/$id" 2>/dev/null

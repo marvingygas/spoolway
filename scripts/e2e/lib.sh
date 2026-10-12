@@ -825,6 +825,41 @@ dispatcher_stop() {
   return 0
 }
 
+# Stop a lane's whole process group, given the pid its pid file holds. A
+# headless lane is `sh -c <script>` leading a group of its own, with the agent
+# as the shell's child, so signalling the pid alone ends the shell and leaves
+# the agent running with nothing above it. The shell builtin takes the
+# negative group id where procps `kill(1)` would not; see `signal_group` in
+# `src/headless.rs`. `kill -- -0` signals the caller's own group and
+# `kill -- -1` every process the caller may signal, so neither 0 nor 1 is ever
+# sent, and a group that is already gone is left alone. `KILL` is delivered
+# before the kernel has torn the processes down, so this waits for the group to
+# go: a caller that removes the lane's worktree next, or `run.sh` deleting the
+# run folder, would otherwise still meet an agent mid-write.
+kill_lane_group() {
+  local pid=${1:-}
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$pid" -gt 1 ] || return 0
+  kill -0 -- "-$pid" 2>/dev/null || return 0
+  kill -KILL -- "-$pid" 2>/dev/null
+  poll_while 5 kill -0 -- "-$pid"
+  return 0
+}
+
+# Stop every lane whose pid file is under `headless/`. The EXIT trap calls it
+# so that a suite which fails before it forgets a lane, or which keeps lanes
+# alive past the dispatcher on purpose, leaves no agent writing into a run
+# folder `run.sh` is about to delete.
+lanes_stop() {
+  local dir=${SPOOLWAY_PROJECT_HOME:-}/headless f
+  [ -n "${SPOOLWAY_PROJECT_HOME:-}" ] && [ -d "$dir" ] || return 0
+  for f in "$dir"/*.pid; do
+    [ -f "$f" ] || continue
+    kill_lane_group "$(cat "$f" 2>/dev/null)"
+  done
+  return 0
+}
+
 # The dispatcher keeps the pipelines it loaded and its environment from when it
 # started, and a few config keys with them — see `_config_stamp`. That is fine
 # for a person — they restart it — and it is the one thing a suite has to say
@@ -838,9 +873,9 @@ dispatcher_restart() {
 
 # A suite reaching its end is the ordinary exit; a failed `must` is the other
 # one. Both have to take the dispatcher down with them — and a screen left
-# open, with the dispatcher it started — and both have to hand run.sh the
-# tally — see `record_results`.
-trap 'screen_stop; dispatcher_stop; record_results' EXIT
+# open, with the dispatcher it started — and every lane still running, and
+# both have to hand run.sh the tally — see `record_results`.
+trap 'screen_stop; dispatcher_stop; lanes_stop; record_results' EXIT
 
 # ------------------------------------------------------------- the task queue
 stage_of() { grep '^stage:' "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2>/dev/null | awk '{print $2}'; }

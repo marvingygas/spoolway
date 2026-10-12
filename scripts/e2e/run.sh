@@ -143,8 +143,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes)
-nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes faults)
+pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-orphans)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-orphans faults)
 cloud_suites=(warmth)
 live_suites=(live)
 
@@ -554,12 +554,13 @@ launch_suite() {
     # open for this whole run, so without this every process a suite forks
     # gets a copy of it — including the detached lanes and stand-ins that
     # `disaster` and `board-pause` leave running on purpose. Those outlive
-    # the run, get reparented to init, and go on holding the lock from a
-    # scratch tree that no longer exists, so the *next* `--tier pr` run on
-    # the machine blocks in `flock` forever: before any suite starts, and so
-    # before the per-suite watchdog covers anything. Observed exactly that
-    # way on a dev box, with `pi` doubles from a finished run still pinning
-    # the file. Closing it here costs the suite nothing — it is this
+    # the run when the watchdog's `timeout -k` kills a suite before its EXIT
+    # trap can stop them, get reparented to init, and go on holding the lock
+    # from a scratch tree that no longer exists, so the *next* `--tier pr`
+    # run on the machine blocks in `flock` forever: before any suite starts,
+    # and so before the per-suite watchdog covers anything. Observed exactly
+    # that way on a dev box, with `pi` doubles from a finished run still
+    # pinning the file. Closing it here costs the suite nothing — it is this
     # script's lock, not the suite's, and `lock.sh`'s nested runs each open
     # their own.
     if [ -n "${E2E_PR_LOCK_FD:-}" ]; then exec {E2E_PR_LOCK_FD}>&-; fi

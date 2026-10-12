@@ -116,7 +116,7 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, upgrade, herdr-bind, remote-base, home-mode, kept-panes | The `suite` step of the pipelines, on the last task of a chain |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, upgrade, herdr-bind, remote-base, home-mode, kept-panes, lane-orphans | The `suite` step of the pipelines, on the last task of a chain |
 | `nightly` | the `pr` suites plus `faults` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
@@ -147,6 +147,7 @@ with a `// covers:` line.
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one. Also `config set` beside an active config layer |
 | `home-mode` | A checkout with no `.spoolway/`, run in a workspace under `~/.spoolway/`. It also covers the clone's id: a superproject moved on disk that finds its queue again, an `init` cancelled at its first question that leaves `.git` and `~/.spoolway/` as they were (needs util-linux `script`), and several first commands started at once in a fresh clone that agree on one home |
 | `kept-panes` | A two-step task driven through the herdr double: `spoolway lane` still lists the first step's lane while the second step runs, and both lanes are gone once the task is done. A second task with `dispatch.keep_finished_lanes` set to `false` lists only the second step's lane while it runs |
+| `lane-orphans` | A suite that ends or forgets a lane leaves none of that lane's processes running. The `forget` helpers of `disaster` and `faults` stop the lane's agent and not only its shell. The exit trap in `lib.sh` stops every lane under `headless/`, and never signals a pid file that holds `0`, a non-number or nothing |
 | `faults` | Faults injected where the stress test found bugs by hand. `SPOOLWAY_TEST_KILL_AT` makes a test dispatcher kill itself inside `git worktree add` and `git worktree remove` in a repository of ten thousand files. The suite also covers a command step's wrapper killed alone by `SIGKILL` and by `SIGTERM`, a dispatcher on a terminal while a cron job fires under an issue hook whose tool is missing, a base ask to `origin` over a stalled ssh transport, eight `config set` calls at once, and `resume` under a live unblocker. A case whose fix is not on `main` yet is marked expected-fail, and the suite prints a line once it passes. It takes about three and a half minutes, so it runs in `nightly` only |
 | `upgrade` | Whether this binary still reads what the 0.6.0 release wrote. The 0.6.0 `.spoolway/` tree under `scripts/e2e/fixtures/` goes through a real `spoolway sync`: its `housekeeping.retention_days` survives, the prose around the pipeline file's key block comes back byte for byte, `spoolway pipeline check` loads the result, and a task queues against it. A dry run changes no file, and the files it lists are the files a real run reports and changes on disk. A sync that cannot remove one file writes nothing, `config.toml` included |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. It ages sessions by waiting, so a run takes about ten minutes. |
@@ -155,6 +156,12 @@ with a `// covers:` line.
 Each suite runs in its own process and scratch tree under `/tmp`, with its own prompts, so no
 suite depends on the shipped prompt text. That isolation is what lets four of them run at
 once, which is the default — see `--jobs`.
+
+When a suite exits, its exit trap in `scripts/e2e/lib.sh` stops the screen and the dispatcher.
+It then stops the whole process group of every lane whose pid file is under `headless/`, and
+waits for the group to go. A lane a suite kept running on purpose, or left behind after a
+failed check, does not outlive the suite. The `forget` helpers in `disaster` and `faults` stop a
+lane's group the same way.
 
 ## The one suite that spends money
 
