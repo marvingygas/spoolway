@@ -545,24 +545,40 @@ screen_board() {
 # answered. Down moves the cursor onto it and `enter` picks it; a letter
 # answers nothing. Done once the
 # header names the child's pid. Fails the suite's setup if it never does.
+#
+# It reads only the last frame, and sends a key only once the screen has drawn
+# a new frame since the last key. It used to grep everything drawn since a mark
+# it re-took each round, which saw the popup's own redraw after `↓` — the same
+# popup, cursor now on `> hide until these change` — as a second question. It
+# answered that too: the `↓` moved the board's cursor and the `enter` landed on
+# `[enter] stop dispatching`, stopping the dispatcher it had just started
+# (disaster's problem-log case, on `main` and on #943's merge).
 screen_dispatch() {
-  local mark i
+  local seen i
   screen_board
+  seen=$(screen_frames)
   screen_press $'\r'
-  for ((i = 0; i < 3; i++)); do
-    mark=$(wc -l < "$E2E_SCREEN_LOG")
-    poll_until 10 _screen_started_or_asked "$mark"
-    if screen_drew_since "$mark" "dispatcher running · pid "; then return 0; fi
-    screen_drew_since "$mark" "hide until these change" &&
-      screen_press $'\x1b[B' && screen_press $'\r'
+  for ((i = 0; i < 200; i++)); do
+    sleep 0.2
+    [ "$(screen_frames)" -gt "$seen" ] || continue
+    case "$(screen_last_frame)" in
+      *"dispatcher running · pid "*) return 0 ;;
+      *"> hide until these change"*) seen=$(screen_frames); screen_press $'\r' ;;
+      *"hide until these change"*) seen=$(screen_frames); screen_press $'\x1b[B' ;;
+    esac
   done
-  poll_until 10 screen_drew_since "$mark" "dispatcher running · pid " && return 0
   printf '  \033[31mSETUP\033[0m the dispatch tab never started dispatching\n' >&2
   tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
   exit 2
 }
-_screen_started_or_asked() {
-  screen_drew_since "$1" "dispatcher running · pid " || screen_drew_since "$1" "hide until these change"
+
+# The last frame the open screen drew — everything after the last frame start
+# code [`screen_frames`] counts — which is what is on screen now. A frame still
+# being written reads short, and the next poll reads it whole.
+screen_last_frame() {
+  local log start=$'\x1b[?2026h\x1b[H'
+  log=$(<"$E2E_SCREEN_LOG")
+  printf '%s' "${log##*"$start"}"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and
