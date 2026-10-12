@@ -646,19 +646,6 @@ pub fn configured(repo: &Repo) -> bool {
     hook_path(repo).is_some()
 }
 
-/// The tracker a configured hook opens tickets on, as the queue screen's
-/// question names it before any is opened: the hook's own filename with its
-/// extension dropped — `github.sh` is `github`, `jira.sh` is `jira`. A hook
-/// says nothing else about where its tickets go, and the shipped hooks are
-/// named for their trackers, so the name is the one honest thing to say.
-pub(crate) fn tracker(repo: &Repo) -> String {
-    let hook = repo.config.issue_tracking.hook.trim();
-    Path::new(hook)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| hook.to_string())
-}
-
 /// How many runs of one hook event may be killed in a row, each without an
 /// exit code, before [`fire`] stops starting it again and [`killed`] answers
 /// for it instead. The same ceiling a command step gets — see

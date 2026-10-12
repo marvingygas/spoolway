@@ -228,13 +228,39 @@ off` written onto every task, and `esc` returns to the queue screen with nothing
 scripts](configuration.md#the-shipped-hook-scripts).
 
 When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
-before it opens any ticket. The question names the tracker and lists every task in the batch.
-`enter` on `create and queue` opens the tickets and queues, `enter` on `queue only` queues the
-batch with `tracking: off` written onto every task instead, and `esc` returns to the queue screen
-with nothing queued. Once the hook
-runs, a popup fills in each task's row as the hook answers it and takes `enter` only once every
-row is done. Queueing a routine from the routines tab asks the same question. A trial never
-asks and opens no ticket. See
+before it opens any ticket. The popup is a checklist of the groups that skip issue tracking for
+this run:
+
+```
+╭─ issue tracking ─────────────────────────────────────────────────╮
+│                                                                  │
+│  Deactivate issue tracking for selected groups:                  │
+│                                                                  │
+│  > [ ] cart       3 tasks                                        │
+│    [ ] checkout   2 tasks                                        │
+│    [ ] search     1 task                                         │
+│                                                                  │
+│  [enter] confirm   [space] select   [a] select all   [esc] back  │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+Each row is a group with at least one task that has no `ticket:`. The count is how many of the
+group's tasks the batch queues. Nothing starts ticked.
+
+| Key | What it does |
+| --- | --- |
+| `space` | Ticks or clears the group under the cursor. |
+| `a` | Ticks every group, or clears every tick when all are ticked. |
+| `enter` | Queues the batch. A ticked group's tasks get `tracking: off` written onto them and never reach the hook. Every other group's tickets are opened. |
+| `esc` | Returns to the queue screen with nothing queued. |
+
+When no group has a task without a `ticket:`, no popup opens. While the hook runs, a `running
+hook` popup shows one line, `running the hook: <n> of <total> tasks`. `<total>` counts the tasks
+the hook is called for, so a ticked group's tasks are not in it. The `queued` popup then opens on
+`Hook executed successfully`, followed by `queued <n> tasks`, every queued id and the dispatcher
+line. When every group was ticked, the hook is never called and the popup has no success line.
+Queueing a routine from the routines tab asks the same question and shows the same popups. A
+trial never asks and opens no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`
@@ -251,6 +277,7 @@ spoolway queue add --from <PATH> --base <BRANCH>
 | `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
+| `--no-tracking [<GROUP>]` | | Queue a group with `tracking: off` and call no `open` hook for it. Repeatable, once per group. With no group, it covers every group in the batch |
 
 While a dispatcher runs, a task whose `pipeline:` that dispatcher did not load is refused, and
 the message says to restart the dispatcher. See [Editing a pipeline while it
@@ -290,12 +317,30 @@ written. A `--from` path anywhere else, including `-`, is read and left alone.
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
 unmet one prints the same gate the queue screen draws. At a terminal it waits for `enter` to
 queue with `tracking: off` written onto every task, or `esc` to back out. With no terminal it
-proceeds the same way without waiting. Otherwise it opens a ticket per task. See
+proceeds the same way without waiting. Otherwise it opens a ticket per task. It calls no `open`
+hook for a task that sets `tracking: off` itself. A batch's other tasks still call it, and a
+failure there refuses the whole batch. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
+
+`--no-tracking` gives the queue screen's issue question from the command line. `--no-tracking
+checkout` queues every task of the group `checkout` with `tracking: off`. The other groups open
+their tickets as before. Repeat the flag for more groups. On its own, as in `--no-tracking --from
+tasks/`, it covers every group in the batch, and the word after it is read as a group only when
+it is not a flag. An empty group name, as in `--no-tracking ""`, is refused. The flag is accepted
+with no hook configured, where it only writes `tracking: off`. `--dry-run` checks it too.
+
+A group that no task in the batch belongs to is refused before the hook runs, and nothing is
+queued:
+
+```
+spoolway: --no-tracking names `chekout`, but no task in this batch belongs to that group.
+The batch's groups are cart, checkout, search.
+Fix the group name, or drop the flag to open every group's tickets. Nothing was queued.
+```
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`
 and a task's issue reads `task issue`. The status is `created`, `kept` or `FAILED`. The queue
-screen's `opening issues` and `issues created` popups use the same words.
+screen does not list these rows.
 
 ```
 issue_tracking: opening tickets for group `cart`

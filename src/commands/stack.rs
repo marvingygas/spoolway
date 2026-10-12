@@ -1374,6 +1374,7 @@ mod tests {
                 from: vec![path.display().to_string()],
                 base: Some("plan/demo".to_string()),
                 dry_run: false,
+                no_tracking: Vec::new(),
             },
             &repo.root,
             false,

@@ -535,9 +535,9 @@ fn queue_add_gathered(
 ) -> Result<()> {
     let base = args.base.as_deref();
     if args.dry_run {
-        return queue_add_dry_run(repo, pipelines, base, tasks);
+        return queue_add_dry_run(repo, pipelines, base, tasks, &args.no_tracking);
     }
-    queue_add_tasks(repo, pipelines, base, tasks)
+    queue_add_tasks(repo, pipelines, base, tasks, &args.no_tracking)
 }
 
 /// `--dry-run`: everything `queue add` decides, said out loud, and nothing
@@ -550,8 +550,11 @@ fn queue_add_dry_run(
     pipelines: &Pipelines,
     base: Option<&str>,
     submitted: &[(String, String)],
+    no_tracking: &[String],
 ) -> Result<()> {
-    let tasks = validate_batch(repo, pipelines, base, submitted)?;
+    // A typo in a group name is refused by a dry run too: it is the run a
+    // person checks a command line with before they trust it.
+    let tasks = validate_batch_untracking(repo, pipelines, base, submitted, no_tracking)?;
     refuse_missing_start(repo, &tasks)?;
     println!("dry run — nothing written");
     println!("  project: {}", repo.root.display());
@@ -1227,14 +1230,51 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
 /// Parse and validate every task as one set: a `depends_on` naming a
 /// sibling in the same submission is satisfied with nothing sorted first,
 /// and one bad task queues nothing. Split out from
-/// [`queue_add_tasks`] so the queue screen can hold the validated batch
-/// across its conflict gate instead of writing it the moment it parses —
-/// see that screen's own `begin_submission`.
+/// [`queue_add_tasks`] so a caller can hold the validated batch before
+/// writing it. The queue screen does, across its conflict gate, through
+/// [`validate_batch_undescribed`]; this form serves the callers with no
+/// question to ask.
 pub(crate) fn validate_batch(
     repo: &Repo,
     pipelines: &Pipelines,
     base: Option<&str>,
     submitted: &[(String, String)],
+) -> Result<Vec<Task>> {
+    validate_batch_untracking(repo, pipelines, base, submitted, &[])
+}
+
+/// [`validate_batch`] for `queue add --no-tracking`: `no_tracking` is the
+/// flag's values, applied by [`untrack_named_groups`] before the
+/// `group_description:` check looks. A group the flag names opens no issue,
+/// so it is no more asked for a description than one that wrote
+/// `tracking: off` by hand.
+fn validate_batch_untracking(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: Option<&str>,
+    submitted: &[(String, String)],
+    no_tracking: &[String],
+) -> Result<Vec<Task>> {
+    let tasks = validate_batch_undescribed(repo, pipelines, base, submitted, no_tracking)?;
+    require_group_description(repo, &tasks)?;
+    Ok(tasks)
+}
+
+/// Everything [`validate_batch_untracking`] checks except that each group
+/// carries a `group_description:`.
+///
+/// The queue screen's two submits call this directly. They ask the issue
+/// question after validating, and a group ticked there opens no issue, so
+/// the description check has to wait for the answer: they run
+/// [`require_group_description`] themselves once [`untrack_groups`] has
+/// stamped the ticked groups. Checked first, it would refuse a group the
+/// person is about to untrack before the checklist could be drawn.
+fn validate_batch_undescribed(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: Option<&str>,
+    submitted: &[(String, String)],
+    no_tracking: &[String],
 ) -> Result<Vec<Task>> {
     if submitted.is_empty() {
         bail!("`--from` named nothing to queue");
@@ -1305,9 +1345,20 @@ pub(crate) fn validate_batch(
         tasks.push(task);
     }
 
-    require_group_description(repo, &tasks)?;
+    untrack_named_groups(&mut tasks, no_tracking)?;
     check_dependencies_set(repo, &mut tasks)?;
     Ok(tasks)
+}
+
+/// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
+/// itself and names no `ticket:` of its own, so `queue add` neither calls the
+/// hook for it nor reports it `kept`. One rule for every site that reasons
+/// about who reaches the hook — the call loop, the group size handed to it,
+/// the group-description check and the tool gate — so they cannot drift
+/// apart. A task that names a `ticket:` is not opted out: it is reported
+/// `kept`, which is a row the group announces.
+fn opts_out_of_open(task: &Task) -> bool {
+    task.tracking_off() && task.extra_str("ticket").is_empty()
 }
 
 /// Whether `task` itself carries a non-blank `group_description:`.
@@ -1340,9 +1391,10 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
     // a ticket — [`tool_requirements_gate`] switches tracking off for the
     // submission before [`open_tickets`] is reached — so demanding a
     // `group_description:` here as well would refuse a submission over a
-    // description nothing is ever going to read. Pre-existing gap: this
-    // check validates the whole batch before the screen's own gate runs,
-    // so without this it fires first and the gate is never seen.
+    // description nothing is ever going to read. `queue add --from` needs
+    // this: it runs this check while validating, before `open_and_prefix`
+    // prints the gate, so without it the refusal fires first and the gate
+    // is never seen.
     if !unmet_requirements(repo).is_empty() {
         return Ok(());
     }
@@ -1351,6 +1403,15 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let mut seen: std::collections::BTreeSet<&str> = Default::default();
     for group in tasks.iter().filter_map(|t| t.front.group.as_deref()) {
         if !seen.insert(group) {
+            continue;
+        }
+        // No issue opens for a group whose every task in this batch has opted
+        // out of `open`, so a description would be text nothing reads.
+        if tasks
+            .iter()
+            .filter(|t| t.front.group.as_deref() == Some(group))
+            .all(opts_out_of_open)
+        {
             continue;
         }
         let in_batch = tasks
@@ -1687,8 +1748,13 @@ fn queue_add_tasks(
     pipelines: &Pipelines,
     base: Option<&str>,
     submitted: &[(String, String)],
+    no_tracking: &[String],
 ) -> Result<()> {
-    let mut tasks = validate_batch(repo, pipelines, base, submitted)?;
+    // `no_tracking` is applied inside the validation, before the hook: a
+    // group named wrongly is refused while nothing has been opened, and a
+    // named group's tasks are already `tracking: off` by the time
+    // `open_tickets` looks, so it passes them by.
+    let mut tasks = validate_batch_untracking(repo, pipelines, base, submitted, no_tracking)?;
     refuse_missing_start(repo, &tasks)?;
     // `esc` from an interactive run — a real terminal on both ends of
     // `queue add --from` — is not a refusal: it means the same thing it
@@ -1885,16 +1951,23 @@ fn open_and_prefix(
     // `tool_requirements_gate`. `true` means the gate drew and this
     // submission goes on with issue tracking switched off for it.
     let tracking_off = match gate {
+        // A batch where no task reaches the hook never calls the tool the
+        // gate warns about, so it neither prints the notice nor waits on a
+        // key that could back the whole batch out.
+        ToolGate::Print { .. } if tasks.iter().all(opts_out_of_open) => false,
         ToolGate::Print { interactive } => tool_requirements_gate(repo, interactive)?,
         ToolGate::Answered { tracking_off } => tracking_off,
     };
     if tracking_off {
-        // Every route that can switch tracking off for a batch — the queue
-        // screen's `n` and the tool gate's `enter` — funnels through here,
-        // so this is the one place that needs to stamp it:
-        // `dispatch::route_reserved_stage` and `tracking_gate` read
+        // Every route that switches tracking off for a whole batch — the
+        // tool gate's `enter`, printed or in the queue screen's popup —
+        // funnels through here, so this is the one place that needs to stamp
+        // it: `dispatch::route_reserved_stage` and `tracking_gate` read
         // `Task::tracking_off` back to fire no hook for these tasks and never
-        // hold them waiting on one.
+        // hold them waiting on one. The issue question switches it off per
+        // group instead: `untrack_groups` stamps the ticked groups' tasks
+        // before they get here, and `open_tickets` passes them by. So does
+        // `queue add --no-tracking`, through `untrack_named_groups`.
         for task in tasks.iter_mut() {
             task.set_extra_str("tracking", "off");
         }
@@ -1916,10 +1989,10 @@ fn open_and_prefix(
 
 /// Where [`open_tickets`] reports each ticket as the hook answers it. A
 /// caller with no screen prints the rows under its own command line —
-/// [`PrintedTickets`]; the queue screen draws them into a popup over its tab
-/// instead, one row at a time — see [`PopupTickets`] — since a row printed
-/// under a drawn frame lands where no frame is and is cleared by the next
-/// draw.
+/// [`PrintedTickets`]; the queue screen draws a popup over its tab instead,
+/// counting the hook's calls and leaving the rows off — see [`PopupHook`] —
+/// since a row printed under a drawn frame lands where no frame is and is
+/// cleared by the next draw.
 pub(crate) trait TicketLog {
     /// `group`'s tickets are about to be opened.
     fn group(&mut self, group: &str);
@@ -1977,8 +2050,9 @@ pub(crate) enum ToolGate {
     /// printing the gate again under the screen would draw it where no frame
     /// is, and take a second terminal guard inside the screen's. See
     /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
-    /// requirement was unmet and `enter` queued anyway, or when the queue
-    /// screen's [`Mode::IssueQuestion`] was answered `queue only`.
+    /// requirement was unmet and `enter` queued anyway. The issue question
+    /// never sets it — its ticked groups carry `tracking: off` on their own
+    /// tasks instead, see [`untrack_groups`].
     Answered { tracking_off: bool },
 }
 
@@ -2263,6 +2337,14 @@ fn tool_requirements_gate_with(
 /// the queue already carrying the prefix — `carry_to_pending` keeps `group:`
 /// as written — gets it exactly once, not stacked on again.
 ///
+/// A group whose every task in the batch sets `tracking: off` is skipped:
+/// no ticket opened for it, so no tracker key belongs in its names, even
+/// when a sibling of it already queued with one seeded the slug. The issue
+/// question's ticked groups reach here that way — see [`untrack_groups`].
+/// A group with only some of its tasks off still takes the prefix on all
+/// of them, so one hand-written `tracking: off` never splits a group across
+/// two `group:` names — see [`untracked_groups`].
+///
 /// Runs after [`open_tickets`] and before any task is saved. The `task/` ref
 /// namespace is kept, so `spoolway stack` and the orphaned-branch sweep still
 /// find these branches where they look today; the worktree directory follows
@@ -2280,10 +2362,14 @@ fn prefix_generated_names(
     // One line per distinct prefix applied, naming the new group — the rename
     // is invisible otherwise until somebody runs `git branch`.
     let mut announced: std::collections::BTreeSet<(String, String)> = Default::default();
+    let untracked = untracked_groups(tasks);
     for task in tasks.iter_mut() {
         let Some(group) = task.front.group.clone() else {
             continue;
         };
+        if untracked.contains(&group) {
+            continue;
+        }
         let Some(slug) = group_slug.get(&group) else {
             continue;
         };
@@ -2300,8 +2386,9 @@ fn prefix_generated_names(
 }
 
 /// Call the `[issue_tracking]` open hook once for every task in the
-/// batch that does not already name a `ticket:`, before any of them is
-/// queued — a no-op start to finish when no hook is configured at all.
+/// batch that does not already name a `ticket:` and does not set
+/// `tracking: off`, before any of them is queued — a no-op start to
+/// finish when no hook is configured at all.
 ///
 /// Walks the batch in dependency order, so a task's own call always has its
 /// dependencies' ticket ids already in hand for `SPOOLWAY_DEPENDS_TICKETS`,
@@ -2352,7 +2439,14 @@ fn open_tickets(
     let mut group_description: BTreeMap<String, String> = BTreeMap::new();
     for task in tasks.iter() {
         if let Some(group) = &task.front.group {
-            *group_size.entry(group.clone()).or_insert(0) += 1;
+            // Counts every task of the group that has or will have a ticket
+            // — the hook's calls plus the ones reported `kept` — which is
+            // what `SPOOLWAY_GROUP_SIZE` tells it: a hook that opens an epic
+            // only for a group of more than one would otherwise open one over
+            // a single ticket.
+            if !opts_out_of_open(task) {
+                *group_size.entry(group.clone()).or_insert(0) += 1;
+            }
             if let Some(description) = task
                 .front
                 .group_description
@@ -2440,11 +2534,22 @@ fn open_tickets(
 
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
+        let already = tasks[i].extra_str("ticket").to_string();
+
+        // A task that says `tracking: off` has opted out of every hook event,
+        // `open` included. Calling the hook anyway would let a logged-out
+        // tracker refuse a batch that asked for no ticket at all. It is
+        // skipped before the group header is printed, so a group none of
+        // whose tasks reach the hook does not announce tickets that are never
+        // opened. A `ticket:` it already names is still reported `kept`.
+        if opts_out_of_open(&tasks[i]) {
+            continue;
+        }
+
         if printed_header.insert(group.clone()) {
             log.group(&group);
         }
 
-        let already = tasks[i].extra_str("ticket").to_string();
         if !already.is_empty() {
             let epic = tasks[i].extra_str("epic").to_string();
             if !epic.is_empty() {
@@ -2460,6 +2565,9 @@ fn open_tickets(
             .iter()
             .map(|dep| dependency_ticket(repo, tasks, dep))
             .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|ticket| !ticket.is_empty())
+            .collect::<Vec<_>>()
             .join(" ");
         let known_epic = group_epic.get(&group).cloned().unwrap_or_default();
         let known_description = group_description.get(&group).cloned().unwrap_or_default();
@@ -2555,7 +2663,11 @@ fn open_tickets(
             }
         }
     }
-    log.done();
+    // Nothing was announced when every task opted out, so there is no block
+    // for the trailing blank line to close.
+    if !printed_header.is_empty() {
+        log.done();
+    }
     Ok(group_slug)
 }
 
@@ -2683,15 +2795,43 @@ fn record_slug_and_url(
 /// the first valid answer in dependency order. Run before a batch is saved
 /// (via [`prefix_generated_names`]) and again before [`write_back_ids`] on a
 /// mid-batch failure, so what lands on disk is the group's decision, never a
-/// later task's own raw answer.
+/// later task's own raw answer. A group whose every task sets `tracking:
+/// off` gets no `slug:`, as it gets no prefix — see
+/// [`prefix_generated_names`].
 fn stamp_group_slugs(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+    let untracked = untracked_groups(tasks);
     for task in tasks.iter_mut() {
         if let Some(group) = &task.front.group
+            && !untracked.contains(group)
             && let Some(slug) = group_slug.get(group)
         {
             task.set_extra_str("slug", slug);
         }
     }
+}
+
+/// The `group:` names in `tasks` whose every task sets `tracking: off` —
+/// the groups the slug prefix leaves bare. Judged per group rather than
+/// per task: a group is one name on the board, in `queue list` and in the
+/// dispatcher's group draining, so a lone hand-written `tracking: off`
+/// beside tracked siblings takes their prefix rather than stay behind
+/// under the bare name as a second group. Every ticked group on the issue
+/// question is whole, since [`untrack_groups`] stamps all of its tasks.
+fn untracked_groups(tasks: &[Task]) -> BTreeSet<String> {
+    let mut off: BTreeSet<String> = BTreeSet::new();
+    let mut on: BTreeSet<&str> = BTreeSet::new();
+    for task in tasks {
+        let Some(group) = task.front.group.as_deref() else {
+            continue;
+        };
+        if task.tracking_off() {
+            off.insert(group.to_string());
+        } else {
+            on.insert(group);
+        }
+    }
+    off.retain(|group| !on.contains(group.as_str()));
+    off
 }
 
 /// Whether `s` is an absolute `http`/`https` URL with a host.
@@ -3485,21 +3625,20 @@ enum Mode {
         then: Resume,
     },
     /// The question a submit stops at before any ticket is opened, with
-    /// issue tracking on — [`issue_question`]'s body, over
-    /// [`ISSUE_ANSWERS`] with the cursor on the `cursor`th. A ticket on a
-    /// public tracker is seen by other people and hard to take back, so
-    /// nothing reaches the hook until a person says yes here. `enter` on
-    /// `create and queue` runs `then` again and opens the tickets, on `queue
-    /// only` runs it with issue tracking switched off for it, and `esc` goes
-    /// back having queued nothing.
+    /// issue tracking on: a checklist of the batch's groups, each ticked
+    /// one left untracked for this run — see [`issue_question`] and
+    /// [`IssueChecklist`]. A ticket on a public tracker is seen by other
+    /// people and hard to take back, so nothing reaches the hook until a
+    /// person confirms here. `enter` runs `then` again, opening the
+    /// tickets of every group left unticked and queuing the ticked ones
+    /// with `tracking: off`, and `esc` goes back having queued nothing.
     IssueQuestion {
-        body: Vec<String>,
-        cursor: usize,
+        checklist: IssueChecklist,
         then: Resume,
     },
-    /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
-    /// the hook opened when it opened any. `enter` closes it, the same as
-    /// [`Mode::Outcome`].
+    /// What a screen submit queued — [`queued_panel`]'s popup, opening on
+    /// `Hook executed successfully` when the hook ran. `enter` closes it, the
+    /// same as [`Mode::Outcome`].
     ///
     /// `routines` is the routines pane the submit came from, when it did:
     /// the routines tab has no pending screen to fall back to, so that pane
@@ -3661,55 +3800,216 @@ impl Resume {
 
 /// Whether a screen submit may still stop at the tool-requirements gate or
 /// the issue question, and how it answered them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Tracking {
     /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
     /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
     /// opened. Nothing is queued until each is answered.
     Ask,
-    /// The tool gate's answer, or `queue only` on the question: queue with
-    /// issue tracking switched off.
+    /// The tool gate's answer: queue the whole batch with issue tracking
+    /// switched off.
     Off,
-    /// `create and queue` on the question: open the tickets and queue.
-    Open,
+    /// `enter` on the question: open the tickets and queue, except for the
+    /// bare group names held here — the groups ticked on the checklist —
+    /// whose tasks queue with `tracking: off` instead. See
+    /// [`untrack_groups`].
+    Open(BTreeSet<String>),
 }
 
 /// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
 /// when it goes straight on: already answered, or every requirement met.
 /// `Open` has passed the gate on the way to the question.
-fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
-    if tracking != Tracking::Ask {
+fn tool_gate(repo: &Repo, tracking: &Tracking, then: Resume) -> Option<Mode> {
+    if *tracking != Tracking::Ask {
         return None;
     }
     tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
 }
 
-/// The issue question's answers, in its popup: open the tickets and queue,
-/// or queue with issue tracking switched off.
-const ISSUE_ANSWERS: [&str; 2] = ["create and queue", "queue only"];
-
-/// The issue question's popup, its cursor on the `cursor`th of
-/// [`ISSUE_ANSWERS`].
-fn issue_question_panel(body: &[String], cursor: usize) -> Vec<String> {
-    crate::screen::ask(
-        "issue tracking",
-        body,
-        &ISSUE_ANSWERS.map(str::to_string),
-        cursor,
-    )
+/// Stamp `tracking: off` on every task in `tasks` whose group the issue
+/// question's answer ticks. [`open_tickets`] then never hands those tasks to
+/// the hook, and [`prefix_generated_names`] leaves their names bare, as
+/// with tracking switched off for the whole batch. A no-op for any answer
+/// but [`Tracking::Open`].
+fn untrack_groups(tasks: &mut [Task], tracking: &Tracking) {
+    let Tracking::Open(untracked) = tracking else {
+        return;
+    };
+    for task in tasks.iter_mut() {
+        if untracked.contains(checklist_group(task)) {
+            task.set_extra_str("tracking", "off");
+        }
+    }
 }
 
-/// How wide [`issue_body`] holds the issue popups' text: room for a
-/// ticket row — see [`ticket_row`] — beside a task id of some length, so
-/// the opening and result popups do not grow a column for most of the rows
-/// that come in.
+/// `queue add --no-tracking`: stamp `tracking: off` on the tasks of every
+/// group `named` lists, the way [`untrack_groups`] does for the queue
+/// screen's ticks. [`crate::cli::NO_TRACKING_BARE`] is the bare flag and covers every group in
+/// the batch.
+///
+/// A name no task belongs to is refused before anything is stamped, listing
+/// the batch's real groups. Left alone, a typo would quietly open that
+/// group's tickets — the opposite of what the flag was typed to do. An empty
+/// name is refused for the opposite reason: `--no-tracking "$group"` with
+/// the variable unset would otherwise untrack the whole batch.
+fn untrack_named_groups(tasks: &mut [Task], named: &[String]) -> Result<()> {
+    if named.is_empty() {
+        return Ok(());
+    }
+    if named.iter().any(String::is_empty) {
+        bail!(
+            "--no-tracking was given an empty group name.\n\
+             Name a group, or drop the value to cover every group in the batch. \
+             Nothing was queued."
+        );
+    }
+    let groups: BTreeSet<&str> = tasks.iter().map(checklist_group).collect();
+    if let Some(unknown) = named
+        .iter()
+        .find(|name| *name != crate::cli::NO_TRACKING_BARE && !groups.contains(name.as_str()))
+    {
+        let groups = groups.iter().copied().collect::<Vec<_>>().join(", ");
+        bail!(
+            "--no-tracking names `{unknown}`, but no task in this batch belongs to that group.\n\
+             The batch's groups are {groups}.\n\
+             Fix the group name, or drop the flag to open every group's tickets. \
+             Nothing was queued."
+        );
+    }
+    let everything = named
+        .iter()
+        .any(|name| name == crate::cli::NO_TRACKING_BARE);
+    for task in tasks.iter_mut() {
+        if everything || named.iter().any(|name| name == checklist_group(task)) {
+            task.set_extra_str("tracking", "off");
+        }
+    }
+    Ok(())
+}
+
+/// The row of the issue question `task` is counted under: its `group:`, or
+/// its own id for a task with none, which is a group of one everywhere the
+/// queue groups tasks — see [`crate::task::Frontmatter::group`].
+///
+/// The id is never reached on the screen: both submits run
+/// [`validate_batch_undescribed`] before they ask, and [`parse_submission`]
+/// refuses a task with no `group:`. That matters for a routine, whose ids
+/// are minted afresh each time `enter` rebuilds the batch — a row keyed by a
+/// minted id could stop matching between the question and its answer, but
+/// its `group:` is written in the routine file and stays the same.
+fn checklist_group(task: &Task) -> &str {
+    task.front.group.as_deref().unwrap_or(task.id())
+}
+
+/// [`Mode::IssueQuestion`]'s state: the batch's groups that still have a
+/// ticket to open, in batch order, with how many of their tasks the batch
+/// queues; which of them are ticked to stay untracked; and the row the
+/// cursor is on. Nothing starts ticked, so an `enter` pressed out of habit
+/// opens every group's tickets.
+#[derive(Debug, Clone)]
+struct IssueChecklist {
+    groups: Vec<(String, usize)>,
+    ticked: BTreeSet<String>,
+    cursor: usize,
+}
+
+impl IssueChecklist {
+    /// `space`: tick the group under the cursor, or clear its tick.
+    fn toggle(&mut self) {
+        let Some((group, _)) = self.groups.get(self.cursor) else {
+            return;
+        };
+        if !self.ticked.remove(group) {
+            self.ticked.insert(group.clone());
+        }
+    }
+
+    /// `a`: tick every group, or clear every tick when all are ticked
+    /// already.
+    fn toggle_all(&mut self) {
+        if self.ticked.len() == self.groups.len() {
+            self.ticked.clear();
+        } else {
+            self.ticked = self.groups.iter().map(|(group, _)| group.clone()).collect();
+        }
+    }
+}
+
+/// The issue question's key row.
+const ISSUE_KEYS: &[(&str, &str)] = &[
+    ("enter", "confirm"),
+    ("space", "select"),
+    ("a", "select all"),
+    ("esc", "back"),
+];
+
+/// The issue question's own fixed rows: a blank, its heading and a blank
+/// over the list.
+const ISSUE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 3;
+
+/// The issue question's popup: a heading naming what a tick does, then one
+/// row per group of `checklist` — its tick and how many tasks it queues —
+/// with the cursor's own marked `>`. Rows are cut to `width` and the list
+/// scrolls inside `height` the way the trial picker's do — see
+/// [`checkbox_row_cap`], [`popup_height`] and [`scroll_rows`] — so a long
+/// group name or a batch of many groups never pushes the popup past the
+/// frame.
+fn issue_question_panel(
+    checklist: &IssueChecklist,
+    (width, height): (usize, Option<usize>),
+) -> Vec<String> {
+    let mut body = vec![
+        String::new(),
+        clip(
+            "Deactivate issue tracking for selected groups:".to_string(),
+            width,
+        ),
+        String::new(),
+    ];
+    // Names padded to one column, three spaces past the longest, so the
+    // counts line up.
+    let name_width = checklist
+        .groups
+        .iter()
+        .map(|(group, _)| group.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let rows: Vec<String> = checklist
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, (group, count))| {
+            let marker = if i == checklist.cursor { '>' } else { ' ' };
+            let tick = if checklist.ticked.contains(group) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let name = crate::screen::pad_to(group, name_width);
+            clip(
+                format!("{marker} {tick} {name}{}", plural(*count, "task")),
+                width,
+            )
+        })
+        .collect();
+    body.extend(scroll_rows(
+        &rows,
+        checklist.cursor,
+        list_room(height, ISSUE_CHROME_ROWS),
+    ));
+    panel("issue tracking", &body, &fit_keys(keys(ISSUE_KEYS), width))
+}
+
+/// How wide [`issue_body`] holds the issue popups' text: room for the
+/// running line and a queued task id of some length, so the running and
+/// result popups share one width for most batches.
 const ISSUE_BODY_WIDTH: usize = 54;
 
-/// A body for one of the issue popups — the question, the tickets opening,
-/// what was queued — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The
-/// three follow one another over the same spot, and holding them to one
-/// width keeps the box from jumping between them as each replaces the last,
-/// or growing a column every time a row comes in.
+/// A body for one of the issue popups — the hook running, what was queued
+/// — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The two follow one
+/// another over the same spot, and holding them to one width keeps the box
+/// from jumping as the second replaces the first.
 fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut body = vec![" ".repeat(ISSUE_BODY_WIDTH)];
     body.extend(lines);
@@ -3722,166 +4022,140 @@ fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
 /// hook wrote back, which [`open_tickets`] reports `kept` and never hands
 /// the hook again.
 ///
-/// Lists every task in the batch and names the tracker — see
-/// [`crate::tracking::tracker`]. The count is the tickets still to open.
-fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
-    if tracking != Tracking::Ask || !crate::tracking::configured(repo) {
+/// One row per group with at least one task naming no `ticket:`, in batch
+/// order, counting every task of that group the batch queues. A group whose
+/// every task already names one has nothing for a tick to stop, so it is
+/// left off.
+fn issue_question(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
+    if *tracking != Tracking::Ask || !crate::tracking::configured(repo) {
         return None;
     }
-    let opening = tasks
-        .iter()
-        .filter(|task| task.extra_str("ticket").is_empty())
-        .count();
-    if opening == 0 {
-        return None;
-    }
-    let mut groups: Vec<&str> = Vec::new();
-    for group in tasks.iter().filter_map(|task| task.front.group.as_deref()) {
-        if !groups.contains(&group) {
-            groups.push(group);
+    let mut groups: Vec<(String, usize)> = Vec::new();
+    let mut opening: BTreeSet<&str> = BTreeSet::new();
+    for task in tasks {
+        let group = checklist_group(task);
+        match groups.iter_mut().find(|(name, _)| name == group) {
+            Some((_, count)) => *count += 1,
+            None => groups.push((group.to_string(), 1)),
+        }
+        if task.extra_str("ticket").is_empty() {
+            opening.insert(group);
         }
     }
-    let ask = format!(
-        "create {} on {} for {}",
-        plural(opening, "issue"),
-        crate::tracking::tracker(repo),
-        groups.join(", ")
-    );
-    let tasks = tasks.iter().map(|task| format!("  {}", task.id()));
-    let body = issue_body(std::iter::once(ask).chain(tasks));
+    groups.retain(|(group, _)| opening.contains(group.as_str()));
+    if groups.is_empty() {
+        return None;
+    }
     Some(Mode::IssueQuestion {
-        body,
-        cursor: 0,
+        checklist: IssueChecklist {
+            groups,
+            ticked: BTreeSet::new(),
+            cursor: 0,
+        },
         then,
     })
 }
 
-/// One ticket row in the issue popups — narrower than the printed form's
-/// id column, which leaves room for a jira key the popup's width has no
-/// room to spare for.
-fn ticket_row(kind: &str, status: &str, ticket: &str, name: &str) -> String {
-    format!("{kind:<12} {status:<9} {ticket:<6} {name}")
-}
-
-/// [`TicketLog`] for the queue screen: each row goes into the `opening
-/// issues` popup as the hook answers it, and `redraw` lays the popup over
-/// the tab again straight away — the hook runs on the screen's own thread,
-/// so nothing else draws until it returns. The task at the hook is drawn
-/// as a `…` row until its answer replaces it, over room for every row the
-/// batch can still add, so the box does not grow row by row under the
-/// person watching it.
-struct PopupTickets<'a> {
-    rows: Vec<String>,
-    waiting: Option<String>,
-    /// A ticket per task and an epic per group: the most rows the batch can
-    /// answer with.
-    room: usize,
+/// [`TicketLog`] for the queue screen: while the hook runs, a `running
+/// hook` popup counting the tasks it has been called for, and `redraw` lays
+/// it over the tab again straight away — the hook runs on the screen's own
+/// thread, so nothing else draws until it returns. What the hook answers is
+/// left off: a hook may open no issue at all, or talk to a tracker whose
+/// words are not these, so the screen claims only that it ran — see
+/// [`queued_panel`].
+struct PopupHook<'a> {
+    /// How many calls the hook has been handed so far, the one running
+    /// included.
+    called: usize,
+    /// The tasks the hook is called for at all: every one that neither
+    /// opts out — a ticked group's tasks among them — nor already names its
+    /// `ticket:`, which [`open_tickets`] reports `kept` without a call.
+    total: usize,
     redraw: &'a mut dyn FnMut(&[String]),
 }
 
-impl<'a> PopupTickets<'a> {
-    fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupTickets<'a> {
-        let groups: std::collections::BTreeSet<_> = tasks
+impl<'a> PopupHook<'a> {
+    fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupHook<'a> {
+        let total = tasks
             .iter()
-            .filter_map(|task| task.front.group.as_deref())
-            .collect();
-        PopupTickets {
-            rows: Vec::new(),
-            waiting: None,
-            room: tasks.len() + groups.len(),
+            .filter(|task| !opts_out_of_open(task) && task.extra_str("ticket").is_empty())
+            .count();
+        PopupHook {
+            called: 0,
+            total,
             redraw,
         }
     }
 
-    /// The popup while the hook is still answering.
-    fn panel(&self) -> Vec<String> {
-        let mut rows = self.rows.clone();
-        rows.extend(
-            self.waiting
-                .as_deref()
-                .map(|id| ticket_row("task issue", "…", "", id)),
-        );
-        while rows.len() < self.room {
-            rows.push(String::new());
-        }
-        rows.extend([
-            String::new(),
-            String::new(),
-            "waiting on the hook".to_string(),
-        ]);
-        crate::screen::boxed("opening issues", &issue_body(rows))
+    /// Whether the hook was called at all. A batch where every group was
+    /// ticked, every task already names its ticket, or no hook is
+    /// configured never calls it, and has nothing to report as run.
+    fn ran(&self) -> bool {
+        self.called > 0
     }
 
-    fn show(&mut self) {
+    /// The popup while the hook is still answering.
+    fn panel(&self) -> Vec<String> {
+        crate::screen::boxed(
+            "running hook",
+            &issue_body([format!(
+                "running the hook: {} of {} tasks",
+                self.called, self.total
+            )]),
+        )
+    }
+}
+
+impl TicketLog for PopupHook<'_> {
+    fn group(&mut self, _group: &str) {}
+
+    fn waiting(&mut self, _id: &str) {
+        self.called += 1;
         let panel = self.panel();
         (self.redraw)(&panel);
     }
-}
 
-impl TicketLog for PopupTickets<'_> {
-    fn group(&mut self, _group: &str) {}
+    /// Left off the popup, which counts calls and claims nothing about what
+    /// any of them created.
+    fn row(&mut self, _kind: &str, _status: &str, _ticket: &str, _name: &str) {}
 
-    fn waiting(&mut self, id: &str) {
-        self.waiting = Some(id.to_string());
-        self.show();
-    }
-
-    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
-        // A group issue is answered in the same call as the first task issue of its
-        // group, and drawn above it — the task stays at the hook until its
-        // own row comes in.
-        if kind != "group issue" {
-            self.waiting = None;
-        }
-        self.rows.push(ticket_row(kind, status, ticket, name));
-        self.show();
-    }
-
-    /// Left off the popup. The popups draw tickets and nothing else, and a
-    /// note is no ticket: the names-prefixed line — which the shipped
-    /// `github.sh` earns on every batch by always answering `slug=` — comes
-    /// after [`TicketLog::done`], so drawing it would put `waiting on the
-    /// hook` back up once the hook has finished, and it is wider than
-    /// [`issue_body`]'s width, so it would stretch the box. The prefix
-    /// itself is on every queued name the tab lists.
+    /// Left off the popup too: the names-prefixed line comes after
+    /// [`TicketLog::done`], once the popup is about to be replaced, and the
+    /// prefix itself is on every queued name the result lists.
     fn note(&mut self, _line: &str) {}
 
-    fn done(&mut self) {
-        self.waiting = None;
-    }
+    fn done(&mut self) {}
 }
 
 /// [`Mode::Queued`] for a batch that queued `names`, one per task, each its
-/// [`Task::display_name`]: the tickets the hook answered with, when it was
-/// asked, over the count queued; or, with no ticket to show, the count over
-/// every task it queued. Then the tasks it left out, `not_queued`, when
-/// there are any — see [`not_queued_lines`].
-/// Either ends on `dispatcher` — [`dispatcher_line`] — a blank row below the
-/// list, and then the [`crate::screen::confirm`] row. `routines` is the
-/// routines pane the batch was queued from, or `None` over the pending
-/// screen.
+/// [`Task::display_name`]: `Hook executed successfully` when `hook_ran`,
+/// then the count queued over every task it queued. Then the tasks it left
+/// out, `not_queued`, when there are any — see [`not_queued_lines`]. It
+/// ends on `dispatcher` — [`dispatcher_line`] — a blank row below the list,
+/// and then the [`crate::screen::confirm`] row. `routines` is the routines
+/// pane the batch was queued from, or `None` over the pending screen.
+///
+/// `hook_ran` says only that the open hook was called and every call exited
+/// cleanly — a failing call refuses the batch before this is ever drawn. It
+/// says nothing of what the hook created, which no popup lists.
 ///
 /// A batch that queued nothing at all, every task left out, draws only what
 /// it left out, under the title `not queued`.
 fn queued_panel(
     names: &[String],
-    tickets: &[String],
+    hook_ran: bool,
     not_queued: &[NotQueued],
     dispatcher: Option<&str>,
     routines: Option<RoutineNav>,
 ) -> Mode {
-    let queued = format!("queued {}", plural(names.len(), "task"));
-    let mut lines = if names.is_empty() {
-        Vec::new()
-    } else if tickets.is_empty() {
-        std::iter::once(queued)
-            .chain(names.iter().map(|name| format!("  {name}")))
-            .collect()
-    } else {
-        let mut lines = tickets.to_vec();
-        lines.extend([String::new(), queued]);
-        lines
-    };
+    let mut lines = Vec::new();
+    if !names.is_empty() {
+        if hook_ran {
+            lines.extend(["Hook executed successfully".to_string(), String::new()]);
+        }
+        lines.push(format!("queued {}", plural(names.len(), "task")));
+        lines.extend(names.iter().map(|name| format!("  {name}")));
+    }
     if !not_queued.is_empty() {
         if !lines.is_empty() {
             lines.push(String::new());
@@ -3893,10 +4167,8 @@ fn queued_panel(
     }
     let title = if names.is_empty() {
         "not queued"
-    } else if tickets.is_empty() {
-        "queued"
     } else {
-        "issues created"
+        "queued"
     };
     Mode::Queued {
         panel: panel(title, &issue_body(lines), &confirm()),
@@ -4716,15 +4988,17 @@ fn run_screen_from(
                 Key::Esc => state.mode = then.back(),
                 _ => {}
             },
-            Mode::IssueQuestion { then, cursor, .. } => match key {
-                // Yes: the hook runs here, on this thread, and the tab under
-                // the question is held as it stands while it does — each
-                // ticket it answers is laid over that frame as it comes in.
-                // Whatever was typed while the hook ran is thrown away once it
-                // returns: the result popup takes `enter` only once it is on
-                // screen, never an `enter` pressed at the one still filling.
-                Key::Enter if *cursor == 0 => {
+            Mode::IssueQuestion { then, checklist } => match key {
+                // The hook runs here, on this thread, for every group left
+                // unticked, and the tab under the question is held as it
+                // stands while it does — the `running hook` popup is laid
+                // over that frame as each call starts. Whatever was typed
+                // while the hook ran is thrown away once it returns: the
+                // result popup takes `enter` only once it is on screen, never
+                // an `enter` pressed while the hook was running.
+                Key::Enter => {
                     let then = then.clone();
+                    let tracking = Tracking::Open(checklist.ticked.clone());
                     let base = crate::repo::branch_at(cwd)?;
                     let at = Submitting {
                         repo,
@@ -4734,42 +5008,24 @@ fn run_screen_from(
                     };
                     let held = Held::new(&groups, &panes, &state);
                     let mut redraw = |panel: &[String]| held.draw(panel, writer, out);
-                    state.mode = resume(
-                        &at,
-                        &then,
-                        Tracking::Open,
-                        &mut groups,
-                        &mut state,
-                        &mut redraw,
-                    );
+                    state.mode = resume(&at, &then, tracking, &mut groups, &mut state, &mut redraw);
                     known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
                 }
-                // `queue only`: the same submit with issue tracking
-                // switched off, so the hook never runs.
-                Key::Enter => {
-                    let then = then.clone();
-                    let base = crate::repo::branch_at(cwd)?;
-                    let at = Submitting {
-                        repo,
-                        pipelines,
-                        base: &base,
-                        routines: &routines,
-                    };
-                    state.mode = resume(
-                        &at,
-                        &then,
-                        Tracking::Off,
-                        &mut groups,
-                        &mut state,
-                        &mut |_| {},
-                    );
-                    known_reading = known_reading.max(reader.started_count());
-                }
                 Key::Esc => state.mode = then.back(),
                 _ => {
-                    if let Mode::IssueQuestion { cursor, .. } = &mut state.mode {
-                        *cursor = crate::screen::move_cursor(*cursor, ISSUE_ANSWERS.len(), key);
+                    if let Mode::IssueQuestion { checklist, .. } = &mut state.mode {
+                        match key {
+                            Key::Char(' ') => checklist.toggle(),
+                            Key::Char('a') => checklist.toggle_all(),
+                            _ => {
+                                checklist.cursor = crate::screen::move_cursor(
+                                    checklist.cursor,
+                                    checklist.groups.len(),
+                                    key,
+                                );
+                            }
+                        }
                     }
                 }
             },
@@ -4976,7 +5232,7 @@ fn resume(
 }
 
 /// The tab as it stood when the issue question was answered, with no popup
-/// on it — what the `opening issues` popup is laid over while the hook runs.
+/// on it — what the `running hook` popup is laid over while the hook runs.
 /// Rendered once and owned, so drawing it again borrows nothing the submit
 /// itself is busy changing.
 struct Held {
@@ -6935,7 +7191,10 @@ fn popup(
         Mode::Outcome { notice, .. } | Mode::JobSaved { notice, .. } => {
             Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
         }
-        Mode::IssueQuestion { body, cursor, .. } => Some(issue_question_panel(body, *cursor)),
+        Mode::IssueQuestion { checklist, .. } => Some(issue_question_panel(
+            checklist,
+            (checkbox_row_cap(layout), popup_height(layout)),
+        )),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
         Mode::Options(menu) => {
             let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
@@ -7076,7 +7335,9 @@ fn gate_steps_panel(
 
 /// Every popup on the queue and routines tabs that asks something, drawn
 /// once each with made-up content — for the test that walks every such
-/// popup in the project; see `crate::screen`'s own tests.
+/// popup in the project; see `crate::screen`'s own tests. The issue
+/// question and the trial picker are left out: each is a tick list that
+/// answers on keys of its own, not one answer picked under a cursor.
 #[cfg(test)]
 pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
     let steps = ["implement", "review", "handover"].map(str::to_string);
@@ -7093,10 +7354,6 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
         jobs: vec![("nightly-audit".to_string(), crate::jobs::Scope::User)],
     };
     vec![
-        (
-            "issue question",
-            issue_question_panel(&issue_body(["create 1 issue on github".to_string()]), 0),
-        ),
         ("issue tracking", tool_gate_panel(&[unmet])),
         (
             "gate picker",
@@ -7510,8 +7767,8 @@ fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> M
 /// it to build the batch, and a landed write clears its selection and gates
 /// right here, before the caller ever sees the resulting mode.
 ///
-/// `redraw` lays the `opening issues` popup over the tab as each ticket
-/// comes in — see [`PopupTickets`].
+/// `redraw` lays the `running hook` popup over the tab as each call to the
+/// hook starts — see [`PopupHook`].
 fn begin_submission(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -7522,14 +7779,15 @@ fn begin_submission(
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let tasks = selected_tasks(groups, state);
-    let pending = match validate_batch(repo, pipelines, Some(base), &tasks) {
+    let pending = match validate_batch_undescribed(repo, pipelines, Some(base), &tasks, &[]) {
         Ok(pending) => pending,
         Err(err) => return outcome("submission refused", format!("{err:#}")),
     };
     // Unlike `queue add`, the screen queues the rest of the batch: the
-    // queued summary lists what it left out and why. `validate_batch` parses
-    // one task per entry of `tasks`, in order, so the two are filtered
-    // together and stay index-aligned for `open_and_prefix`.
+    // queued summary lists what it left out and why.
+    // `validate_batch_undescribed` parses one task per entry of `tasks`, in
+    // order, so the two are filtered together and stay index-aligned for
+    // `open_and_prefix`.
     let not_queued = not_queued(repo, &pending);
     let mut pending = pending;
     carry_group_descriptions(&mut pending, &not_queued);
@@ -7539,16 +7797,21 @@ fn begin_submission(
         .filter(|(_, task)| !not_queued.iter().any(|n| n.id == task.id()))
         .unzip();
     if pending.is_empty() {
-        return queued_panel(&[], &[], &not_queued, dispatcher_line(repo), None);
+        return queued_panel(&[], false, &not_queued, dispatcher_line(repo), None);
     }
-    if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
+    if let Some(gate) = tool_gate(repo, &tracking, Resume::Selection) {
         return gate;
     }
-    if let Some(question) = issue_question(repo, tracking, &pending, Resume::Selection) {
+    if let Some(question) = issue_question(repo, &tracking, &pending, Resume::Selection) {
         return question;
     }
+    let mut pending = pending;
+    untrack_groups(&mut pending, &tracking);
+    if let Err(err) = require_group_description(repo, &pending) {
+        return outcome("submission refused", format!("{err:#}"));
+    }
     let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
-    let mut tickets = PopupTickets::new(&pending, redraw);
+    let mut hook = PopupHook::new(&pending, redraw);
     let selected = state.selected.clone();
     let left_out: Vec<String> = not_queued.iter().map(|n| n.id.clone()).collect();
     let submit = Submit {
@@ -7558,18 +7821,12 @@ fn begin_submission(
         left_out: &left_out,
         tracking_off: tracking == Tracking::Off,
     };
-    match finish_submit(repo, groups, pending, &submit, &mut tickets) {
+    match finish_submit(repo, groups, pending, &submit, &mut hook) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            queued_panel(
-                &ids,
-                &tickets.rows,
-                &not_queued,
-                dispatcher_line(repo),
-                None,
-            )
+            queued_panel(&ids, hook.ran(), &not_queued, dispatcher_line(repo), None)
         }
         Err(err) => outcome("queue refused", format!("{err:#}")),
     }
@@ -7578,8 +7835,7 @@ fn begin_submission(
 /// What [`finish_submit`] writes beside the batch itself: the tasks it
 /// came from, the branch it is based on, the groups it was selected as, the
 /// ids of the selected tasks it left out — see [`not_queued`] — and whether
-/// the tool-requirements gate or the issue question switched issue tracking
-/// off for it.
+/// the tool-requirements gate switched issue tracking off for all of it.
 struct Submit<'a> {
     tasks: &'a [(String, String)],
     base: &'a str,
@@ -7624,9 +7880,9 @@ fn finish_submit(
         left_out,
         tracking_off,
     } = *submit;
-    // `validate_batch` already ran this over the same batch, and nothing
-    // between there and here mutates it any more, so today this is a repeat
-    // of a check `pending` already passed. Kept anyway as this function's own
+    // `validate_batch_undescribed` already ran this over the same batch, and
+    // nothing between there and here mutates it any more, so today this is a
+    // repeat of a check `pending` already passed. Kept anyway as this function's own
     // guarantee rather than a borrowed one: whatever calls `finish_submit`
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
@@ -8825,9 +9081,10 @@ pub(crate) fn queue_routine_target(
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
 /// comment on why that is a different list from the empty `tasks`.
 ///
-/// `tracking_off` is the answer of the tool-requirements gate or the issue
-/// question, asked already in the screen's own popup — see
-/// [`ToolGate::Answered`].
+/// `tracking_off` is the answer of the tool-requirements gate, asked
+/// already in the screen's own popup — see [`ToolGate::Answered`]. Groups
+/// ticked on the issue question already carry `tracking: off` on their own
+/// tasks — see [`untrack_groups`].
 fn finish_routine(
     repo: &Repo,
     tasks: &mut [Task],
@@ -8843,7 +9100,8 @@ fn finish_routine(
 
 /// `enter` over the routines pane's folders: mint every ticked folder's
 /// tasks through [`routine_batch_tasks`] and queue them as one
-/// batch through [`validate_batch`] — the same all-or-nothing write
+/// batch through [`validate_batch_undescribed`], checking descriptions
+/// once the issue question is answered — the same all-or-nothing write
 /// [`begin_submission`] gives a pending selection.
 ///
 /// A refusal is a popup over the routines pane, which closing it goes back
@@ -8919,7 +9177,7 @@ fn finish_routine_mode(
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let ((tasks, names), task_files) = batch;
-    let mut tasks = match validate_batch(repo, pipelines, Some(base), tasks) {
+    let mut tasks = match validate_batch_undescribed(repo, pipelines, Some(base), tasks, &[]) {
         Ok(tasks) => tasks,
         Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     };
@@ -8930,32 +9188,30 @@ fn finish_routine_mode(
         Focus::Groups => Resume::Routines(nav.clone()),
         Focus::Tasks => Resume::RoutineTask(nav.clone()),
     };
-    if let Some(gate) = tool_gate(repo, tracking, then.clone()) {
+    if let Some(gate) = tool_gate(repo, &tracking, then.clone()) {
         return gate;
     }
-    if let Some(question) = issue_question(repo, tracking, &tasks, then) {
+    if let Some(question) = issue_question(repo, &tracking, &tasks, then) {
         return question;
+    }
+    untrack_groups(&mut tasks, &tracking);
+    if let Err(err) = require_group_description(repo, &tasks) {
+        return outcome_over(Some(nav), "queue refused", format!("{err:#}"));
     }
     let names: Vec<String> = tasks
         .iter()
         .map(|task| task.display_name().to_string())
         .collect();
-    let mut tickets = PopupTickets::new(&tasks, redraw);
+    let mut hook = PopupHook::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
-    match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
+    match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut hook) {
         Ok(()) => {
             // Back onto the pane with nothing ticked: the batch is queued,
             // and a tick left standing is one `enter` away from the refusal
             // a routine still in the queue meets.
             let mut after = nav.clone();
             after.selected.clear();
-            queued_panel(
-                &names,
-                &tickets.rows,
-                &[],
-                dispatcher_line(repo),
-                Some(after),
-            )
+            queued_panel(&names, hook.ran(), &[], dispatcher_line(repo), Some(after))
         }
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
@@ -8981,7 +9237,7 @@ fn still_queued_panel(live: &[LiveCopy], nav: &RoutineNav) -> Mode {
 
 /// `space` over the routines pane's own tasks pane: queue the highlighted
 /// task alone, under a minted id, with its `depends_on` emptied before
-/// [`validate_batch`] ever sees it. Emptied here rather than left for
+/// [`validate_batch_undescribed`] ever sees it. Emptied here rather than left for
 /// [`check_dependencies_set`] to refuse: a solo pick names no sibling in
 /// this batch for a dependency on one to resolve against, and that check
 /// bails on a `depends_on` naming anything outside the queue or the
@@ -9053,6 +9309,7 @@ mod tests {
                 from: vec![path.display().to_string()],
                 base: Some("plan/demo".to_string()),
                 dry_run: false,
+                no_tracking: Vec::new(),
             };
             queue_add_on(&repo, &loaded, &args, false)
         };
@@ -9316,6 +9573,7 @@ mod tests {
             from: paths.iter().map(|p| p.to_string()).collect(),
             base: Some("plan/demo".to_string()),
             dry_run: false,
+            no_tracking: Vec::new(),
         }
     }
 
@@ -10759,6 +11017,7 @@ mod tests {
             from: vec![],
             base: None,
             dry_run: false,
+            no_tracking: Vec::new(),
         };
         assert!(
             queue_add(&repo, &pipelines, &args, &repo.root, false).is_ok(),
@@ -11074,7 +11333,13 @@ mod tests {
                             barrier.wait();
                             (
                                 n,
-                                queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted),
+                                queue_add_tasks(
+                                    repo,
+                                    pipelines,
+                                    Some("plan/demo"),
+                                    &submitted,
+                                    &[],
+                                ),
                             )
                         })
                     })
@@ -11129,7 +11394,7 @@ mod tests {
                             task_text(&format!("distinct{n}"), &format!("group: g{n}\n"), BODY);
                         let submitted = [(format!("distinct{n}.md"), text)];
                         barrier.wait();
-                        queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted)
+                        queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted, &[])
                     })
                 })
                 .collect();
@@ -15441,7 +15706,7 @@ mod tests {
         .to_vec();
         let Mode::Queued { panel, .. } = queued_panel(
             &ids,
-            &[],
+            false,
             &[],
             Some("Start the dispatcher to begin working"),
             None,
@@ -15490,9 +15755,13 @@ mod tests {
                 why: NotQueuedWhy::DependsOn("archive-index-readers".to_string()),
             },
         ];
-        let Mode::Queued { panel, .. } =
-            queued_panel(&ids, &[], &not_queued, Some("Dispatcher is running"), None)
-        else {
+        let Mode::Queued { panel, .. } = queued_panel(
+            &ids,
+            false,
+            &not_queued,
+            Some("Dispatcher is running"),
+            None,
+        ) else {
             panic!("a landed batch is Mode::Queued");
         };
         assert!(
@@ -15540,7 +15809,7 @@ mod tests {
             id: "wire".to_string(),
             why: NotQueuedWhy::MissingStart("task/gone".to_string()),
         }];
-        let Mode::Queued { panel, .. } = queued_panel(&[], &[], &not_queued, None, None) else {
+        let Mode::Queued { panel, .. } = queued_panel(&[], false, &not_queued, None, None) else {
             panic!("a batch that left everything out is still Mode::Queued");
         };
         let all = panel.join("\n");
@@ -15552,14 +15821,13 @@ mod tests {
         assert!(all.contains("wire starts from task/gone"), "{all}");
     }
 
-    /// The `issues created` form carries the same line, under the count
-    /// rather than a task list.
+    /// A batch the hook ran for keeps the `queued` title and the full task
+    /// list, with one line on top saying the hook ran, and no ticket rows.
     #[test]
-    fn the_issues_created_popup_ends_on_the_dispatcher_line_too() {
-        let ids = vec!["wire".to_string()];
-        let tickets = vec!["task issue   created   #7   wire".to_string()];
+    fn a_batch_the_hook_ran_for_says_so_above_the_queued_list() {
+        let ids = vec!["cart-01".to_string(), "search-01".to_string()];
         let Mode::Queued { panel, .. } =
-            queued_panel(&ids, &tickets, &[], Some("Dispatcher is running"), None)
+            queued_panel(&ids, true, &[], Some("Dispatcher is running"), None)
         else {
             panic!("a landed batch is Mode::Queued");
         };
@@ -15568,16 +15836,18 @@ mod tests {
             .map(|line| line.trim_matches(['│', ' ']))
             .collect();
         assert!(
-            panel[0].starts_with(&format!("{TOP_LEFT}─ issues created ")),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ queued ")),
             "{panel:?}"
         );
         assert_eq!(
             body[1..panel.len() - 1],
             [
                 "",
-                "task issue   created   #7   wire",
+                "Hook executed successfully",
                 "",
-                "queued 1 task",
+                "queued 2 tasks",
+                "cart-01",
+                "search-01",
                 "",
                 "Dispatcher is running",
                 "",
@@ -15620,7 +15890,7 @@ mod tests {
         assert_eq!(dispatcher_line(&repo), None);
         let Mode::Queued { panel, .. } = queued_panel(
             &["wire".to_string()],
-            &[],
+            false,
             &[],
             dispatcher_line(&repo),
             None,
@@ -17568,6 +17838,545 @@ mod tests {
             );
         }
 
+        /// A task that sets `tracking: off` itself is queued without the
+        /// `open` hook being called for it, so a hook that would fail
+        /// (its tool logged out, say) cannot refuse it.
+        #[test]
+        fn a_task_setting_tracking_off_is_queued_without_calling_the_open_hook() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-hook-fails");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'; exit 1"#, calls.display()),
+            );
+            let text = task_text(
+                "release",
+                "group: rel\ngroup_description: a release\ntracking: off\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "release.md", &text);
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "release");
+            assert!(task.tracking_off());
+            assert_eq!(task.extra_str("ticket"), "");
+            assert!(
+                !calls.exists(),
+                "the open hook ran for a task that sets tracking: off"
+            );
+        }
+
+        /// In a batch where only some tasks set `tracking: off`, the `open`
+        /// hook is called for exactly the tasks that do not.
+        #[test]
+        fn the_open_hook_is_still_called_for_the_tasks_of_a_batch_that_do_not_set_tracking_off() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-mixed");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_TASK" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    calls.display()
+                ),
+            );
+            let tracked = write_doc(
+                &repo,
+                "tracked.md",
+                &task_text(
+                    "tracked",
+                    "group: rel\ngroup_description: a release\n",
+                    BODY,
+                ),
+            );
+            let untracked = write_doc(
+                &repo,
+                "untracked.md",
+                &task_text(
+                    "untracked",
+                    "group: rel\ngroup_description: a release\ndepends_on: [tracked]\ntracking: off\n",
+                    BODY,
+                ),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&tracked, &untracked]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let called = std::fs::read_to_string(&calls).unwrap_or_default();
+            assert_eq!(called.trim(), "tracked", "hook calls: {called:?}");
+            assert_eq!(queued(&repo, "tracked").extra_str("ticket"), "PROJ-13");
+            assert_eq!(queued(&repo, "untracked").extra_str("ticket"), "");
+        }
+
+        /// Three groups in one batch, each a single task, for the
+        /// `--no-tracking` tests below.
+        fn three_groups(repo: &Repo) -> Vec<String> {
+            ["cart", "checkout", "search"]
+                .iter()
+                .map(|group| {
+                    write_doc(
+                        repo,
+                        &format!("{group}-01.md"),
+                        &task_text(
+                            &format!("{group}-01"),
+                            &format!("group: {group}\ngroup_description: {group}\n"),
+                            BODY,
+                        ),
+                    )
+                })
+                .collect()
+        }
+
+        /// `--no-tracking checkout` queues that group with `tracking: off`
+        /// and never calls the hook for it; the other groups still do.
+        #[test]
+        fn no_tracking_with_a_group_skips_only_that_group() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-named");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_TASK" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    calls.display()
+                ),
+            );
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec!["checkout".to_string()];
+
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+
+            let called = std::fs::read_to_string(&calls).unwrap_or_default();
+            assert!(!called.contains("checkout-01"), "hook calls: {called:?}");
+            assert!(called.contains("cart-01") && called.contains("search-01"));
+            assert!(queued(&repo, "checkout-01").tracking_off());
+            assert_eq!(queued(&repo, "checkout-01").extra_str("ticket"), "");
+            assert!(!queued(&repo, "cart-01").tracking_off());
+            assert_eq!(queued(&repo, "cart-01").extra_str("ticket"), "PROJ-13");
+        }
+
+        /// The flag repeats, once per group.
+        #[test]
+        fn no_tracking_repeats_once_per_group() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-repeated");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_TASK" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    calls.display()
+                ),
+            );
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec!["cart".to_string(), "search".to_string()];
+
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+
+            let called = std::fs::read_to_string(&calls).unwrap_or_default();
+            assert_eq!(called.trim(), "checkout-01", "hook calls: {called:?}");
+            assert!(queued(&repo, "cart-01").tracking_off());
+            assert!(queued(&repo, "search-01").tracking_off());
+            assert!(!queued(&repo, "checkout-01").tracking_off());
+        }
+
+        /// The bare flag covers every group, and a hook that would fail is
+        /// never reached.
+        #[test]
+        fn bare_no_tracking_covers_every_group() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-bare");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'; exit 1"#, calls.display()),
+            );
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec![crate::cli::NO_TRACKING_BARE.to_string()];
+
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+
+            assert!(!calls.exists(), "the hook ran under a bare --no-tracking");
+            for id in ["cart-01", "checkout-01", "search-01"] {
+                assert!(queued(&repo, id).tracking_off(), "{id}");
+            }
+        }
+
+        /// A group no task belongs to is refused before the hook runs, with
+        /// nothing queued, and the message names the group and the batch's
+        /// real groups.
+        #[test]
+        fn no_tracking_with_an_unknown_group_is_refused_before_the_hook() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-typo");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'"#, calls.display()),
+            );
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec!["chekout".to_string()];
+
+            let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("names `chekout`"), "{err}");
+            assert!(err.contains("cart, checkout, search"), "{err}");
+            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(!calls.exists(), "the hook ran before the refusal");
+            assert!(repo.task("cart-01").is_err(), "something was queued");
+        }
+
+        /// A group the flag names needs no `group_description:`: its issue
+        /// is never opened, so the description would be read by nothing. The
+        /// bare flag spares every group, and a group left tracked still
+        /// asks for one.
+        #[test]
+        fn no_tracking_spares_a_group_its_description() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-description");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'"#, calls.display()),
+            );
+            let bare = |group: &str| {
+                write_doc(
+                    &repo,
+                    &format!("{group}-01.md"),
+                    &task_text(&format!("{group}-01"), &format!("group: {group}\n"), BODY),
+                )
+            };
+            let (cart, checkout) = (bare("cart"), bare("checkout"));
+            let mut args = from_args(&[&cart, &checkout]);
+
+            args.no_tracking = vec!["checkout".to_string()];
+            let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("group `cart` sets no `group_description:`"),
+                "{err}"
+            );
+            assert!(repo.task("checkout-01").is_err(), "something was queued");
+
+            args.no_tracking = vec!["cart".to_string(), "checkout".to_string()];
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+            assert!(queued(&repo, "cart-01").tracking_off());
+
+            let (search, local) = (bare("search"), bare("local"));
+            let mut args = from_args(&[&search, &local]);
+            args.no_tracking = vec![crate::cli::NO_TRACKING_BARE.to_string()];
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+            assert!(queued(&repo, "search-01").tracking_off());
+            assert!(queued(&repo, "local-01").tracking_off());
+            assert!(!calls.exists(), "the hook ran for an untracked group");
+        }
+
+        /// An empty group name is not the bare flag: it is refused, so an
+        /// unset shell variable cannot untrack the whole batch.
+        #[test]
+        fn no_tracking_with_an_empty_group_name_is_refused() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-empty");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'"#, calls.display()),
+            );
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec![String::new()];
+
+            let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("empty group name"), "{err}");
+            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(!calls.exists(), "the hook ran before the refusal");
+            assert!(repo.task("cart-01").is_err(), "something was queued");
+        }
+
+        /// `--dry-run` checks the flag too: a typo is refused, and a named
+        /// group needs no `group_description:`. Nothing is queued and no
+        /// hook is called either way.
+        #[test]
+        fn a_dry_run_checks_no_tracking_too() {
+            let (mut repo, _root_guard) = fixture("open-no-tracking-dry-run");
+            let calls = repo.root.join("open-calls.txt");
+            with_hook(
+                &mut repo,
+                &format!(r#"echo "$SPOOLWAY_TASK" >> '{}'"#, calls.display()),
+            );
+            let task = write_doc(
+                &repo,
+                "cart-01.md",
+                &task_text("cart-01", "group: cart\n", BODY),
+            );
+            let mut args = from_args(&[&task]);
+            args.dry_run = true;
+
+            args.no_tracking = vec!["chekout".to_string()];
+            let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("names `chekout`"), "{err}");
+
+            args.no_tracking = Vec::new();
+            let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("sets no `group_description:`"), "{err}");
+
+            args.no_tracking = vec!["cart".to_string()];
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+            assert!(repo.task("cart-01").is_err(), "a dry run queued");
+            assert!(!calls.exists(), "a dry run called the hook");
+        }
+
+        /// With no hook configured the flag is accepted and still writes
+        /// `tracking: off`.
+        #[test]
+        fn no_tracking_without_a_hook_still_writes_tracking_off() {
+            let (repo, _root_guard) = fixture("open-no-tracking-no-hook");
+            let paths = three_groups(&repo);
+            let mut args = from_args(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            args.no_tracking = vec!["checkout".to_string()];
+
+            queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+
+            assert!(queued(&repo, "checkout-01").tracking_off());
+            assert!(!queued(&repo, "cart-01").tracking_off());
+        }
+
+        /// With `key_in_names` on, a hand-written `tracking: off` task takes
+        /// the slug prefix its tracked sibling's hook answered, so the group
+        /// keeps one `group:` name rather than splitting in two. Only a group
+        /// whose every task is off stays bare.
+        #[test]
+        fn a_tracking_off_task_beside_a_tracked_sibling_takes_the_prefix() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-prefix");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-7"; echo "slug=gh-7"; } >"$SPOOLWAY_OUT""#,
+            );
+            let tracked = write_doc(
+                &repo,
+                "tracked.md",
+                &task_text(
+                    "tracked",
+                    "group: search\ngroup_description: search\n",
+                    BODY,
+                ),
+            );
+            let untracked = write_doc(
+                &repo,
+                "untracked.md",
+                &task_text(
+                    "untracked",
+                    "group: search\ndepends_on: [tracked]\ntracking: off\n",
+                    BODY,
+                ),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&tracked, &untracked]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            for id in ["tracked", "untracked"] {
+                let task = queued(&repo, id);
+                assert_eq!(task.front.group.as_deref(), Some("gh-7-search"), "{id}");
+                assert_eq!(
+                    task.front.branch.as_deref(),
+                    Some(format!("task/gh-7-{id}").as_str()),
+                    "{id}"
+                );
+                assert_eq!(task.extra_str("slug"), "gh-7", "{id}");
+            }
+            assert_eq!(queued(&repo, "untracked").extra_str("ticket"), "");
+        }
+
+        /// The group size the hook is told counts only the tasks that call
+        /// it: a group of a `tracking: off` task and one tracked task is a
+        /// group of one, so a hook opening an epic only above one opens none.
+        #[test]
+        fn the_group_size_handed_to_the_hook_leaves_out_a_tracking_off_task() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-group-size");
+            let sizes = repo.root.join("sizes.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"echo "$SPOOLWAY_GROUP_SIZE" >> '{}'; echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+                    sizes.display()
+                ),
+            );
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text(
+                    "off",
+                    "group: rel\ngroup_description: a release\ntracking: off\n",
+                    BODY,
+                ),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: rel\ndepends_on: [off]\n", BODY),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let seen = std::fs::read_to_string(&sizes).unwrap_or_default();
+            assert_eq!(seen.trim(), "1", "group sizes: {seen:?}");
+        }
+
+        /// A group whose every task sets `tracking: off` opens no issue, so
+        /// it is not refused for lacking a `group_description:` under a
+        /// configured hook; a group with one tracked task still is.
+        #[test]
+        fn a_group_of_tracking_off_tasks_needs_no_description() {
+            let (mut repo, _root_guard) = fixture("open-tracking-off-no-description");
+            with_hook(&mut repo, "exit 1");
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text("off", "group: rel\ntracking: off\n", BODY),
+            );
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            assert!(queued(&repo, "off").tracking_off());
+
+            let off2 = write_doc(
+                &repo,
+                "off2.md",
+                &task_text("off2", "group: mix\ntracking: off\n", BODY),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: mix\ndepends_on: [off2]\n", BODY),
+            );
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off2, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("sets no `group_description:`"),
+                "{err:#}"
+            );
+        }
+
+        /// `SPOOLWAY_DEPENDS_TICKETS` lists only the dependencies that have a
+        /// ticket: one that opted out of `open` leaves no empty id, and so no
+        /// stray space, in front of the one that did not.
+        #[test]
+        fn depends_tickets_leave_out_a_dependency_with_no_ticket() {
+            let (mut repo, _root_guard) = fixture("open-depends-tickets-no-empty");
+            let seen = repo.root.join("depends.txt");
+            with_hook(
+                &mut repo,
+                &format!(
+                    r#"[ "$SPOOLWAY_TASK" = on ] && printf '%s' "$SPOOLWAY_DEPENDS_TICKETS" > '{}'; echo "ticket=PROJ-9" >"$SPOOLWAY_OUT""#,
+                    seen.display()
+                ),
+            );
+            let off = write_doc(
+                &repo,
+                "off.md",
+                &task_text(
+                    "off",
+                    "group: rel\ngroup_description: a release\ntracking: off\n",
+                    BODY,
+                ),
+            );
+            let kept = write_doc(
+                &repo,
+                "kept.md",
+                &task_text(
+                    "kept",
+                    "group: rel\ndepends_on: [off]\nticket: PROJ-1\n",
+                    BODY,
+                ),
+            );
+            let on = write_doc(
+                &repo,
+                "on.md",
+                &task_text("on", "group: rel\ndepends_on: [off, kept]\n", BODY),
+            );
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&off, &kept, &on]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(std::fs::read_to_string(&seen).unwrap(), "PROJ-1");
+        }
+
+        /// Only a task that sets `tracking: off` and names no `ticket:` is
+        /// out of the hook's reach; the tool gate and the group checks all
+        /// read this one answer.
+        #[test]
+        fn opts_out_of_open_needs_tracking_off_and_no_ticket() {
+            let (repo, _root_guard) = fixture("open-opts-out");
+            let parse = |extra: &str| {
+                validate_batch(
+                    &repo,
+                    &Pipelines::builtin(),
+                    Some("plan/demo"),
+                    &[(
+                        "t.md".to_string(),
+                        task_text("t", &format!("group: g\n{extra}"), BODY),
+                    )],
+                )
+                .unwrap()
+                .remove(0)
+            };
+            assert!(opts_out_of_open(&parse("tracking: off\n")));
+            assert!(!opts_out_of_open(&parse("tracking: off\nticket: PROJ-1\n")));
+            assert!(!opts_out_of_open(&parse("")));
+        }
+
         /// The mockup this covers verbatim: a hook is configured, and the
         /// group being submitted sets `group_description:` on none of its
         /// tasks — refused, naming the group and the hook, before
@@ -18256,7 +19065,7 @@ mod tests {
         /// The queue screen's `enter` is the third way a batch arrives, and
         /// it takes the same prefix: driven through `begin_submission` the
         /// way the screen's own tests do, with the issue question already
-        /// answered yes.
+        /// answered with nothing ticked.
         #[test]
         fn a_screen_submission_takes_the_prefix_like_queue_add() {
             let (mut repo, _root_guard) = fixture("open-screen-prefix");
@@ -18284,7 +19093,7 @@ mod tests {
                 "plan/demo",
                 &mut groups,
                 &mut state,
-                Tracking::Open,
+                Tracking::Open(BTreeSet::new()),
                 &mut |_| {},
             );
             assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
@@ -18648,6 +19457,86 @@ depends_on: [cart-empty-state]
                 (repo, root_guard)
             }
 
+            /// [`cart`], plus a second pending group `search` of one task.
+            /// The two are the pane's first two rows, so `" \x1b[B "`
+            /// selects both; which comes first depends on the files'
+            /// creation times — see [`shop_order`].
+            fn shop(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+                let (repo, root_guard) = cart(name);
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+",
+                        BODY,
+                    ),
+                );
+                (repo, root_guard)
+            }
+
+            /// [`shop`]'s two groups in the order the pane lists them, which is
+            /// the order the batch and the checklist take them in: newest
+            /// first, so it follows which file the filesystem dates later
+            /// and cannot be fixed by the fixture.
+            fn shop_order(repo: &Repo) -> Vec<String> {
+                listed(repo)
+                    .into_iter()
+                    .map(|group| group.name)
+                    .filter(|name| name == "cart" || name == "search")
+                    .collect()
+            }
+
+            /// The keys that move the checklist's cursor from its first row
+            /// onto `search`'s.
+            fn to_search(repo: &Repo) -> &'static str {
+                if shop_order(repo)[0] == "search" {
+                    ""
+                } else {
+                    "\x1b[B"
+                }
+            }
+
+            /// [`shop`]'s checklist rows as the popup draws them, in pane
+            /// order, with the cursor on `cursor` and `ticked` ticked.
+            fn shop_rows(repo: &Repo, cursor: &str, ticked: &[&str]) -> Vec<String> {
+                shop_order(repo)
+                    .iter()
+                    .map(|name| {
+                        let marker = if name == cursor { '>' } else { ' ' };
+                        let tick = if ticked.contains(&name.as_str()) {
+                            "[x]"
+                        } else {
+                            "[ ]"
+                        };
+                        let count = if name == "cart" { "2 tasks" } else { "1 task" };
+                        format!("{marker} {tick} {name:<9}{count}")
+                    })
+                    .collect()
+            }
+
+            /// The rows of the popup titled `title` in `frame`, each cut out
+            /// of its box and trimmed of the two-space indent [`boxed`]
+            /// draws, from the blank row under the title to the key row.
+            fn popup_rows(frame: &str, title: &str) -> Vec<String> {
+                frame
+                    .lines()
+                    .skip_while(|line| !line.contains(&format!("{TOP_LEFT}─ {title} ")))
+                    .skip(1)
+                    .take_while(|line| !line.contains(BOTTOM_LEFT))
+                    .map(|line| {
+                        let inner = line.split('│').nth(2).unwrap_or("");
+                        inner
+                            .strip_prefix("  ")
+                            .unwrap_or(inner)
+                            .trim_end()
+                            .to_string()
+                    })
+                    .collect()
+            }
+
             fn hook_calls(repo: &Repo) -> Vec<String> {
                 std::fs::read_to_string(repo.tracking_dir().join("calls.log"))
                     .unwrap_or_default()
@@ -18656,48 +19545,309 @@ depends_on: [cart-empty-state]
                     .collect()
             }
 
-            /// `enter` stops at the question before the hook runs: it lists
-            /// every task in the batch and names the tracker, over the tab.
+            /// The `running hook` popups in `drawn`, in the order they were
+            /// drawn, each cut down to its rows by [`popup_rows`].
+            fn running_popups(drawn: &str) -> Vec<Vec<String>> {
+                drawn
+                    .split("\x1b[?2026h\x1b[H")
+                    .filter(|frame| frame.contains(&format!("{TOP_LEFT}─ running hook ")))
+                    .map(|frame| popup_rows(frame, "running hook"))
+                    .collect()
+            }
+
+            /// `enter` stops at the question before the hook runs: a
+            /// checklist of the batch's groups, each counting the tasks it
+            /// queues, nothing ticked, over the tab.
             #[test]
-            fn enter_asks_before_the_hook_runs() {
-                let (repo, _root_guard) = cart("issue-question-asks");
-                let drawn = screen(&repo, listed(&repo), " \r");
+            fn enter_asks_with_a_checklist_of_groups_before_the_hook_runs() {
+                let (repo, _root_guard) = shop("issue-question-asks");
+                let drawn = screen(&repo, listed(&repo), " \x1b[B \r");
                 let frame = last_frame(&drawn);
-                assert!(
-                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
-                    "{frame}"
-                );
-                assert!(
-                    frame.contains("create 2 issues on open for cart"),
-                    "{frame}"
-                );
-                assert!(frame.contains("    cart-empty-state"), "{frame}");
-                assert!(frame.contains("    cart-totals"), "{frame}");
-                assert!(frame.contains("> create and queue"), "{frame}");
-                assert!(frame.contains("  queue only"), "{frame}");
-                assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
+                let first = shop_order(&repo)[0].clone();
+                let mut expected = vec![
+                    String::new(),
+                    "Deactivate issue tracking for selected groups:".to_string(),
+                    String::new(),
+                ];
+                expected.extend(shop_rows(&repo, &first, &[]));
+                expected.extend([
+                    String::new(),
+                    "[enter] confirm   [space] select   [a] select all   [esc] back".to_string(),
+                ]);
+                assert_eq!(popup_rows(frame, "issue tracking"), expected, "{frame}");
                 assert!(frame.contains("─ groups"), "the tab under it: {frame}");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
                 assert!(repo.queued_ids().is_empty());
             }
 
-            /// `queue only` queues the group with issue tracking off: no
-            /// hook call, no ticket, and a popup naming what it queued. `n`,
-            /// the letter that used to answer it, does nothing on the way.
+            /// The popup as drawn for a batch of three groups: nothing
+            /// ticked on open, one row ticked after `↓` and `space`, and
+            /// every row ticked by `a` — box, padding and key row exact.
             #[test]
-            fn queue_only_queues_with_no_hook_call() {
-                let (repo, _root_guard) = cart("issue-question-n");
-                let drawn = screen(&repo, listed(&repo), " \rn\x1b[B\r");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
+            fn the_checklist_draws_each_group_its_tick_and_its_count() {
+                let mut checklist = IssueChecklist {
+                    groups: vec![
+                        ("cart".to_string(), 3),
+                        ("checkout".to_string(), 2),
+                        ("search".to_string(), 1),
+                    ],
+                    ticked: BTreeSet::new(),
+                    cursor: 0,
+                };
+                let drawn = |checklist: &IssueChecklist| {
+                    issue_question_panel(checklist, (usize::MAX, None)).join("\n")
+                };
+                let frame = |rows: [&str; 3]| {
+                    [
+                        "╭─ issue tracking ─────────────────────────────────────────────────╮",
+                        "│                                                                  │",
+                        "│  Deactivate issue tracking for selected groups:                  │",
+                        "│                                                                  │",
+                        rows[0],
+                        rows[1],
+                        rows[2],
+                        "│                                                                  │",
+                        "│  [enter] confirm   [space] select   [a] select all   [esc] back  │",
+                        "╰──────────────────────────────────────────────────────────────────╯",
+                    ]
+                    .join("\n")
+                };
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│  > [ ] cart       3 tasks                                        │",
+                        "│    [ ] checkout   2 tasks                                        │",
+                        "│    [ ] search     1 task                                         │",
+                    ])
+                );
+
+                checklist.cursor = crate::screen::move_cursor(0, 3, Key::Down);
+                checklist.toggle();
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│    [ ] cart       3 tasks                                        │",
+                        "│  > [x] checkout   2 tasks                                        │",
+                        "│    [ ] search     1 task                                         │",
+                    ])
+                );
+
+                checklist.cursor = 0;
+                checklist.toggle_all();
+                assert_eq!(
+                    drawn(&checklist),
+                    frame([
+                        "│  > [x] cart       3 tasks                                        │",
+                        "│    [x] checkout   2 tasks                                        │",
+                        "│    [x] search     1 task                                         │",
+                    ])
+                );
+            }
+
+            /// A batch of more groups than the frame has rows for scrolls
+            /// the list under the cursor, and a group name wider than the
+            /// frame is cut, so the popup never runs past the frame.
+            #[test]
+            fn the_checklist_scrolls_and_clips_inside_the_frame() {
+                let mut groups: Vec<(String, usize)> =
+                    (0..20).map(|i| (format!("group-{i:02}"), 1)).collect();
+                groups[0].0 = "a-very-long-group-name-that-runs-past-the-frame".to_string();
+                let checklist = IssueChecklist {
+                    groups,
+                    ticked: BTreeSet::new(),
+                    cursor: 10,
+                };
+                let height = 15;
+                let panel = issue_question_panel(&checklist, (40, Some(height)));
+                assert!(panel.len() <= height, "{}", panel.join("\n"));
+                let drawn = panel.join("\n");
+                assert!(drawn.contains("> [ ] group-10"), "{drawn}");
+                assert!(drawn.contains("↑"), "{drawn}");
+                assert!(drawn.contains("↓"), "{drawn}");
+                // Two borders and the two-space indent each side of the text.
+                assert!(
+                    panel.iter().all(|line| line.chars().count() <= 40 + 6),
+                    "{drawn}"
+                );
+            }
+
+            /// A group whose every task already names a `ticket:` has no
+            /// ticket left to open, so it is left off the list; with no
+            /// group left at all, `enter` queues without asking.
+            #[test]
+            fn a_group_with_every_ticket_named_is_left_off_the_list() {
+                let (repo, _root_guard) = shop("issue-question-ticketed");
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+ticket: \"#9\"
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), " \x1b[B \r");
+                let rows = popup_rows(last_frame(&drawn), "issue tracking");
+                assert_eq!(rows[3..5], ["> [ ] cart   2 tasks", ""], "{rows:?}");
+
+                // `search` alone: nothing to ask, queued straight away.
+                let keys = format!("{} \r", to_search(&repo));
+                let drawn = screen(&repo, listed(&repo), &keys);
+                assert!(!drawn.contains("issue tracking"), "{drawn}");
+                assert_eq!(
+                    repo.queued_ids(),
+                    BTreeSet::from(["search-box".to_string()])
+                );
+                assert!(hook_calls(&repo).is_empty());
+            }
+
+            /// `space` ticks the row under the cursor and clears it again;
+            /// `a` ticks every row, and clears every tick once all are
+            /// ticked.
+            #[test]
+            fn space_ticks_a_row_and_a_ticks_or_clears_them_all() {
+                let (repo, _root_guard) = shop("issue-question-ticks");
+                let rows = |input: &str| {
+                    let drawn = screen(&repo, listed(&repo), &format!(" \x1b[B \r{input}"));
+                    popup_rows(last_frame(&drawn), "issue tracking")[3..5].to_vec()
+                };
+                let order = shop_order(&repo);
+                let (first, second) = (order[0].as_str(), order[1].as_str());
+                assert_eq!(rows("\x1b[B "), shop_rows(&repo, second, &[second]));
+                assert_eq!(rows("\x1b[B  "), shop_rows(&repo, second, &[]));
+                let both = [first, second];
+                assert_eq!(rows("a"), shop_rows(&repo, first, &both));
+                // One already ticked: `a` ticks the rest rather than clearing.
+                assert_eq!(rows(" a"), shop_rows(&repo, first, &both));
+                assert_eq!(rows("aa"), shop_rows(&repo, first, &[]));
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
+            }
+
+            /// A ticked group queues with `tracking: off` and never reaches
+            /// the hook; the group left unticked opens its tickets as
+            /// before, in the same batch.
+            #[test]
+            fn enter_opens_tickets_only_for_the_groups_left_unticked() {
+                let (repo, _root_guard) = shop("issue-question-mixed");
+                let keys = format!(" \x1b[B \r{} \r", to_search(&repo));
+                let drawn = screen(&repo, listed(&repo), &keys);
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                // The ticked group's task is no call the popup counts.
+                assert_eq!(
+                    running_popups(&drawn).last().map(|rows| rows[1].as_str()),
+                    Some("running the hook: 2 of 2 tasks"),
+                    "{drawn}"
+                );
+                let search = queued(&repo, "search-box");
+                assert!(search.tracking_off());
+                assert_eq!(search.extra_str("ticket"), "");
+                for id in ["cart-empty-state", "cart-totals"] {
+                    let task = queued(&repo, id);
+                    assert!(!task.tracking_off(), "{id}");
+                    assert_ne!(task.extra_str("ticket"), "", "{id}");
+                }
+            }
+
+            /// A group with no `group_description:` reaches the checklist,
+            /// and ticking it spares it the description: its issue is never
+            /// opened. Left unticked it is still refused, after the answer.
+            #[test]
+            fn a_ticked_group_needs_no_description_but_an_unticked_one_does() {
+                let (repo, _root_guard) = shop("issue-question-description");
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text("search-box", "group: search\n", BODY),
+                );
+                let select = " \x1b[B \r";
+
+                let unticked = screen(&repo, listed(&repo), &format!("{select}\r"));
+                let frame = last_frame(&unticked);
+                assert!(frame.contains("submission refused"), "{frame}");
+                assert!(frame.contains("group `search` sets no `group_description:`"));
+                assert!(repo.queued_ids().is_empty(), "something was queued");
+                assert!(hook_calls(&repo).is_empty());
+
+                screen(
+                    &repo,
+                    listed(&repo),
+                    &format!("{select}{} \r", to_search(&repo)),
+                );
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                assert!(queued(&repo, "search-box").tracking_off());
+            }
+
+            /// With `key_in_names` on, a ticked group's names stay bare even
+            /// when a sibling of that group is already queued with a slug —
+            /// the slug that would otherwise prefix them.
+            #[test]
+            fn a_ticked_groups_names_take_no_slug_from_a_queued_sibling() {
+                let (mut repo, _root_guard) = shop("issue-question-bare");
+                repo.config.issue_tracking.key_in_names = true;
+                std::fs::write(
+                    repo.queue_dir().join("search-old.md"),
+                    "---\nid: search-old\ntitle: search-old\nstage: queued\n\
+                     group: gh-7-search\nslug: gh-7\nepic: \"#7\"\n---\nbody\n",
+                )
+                .unwrap();
+                // One chain with the queued sibling, as a group must be.
+                write_pending(
+                    &repo,
+                    "search-box",
+                    &task_text(
+                        "search-box",
+                        "group: search
+group_description: search
+depends_on: [search-old]
+",
+                        BODY,
+                    ),
+                );
+                let keys = format!(" \x1b[B \r{} \r", to_search(&repo));
+                screen(&repo, listed(&repo), &keys);
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                let search = queued(&repo, "search-box");
+                assert_eq!(search.front.group.as_deref(), Some("search"));
+                assert_eq!(search.front.branch.as_deref(), Some("task/search-box"));
+                assert_eq!(search.extra_str("slug"), "");
+            }
+
+            /// Every group ticked queues the whole batch with issue tracking
+            /// off: no hook call, no ticket, and a popup naming what it
+            /// queued.
+            #[test]
+            fn every_group_ticked_queues_with_no_hook_call() {
+                let (repo, _root_guard) = cart("issue-question-all");
+                let drawn = screen(&repo, listed(&repo), " \ra\r");
+                assert!(
+                    hook_calls(&repo).is_empty(),
+                    "the hook ran for a ticked group"
+                );
                 let task = queued(&repo, "cart-totals");
                 assert_eq!(task.extra_str("ticket"), "");
+                assert!(task.tracking_off());
                 assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
 
+                assert!(running_popups(&drawn).is_empty(), "{drawn}");
                 let frame = last_frame(&drawn);
-                assert!(frame.contains(&format!("{TOP_LEFT}─ queued ")), "{frame}");
-                assert!(frame.contains("queued 2 tasks"), "{frame}");
-                assert!(frame.contains("    cart-empty-state"), "{frame}");
-                assert!(frame.contains("[enter] confirm"), "{frame}");
+                assert_eq!(
+                    popup_rows(frame, "queued"),
+                    [
+                        "",
+                        "queued 2 tasks",
+                        "  cart-empty-state",
+                        "  cart-totals",
+                        "",
+                        "Start the dispatcher to begin working",
+                        "",
+                        "[enter] confirm",
+                    ],
+                    "{frame}"
+                );
             }
 
             /// `esc` queues nothing and opens nothing, and leaves the
@@ -18713,12 +19863,12 @@ depends_on: [cart-empty-state]
                 assert!(frame.contains("[x] cart"), "still selected: {frame}");
             }
 
-            /// `enter` opens the tickets and queues. The popup fills in row
-            /// by row while the hook answers — the task at the hook drawn as
-            /// `…` — and once it is done says what was opened and queued,
-            /// taking `enter` to close.
+            /// `enter` runs the hook and queues. While it runs, the popup
+            /// counts the calls and says nothing else; once it is done it
+            /// says the hook ran above the usual `queued` popup, with no
+            /// ticket row, taking `enter` to close.
             #[test]
-            fn enter_opens_the_tickets_row_by_row_and_queues() {
+            fn enter_runs_the_hook_counting_tasks_and_queues() {
                 let (repo, _root_guard) = cart("issue-question-enter");
                 let drawn = screen(&repo, listed(&repo), " \r\r");
                 assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
@@ -18728,48 +19878,34 @@ depends_on: [cart-empty-state]
                 );
                 assert_eq!(queued(&repo, "cart-totals").extra_str("ticket"), "#412");
 
-                let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
-                let opening: Vec<&&str> = frames
-                    .iter()
-                    .filter(|frame| frame.contains(&format!("{TOP_LEFT}─ opening issues ")))
-                    .collect();
-                assert!(
-                    opening
-                        .iter()
-                        .all(|frame| frame.contains("waiting on the hook")),
-                    "{opening:?}"
-                );
-                // The second task at the hook, under the first one's answer.
-                assert!(
-                    opening.iter().any(|frame| {
-                        frame.contains("group issue  created   #410   cart")
-                            && frame.contains("task issue   created   #411   cart-empty-state")
-                            && frame.contains("task issue   …                cart-totals")
-                    }),
-                    "{opening:?}"
-                );
-                assert!(
-                    !opening
-                        .iter()
-                        .any(|frame| frame.contains("[enter] confirm")),
-                    "a popup still filling takes no key: {opening:?}"
+                assert_eq!(
+                    running_popups(&drawn),
+                    [
+                        ["", "running the hook: 1 of 2 tasks"],
+                        ["", "running the hook: 2 of 2 tasks"],
+                    ],
+                    "{drawn}"
                 );
 
                 let frame = last_frame(&drawn);
-                assert!(
-                    frame.contains(&format!("{TOP_LEFT}─ issues created ")),
+                let rows = popup_rows(frame, "queued");
+                assert_eq!(
+                    rows,
+                    [
+                        "",
+                        "Hook executed successfully",
+                        "",
+                        "queued 2 tasks",
+                        "  cart-empty-state",
+                        "  cart-totals",
+                        "",
+                        "Start the dispatcher to begin working",
+                        "",
+                        "[enter] confirm",
+                    ],
                     "{frame}"
                 );
-                assert!(
-                    frame.contains("task issue   created   #412   cart-totals"),
-                    "{frame}"
-                );
-                assert!(frame.contains("queued 2 tasks"), "{frame}");
-                assert!(
-                    frame.contains("Start the dispatcher to begin working"),
-                    "{frame}"
-                );
-                assert!(frame.contains("[enter] confirm"), "{frame}");
+                assert!(!frame.contains("issue  "), "no ticket row: {frame}");
                 // Nothing printed under the frame: every byte went out as part
                 // of one frame or another, each opening with the shared frame
                 // writer's own start code.
@@ -18780,13 +19916,33 @@ depends_on: [cart-empty-state]
                 );
             }
 
+            /// A hook that answers no `ticket=` at all still ran, and the
+            /// popup says only that: it claims no issue the hook never
+            /// opened.
+            #[test]
+            fn a_hook_answering_no_ticket_is_reported_as_run() {
+                let (mut repo, _root_guard) = cart("issue-question-no-ticket");
+                with_hook(
+                    &mut repo,
+                    r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
+                       echo "$SPOOLWAY_TASK" >>"$log"
+                       : >"$SPOOLWAY_OUT""#,
+                );
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(hook_calls(&repo).len(), 2);
+                let frame = last_frame(&drawn);
+                let rows = popup_rows(frame, "queued");
+                assert_eq!(rows[1], "Hook executed successfully", "{frame}");
+                assert!(!frame.contains("created"), "{frame}");
+            }
+
             /// A hook answering `slug=` with `key_in_names` on prefixes the
             /// names, as the shipped `github.sh` does on every batch — and
-            /// the result is still step 12: ticket rows, then what was
-            /// queued, the box held to the question's width, and no
-            /// `opening issues` frame drawn once the last ticket is in.
+            /// the result is still the `queued` popup: no names-prefixed
+            /// note, the box held to the issue popups' width, and the last
+            /// `running hook` frame counting the last call.
             #[test]
-            fn a_slug_answer_keeps_the_result_to_the_ticket_rows() {
+            fn a_slug_answer_keeps_the_result_to_the_queued_popup() {
                 let (mut repo, _root_guard) = cart("issue-question-slug");
                 repo.config.issue_tracking.key_in_names = true;
                 with_hook(
@@ -18802,43 +19958,23 @@ depends_on: [cart-empty-state]
                     queued(&repo, "cart-totals").front.group.as_deref(),
                     Some("gh-410-cart")
                 );
-
-                let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
-                let last_opening = frames
-                    .iter()
-                    .rposition(|frame| frame.contains(&format!("{TOP_LEFT}─ opening issues ")))
-                    .unwrap();
-                assert!(
-                    frames[last_opening].contains("#412   cart-totals"),
-                    "the last `opening issues` frame is the last ticket's: {}",
-                    frames[last_opening]
+                let running = running_popups(&drawn);
+                assert_eq!(
+                    running.last().map(|rows| rows[1].as_str()),
+                    Some("running the hook: 2 of 2 tasks"),
+                    "{drawn}"
                 );
 
                 let frame = last_frame(&drawn);
                 assert!(!frame.contains("names prefixed"), "{frame}");
-                let body: Vec<String> = frame
-                    .lines()
-                    .skip_while(|line| !line.contains(&format!("{TOP_LEFT}─ issues created ")))
-                    .skip(1)
-                    .take_while(|line| !line.contains(BOTTOM_LEFT) || line.contains('│'))
-                    .map(|line| line.split('│').nth(2).unwrap_or("").trim().to_string())
-                    .collect();
                 assert_eq!(
-                    body[..7],
-                    [
-                        "",
-                        "group issue  created   #410   cart",
-                        "task issue   created   #411   cart-empty-state",
-                        "task issue   created   #412   cart-totals",
-                        "",
-                        "queued 2 tasks",
-                        "",
-                    ],
+                    popup_rows(frame, "queued")[..4],
+                    ["", "Hook executed successfully", "", "queued 2 tasks"],
                     "{frame}"
                 );
                 let top = frame
                     .lines()
-                    .find(|line| line.contains(&format!("{TOP_LEFT}─ issues created ")))
+                    .find(|line| line.contains(&format!("{TOP_LEFT}─ queued ")))
                     .unwrap();
                 let width = top
                     .chars()
@@ -18846,11 +19982,12 @@ depends_on: [cart-empty-state]
                     .take_while(|c| *c != TOP_RIGHT)
                     .count()
                     + 1;
-                assert_eq!(width, 60, "held to the question's width: {frame}");
+                assert_eq!(width, 60, "held to the issue popups' width: {frame}");
             }
 
-            /// Queuing a routine asks the same question, over the routines
-            /// pane, and `queue only` there queues it with no hook call.
+            /// Queuing a routine asks with the same checklist, over the
+            /// routines pane, and a ticked group there queues with no hook
+            /// call.
             #[test]
             fn queuing_a_routine_asks_the_same_question() {
                 let (repo, _root_guard) = cart("issue-question-routine");
@@ -18868,12 +20005,15 @@ group_description: audit
                 );
                 let drawn = routines_screen(&repo, " \r");
                 let frame = last_frame(&drawn);
-                assert!(
-                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
-                    "{frame}"
-                );
-                assert!(
-                    frame.contains("create 1 issue on open for nightly"),
+                let rows = popup_rows(frame, "issue tracking");
+                assert_eq!(
+                    rows[1..5],
+                    [
+                        "Deactivate issue tracking for selected groups:",
+                        "",
+                        "> [ ] nightly   1 task",
+                        "",
+                    ],
                     "{frame}"
                 );
                 assert!(
@@ -18882,9 +20022,113 @@ group_description: audit
                 );
                 assert!(repo.queued_ids().is_empty());
 
-                routines_screen(&repo, " \r\x1b[B\r");
-                assert!(hook_calls(&repo).is_empty(), "the hook ran on `queue only`");
-                assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
+                let drawn = routines_screen(&repo, " \r \r");
+                assert!(
+                    hook_calls(&repo).is_empty(),
+                    "the hook ran for a ticked group"
+                );
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                assert!(queued(&repo, ids.first().unwrap()).tracking_off());
+                // No call, so no running popup and no success line.
+                assert!(running_popups(&drawn).is_empty(), "{drawn}");
+                let frame = last_frame(&drawn);
+                assert_eq!(
+                    popup_rows(frame, "queued")[..2],
+                    ["", "queued 1 task"],
+                    "{frame}"
+                );
+            }
+
+            /// A routine group with no `group_description:` reaches the
+            /// checklist too: ticked it queues untracked, and unticked it is
+            /// refused after the answer, with nothing queued.
+            #[test]
+            fn a_routine_group_needs_no_description_when_ticked() {
+                let (repo, _root_guard) = cart("issue-question-routine-description");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text("audit", "group: nightly\n", BODY),
+                );
+
+                let drawn = routines_screen(&repo, " \r\r");
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("queue refused"), "{frame}");
+                assert!(frame.contains("group `nightly` sets no `group_description:`"));
+                assert!(repo.queued_ids().is_empty(), "something was queued");
+
+                routines_screen(&repo, " \r \r");
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                assert!(queued(&repo, ids.first().unwrap()).tracking_off());
+                assert!(hook_calls(&repo).is_empty());
+            }
+
+            /// `space` on the routines tab's tasks pane — one task queued
+            /// alone — asks with the same checklist, and its group left
+            /// unticked opens its ticket.
+            #[test]
+            fn queuing_one_routine_task_asks_the_same_question() {
+                let (repo, _root_guard) = cart("issue-question-routine-solo");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let drawn = routines_screen(&repo, "\t ");
+                let rows = popup_rows(last_frame(&drawn), "issue tracking");
+                assert_eq!(rows[3], "> [ ] nightly   1 task", "{rows:?}");
+
+                let drawn = routines_screen(&repo, "\t \r");
+                assert_eq!(hook_calls(&repo).len(), 1);
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                let task = queued(&repo, ids.first().unwrap());
+                assert!(!task.tracking_off());
+                assert_ne!(task.extra_str("ticket"), "");
+                // The same two popups the queue tab draws.
+                assert_eq!(
+                    running_popups(&drawn),
+                    [["", "running the hook: 1 of 1 tasks"]],
+                    "{drawn}"
+                );
+                let frame = last_frame(&drawn);
+                assert_eq!(
+                    popup_rows(frame, "queued")[..4],
+                    ["", "Hook executed successfully", "", "queued 1 task"],
+                    "{frame}"
+                );
+            }
+
+            /// A routine task with no `group:` is refused before the
+            /// question opens, so no row is ever keyed by a minted id that
+            /// `enter` could mint afresh. With `audit-1` queued meanwhile, a
+            /// tick on it would match nothing in a rebuilt batch holding
+            /// `audit-2` and let the hook open the ticket it was set to
+            /// skip — see [`checklist_group`].
+            #[test]
+            fn a_routine_task_with_no_group_never_reaches_the_checklist() {
+                let (repo, _root_guard) = cart("issue-question-routine-no-group");
+                write_routine(&repo, "nightly", "audit", &task_text("audit", "", BODY));
+                let drawn = routines_screen(&repo, "\t ");
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("issue tracking"), "{frame}");
+                // Read across the popup's rows: the refusal leads with the
+                // task's full path, and a longer temp directory (macOS)
+                // wraps the sentence at a different word.
+                let refusal = popup_rows(frame, "queue refused").join(" ");
+                assert!(refusal.contains("a task must set `group:`"), "{frame}");
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
             }
 
             /// A trial never asks and opens no tickets, as before.

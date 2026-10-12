@@ -345,6 +345,69 @@ must "the second run over the same batch queues both" \
 has "the resumed run kept the first ticket rather than opening a new one" \
   "ticket: $FIRST_TICKET" "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md"
 
+# A task that sets `tracking: off` itself has opted out of `open` too. Under a
+# hook that fails on every call, it still queues, and the hook is never run
+# for it; a sibling in the same batch that sets no such thing still reaches the
+# hook, which is what refuses the batch here.
+cat > .spoolway/hooks/open-fails.sh <<'EOF'
+#!/bin/sh
+[ "$SPOOLWAY_EVENT" = open ] || exit 0
+echo "$SPOOLWAY_TASK" >>"$(dirname "$SPOOLWAY_OUT")/open-fails.calls"
+exit 9
+EOF
+chmod +x .spoolway/hooks/open-fails.sh
+must "the hook is switched to one that fails every open call"   "$SPOOLWAY" config set issue_tracking.hook open-fails.sh
+task_doc "$LIVE/off-solo.md" off-solo "$BODY" "tracking: off" \
+  "group: off-solo" "group_description: a task that sets tracking off itself"
+must "a tracking: off task queues under a hook that would fail" \
+  "$SPOOLWAY" queue add --from "$LIVE/off-solo.md"
+task_doc "$LIVE/off-quiet.md" off-quiet "$BODY" "tracking: off" \
+  "group: off-quiet" "group_description: a task that sets tracking off itself"
+OFF_QUIET_OUT=$("$SPOOLWAY" queue add --from "$LIVE/off-quiet.md" 2>&1)
+has "a group whose tasks all set tracking: off announces no tickets" "queued" \
+  <(printf '%s\n' "$OFF_QUIET_OUT")
+works "so the output has no opening-tickets header" \
+  bash -c '! printf "%s" "$1" | grep -q "opening tickets"' _ "$OFF_QUIET_OUT"
+has "and it is still stamped tracking: off" "tracking: off" \
+  "$SPOOLWAY_PROJECT_HOME/queue/off-solo.md"
+works "and the open hook was never run for it" \
+  bash -c '! grep -qx off-solo "$1/tracking/open-fails.calls" 2>/dev/null' _ "$SPOOLWAY_PROJECT_HOME"
+task_doc "$LIVE/off-mixed-a.md" off-mixed-a "$BODY" "tracking: off" \
+  "group: off-mixed" "group_description: a batch where one task opts out"
+task_doc "$LIVE/off-mixed-b.md" off-mixed-b "$BODY" "group: off-mixed" \
+  "depends_on: [off-mixed-a]"
+refuses "the sibling that sets no tracking: off still reaches the failing hook" \
+  "off-mixed-b" \
+  "$SPOOLWAY" queue add --from "$LIVE/off-mixed-a.md" --from "$LIVE/off-mixed-b.md"
+works "while the hook was never run for the one that did" \
+  bash -c '! grep -qx off-mixed-a "$1/tracking/open-fails.calls"' _ "$SPOOLWAY_PROJECT_HOME"
+works "and it did run for the sibling" \
+  bash -c 'grep -qx off-mixed-b "$1/tracking/open-fails.calls"' _ "$SPOOLWAY_PROJECT_HOME"
+# A hook whose tool this machine lacks draws the tool gate for a batch that
+# will call it, but not for one whose every task opted out: nothing there will
+# ever run the missing tool.
+cat > .spoolway/hooks/open-needs.sh <<'EOF'
+#!/bin/sh
+# spoolway-requires: nosuchtool >= 1.0
+exit 0
+EOF
+chmod +x .spoolway/hooks/open-needs.sh
+must "the hook is switched to one that needs a tool this machine lacks" \
+  "$SPOOLWAY" config set issue_tracking.hook open-needs.sh
+task_doc "$LIVE/off-gate.md" off-gate "$BODY" "tracking: off" "group: off-gate"
+OFF_GATE_OUT=$("$SPOOLWAY" queue add --from "$LIVE/off-gate.md" </dev/null 2>&1)
+has "a batch of tracking: off tasks is queued" "tracking: off" \
+  "$SPOOLWAY_PROJECT_HOME/queue/off-gate.md"
+works "and draws no gate" \
+  bash -c '! printf "%s" "$1" | grep -q "issue tracking is not supported"' _ "$OFF_GATE_OUT"
+task_doc "$LIVE/on-gate.md" on-gate "$BODY" "group: on-gate" \
+  "group_description: a task that does call the hook"
+ON_GATE_OUT=$("$SPOOLWAY" queue add --from "$LIVE/on-gate.md" </dev/null 2>&1)
+has "while a batch that reaches the hook still draws the gate" \
+  "issue tracking is not supported" <(printf '%s\n' "$ON_GATE_OUT")
+must "the hook is switched back to the one that only answers open" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
+
 # --------------------------------------------- issue_tracking.key_in_names
 # With the flag on and the hook answering a `slug=`, `queue add` writes the
 # prefixed `group:` and `branch:` into each queued document — proven here
@@ -408,13 +471,14 @@ must "the hook is restored to the plain one" \
 
 # ------------------------------------------ the queue tab asks before `open`
 # The queue tab's `enter` no longer runs the hook straight away: with
-# tracking on, it asks first — `create and queue` or `queue only`, picked with
-# the arrows and `enter`, `esc` to close — over every task in the batch. What only this suite can say
-# is that `queue only` really does keep the hook's process from ever starting: the
+# tracking on, it asks first, with a checklist of the batch's groups: `space`
+# ticks the group under the cursor, `a` ticks all, `enter` confirms, `esc`
+# goes back. A ticked group queues with tracking off. What only this suite
+# can say is that a ticked group really does keep the hook's process from ever starting: the
 # whole binary reading real keys off a pipe, against the real `open.sh` above,
 # which writes `tracking/task-file.<task>` on every `open` it is called for.
-# `enter` on the same question is the control — the same hook, the same
-# marker, written — so a marker missing after `queue only` is the question working, not
+# `enter` on the same question with nothing ticked is the control — the same
+# hook, the same marker, written — so a marker missing after a tick is the question working, not
 # a hook that never fires. One group in pending at a time, so the cursor opens
 # on it.
 pending_doc asked-a "$BODY" "group: asked" \
@@ -426,19 +490,18 @@ TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 ASK_ESC="$LIVE/ask-esc.out"
 on_screen ' \r\x1b' "$ASK_ESC"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_ESC"
 has "enter on the queue tab asks before any ticket is opened" \
-  "create 2 issues on open for asked" "$ASK_ESC"
+  "Deactivate issue tracking for selected groups:" "$ASK_ESC"
 has "in a popup over the queue tab" "╭─ issue tracking " "$ASK_ESC"
-has "listing every task in the batch" "asked-b" "$ASK_ESC"
-has "whose keys read as drawn" \
-  "> create and queue" "$ASK_ESC"
-has "and queue only under it" "queue only" "$ASK_ESC"
-has "under the shared key row" "[enter] confirm   [esc] close" "$ASK_ESC"
+has "listing the group with nothing ticked and its task count" \
+  "> [ ] asked   2 tasks" "$ASK_ESC"
+has "under the checklist's key row" \
+  "[enter] confirm   [space] select   [a] select all   [esc] back" "$ASK_ESC"
 works "esc queues nothing" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
 works "and leaves the group in pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/asked-a.md"
 works "and the hook was never called" \
   bash -c '[ ! -e "$1/task-file.asked-a" ] && [ ! -e "$1/task-file.asked-b" ]' _ "$TRACKING"
 
-# `n` used to answer `queue only`; now a letter answers nothing, so the
+# A letter answers nothing, so the
 # question stays up until `esc` closes it and nothing is queued.
 ASK_LETTER="$LIVE/ask-letter.out"
 on_screen ' \rn\x1b' "$ASK_LETTER"
@@ -449,8 +512,8 @@ works "and the hook was never called for it" \
   bash -c '[ ! -e "$1/task-file.asked-a" ]' _ "$TRACKING"
 
 ASK_N="$LIVE/ask-n.out"
-on_screen ' \r\x1b[B\r' "$ASK_N"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_N"
-works "queue only on the question queues the group" \
+on_screen ' \r \r' "$ASK_N"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_N"
+works "ticking the group on the question queues it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
 works "the whole of it" test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-b.md"
 works "with no hook call for either task" \
@@ -469,11 +532,14 @@ works "enter on the question queues the group" \
 works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"
 has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
-has "and the result popup names what was created" "╭─ issues created " "$ASK_YES"
+has "and the result popup says the hook ran" "Hook executed successfully" "$ASK_YES"
+has "above the queued list" "╭─ queued " "$ASK_YES"
+lacks "with no ticket rows" "issues created" "$ASK_YES"
+lacks "and the untracked popup carries no success line" "Hook executed successfully" "$ASK_N"
 
 # -------------------------------------------- tracking off: no hook, ever
-# `queue only` above proved the hook never runs at `open`. This is this task's own
-# acceptance criterion: `queue only` also stamps `tracking: off` onto the queued task
+# Ticking a group above proved the hook never runs at `open`. This is this task's own
+# acceptance criterion: a ticked group also stamps `tracking: off` onto the queued task
 # (`commands::queue::open_and_prefix`), and the dispatcher reads that back —
 # the same way it already reads a trial arm's `trial:` — to fire no
 # `[issue_tracking]` event for it on `queued`, `started` or `done` either,
@@ -487,8 +553,8 @@ must "the hook is switched to the one that marks every event, for this case" \
 pending_doc declined-tracking "$BODY" "group: declined-tracking" \
   "group_description: a task queued with tracking declined, driven to done"
 DECLINED_OUT="$LIVE/declined-tracking.out"
-on_screen ' \r\x1b[B\r' "$DECLINED_OUT"; sed -i 's/\x1b\[[0-9;]*m//g' "$DECLINED_OUT"
-has "the question, answered n, queues the task" "queued 1 task" "$DECLINED_OUT"
+on_screen ' \r \r' "$DECLINED_OUT"; sed -i 's/\x1b\[[0-9;]*m//g' "$DECLINED_OUT"
+has "the question, with its group ticked, queues the task" "queued 1 task" "$DECLINED_OUT"
 has "with tracking: off stamped onto it" "tracking: off" \
   "$SPOOLWAY_PROJECT_HOME/queue/declined-tracking.md"
 
@@ -512,11 +578,11 @@ works "and no tracking/ bookkeeping file exists for it at all" \
 # ticket opened, sat at `queued` with the dispatcher stopped until the
 # `drive` above started one reading `record.sh`. Same dispatcher, same hook,
 # tracking on — so its `queued` marker is what the declined task's missing
-# one is measured against. `asked-a`, declined through the same `queue only`, is the
+# one is measured against. `asked-a`, ticked through the same checklist, is the
 # screen's two-task batch getting the same treatment.
 works "the control: a tracking-on task in the same run did fire the queued hook" \
   test -e "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md.env.queued"
-works "while asked-a, declined through the same n, fired none" \
+works "while asked-a, ticked through the same checklist, fired none" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md.env.queued"
 
 must "the hook is switched back to the one that only answers open" \
