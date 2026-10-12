@@ -536,8 +536,9 @@ files out of the count of files that are behind.
 
 ### The retired version marker
 
-Some builds of 0.10.0 leave a file named `.spoolway/spoolway-version` in the project, and a file
-named `.spoolway-version` in each user-level skills folder. spoolway does not read these files. A
+spoolway 0.10.0 leaves a file named `.spoolway/spoolway-version` in the project, and a file
+named `.spoolway-version` in each user-level skills folder. spoolway 0.11.0 and later do not read
+these files. A
 skill file written by a newer spoolway is caught by the comparison in [Files spoolway
 refuses](#files-spoolway-refuses).
 
