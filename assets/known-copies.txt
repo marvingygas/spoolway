@@ -1,0 +1,326 @@
+# The fingerprints of the copies of each shipped file that earlier builds
+# committed, one per line: `<identity> <fingerprint>`. Read by
+# `src/known_copies.rs`.
+#
+# Identities are `skill <provider>/<skill>/<file>` (the path under
+# `assets/skills/`), `pipeline-keys` and `config-reference`. A skill file and
+# the key block have every revision git history holds. The reference table has
+# the one each released version scaffolded (`scripts/e2e/fixtures/`), so a table
+# an unreleased build wrote is not here. Within an identity the oldest copy
+# comes first. Lines are only ever added, never edited or removed, so a project
+# still holding an old copy is recognised as unedited.
+#
+# A fingerprint is `spoolway::skeleton::fingerprint` of the text. When
+# `cargo test known_copies` reports a missing line, append the line it prints
+# under the matching identity.
+config-reference 7a51eaf5
+config-reference 0f4314c8
+config-reference 1c60fb12
+config-reference ff2e6184
+config-reference af7e0817
+pipeline-keys d685018b
+pipeline-keys 297a47f0
+pipeline-keys e26277c6
+pipeline-keys 3b2ecaa7
+pipeline-keys 572bb904
+pipeline-keys ff1902e4
+pipeline-keys 063d1189
+pipeline-keys 27edd800
+pipeline-keys 97b7a6d7
+pipeline-keys 566c52b6
+pipeline-keys 0705818d
+pipeline-keys 54374be2
+pipeline-keys e9836013
+pipeline-keys 9e9723b9
+pipeline-keys 8b89361c
+skill claude/spoolway-calibrate/SKILL.md 31326562
+skill claude/spoolway-calibrate/SKILL.md 20d9730b
+skill claude/spoolway-calibrate/SKILL.md f631f87c
+skill claude/spoolway-calibrate/SKILL.md 88f19653
+skill claude/spoolway-calibrate/SKILL.md eb183410
+skill claude/spoolway-calibrate/SKILL.md cbab9d7f
+skill claude/spoolway-calibrate/SKILL.md 3725ee13
+skill claude/spoolway-calibrate/SKILL.md b601b667
+skill claude/spoolway-calibrate/SKILL.md 42fc22c1
+skill claude/spoolway-calibrate/SKILL.md 9fafa8fe
+skill claude/spoolway-calibrate/SKILL.md e5a6b78f
+skill claude/spoolway-calibrate/SKILL.md 5a647d1d
+skill claude/spoolway-calibrate/SKILL.md ab84bc4f
+skill claude/spoolway-calibrate/SKILL.md fa22548c
+skill claude/spoolway-calibrate/SKILL.md 69687d24
+skill claude/spoolway-calibrate/SKILL.md 2b4b0760
+skill claude/spoolway-calibrate/SKILL.md 8fd71e3a
+skill claude/spoolway-calibrate/assets/report.md 185c9fce
+skill claude/spoolway-config/SKILL.md 29408617
+skill claude/spoolway-config/SKILL.md 8760aad5
+skill claude/spoolway-config/SKILL.md e836ce2c
+skill claude/spoolway-config/SKILL.md cd0b8bef
+skill claude/spoolway-config/SKILL.md 840deff1
+skill claude/spoolway-config/SKILL.md dc633f2e
+skill claude/spoolway-config/SKILL.md ac8fa6dc
+skill claude/spoolway-config/SKILL.md 58dc23c6
+skill claude/spoolway-config/SKILL.md ca425924
+skill claude/spoolway-config/SKILL.md 44ac81ca
+skill claude/spoolway-config/SKILL.md 82bf1a5c
+skill claude/spoolway-config/SKILL.md f479ee7f
+skill claude/spoolway-config/SKILL.md 51284cfd
+skill claude/spoolway-config/SKILL.md f9f58d90
+skill claude/spoolway-doctor/SKILL.md 51b1e72b
+skill claude/spoolway-doctor/SKILL.md e56abc6f
+skill claude/spoolway-doctor/SKILL.md f7d3e04f
+skill claude/spoolway-doctor/SKILL.md fb178817
+skill claude/spoolway-doctor/SKILL.md c1b913c1
+skill claude/spoolway-doctor/SKILL.md 6d326ab4
+skill claude/spoolway-doctor/SKILL.md ed658b4f
+skill claude/spoolway-doctor/SKILL.md 08962be3
+skill claude/spoolway-pipeline/SKILL.md c3ebd06b
+skill claude/spoolway-pipeline/SKILL.md 71c45ebf
+skill claude/spoolway-pipeline/SKILL.md 3c31e979
+skill claude/spoolway-pipeline/SKILL.md 41cb1a28
+skill claude/spoolway-plan/SKILL.md 18063d92
+skill claude/spoolway-plan/SKILL.md aaad348b
+skill claude/spoolway-plan/SKILL.md a7403d73
+skill claude/spoolway-plan/SKILL.md 0b7267dc
+skill claude/spoolway-plan/SKILL.md 861ac793
+skill claude/spoolway-plan/SKILL.md b57dd9de
+skill claude/spoolway-plan/SKILL.md a6fef29d
+skill claude/spoolway-plan/SKILL.md dd9fad9d
+skill claude/spoolway-plan/SKILL.md acd29771
+skill claude/spoolway-plan/SKILL.md 3524056c
+skill claude/spoolway-plan/SKILL.md 6d0f4f1f
+skill claude/spoolway-plan/SKILL.md ac8b5032
+skill claude/spoolway-plan/SKILL.md 6fb99049
+skill claude/spoolway-plan/SKILL.md d49e7a92
+skill claude/spoolway-plan/assets/page.md 0a03203b
+skill claude/spoolway-plan/assets/page.md 58a90819
+skill claude/spoolway-plan/assets/page.md 91a5be10
+skill claude/spoolway-plan/assets/page.md 84b5008e
+skill claude/spoolway-plan/assets/page.md bef3ca9e
+skill claude/spoolway-plan/assets/page.md ebd125a2
+skill claude/spoolway-plan/assets/page.md 4eb34040
+skill claude/spoolway-plan/assets/page.md 589f3e91
+skill claude/spoolway-plan/assets/page.md e482b874
+skill claude/spoolway-plan/assets/page.md 7f983be4
+skill claude/spoolway-plan/assets/page.md 56b03615
+skill claude/spoolway-plan/assets/page.md 1c48b0dd
+skill claude/spoolway-plan/assets/page.md 7a63b734
+skill claude/spoolway-plan/assets/page.md 03b275f6
+skill claude/spoolway-plan/assets/page.md ec6925a3
+skill claude/spoolway-plan/assets/template.html ce65e5cb
+skill claude/spoolway-plan/assets/template.html 4ec36e0c
+skill claude/spoolway-plan/assets/template.html 18e1f213
+skill claude/spoolway-plan/assets/template.html 6893a07d
+skill claude/spoolway-plan/assets/template.html 8e106612
+skill claude/spoolway-plan/assets/template.html ce3a9625
+skill claude/spoolway-plan/assets/template.html 33efba28
+skill claude/spoolway-plan/assets/template.html 48708c86
+skill claude/spoolway-plan/assets/template.html 6f83e587
+skill claude/spoolway-plan/assets/template.html 96ba3a62
+skill claude/spoolway-plan/assets/template.html 9a291816
+skill claude/spoolway-plan/assets/template.html 901458da
+skill claude/spoolway-plan/assets/template.html a47fc162
+skill claude/spoolway-tasks/SKILL.md 26bc5db5
+skill claude/spoolway-tasks/SKILL.md 52f06fdd
+skill claude/spoolway-tasks/SKILL.md 7f774667
+skill claude/spoolway-tasks/SKILL.md 3fc13034
+skill claude/spoolway-tasks/SKILL.md b0d6b24f
+skill claude/spoolway-tasks/SKILL.md b177bd4a
+skill claude/spoolway-tasks/SKILL.md c8d5fe4e
+skill claude/spoolway-tasks/SKILL.md f9fd817d
+skill claude/spoolway-tasks/SKILL.md 9e5aa6e4
+skill claude/spoolway-tasks/SKILL.md 46124167
+skill claude/spoolway-tasks/SKILL.md 40eeefa5
+skill claude/spoolway-tasks/SKILL.md 55d4e133
+skill claude/spoolway-tasks/SKILL.md b91d3369
+skill claude/spoolway-tasks/SKILL.md fe79cc13
+skill claude/spoolway-tasks/SKILL.md 1fb031d9
+skill claude/spoolway-tasks/SKILL.md 7405397b
+skill claude/spoolway-tasks/SKILL.md 4c369ec9
+skill claude/spoolway-tasks/SKILL.md 9c9e7bdd
+skill claude/spoolway-tasks/SKILL.md 5b97ce5b
+skill claude/spoolway-tasks/SKILL.md 2da66feb
+skill claude/spoolway-tasks/SKILL.md b2dc82b0
+skill claude/spoolway-tasks/SKILL.md 9bc2d671
+skill claude/spoolway-tasks/SKILL.md 7590a2d7
+skill claude/spoolway-tasks/SKILL.md f0ef9ef9
+skill claude/spoolway-tasks/SKILL.md 443c2a42
+skill claude/spoolway-tasks/SKILL.md e36941a6
+skill claude/spoolway-tasks/SKILL.md bfb4fc14
+skill claude/spoolway-tasks/SKILL.md 079833cd
+skill claude/spoolway-tasks/SKILL.md 93af0d71
+skill claude/spoolway-tasks/SKILL.md 657a9fcd
+skill claude/spoolway-tasks/SKILL.md 84aeafd3
+skill claude/spoolway-tasks/SKILL.md e4d6ee8c
+skill claude/spoolway-tasks/SKILL.md 9c58abed
+skill claude/spoolway-tasks/SKILL.md 9e7a0f28
+skill codex/spoolway-calibrate/SKILL.md 2ec9f7a8
+skill codex/spoolway-calibrate/SKILL.md cd2e8cb4
+skill codex/spoolway-calibrate/SKILL.md 4cb30cbc
+skill codex/spoolway-calibrate/SKILL.md 4e3a6b15
+skill codex/spoolway-calibrate/SKILL.md 1d955c83
+skill codex/spoolway-calibrate/SKILL.md 1f89a106
+skill codex/spoolway-calibrate/SKILL.md 14065c07
+skill codex/spoolway-calibrate/SKILL.md b601b667
+skill codex/spoolway-calibrate/SKILL.md 42fc22c1
+skill codex/spoolway-calibrate/SKILL.md 9fafa8fe
+skill codex/spoolway-calibrate/SKILL.md e5a6b78f
+skill codex/spoolway-calibrate/SKILL.md 5a647d1d
+skill codex/spoolway-calibrate/SKILL.md ab84bc4f
+skill codex/spoolway-calibrate/SKILL.md fa22548c
+skill codex/spoolway-calibrate/SKILL.md 69687d24
+skill codex/spoolway-calibrate/SKILL.md 2b4b0760
+skill codex/spoolway-calibrate/SKILL.md 8fd71e3a
+skill codex/spoolway-config/SKILL.md 31bf4f99
+skill codex/spoolway-config/SKILL.md ab785748
+skill codex/spoolway-config/SKILL.md 96e6ad87
+skill codex/spoolway-config/SKILL.md 07ae5d84
+skill codex/spoolway-config/SKILL.md c14fb664
+skill codex/spoolway-config/SKILL.md 32df738d
+skill codex/spoolway-config/SKILL.md 94503e83
+skill codex/spoolway-config/SKILL.md 43b2c945
+skill codex/spoolway-config/SKILL.md 2f7a8ca3
+skill codex/spoolway-config/SKILL.md f50dac3e
+skill codex/spoolway-config/SKILL.md 36af0c20
+skill codex/spoolway-config/SKILL.md b1229a64
+skill codex/spoolway-config/SKILL.md 6ef2e91d
+skill codex/spoolway-config/SKILL.md d654bab7
+skill codex/spoolway-doctor/SKILL.md 3fd8b216
+skill codex/spoolway-doctor/SKILL.md de788d4c
+skill codex/spoolway-doctor/SKILL.md 04175029
+skill codex/spoolway-doctor/SKILL.md b11de1ee
+skill codex/spoolway-doctor/SKILL.md c270e75d
+skill codex/spoolway-doctor/SKILL.md 3be4c6d4
+skill codex/spoolway-pipeline/SKILL.md f31503fa
+skill codex/spoolway-pipeline/SKILL.md 7a2d5e8e
+skill codex/spoolway-pipeline/SKILL.md d20b52c1
+skill codex/spoolway-pipeline/SKILL.md c08b1473
+skill codex/spoolway-plan/SKILL.md a737397a
+skill codex/spoolway-plan/SKILL.md 48b21edc
+skill codex/spoolway-plan/SKILL.md 62944e74
+skill codex/spoolway-plan/SKILL.md de31dce9
+skill codex/spoolway-plan/SKILL.md 07c2e4d2
+skill codex/spoolway-plan/SKILL.md 01609db0
+skill codex/spoolway-plan/SKILL.md f27f1d4b
+skill codex/spoolway-plan/SKILL.md beb5bb62
+skill codex/spoolway-plan/SKILL.md de2fc3ba
+skill codex/spoolway-plan/SKILL.md e982b474
+skill codex/spoolway-plan/SKILL.md ffe360ea
+skill codex/spoolway-plan/SKILL.md f253ca69
+skill codex/spoolway-plan/SKILL.md 6949b523
+skill codex/spoolway-tasks/SKILL.md b6ebf7e2
+skill codex/spoolway-tasks/SKILL.md d57c8d02
+skill codex/spoolway-tasks/SKILL.md e1f7bb85
+skill codex/spoolway-tasks/SKILL.md dfe21491
+skill codex/spoolway-tasks/SKILL.md 68afdc8c
+skill codex/spoolway-tasks/SKILL.md c5f08546
+skill codex/spoolway-tasks/SKILL.md 9fc87b63
+skill codex/spoolway-tasks/SKILL.md dca4b8b5
+skill codex/spoolway-tasks/SKILL.md a29da992
+skill codex/spoolway-tasks/SKILL.md 0d0165f3
+skill codex/spoolway-tasks/SKILL.md a04815ac
+skill codex/spoolway-tasks/SKILL.md 90955633
+skill codex/spoolway-tasks/SKILL.md 8c47bfba
+skill codex/spoolway-tasks/SKILL.md 09315b67
+skill codex/spoolway-tasks/SKILL.md fabb30ee
+skill codex/spoolway-tasks/SKILL.md 08eb3b7c
+skill codex/spoolway-tasks/SKILL.md d543d81b
+skill codex/spoolway-tasks/SKILL.md a680fe6d
+skill codex/spoolway-tasks/SKILL.md 8ebb74a5
+skill codex/spoolway-tasks/SKILL.md 6e0cd15d
+skill codex/spoolway-tasks/SKILL.md b7ac9f3c
+skill codex/spoolway-tasks/SKILL.md dd997529
+skill codex/spoolway-tasks/SKILL.md 5c970ad6
+skill codex/spoolway-tasks/SKILL.md 390f1bdf
+skill codex/spoolway-tasks/SKILL.md ea0e66f7
+skill codex/spoolway-tasks/SKILL.md 076046b2
+skill codex/spoolway-tasks/SKILL.md e4ef0c95
+skill codex/spoolway-tasks/SKILL.md 17b97e6c
+skill codex/spoolway-tasks/SKILL.md f57143c9
+skill codex/spoolway-tasks/SKILL.md ced3e8a8
+skill codex/spoolway-tasks/SKILL.md 2e8b6c57
+skill pi/spoolway-calibrate/SKILL.md 5e8c66f3
+skill pi/spoolway-calibrate/SKILL.md 2b53c9d9
+skill pi/spoolway-calibrate/SKILL.md f9f5db89
+skill pi/spoolway-calibrate/SKILL.md 771e47b9
+skill pi/spoolway-calibrate/SKILL.md 32597ffd
+skill pi/spoolway-calibrate/SKILL.md bd8dc070
+skill pi/spoolway-calibrate/SKILL.md 1679a4f1
+skill pi/spoolway-calibrate/SKILL.md b601b667
+skill pi/spoolway-calibrate/SKILL.md 42fc22c1
+skill pi/spoolway-calibrate/SKILL.md 9fafa8fe
+skill pi/spoolway-calibrate/SKILL.md e5a6b78f
+skill pi/spoolway-calibrate/SKILL.md 5a647d1d
+skill pi/spoolway-calibrate/SKILL.md ab84bc4f
+skill pi/spoolway-calibrate/SKILL.md fa22548c
+skill pi/spoolway-calibrate/SKILL.md 69687d24
+skill pi/spoolway-calibrate/SKILL.md 2b4b0760
+skill pi/spoolway-calibrate/SKILL.md 8fd71e3a
+skill pi/spoolway-config/SKILL.md 537fb7c0
+skill pi/spoolway-config/SKILL.md 10a33f94
+skill pi/spoolway-config/SKILL.md e4868a36
+skill pi/spoolway-config/SKILL.md 0838d294
+skill pi/spoolway-config/SKILL.md 0d84eacc
+skill pi/spoolway-config/SKILL.md 1e5d91a0
+skill pi/spoolway-config/SKILL.md e0eb75df
+skill pi/spoolway-config/SKILL.md b5828ac2
+skill pi/spoolway-config/SKILL.md fab30451
+skill pi/spoolway-config/SKILL.md cce7e17f
+skill pi/spoolway-config/SKILL.md ad0980a8
+skill pi/spoolway-config/SKILL.md b3ed90a6
+skill pi/spoolway-config/SKILL.md d5c5b8aa
+skill pi/spoolway-config/SKILL.md 4ae4b32c
+skill pi/spoolway-doctor/SKILL.md 2f0fe32b
+skill pi/spoolway-doctor/SKILL.md 83e779a1
+skill pi/spoolway-doctor/SKILL.md 402d519f
+skill pi/spoolway-doctor/SKILL.md 39294546
+skill pi/spoolway-doctor/SKILL.md 499654b5
+skill pi/spoolway-doctor/SKILL.md e1593e4c
+skill pi/spoolway-pipeline/SKILL.md 9378b5a2
+skill pi/spoolway-pipeline/SKILL.md 04ca378b
+skill pi/spoolway-pipeline/SKILL.md 9f34ff05
+skill pi/spoolway-pipeline/SKILL.md cc12336d
+skill pi/spoolway-plan/SKILL.md 2272a40b
+skill pi/spoolway-plan/SKILL.md d11caf4b
+skill pi/spoolway-plan/SKILL.md 5a0d8503
+skill pi/spoolway-plan/SKILL.md 9c81ce2d
+skill pi/spoolway-plan/SKILL.md 971111c0
+skill pi/spoolway-plan/SKILL.md f8d6d5ee
+skill pi/spoolway-plan/SKILL.md 8db5e667
+skill pi/spoolway-plan/SKILL.md 3ba08fd2
+skill pi/spoolway-plan/SKILL.md 4af3a470
+skill pi/spoolway-plan/SKILL.md 3dcad3c3
+skill pi/spoolway-plan/SKILL.md fbea20b2
+skill pi/spoolway-plan/SKILL.md 063b26f5
+skill pi/spoolway-plan/SKILL.md 533d4cce
+skill pi/spoolway-tasks/SKILL.md 5e8faff1
+skill pi/spoolway-tasks/SKILL.md 5604899d
+skill pi/spoolway-tasks/SKILL.md 60a7acf2
+skill pi/spoolway-tasks/SKILL.md 5ed37756
+skill pi/spoolway-tasks/SKILL.md 6fd78214
+skill pi/spoolway-tasks/SKILL.md 182904cd
+skill pi/spoolway-tasks/SKILL.md 0d66c0a0
+skill pi/spoolway-tasks/SKILL.md 04304ce8
+skill pi/spoolway-tasks/SKILL.md 7be668ec
+skill pi/spoolway-tasks/SKILL.md 187f5132
+skill pi/spoolway-tasks/SKILL.md 7684eb15
+skill pi/spoolway-tasks/SKILL.md 74a54d3b
+skill pi/spoolway-tasks/SKILL.md 6cbed80d
+skill pi/spoolway-tasks/SKILL.md 70d944bd
+skill pi/spoolway-tasks/SKILL.md 8bce7879
+skill pi/spoolway-tasks/SKILL.md bbe6e2cb
+skill pi/spoolway-tasks/SKILL.md 53a51bb5
+skill pi/spoolway-tasks/SKILL.md 04eceb2f
+skill pi/spoolway-tasks/SKILL.md a9f4da19
+skill pi/spoolway-tasks/SKILL.md f4df69fe
+skill pi/spoolway-tasks/SKILL.md 9c009dee
+skill pi/spoolway-tasks/SKILL.md 0f735ca7
+skill pi/spoolway-tasks/SKILL.md 11d8cbec
+skill pi/spoolway-tasks/SKILL.md b242a3f0
+skill pi/spoolway-tasks/SKILL.md e26a946b
+skill pi/spoolway-tasks/SKILL.md 077b7954
+skill pi/spoolway-tasks/SKILL.md 835e8ddc
+skill pi/spoolway-tasks/SKILL.md d99d8fe6
+skill pi/spoolway-tasks/SKILL.md 4e630ec0
+skill pi/spoolway-tasks/SKILL.md eea10b9c
+skill pi/spoolway-tasks/SKILL.md d2965463
+skill pi/spoolway-tasks/SKILL.md 3ee57b89

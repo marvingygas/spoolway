@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
+covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup

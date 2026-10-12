@@ -69,16 +69,15 @@ struct Skill {
     assets: &'static [(&'static str, &'static str)],
 }
 
-#[cfg(test)]
 impl Skill {
-    /// Every provider's copy of this skill, by the name that provider is
-    /// selected under. Tests walk this so a copy added here cannot skip the
-    /// checks the others pass.
-    fn copies(&self) -> [(&'static str, &'static str); 3] {
+    /// Every provider's copy of this skill. Walked by the tests and by
+    /// [`shipped_skill_files`], so a copy added here cannot skip the checks
+    /// the others pass or the list of known copies.
+    fn copies(&self) -> [(Provider, &'static str); 3] {
         [
-            ("claude", self.skill_md),
-            ("codex", self.codex_skill_md),
-            ("pi", self.pi_skill_md),
+            (Provider::Claude, self.skill_md),
+            (Provider::Codex, self.codex_skill_md),
+            (Provider::Pi, self.pi_skill_md),
         ]
     }
 }
@@ -156,6 +155,40 @@ const SKILLS: &[Skill] = &[
         )],
     },
 ];
+
+/// One skill file this binary ships, as [`crate::known_copies`] names it.
+pub struct ShippedSkillFile {
+    pub provider: Provider,
+    pub skill: &'static str,
+    /// Relative to the skill's directory: `SKILL.md` or `assets/<file>`.
+    pub file: String,
+    pub text: &'static str,
+}
+
+/// Every skill file this binary ships: each provider's `SKILL.md`, and each
+/// asset once, as the Claude copy that every provider is handed.
+pub fn shipped_skill_files() -> Vec<ShippedSkillFile> {
+    let mut files = Vec::new();
+    for skill in SKILLS {
+        for (provider, text) in skill.copies() {
+            files.push(ShippedSkillFile {
+                provider,
+                skill: skill.name,
+                file: "SKILL.md".to_string(),
+                text,
+            });
+        }
+        for (file, text) in skill.assets {
+            files.push(ShippedSkillFile {
+                provider: Provider::Claude,
+                skill: skill.name,
+                file: format!("assets/{file}"),
+                text,
+            });
+        }
+    }
+    files
+}
 
 /// Skill directories this project once shipped under a name it no longer
 /// uses, each with the reason `spoolway sync` reports beside it — a short,
@@ -795,6 +828,7 @@ mod tests {
             .find(|s| s.name == "spoolway-config")
             .expect("spoolway-config is a shipped skill");
         for (provider, copy) in skill.copies() {
+            let provider = provider.name();
             for route in [
                 "Edit the setup, for everyone",
                 "Try it, just for me",
@@ -930,6 +964,7 @@ mod tests {
         for skill in SKILLS {
             let name = skill.name;
             for (provider, skill_md) in skill.copies() {
+                let provider = provider.name();
                 assert!(
                     skill_md.starts_with("---\n"),
                     "{name}'s {provider} copy has no frontmatter"
@@ -994,6 +1029,7 @@ mod tests {
             // validator will reject it on its own terms — so each one is
             // checked, not just the Claude copy the others are written from.
             for (provider, contents) in skill.copies() {
+                let provider = provider.name();
                 let front = contents
                     .split("---\n")
                     .nth(1)

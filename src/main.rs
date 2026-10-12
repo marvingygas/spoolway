@@ -27,6 +27,7 @@ mod graph;
 mod headless;
 mod install;
 mod jobs;
+mod known_copies;
 mod lane_alias;
 mod local;
 mod lock;
