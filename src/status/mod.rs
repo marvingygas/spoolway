@@ -453,9 +453,10 @@ impl Board {
         Board::with_term(crate::platform::TermGuard::inert())
     }
 
-    /// Whether no options menu or confirm panel is open — the one state in
-    /// which `←`, `→` and `q` belong to the screen around the board rather
-    /// than to the menu or panel, which reads every key until it is answered.
+    /// Whether no options menu, confirm panel or popup is open — the one
+    /// state in which `←`, `→` and `q` belong to the screen around the board
+    /// rather than to the menu, panel or popup, which reads every key until
+    /// it is answered or closed.
     pub(crate) fn at_rest(&self) -> bool {
         matches!(self.mode, BoardMode::Browsing)
     }
@@ -749,7 +750,8 @@ impl Board {
     /// letter answers one — the letter that opened it, a `q`, or any other
     /// key it does not read is ignored, the same as it is while browsing. A
     /// pause panel's second answer leaves every named abort running and
-    /// schedules its task's `gate_at` on the step it is on instead.
+    /// schedules its task's `gate_at` on the step it is on instead. A refused
+    /// open's popup has no answers and closes on `enter` alone.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -767,19 +769,28 @@ impl Board {
         // only about letting each arm build its own replacement without
         // fighting the borrow checker over `self.mode` at the same time.
         match std::mem::take(&mut self.mode) {
-            BoardMode::Browsing => self.on_key_browsing(repo, pipelines, key),
-            BoardMode::Options(menu) => self.on_key_options(repo, pipelines, menu, key),
-            BoardMode::ConfirmPause(confirm) => self.on_key_pause_confirm(repo, confirm, key),
+            BoardMode::Browsing => self.on_key_browsing(repo, pipelines, key)?,
+            BoardMode::Options(menu) => self.on_key_options(repo, pipelines, menu, key)?,
+            BoardMode::ConfirmPause(confirm) => self.on_key_pause_confirm(repo, confirm, key)?,
             BoardMode::ResumePicker(picker) => {
-                self.on_key_resume_picker(repo, pipelines, picker, key)
+                self.on_key_resume_picker(repo, pipelines, picker, key)?
             }
             BoardMode::ConfirmUnqueue { chain, dir } => {
-                self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)
+                self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)?
             }
             BoardMode::ConfirmRestart(confirm) => {
-                self.on_key_restart_confirm(repo, pipelines, confirm, key)
+                self.on_key_restart_confirm(repo, pipelines, confirm, key)?
+            }
+            // `enter` closes it, and nothing else does, the same as the
+            // pending screen's: a key meant for the board under it cannot
+            // slip past a refusal not yet read.
+            BoardMode::Outcome(notice) => {
+                if key != crate::screen::Key::Enter {
+                    self.mode = BoardMode::Outcome(notice);
+                }
             }
         }
+        Ok(())
     }
 
     fn on_key_browsing(
@@ -838,7 +849,11 @@ impl Board {
             // asks its own check again, so a row that changed state since
             // the menu opened gets nothing done to it.
             Key::Enter => match menu.items.get(menu.cursor) {
-                Some(RowAction::Open) => open_task(repo, &menu.id)?,
+                Some(RowAction::Open) => {
+                    if let Some(notice) = open_task(repo, &menu.id) {
+                        self.mode = BoardMode::Outcome(notice);
+                    }
+                }
                 Some(RowAction::Pause) => self.begin_pause(repo, pipelines, menu.id)?,
                 Some(RowAction::Restart) => self.begin_restart(repo, pipelines, menu.id)?,
                 Some(RowAction::Unqueue) => self.begin_unqueue(repo, menu.id)?,
@@ -1247,8 +1262,9 @@ impl Board {
     }
 }
 
-/// The options menu's `open`: open task `id`'s file in an editor, in a pane
-/// the multiplexer opens — a no-op on a task the queue and the archive no
+/// The options menu's `open`: open task `id`'s file in the editor
+/// [`crate::editor::open`] picks — a terminal editor in a pane the
+/// multiplexer opens, a window editor in the background — a no-op on a task the queue and the archive no
 /// longer have. `repo.task` reads both, so this reaches a done row's task
 /// exactly as it does a live one — [`build`]'s own composed row list, which
 /// [`Board::drawn`] is taken from, is what lets the cursor land on that row
@@ -1256,32 +1272,20 @@ impl Board {
 /// and the board keeps redrawing and the pass loop keeps running while it
 /// is open, exactly as if nothing had happened.
 ///
-/// A backend with no pane to open one in — headless, which refuses the
-/// way `Mux::open_command`'s default does — is best-effort like every
-/// other action here: the refusal is swallowed, exactly as an `Err` out of
-/// `on_key` already is by the dispatch loop that calls it, and the task
-/// file it would have opened is left exactly as it was.
-fn open_task(repo: &Repo, id: &str) -> Result<()> {
-    let Ok(task) = repo.task(id) else {
-        return Ok(());
-    };
-    let command = editor_command(&task.path);
-    let mux = crate::mux::backend(repo)?;
-    let _ = mux.open_command(&repo.root, &format!("{id} · edit"), &command);
-    Ok(())
-}
-
-/// The command line a screen runs to open a task in an editor.
-///
-/// The same resolution `spoolway config edit` already uses: `$VISUAL`, then
-/// `$EDITOR`, then `vi`. Shared between the board's [`open_task`]
-/// and the queue screen's own `o` — `crate::commands::queue::open_highlighted`
-/// — so the two can never resolve to two different editors.
-pub(crate) fn editor_command(path: &Path) -> String {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
-    format!("{editor} '{}'", path.display())
+/// A refused open comes back as the popup [`BoardMode::Outcome`] draws —
+/// [`crate::editor::refusal`], the same one the pending screen shows —
+/// rather than as an `Err`: the dispatch loop that calls `on_key` swallows
+/// an `Err`, so a person picking open would see nothing at all. Among the
+/// refusals are a terminal editor on a backend with no pane to open one in
+/// — headless, which refuses the way `Mux::open_command`'s default does —
+/// an `editor.toml` that does not parse, an editor program that is not on
+/// `PATH`, and a path `wslpath` cannot convert. The task file it would have
+/// opened is left exactly as it was.
+fn open_task(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
+    let task = repo.task(id).ok()?;
+    crate::editor::open(repo, &format!("{id} · edit"), &task.path)
+        .err()
+        .map(|err| crate::editor::refusal(&err))
 }
 
 /// What an `o` or `r` keypress is waiting to be answered — a menu or panel
@@ -1289,10 +1293,12 @@ pub(crate) fn editor_command(path: &Path) -> String {
 /// press and the run it would otherwise change. Every panel here
 /// lists its answers and is answered the same way: the arrows move its
 /// cursor, `enter` runs the answer under it, and `esc` closes it with
-/// nothing changed. `Default` is
-/// `Browsing`, both for [`Board::with_term`] and for [`std::mem::take`]
-/// inside [`Board::on_key`], which is what lets each key handler build the
-/// mode's replacement without holding a borrow of `self.mode` open across it.
+/// nothing changed. [`BoardMode::Outcome`] alone has nothing to answer and
+/// closes on `enter` only, the way the pending screen's popup does.
+/// `Default` is `Browsing`, both for [`Board::with_term`] and for
+/// [`std::mem::take`] inside [`Board::on_key`], which is what lets each key
+/// handler build the mode's replacement without holding a borrow of
+/// `self.mode` open across it.
 #[derive(Default)]
 enum BoardMode {
     #[default]
@@ -1323,6 +1329,10 @@ enum BoardMode {
     /// carries the restart out, and `esc` leaves the task and its lane
     /// exactly as they were.
     ConfirmRestart(RestartConfirm),
+    /// The options menu's `open` was refused — see [`open_task`]. Held until
+    /// `enter` closes it, with no other answer to pick. The pass loop keeps
+    /// running under it, as it does under every panel here.
+    Outcome(crate::screen::Notice),
 }
 
 impl BoardMode {
@@ -1340,6 +1350,13 @@ impl BoardMode {
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
             BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
             BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
+            // Wrapped no wider than the board has room for, so a narrow
+            // terminal still sees the popup's right border: a notice line
+            // spends 6 columns around its text, a border and two spaces of
+            // padding on each side.
+            BoardMode::Outcome(notice) => Some(
+                notice.panel(crate::screen::NOTICE_WRAP.min(pane_width().saturating_sub(6).max(1))),
+            ),
         }
     }
 }
@@ -9246,6 +9263,7 @@ mod tests {
     #[test]
     fn the_cursor_reaches_a_done_row_and_its_menu_opens_its_task() {
         let (mut repo, _root_guard) = fixture("cursor-reaches-done-row");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
@@ -9283,11 +9301,12 @@ mod tests {
         );
 
         assert_eq!(menu_items(&mut board, &repo, &pipelines), [RowAction::Open]);
-        // Headless refuses to open a pane at all, so this only proves `open`
-        // never bails out before that — the archived task resolves through
-        // `repo.task` rather than being treated as gone.
+        // Headless refuses to open a pane at all, and only a task `repo.task`
+        // found gets that far: a task treated as gone opens nothing and
+        // shows no popup. So the headless refusal's popup proves the
+        // archived task resolved.
         pick(&mut board, &repo, &pipelines, RowAction::Open);
-        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert!(matches!(board.mode, BoardMode::Outcome(_)));
     }
 
     /// `o` lists, in a fixed order, only what each row can do: a running
@@ -11202,13 +11221,13 @@ mod tests {
         );
     }
 
-    /// `o` on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `Mux::open_command`'s default does — so the key is a no-op:
-    /// best-effort, like every other key here, and the task file it would
-    /// have opened is left exactly as it was.
+    /// `o` on a headless run, with a terminal editor named, only opens the
+    /// row's menu: nothing is opened until `open` is picked in it, and the
+    /// task file is left exactly as it was.
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
         let (mut repo, _root_guard) = fixture("open-key-headless");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -11237,6 +11256,61 @@ mod tests {
 
         let after = std::fs::read_to_string(repo.task("login").unwrap().path).unwrap();
         assert_eq!(before, after);
+    }
+
+    /// Picking `open` with an `editor.toml` naming a program that is not on
+    /// `PATH` shows the refusal in an `open task` popup, remedy and all,
+    /// rather than dropping it. The board keeps drawing under it, every key
+    /// but `enter` leaves it open, and `enter` closes it onto the board.
+    #[test]
+    fn picking_open_with_a_missing_program_shows_the_refusal() {
+        use crate::screen::Key;
+
+        let (repo, _root_guard) = fixture("open-key-missing-program");
+        let home = crate::scratch::root("editor-home");
+        std::fs::create_dir_all(home.join(".spoolway")).unwrap();
+        std::fs::write(
+            home.join(".spoolway/editor.toml"),
+            "[editor]\ncommand = \"notepd.exe\"\n",
+        )
+        .unwrap();
+        crate::platform::test_home::pin(&home);
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let watching = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+
+        let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, watching).unwrap();
+        for key in [Key::Down, Key::Char('o'), Key::Enter] {
+            board.on_key(&repo, &pipelines, key).unwrap();
+        }
+
+        let BoardMode::Outcome(notice) = &board.mode else {
+            panic!("no popup");
+        };
+        assert_eq!(notice.title, "open task");
+        assert_eq!(
+            notice.text,
+            "o: `notepd.exe` is not on PATH — fix command in ~/.spoolway/editor.toml, or \
+             delete the file to use $VISUAL, $EDITOR or vim"
+        );
+        assert!(!board.at_rest(), "the popup reads every key");
+        let drawn = strip_ansi(&board.frame(&repo, &pipelines, watching).unwrap());
+        assert!(drawn.contains("─ open task "), "{drawn}");
+        assert!(drawn.contains("`notepd.exe` is not on PATH"), "{drawn}");
+        assert!(drawn.contains("login"), "the board under it: {drawn}");
+
+        for key in [Key::Esc, Key::Up, Key::Char('o')] {
+            board.on_key(&repo, &pipelines, key).unwrap();
+            assert!(matches!(board.mode, BoardMode::Outcome(_)), "{key:?}");
+        }
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
     }
 
     /// `pause` then `r` `enter` parks a task and puts it straight back — the

@@ -5874,23 +5874,26 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
     Some(task_key(group.tasks.get(state.task_cursor)?))
 }
 
-/// The pending screen's open: open the highlighted task in an editor, in a
-/// pane the multiplexer opens — offered, as gate is, only with the tasks
+/// The pending screen's open: open the highlighted task in the editor
+/// `crate::editor::open` picks — offered, as gate is, only with the tasks
 /// pane focused on a task, which the options menu checks before this is
-/// reached. Never blocks: the pane runs the editor on its own, and the
+/// reached. Never blocks: a terminal editor runs in a pane the multiplexer
+/// opens and a window editor in the background, so the
 /// screen keeps redrawing and reading keys while it is open, the same
 /// non-blocking shape the board's `open_task` uses — this calls through
-/// `crate::status::editor_command` rather than resolving
-/// `$VISUAL`/`$EDITOR` a second time.
+/// `crate::editor::open` rather than resolving the editor a second time.
 ///
 /// A queued group's task reads from the queue directory rather than
 /// pending — see [`PendingTask::path`] — so this opens whichever copy is
 /// actually live, the same file every other read of the screen uses.
 ///
-/// A backend with no pane to open one in — headless, which refuses the way
-/// `Mux::open_command`'s default does — is surfaced through [`Mode::Outcome`] rather
-/// than lost: an `Err` this discarded would leave a person picking open on
-/// a headless run with no sign it did anything at all.
+/// A refused open is surfaced through [`Mode::Outcome`] rather than lost: an
+/// `Err` this discarded would leave a person picking open with no sign it did
+/// anything at all. Among the refusals are a terminal editor on a backend
+/// with no pane to open one in — headless, which refuses the way
+/// `Mux::open_command`'s default does — an `editor.toml` that does not parse,
+/// an editor program that is not on `PATH`, and a path `wslpath` cannot
+/// convert.
 fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode {
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return Mode::Browsing;
@@ -5898,21 +5901,19 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     let Some(task) = group.tasks.get(state.task_cursor) else {
         return Mode::Browsing;
     };
-    let command = crate::status::editor_command(&task.path);
-    let mux = match crate::mux::backend(repo) {
-        Ok(mux) => mux,
-        Err(err) => return outcome("open task", format!("o: {err:#}")),
-    };
-    match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
+    match crate::editor::open(repo, &format!("{} · edit", task.id), &task.path) {
         Ok(()) => Mode::Browsing,
-        Err(err) => outcome("open task", format!("o: {err:#}")),
+        Err(err) => Mode::Outcome {
+            notice: crate::editor::refusal(&err),
+            routines: None,
+        },
     }
 }
 
 /// Open over the routines pane's own tasks pane: open the highlighted
-/// task in an editor pane — the same shape [`open_highlighted`] gives
-/// the pending screen, including the same [`Mode::Outcome`] a backend with
-/// no pane to open one in is surfaced through — drawn over this pane, and
+/// task in the picked editor — the same shape [`open_highlighted`] gives
+/// the pending screen, including the same [`Mode::Outcome`] a refused open is
+/// surfaced through — drawn over this pane, and
 /// closed back onto it. Returns to [`Mode::Routines`]
 /// with `nav` exactly as it was rather than [`Mode::Browsing`], since
 /// picking open here never leaves the pane, where the pending screen's open
@@ -5921,14 +5922,12 @@ fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &Routi
     let Some(task) = highlighted_routine_task(routines, nav) else {
         return Mode::Routines(nav.clone());
     };
-    let command = crate::status::editor_command(&task.path);
-    let mux = match crate::mux::backend(repo) {
-        Ok(mux) => mux,
-        Err(err) => return outcome_over(Some(nav), "open task", format!("o: {err:#}")),
-    };
-    match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
+    match crate::editor::open(repo, &format!("{} · edit", task.id), &task.path) {
         Ok(()) => Mode::Routines(nav.clone()),
-        Err(err) => outcome_over(Some(nav), "open task", format!("o: {err:#}")),
+        Err(err) => Mode::Outcome {
+            notice: crate::editor::refusal(&err),
+            routines: Some(nav.clone()),
+        },
     }
 }
 
@@ -12401,6 +12400,7 @@ mod tests {
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
         let (mut repo, _root_guard) = fixture("screen-hosted-routines-popup");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -16126,14 +16126,15 @@ mod tests {
         assert!(drawn.contains("> trial"), "{drawn}");
     }
 
-    /// Open on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `Mux::open_command`'s default does — and the refusal is
-    /// surfaced through `Mode::Outcome` rather than lost: an `Err` this
+    /// Opening a terminal editor on a headless run finds no pane to open it
+    /// in — headless refuses it the way `Mux::open_command`'s default does — and
+    /// the refusal is surfaced through `Mode::Outcome` rather than lost: an `Err` this
     /// discarded would leave a person picking open on a headless run with no
     /// sign it did anything at all.
     #[test]
     fn picking_open_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("screen-open-headless");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
@@ -16390,13 +16391,14 @@ mod tests {
         assert!(drawn.contains("> new job"), "{drawn}");
     }
 
-    /// Open on a headless run has no pane to open an editor in, in the
-    /// routines pane exactly as it does on the pending screen — see
+    /// Opening a terminal editor on a headless run finds no pane to open it
+    /// in, in the routines pane exactly as it does on the pending screen — see
     /// `open_highlighted_routine`'s own doc comment — and staying in
     /// `Mode::Routines` afterwards, not falling back to `Mode::Browsing`.
     #[test]
     fn picking_open_in_routines_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("routines-open-headless");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -16931,6 +16933,7 @@ mod tests {
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
         let (mut repo, _root_guard) = fixture("routine-new-job-tasks-pane");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_two_routines(&repo);
 

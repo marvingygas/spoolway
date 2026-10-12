@@ -20,6 +20,9 @@
 # keys; `U` gets one pass that proves it does nothing, and
 # `spoolway queue unqueue --all` does its job.
 #
+# Open is checked once, for the popup a refused open shows: an editor that
+# is not on `PATH` is refused before anything is started.
+#
 # Pausing from the menu and the dispatch tab's stop popup carry most of the
 # suite, since pausing and stopping with `i` are the two answers that can
 # also abort a live lane; a park off `queued` is checked
@@ -348,6 +351,43 @@ stage_stays "the task file is untouched while the menu is open" mid-turn impleme
 press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"
 next_frame
+
+# ------------------------------------------- open with a missing editor
+# An `editor.toml` naming a program that is not on `PATH` refuses the open,
+# and the board shows the refusal, remedy and all, in a popup closed with
+# `enter` alone. Under `$HOME`, which fixture.sh points at a scratch folder.
+mkdir -p "$HOME/.spoolway"
+printf '[editor]\ncommand = "notepd.exe"\n' > "$HOME/.spoolway/editor.toml"
+OPEN_MARK=$(wc -l < "$BOARD_LOG")
+pick_item 0
+draws_since_waited "a refused open shows a popup titled open task" \
+  "╭─ open task ─" "$OPEN_MARK"
+draws_since "naming the program that is not on PATH" \
+  "\`notepd.exe\` is not on PATH" "$OPEN_MARK"
+draws_since "and how to fix it" "~/.spoolway/editor.toml" "$OPEN_MARK"
+# The key row is read only off frames drawn once the popup is up. The options
+# menu `pick_item` opened after OPEN_MARK draws `[enter] confirm   [esc] close`
+# itself, so a check reaching back that far would pass for a popup with an
+# `esc` key or no key row at all.
+POPUP_MARK=$(wc -l < "$BOARD_LOG")
+settle_frames 1
+draws_since "closed with enter" "[enter] confirm" "$POPUP_MARK"
+draws_since_not "and enter alone" "[esc] close" "$POPUP_MARK"
+# Read only off frames drawn after `esc`, so this also proves the board
+# keeps redrawing under the popup.
+ESC_MARK=$(wc -l < "$BOARD_LOG")
+press $'\x1b'
+settle_frames 2
+draws_since "esc leaves the popup up, on a board still redrawing" \
+  "╭─ open task ─" "$ESC_MARK"
+if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane runs on under it"
+else bad "and the lane runs on under it"; fi
+press $'\r'
+stops_drawing "enter closes the popup" "╭─ open task ─"
+stage_stays "and the task is where it was" mid-turn implement
+rm "$HOME/.spoolway/editor.toml"
+next_frame
+
 pick_item 1
 
 draws "picking pause over a live lane opens a panel naming the task" "pause mid-turn"
