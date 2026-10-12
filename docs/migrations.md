@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.10.0 to 0.11.0 | A background step with `on_fail` is refused when the pipeline loads and its exit never moves the task; `sync`, `init` and `install` refuse a file that matches no copy spoolway has shipped and delete the version marker; the issue question is a checklist of groups and its popups changed; `queue add` calls no `open` hook for a `tracking: off` task; a routine runs one copy at a time and reads by its name on the board, the lane, the workspace and `eval`; `routine:` is refused in a task file; `eval --by task` writes WHEN with the time; `open` reads `~/.spoolway/editor.toml` and falls back to `vim`. | Fix every background step with `on_fail`, run `spoolway sync` and `spoolway sync --replace` for each refused file, commit the deleted marker, update scripts that drive the issue popups, find routine panes by id or read `eval`'s `when`, and rename a `routine:` key of your own. |
 | 0.9.0 to 0.10.0 | Row actions move behind `o` and popups take no letter answers; a job with no `base` never fires; `sync` writes a version marker older binaries refuse to overwrite; long task and step ids are refused; `--json` is refused where a command has no JSON form; `pipeline check` reads the live queue; resuming an archived task fails; silent lanes are reminded instead of escalated; agent launch failures go to `blocked`; a gated command reruns after an unblocker pass; background checks and failed removals hold a task on `done`; `eval` and the ledger carry command steps; `[models]` globs match more names; requeued tasks fire their hooks again; `doctor` fails more settings. | Learn the options menu, add `base` to every job, commit `.spoolway/spoolway-version`, shorten long ids, drop `--json` where refused, update scripts that read `eval`, the ledger or `queue list`, and clear what `spoolway doctor` fails. |
 | 0.8.0 to 0.9.0 | A job table with an unknown key never fires; a first cut refuses a leftover `task/<id>` branch; no command prints the update or sync notice; hook failures leave the board and make `doctor` exit non-zero; a partial `[models]` row keeps the price table's rates and window; `slots` caps a whole row; recorded costs include subagents and Claude Code's own total; `blocked.*` overrides apply; config reloads every pass; unknown keys load with a note; unattended escalations go to `blocked`; `openrouter/` models leave the price table. | Fix unknown job keys, clear leftover task branches, run `spoolway sync` in each project, review cost and session limits, read `spoolway doctor` and `spoolway override list`, and set `context_window` for `openrouter/` models. |
 | 0.7.1 to 0.8.0 | A pipeline with `end: true` or `on_pass: blocked` is refused when it loads; `session_reuse_idle` is renamed `prompt_cache_ttl` and defaults to five minutes on hosted models; `session_reuse_ctx` and `session_blocked_ctx` default to 20 and 40; `R` on the board is gone; `dispatch.herdr_mode` and `models.<glob>.exclusive` are retired; every step keeps its pane until its task is done; `loop:` limits every move; a running dispatcher routes on the pipelines it started with; a nested `.spoolway/` is refused; `config set` refuses values `doctor` would fail; `queue add --from` rows say `group issue` and `task issue`; `eval` gains USD columns. | Replace `end: true` and `on_pass: blocked`, set `prompt_cache_ttl` and `context_window` where the defaults do not fit, run `spoolway sync`, and restart the dispatcher after editing a pipeline. |
@@ -50,6 +51,66 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.10.0 to 0.11.0
+
+Upgrade every machine and CI job that reads the project first. 0.10.0 refuses to write over newer
+files only by the version marker, and this release deletes that marker, so a 0.10.0 binary left
+running `sync`, `init` or `install` writes its older skill files over yours and the marker back.
+Then run `spoolway sync` in each project, commit the deleted `.spoolway/spoolway-version`, read
+the notes and failures `spoolway doctor` prints, work through the list, and restart the dispatcher.
+
+- Fix every `background: true` step that declares `on_fail`. Such a pipeline no longer loads, and
+  `spoolway pipeline check`, `spoolway doctor`, the dispatcher and `spoolway sync` all refuse it
+  with ``step `<id>` runs in the background but declares `on_fail` ``. To keep the step a sidecar,
+  delete `on_fail:`. To make it a check the task waits for, delete `background:`. A background
+  run never moves its task now, and a task no longer waits on `done` for one. A run that exits
+  non-zero or hits its `timeout:` writes one line to the task's `## Status Log` instead.
+- Run `spoolway sync --replace <path>` for each file `sync` refuses. `sync` no longer overwrites a
+  skill file, a pipeline key block or a `config.toml` settings reference that matches no copy
+  spoolway has shipped, such as one you edited by hand. 0.10.0 replaced a hand-edited key block
+  and always rewrote skill files. `--replace` now takes a project or user-level skill file, a
+  pipeline file, whose key block alone is swapped, and `config.toml`, whose values are kept.
+  `init` and `install` write no skill file while any is refused, `--force` included. See
+  [Files spoolway refuses](installation.md#files-spoolway-refuses).
+- Commit the deletion of `.spoolway/spoolway-version`. `sync`, `init` and `install` delete it, and
+  `.spoolway-version` in each user skills folder, and list each as `removed`. See [The retired
+  version marker](installation.md#the-retired-version-marker).
+- Update any pty or tmux script that answers the queue screen's or the routines tab's issue
+  question. It is now a checklist of groups headed `Deactivate issue tracking for selected
+  groups:`, with nothing ticked, and the `create and queue` and `queue only` rows are gone.
+
+  | 0.10.0 | 0.11.0 |
+  |---|---|
+  | `create and queue`, then `enter` | `enter` |
+  | `queue only`, then `enter` | `a`, then `enter` |
+  | The `opening issues` popup, one row per ticket | `running the hook: <n> of <total> tasks` |
+  | The `issues created` popup | The `queued` popup, opening on `Hook executed successfully` |
+
+  `spoolway queue add --no-tracking <group>` gives the same answer from a shell. See
+  [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
+- Expect `spoolway queue add` to call no `open` hook for a task that sets `tracking: off`. A group
+  whose tasks all set it needs no `group_description:` and gets no `key_in_names` prefix, so its
+  branches read `task/<id>`.
+- Let a routine's copy finish before you queue the routine again. Queueing a routine is refused
+  while any task in the queue, paused and blocked ones included, carries its name in `routine:` or
+  as its id. A job skips its window instead and says ``job <name> · due now · skipped, <routine> is
+  still in the queue, at step <step>``. Resume, restart or unqueue a stopped copy to free the
+  routine. See [Routines](planning.md#routines).
+- Rename a `routine:` key in your own task files. spoolway sets it on every queued copy of a
+  routine, so `spoolway queue add` refuses a task file that sets it.
+- Update scripts that find a routine copy by its numbered id. Its lane is now named
+  `<routine> · <step>`, its herdr workspace `spoolway/<routine>`, its tab `<routine>`, and its
+  system prompt file `system-prompts/<routine> · <step>.md`. The board and the `queued` popup show
+  the routine's name. `spoolway lane` takes either name while the copy is in the queue, and
+  `spoolway queue list` still prints the numbered id.
+- Update scripts that read `spoolway eval --by task`. WHEN, and `when` under `--json` and
+  `--csv`, is now the run's start as `YYYY-MM-DD HH:MM` in local time, not a date. A routine
+  copy's run is labelled by its routine in `task`, and rows read newest start first. `--task`
+  still matches the task id. `usage.jsonl` lines for a routine copy gain a `routine` key.
+- Expect the board's `open` to read `~/.spoolway/editor.toml` before `$VISUAL` and `$EDITOR`, and
+  to run `vim`, not `vi`, when none of them is set. `spoolway config edit` and
+  `spoolway config override` are unchanged. See [Editor](dispatcher.md#editor).
 
 ## 0.9.0 to 0.10.0
 
