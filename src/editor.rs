@@ -28,6 +28,11 @@ const FILE: &str = "editor.toml";
 const REMEDY: &str = "fix command in ~/.spoolway/editor.toml, or delete the file to use \
      $VISUAL, $EDITOR or vim";
 
+/// What to do when `wslpath` is missing or fails: a Windows editor on WSL
+/// cannot be given a path without it.
+const WSLPATH_REMEDY: &str = "install it, or point command in ~/.spoolway/editor.toml at a \
+     wrapper script without the .exe suffix";
+
 /// Everything the choice depends on, passed in so a test can set each one
 /// without touching the process environment.
 pub(crate) struct Inputs<'a> {
@@ -61,22 +66,34 @@ struct Setting {
     window: Option<bool>,
 }
 
-/// Choose the editor and build the line that opens `task` in it.
+/// The editor that was chosen, before any task path is known.
+struct Chosen {
+    command: String,
+    program: String,
+    /// Where `command` came from, worded for `spoolway doctor`.
+    source: &'static str,
+    window: bool,
+    exe: bool,
+}
+
+/// Choose the editor: the first of the file, `$VISUAL`, `$EDITOR` and `vim`
+/// that is set wins.
 ///
-/// The first of the file, `$VISUAL`, `$EDITOR` and `vim` that is set wins. A
-/// file that does not parse is an error rather than a reason to try the next
-/// one, so a typo is seen instead of silently opening something else.
-pub(crate) fn plan(inputs: &Inputs, task: &Path) -> Result<Plan> {
-    let (command, window) = match read_file(&inputs.file)? {
-        Some(setting) => (setting.command, setting.window),
+/// A file that does not parse is an error rather than a reason to try the
+/// next one, so a typo is seen instead of silently opening something else.
+/// A program that is not on `PATH` is refused here too, so `spoolway doctor`
+/// and the open itself judge the same setting the same way.
+fn choose(inputs: &Inputs) -> Result<Chosen> {
+    let (command, window, source) = match read_file(&inputs.file)? {
+        Some(setting) => (setting.command, setting.window, "~/.spoolway/editor.toml"),
         None => {
-            let command = [&inputs.visual, &inputs.editor]
-                .into_iter()
-                .flatten()
-                .find(|value| !value.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| "vim".to_string());
-            (command, None)
+            let set = |value: &Option<String>| value.clone().filter(|v| !v.trim().is_empty());
+            let (command, source) = match (set(&inputs.visual), set(&inputs.editor)) {
+                (Some(value), _) => (value, "$VISUAL"),
+                (None, Some(value)) => (value, "$EDITOR"),
+                (None, None) => ("vim".to_string(), "the vim fallback"),
+            };
+            (command, None, source)
         }
     };
     let program = first_word(&command);
@@ -95,18 +112,72 @@ pub(crate) fn plan(inputs: &Inputs, task: &Path) -> Result<Plan> {
         bail!("`{program}` is not on PATH — {REMEDY}");
     }
     let exe = program.to_ascii_lowercase().ends_with(".exe");
+    Ok(Chosen {
+        command,
+        program,
+        source,
+        window: window.unwrap_or(exe),
+        exe,
+    })
+}
+
+/// Choose the editor and build the line that opens `task` in it.
+pub(crate) fn plan(inputs: &Inputs, task: &Path) -> Result<Plan> {
+    let chosen = choose(inputs)?;
     // A Windows program cannot open `/home/…`; a Linux launcher can, and must
     // be left alone. WSL is detected from the system, never from a setting.
-    let shown = if exe && inputs.wsl {
+    let shown = if chosen.exe && inputs.wsl {
         (inputs.wslpath)(task)
             .with_context(|| format!("could not convert {} to a Windows path", task.display()))?
     } else {
         task.display().to_string()
     };
     Ok(Plan {
-        line: format!("{command} {}", crate::platform::quote(&shown)),
-        window: window.unwrap_or(exe),
+        line: format!("{} {}", chosen.command, crate::platform::quote(&shown)),
+        window: chosen.window,
     })
+}
+
+/// What `spoolway doctor` says about the editor open will run, on the same
+/// `inputs` open uses: the program, where it came from, whether it opens its
+/// own window and whether the path is converted for Windows.
+///
+/// `no_pane` names the backend when it cannot open a command in a pane, and
+/// is `None` otherwise. A terminal editor needs that pane, so on such a
+/// backend open refuses it; a window editor does not and still works.
+///
+/// An `Err` is a setting open would refuse, worded as open's popup words it.
+/// Two refusals need no task path to be seen: a terminal editor on a backend
+/// without panes, and a Windows editor on WSL when `wslpath` is not on `PATH`.
+pub(crate) fn describe(inputs: &Inputs, no_pane: Option<&str>) -> Result<String> {
+    let chosen = choose(inputs)?;
+    if let (false, Some(backend)) = (chosen.window, no_pane) {
+        bail!(
+            "`{}` opens in a pane, and the {backend} backend has no pane to open it in — \
+             set window = true under [editor] in ~/.spoolway/editor.toml if it draws its \
+             own window, or run `spoolway config set dispatch.backend herdr`",
+            chosen.program
+        );
+    }
+    let converts = chosen.exe && inputs.wsl;
+    if converts && crate::platform::which("wslpath", &inputs.path).is_none() {
+        bail!("`wslpath` is not on PATH — {WSLPATH_REMEDY}");
+    }
+    Ok(format!(
+        "{}, from {} — {}, {}",
+        chosen.program,
+        chosen.source,
+        if chosen.window {
+            "own window"
+        } else {
+            "in a pane"
+        },
+        if converts {
+            "Windows paths"
+        } else {
+            "Linux paths"
+        },
+    ))
 }
 
 fn read_file(file: &Path) -> Result<Option<Setting>> {
@@ -150,28 +221,30 @@ fn wslpath(path: &Path) -> Result<String> {
         .arg("-w")
         .arg(path)
         .output()
-        .context("could not run `wslpath`")?;
+        .with_context(|| format!("could not run `wslpath` — {WSLPATH_REMEDY}"))?;
     if !output.status.success() {
         bail!("`wslpath -w` exited with {}", output.status);
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The inputs open and `spoolway doctor` both read, taken from this process.
+pub(crate) fn live_inputs() -> Inputs<'static> {
+    Inputs {
+        file: crate::mux::state_root().join(FILE),
+        visual: std::env::var("VISUAL").ok(),
+        editor: std::env::var("EDITOR").ok(),
+        path: std::env::var_os("PATH").unwrap_or_default(),
+        wsl: on_wsl(),
+        home: crate::platform::home_dir(),
+        wslpath: &wslpath,
+    }
+}
+
 /// Open `task` in the person's editor: in the background for a window editor,
 /// in a pane named `label` for a terminal one.
 pub(crate) fn open(repo: &crate::repo::Repo, label: &str, task: &Path) -> Result<()> {
-    let plan = plan(
-        &Inputs {
-            file: crate::mux::state_root().join(FILE),
-            visual: std::env::var("VISUAL").ok(),
-            editor: std::env::var("EDITOR").ok(),
-            path: std::env::var_os("PATH").unwrap_or_default(),
-            wsl: on_wsl(),
-            home: crate::platform::home_dir(),
-            wslpath: &wslpath,
-        },
-        task,
-    )?;
+    let plan = plan(&live_inputs(), task)?;
     if plan.window {
         return start_window(&plan.line, &repo.root);
     }
@@ -420,6 +493,74 @@ mod tests {
             text(&i, "/home/u/t.md"),
             "o: could not convert /home/u/t.md to a Windows path: wslpath exited 1"
         );
+    }
+
+    #[test]
+    fn describe_names_program_source_window_and_paths() {
+        let d = dir();
+        write_file(&d, "[editor]\ncommand = \"notepad.exe\"\n");
+        let mut i = inputs(&d, bin(&d, &["notepad.exe", "wslpath"]), &no_wslpath);
+        assert_eq!(
+            describe(&i, None).unwrap(),
+            "notepad.exe, from ~/.spoolway/editor.toml — own window, Linux paths"
+        );
+        i.wsl = true;
+        assert_eq!(
+            describe(&i, None).unwrap(),
+            "notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths"
+        );
+        std::fs::remove_file(d.join("editor.toml")).unwrap();
+        i.visual = Some("notepad.exe".into());
+        assert!(describe(&i, None).unwrap().contains("from $VISUAL"));
+        i.visual = None;
+        i.editor = Some("notepad.exe -x".into());
+        assert!(describe(&i, None).unwrap().contains("from $EDITOR"));
+        i.editor = None;
+        i.path = bin(&d, &["vim"]);
+        assert_eq!(
+            describe(&i, None).unwrap(),
+            "vim, from the vim fallback — in a pane, Linux paths"
+        );
+    }
+
+    #[test]
+    fn describe_refuses_what_open_refuses() {
+        let d = dir();
+        write_file(&d, "[editor]\ncommand = \"notepd.exe\"\n");
+        let mut i = inputs(&d, bin(&d, &["vim"]), &no_wslpath);
+        assert_eq!(
+            format!("{:#}", describe(&i, None).unwrap_err()),
+            format!("`notepd.exe` is not on PATH — {REMEDY}")
+        );
+        write_file(&d, "[editor\ncommand = ");
+        let err = format!("{:#}", describe(&i, None).unwrap_err());
+        assert!(
+            err.contains("does not parse — fix it or delete it"),
+            "{err}"
+        );
+        // A Windows editor on WSL cannot be given a path without `wslpath`.
+        write_file(&d, "[editor]\ncommand = \"notepad.exe\"\n");
+        i.path = bin(&d, &["notepad.exe"]);
+        i.wsl = true;
+        assert_eq!(
+            format!("{:#}", describe(&i, None).unwrap_err()),
+            format!("`wslpath` is not on PATH — {WSLPATH_REMEDY}")
+        );
+    }
+
+    #[test]
+    fn describe_refuses_a_terminal_editor_on_a_backend_without_panes() {
+        let d = dir();
+        let i = inputs(&d, bin(&d, &["vim", "gedit"]), &no_wslpath);
+        let err = format!("{:#}", describe(&i, Some("headless")).unwrap_err());
+        assert!(
+            err.starts_with("`vim` opens in a pane, and the headless backend has no pane"),
+            "{err}"
+        );
+        assert!(err.contains("window = true"), "{err}");
+        // A window editor needs no pane, so the same backend is fine.
+        write_file(&d, "[editor]\ncommand = \"gedit\"\nwindow = true\n");
+        assert!(describe(&i, Some("headless")).is_ok());
     }
 
     #[test]

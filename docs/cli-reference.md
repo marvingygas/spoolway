@@ -1245,7 +1245,7 @@ spoolway config edit
 | `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Parallel calls run one after another. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
-| `edit` | Open the file in `$EDITOR` and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
+| `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vi`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
 and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each
@@ -1256,7 +1256,7 @@ See [Configuration](configuration.md).
 
 ### `spoolway config override`
 
-Open `overrides/config.toml` in `$EDITOR`, creating it if needed. See the [overrides
+Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vi`, creating it if needed. See the [overrides
 layer](configuration.md#the-overrides-layer).
 
 ### `spoolway override contract`
@@ -1608,6 +1608,13 @@ its event, task, exit code, remedy and log path.
 
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
+
+Under `-v`, one `editor` row names the editor the TUI's `open` runs. A setting that cannot work
+prints a note with the fix and is never a failure. See [Editor](dispatcher.md#editor).
+
+```
+  ok    editor — notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths
+```
 
 The `lanes can be started` check fails for `dispatch.backend = "headless"` unless
 `SPOOLWAY_TEST_BACKEND` is set. It gives the same reason `spoolway dispatch` gives.

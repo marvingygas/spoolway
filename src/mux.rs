@@ -282,6 +282,14 @@ pub trait Mux: Sync {
         bail!("this backend has no pane to open a command in")
     }
 
+    /// Whether [`Mux::open_command`] works on this backend, so a caller can
+    /// say so before anything is opened. A backend that implements
+    /// `open_command` overrides this to `true`; the default matches the
+    /// default refusal above.
+    fn can_open_command(&self) -> bool {
+        false
+    }
+
     /// Every tab this backend currently has open on a checkout of ours,
     /// with just enough about each to judge
     /// [`crate::dispatch::sweep_anchor_tabs`]'s four conditions — never a
@@ -1648,6 +1656,10 @@ impl Mux for Herdr {
         self.call::<PaneCurrentResult>(&["pane", "current"])
             .ok()
             .map(|r| r.pane.pane_id)
+    }
+
+    fn can_open_command(&self) -> bool {
+        true
     }
 
     fn open_command(&self, cwd: &Path, label: &str, command: &str) -> Result<()> {

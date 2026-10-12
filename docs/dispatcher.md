@@ -433,7 +433,8 @@ from a shell.
 
 The same choice serves every `open` in the terminal screens: the board, the queue screen's tasks
 and routines panes, and the jobs routine picker. `spoolway config edit` and `spoolway config
-override` do not use it. They read `$EDITOR` and fall back to `vi`.
+override` do not use it. They wait for the editor to close and then check the file, so they keep
+their own order: `$VISUAL`, then `$EDITOR`, then `vi`. Setting `editor.toml` does not change them.
 
 `editor.toml` is written by hand. This example opens tasks in Notepad:
 
@@ -453,6 +454,19 @@ backend has no pane to open it in.
 
 On WSL, a command whose program ends in `.exe` receives the Windows form of the path, such as
 `\\wsl.localhost\Ubuntu\home\you\...`. Other commands receive the Linux path.
+
+Some `.exe` programs want the Linux path instead. To keep it, point `command` at a small wrapper
+script whose name does not end in `.exe`. The script runs the program itself and passes the path on.
+The wrapper also loses the `.exe` default for `window`, so set `window = true` if the program draws
+its own window.
+
+`spoolway doctor` reports the choice. With `--verbose` it prints one `editor` row that names the
+program, where it came from, whether it opens its own window, and whether paths are converted for
+Windows. When the setting cannot work, doctor prints a note with the same fix the popup gives. The
+note covers a program that is not on `PATH`, an `editor.toml` that does not parse, and a missing
+`wslpath` on WSL. On the headless backend it also covers a terminal editor, which has no pane to
+open in. It is never a failure and does not change the count of checks passed. The
+warnings screen shown before a run does not include it.
 
 `open` refuses and starts nothing in these cases:
 

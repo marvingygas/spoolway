@@ -432,6 +432,10 @@ pub fn doctor(
                 pipelines_load_outcome(&repo.checkout, err),
             );
             report.record_all(config_checks(repo, config_error, &config, None));
+            report.record(editor_finding(
+                &crate::editor::live_inputs(),
+                backend_without_panes(&mux),
+            ));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
@@ -452,6 +456,10 @@ pub fn doctor(
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
     report.record_all(config_checks(repo, config_error, &config, Some(pipelines)));
+    report.record(editor_finding(
+        &crate::editor::live_inputs(),
+        backend_without_panes(&mux),
+    ));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
@@ -503,6 +511,30 @@ pub fn doctor(
     });
 
     finish(&report, verbose, json)
+}
+
+/// The backend's name when it cannot open a command in a pane, for
+/// [`editor_finding`]. A backend that could not be resolved is `mux_finding`'s
+/// to report, so it does not count as one without panes here.
+fn backend_without_panes(mux: &Result<Box<dyn Mux>>) -> Option<&'static str> {
+    match mux {
+        Ok(m) if !m.can_open_command() => Some(m.name()),
+        _ => None,
+    }
+}
+
+/// The editor the TUI's open will run, as one `ok` row, or as a note when the
+/// setting could not work.
+///
+/// A note and never a failure, and never in [`cheap_findings`]: the editor
+/// only matters when a person presses open, and nothing about a run depends
+/// on it. The note carries open's own refusal, so the fix reads the same in
+/// both places.
+fn editor_finding(inputs: &crate::editor::Inputs, no_pane: Option<&str>) -> Finding {
+    match crate::editor::describe(inputs, no_pane) {
+        Ok(summary) => Finding::Check("editor".into(), Ok(Some(summary))),
+        Err(err) => Finding::Note(format!("editor: {err:#}")),
+    }
 }
 
 /// `doctor` when `Repo::discover_lenient`'s own resolution of this
@@ -5036,6 +5068,122 @@ mod tests {
                     && !text(w).contains("a lane really starts")
             }),
             "no network or live-pane check may appear on this path: {warnings:?}"
+        );
+    }
+
+    /// An editor that cannot work is a note and never a failure, so the
+    /// passed-checks count is the one a working editor would give, minus
+    /// the editor's own `ok` row.
+    #[test]
+    fn editor_finding_is_a_note_for_a_broken_setting_and_an_ok_row_for_a_good_one() {
+        let d = crate::scratch::root("doctor-editor");
+        std::fs::create_dir_all(&d).unwrap();
+        let bin = d.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let vim = bin.join("vim");
+        std::fs::write(&vim, "#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&vim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let wslpath = |_: &Path| -> Result<String> { unreachable!() };
+        let inputs = crate::editor::Inputs {
+            file: d.join("editor.toml"),
+            visual: None,
+            editor: None,
+            path: bin.into_os_string(),
+            wsl: false,
+            home: None,
+            wslpath: &wslpath,
+        };
+
+        let mut report = Report::default();
+        report.record(editor_finding(&inputs, None));
+        assert_eq!(
+            report.render(true),
+            "  ok    editor — vim, from the vim fallback — in a pane, Linux paths\n\n1 checks passed.\n"
+        );
+
+        std::fs::write(
+            d.join("editor.toml"),
+            "[editor]\ncommand = \"notepd.exe\"\n",
+        )
+        .unwrap();
+        let mut report = Report::default();
+        report.record(editor_finding(&inputs, None));
+        let text = report.render(false);
+        assert!(
+            text.starts_with("  note  editor: `notepd.exe` is not on PATH — fix command in"),
+            "{text}"
+        );
+        assert!(text.ends_with("0 checks passed.\n"), "{text}");
+        assert_eq!(report.problems(), 0);
+    }
+
+    /// On a backend with no panes, a terminal editor is a note, since open
+    /// would refuse it, and a window editor is still an `ok` row.
+    #[test]
+    fn editor_finding_notes_a_terminal_editor_on_a_backend_without_panes() {
+        let d = crate::scratch::root("doctor-editor-nopane");
+        let bin = d.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let vim = bin.join("vim");
+            std::fs::write(&vim, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&vim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let wslpath = |_: &Path| -> Result<String> { unreachable!() };
+        let inputs = crate::editor::Inputs {
+            file: d.join("editor.toml"),
+            visual: None,
+            editor: None,
+            path: bin.into_os_string(),
+            wsl: false,
+            home: None,
+            wslpath: &wslpath,
+        };
+
+        let mut report = Report::default();
+        report.record(editor_finding(&inputs, Some("headless")));
+        let text = report.render(false);
+        assert!(
+            text.starts_with("  note  editor: `vim` opens in a pane, and the headless backend"),
+            "{text}"
+        );
+        assert!(text.ends_with("0 checks passed.\n"), "{text}");
+
+        std::fs::write(
+            d.join("editor.toml"),
+            "[editor]\ncommand = \"vim\"\nwindow = true\n",
+        )
+        .unwrap();
+        let mut report = Report::default();
+        report.record(editor_finding(&inputs, Some("headless")));
+        assert!(report.render(true).starts_with("  ok    editor — vim"));
+    }
+
+    /// The editor never affects a run, so the pre-dispatch warnings carry no
+    /// editor finding, even when `editor.toml` is broken.
+    #[test]
+    fn cheap_findings_carries_no_editor_finding() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-editor");
+        let home = crate::scratch::root("doctor-cheap-editor-home");
+        std::fs::create_dir_all(home.join(".spoolway")).unwrap();
+        std::fs::write(
+            home.join(".spoolway").join("editor.toml"),
+            "[editor\ncommand = ",
+        )
+        .unwrap();
+        crate::platform::test_home::pin(&home);
+
+        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+        assert!(
+            warnings.iter().all(|w| match w {
+                Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
+                    !t.starts_with("editor") && !t.contains("editor.toml"),
+            }),
+            "{warnings:?}"
         );
     }
 
