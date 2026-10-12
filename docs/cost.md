@@ -39,7 +39,9 @@ the check that sees the lane finished, so a lane of a few seconds can show up to
 
 A transcript can grow after the lane is torn down. Every `spoolway eval` reads settled sessions
 again and appends one line for the turns that arrived later. That line carries no `outcome`.
-Lanes still running are left alone.
+Lanes still running are left alone. One read walks the transcript store of
+claude and pi once, however many sessions the ledger names. codex sessions are looked up one
+at a time.
 
 A lane banked more than once still counts as one lane. `spoolway eval`
 groups these lines by task, step, round and session. Tokens, cost and time are deltas against

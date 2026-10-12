@@ -34,7 +34,9 @@
 //! who sees a `PASS` of 79% next to a `RUNS` of two can discount it
 //! themselves, and will do it better than a threshold could.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 
@@ -452,7 +454,7 @@ impl Metrics {
     fn for_matching(
         matching: &[&Entry],
         fallback: &HashMap<(String, String), String>,
-        models: &BTreeMap<String, ModelPrice>,
+        models: &dyn PriceBook,
     ) -> Self {
         let mut out = Metrics::default();
         let mut runs: HashSet<(String, String)> = HashSet::new();
@@ -537,6 +539,71 @@ impl Metrics {
     }
 }
 
+/// Where a model's price comes from, for everything here that prices a ledger
+/// line or reads a context window.
+///
+/// A bare `[models]` table resolves each model live, through
+/// [`crate::models::resolve`], which reads the refreshed price file from
+/// disk. That suits the printing path, which prices once and exits. The
+/// screen prices from [`Prices`] instead, which resolved every model when the
+/// ledger loaded and reads no file after that.
+trait PriceBook {
+    /// The price `model` resolves to, `None` where no table has one.
+    fn price(&self, model: &str) -> Option<ModelPrice>;
+}
+
+impl PriceBook for BTreeMap<String, ModelPrice> {
+    fn price(&self, model: &str) -> Option<ModelPrice> {
+        crate::models::resolve(self, model).price
+    }
+}
+
+/// The prices of one load: every model its lines name, resolved once when
+/// the ledger was read.
+///
+/// Rows, the `Total` line and the export all price from this one result, so
+/// a keypress never reads `~/.spoolway/model-prices.json` — a file that runs
+/// to hundreds of kilobytes, which [`crate::models::resolve`] reads and
+/// compares on every call. A refresh of that file shows from the next load.
+#[derive(Default)]
+struct Prices {
+    /// The project's `[models]` table, which a model the load did not see
+    /// falls back to.
+    config: BTreeMap<String, ModelPrice>,
+    resolved: HashMap<String, Option<ModelPrice>>,
+}
+
+impl Prices {
+    /// `config` resolved for each distinct model among `entries`.
+    fn of<'a>(
+        config: &BTreeMap<String, ModelPrice>,
+        entries: impl IntoIterator<Item = &'a Entry>,
+    ) -> Prices {
+        let mut resolved: HashMap<String, Option<ModelPrice>> = HashMap::new();
+        for entry in entries {
+            if !resolved.contains_key(&entry.model) {
+                resolved.insert(entry.model.clone(), config.price(&entry.model));
+            }
+        }
+        Prices {
+            config: config.clone(),
+            resolved,
+        }
+    }
+}
+
+impl PriceBook for Prices {
+    /// A model no loaded line names resolves live, as a bare table would. No
+    /// line the screen prices lacks one, so this is reached only by a
+    /// `Loaded` built by hand.
+    fn price(&self, model: &str) -> Option<ModelPrice> {
+        match self.resolved.get(model) {
+            Some(price) => *price,
+            None => self.config.price(model),
+        }
+    }
+}
+
 /// What each token class on a set of ledger lines costs at today's price
 /// table: the `IN USD`, `OUT USD`, `CACHE R USD` and `CACHE W USD` columns.
 ///
@@ -567,20 +634,17 @@ struct ClassCost {
 }
 
 impl ClassCost {
-    fn of<'a>(
-        entries: impl IntoIterator<Item = &'a Entry>,
-        models: &BTreeMap<String, ModelPrice>,
-    ) -> ClassCost {
-        // One resolution per model, not per line: `models::resolve` reads
-        // the refreshed price file from disk on every call, and the screen
-        // rebuilds its table on every keypress.
+    fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>, models: &dyn PriceBook) -> ClassCost {
+        // One lookup per model, not per line. Over a bare `[models]` table
+        // each lookup is a `models::resolve`, which reads the refreshed price
+        // file from disk, so a line-by-line pass would read it once per line.
         let mut prices: HashMap<&str, Option<ModelPrice>> = HashMap::new();
         let mut out = ClassCost::default();
         for entry in entries.into_iter().filter(|e| !e.tokens.is_zero()) {
             out.spent += 1;
             let price = *prices
                 .entry(entry.model.as_str())
-                .or_insert_with(|| crate::models::resolve(models, &entry.model).price);
+                .or_insert_with(|| models.price(&entry.model));
             match price {
                 Some(price) => out.add(&price, &entry.tokens, &entry.tier_tokens),
                 None => out.unpriced += 1,
@@ -698,7 +762,7 @@ impl CtxAvg {
 /// the worst lane came to its window, this says how close a typical one did.
 fn ctx_avg_of<'a, 'b: 'a>(
     groups: impl IntoIterator<Item = &'a Vec<&'b Entry>>,
-    models: &BTreeMap<String, ModelPrice>,
+    models: &dyn PriceBook,
 ) -> CtxAvg {
     let mut tokens: Vec<f64> = Vec::new();
     let mut pcts: Vec<f64> = Vec::new();
@@ -726,16 +790,13 @@ fn ctx_avg_of<'a, 'b: 'a>(
 /// 180k of a 1M one. So the winner is the highest share, and the raw reading
 /// decides only when no lane's model resolves a window — then the share is
 /// `None` and the cell falls back to tokens, see [`ctx_cell`].
-fn ctx_peak_of(
-    lanes: &[&Entry],
-    models: &BTreeMap<String, ModelPrice>,
-) -> (Option<u64>, Option<f64>) {
+fn ctx_peak_of(lanes: &[&Entry], models: &dyn PriceBook) -> (Option<u64>, Option<f64>) {
     let readings: Vec<(u64, Option<f64>)> = lanes
         .iter()
         .filter_map(|e| {
             e.ctx_peak.map(|tokens| {
-                let share = crate::models::resolve(models, &e.model)
-                    .price
+                let share = models
+                    .price(&e.model)
                     .map(|price| price.context_window)
                     .filter(|window| *window > 0)
                     .map(|window| tokens as f64 / window as f64);
@@ -1040,7 +1101,7 @@ fn lane_rows(
     entries: &[&Entry],
     by: EvalBy,
     fallback: &HashMap<(String, String), String>,
-    models: &BTreeMap<String, ModelPrice>,
+    models: &dyn PriceBook,
     pipelines: Option<&Pipelines>,
 ) -> Vec<LaneRow> {
     grouped_rows(entries, by, fallback, pipelines)
@@ -1253,7 +1314,7 @@ impl LaneTotal {
     fn of(
         entries: &[&Entry],
         fallback: &HashMap<(String, String), String>,
-        models: &BTreeMap<String, ModelPrice>,
+        models: &dyn PriceBook,
     ) -> LaneTotal {
         let runs: HashSet<(String, String)> = entries
             .iter()
@@ -2395,10 +2456,10 @@ fn normalize_skill(marker: &str) -> &str {
 ///
 /// `spans` and `skills` are [`Loaded::spans_by_session`] and
 /// [`Loaded::skills_by_session`] — read once at `load` rather than here,
-/// since this runs on every draw and each is a transcript read.
+/// since this runs on every build of the table and each is a transcript read.
 fn list_sessions(
     entries: &[&Entry],
-    models: &BTreeMap<String, ModelPrice>,
+    models: &dyn PriceBook,
     spans: &Spans,
     skills: &HashMap<String, BTreeSet<String>>,
 ) -> Vec<SessionRow> {
@@ -2547,7 +2608,7 @@ fn dirs_total(rows: &[DirRow]) -> DirRow {
 fn dir_rows(
     entries: &[&Entry],
     roots: &[String],
-    models: &BTreeMap<String, ModelPrice>,
+    models: &dyn PriceBook,
     spans: &Spans,
 ) -> Vec<DirRow> {
     let mut order: Vec<String> = Vec::new();
@@ -3740,12 +3801,13 @@ struct Loaded {
     roots: Vec<String>,
     /// Every skill each of `dirs`' own sessions ran, whether a
     /// `<command-name>` marker or a Skill `tool_use` named it, keyed by
-    /// session id — read once here rather than on every draw, since a
-    /// transcript scan is a file read `draw` cannot afford to repeat on every
-    /// keypress. A subagent's own markers are folded onto its parent's set
-    /// here in `load`, so this never holds an `agent-<id>` key. What the
-    /// `skill` filter row cycles over, what a chosen `skill` narrows `dirs`
-    /// by — see [`scoped_dirs`] — and what the `SKILL` column names.
+    /// session id — read once here rather than on every build of the
+    /// table, since a transcript scan is a file read a rebuild cannot
+    /// afford to repeat on every filter change. A subagent's own markers
+    /// are folded onto its parent's set here in `load`, so this never holds
+    /// an `agent-<id>` key. What the `skill` filter row cycles over, what a
+    /// chosen `skill` narrows `dirs` by — see [`scoped_dirs`] — and what the
+    /// `SKILL` column names.
     skills_by_session: HashMap<String, BTreeSet<String>>,
     /// Each of `dirs`' own sessions' transcript span — see
     /// [`crate::usage::session_span`] — keyed by session id, read once here
@@ -3754,14 +3816,22 @@ struct Loaded {
     /// line's `ts` for that one.
     spans_by_session: Spans,
     fallback: HashMap<(String, String), String>,
-    models: BTreeMap<String, ModelPrice>,
+    /// Every model the lines above name, priced once at this load — what the
+    /// rows, the `Total` line and the export all price from.
+    models: Prices,
     /// Every trial id a task in this project's queue still carries — what
     /// tells a trial's `STATE` `running` from `settled`. Read once here for
     /// the reason `skills_by_session` is. Empty under any other scope: the
     /// screen only reaches this project's own queue, and the tab it opens in
     /// always reads this project.
     running_trials: BTreeSet<String>,
+    /// Which load this is, so a table built from one is never served for
+    /// another: see [`TableCache`]. Every `load` takes the next number.
+    generation: u64,
 }
+
+/// The next [`Loaded::generation`].
+static LOAD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
     crate::usage::sweep(repo);
@@ -3916,6 +3986,8 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         Scope::Named(_) | Scope::All => BTreeSet::new(),
     };
 
+    let models = Prices::of(&repo.config.models, entries.iter().chain(&dirs));
+
     Ok(Loaded {
         entries,
         dirs,
@@ -3923,8 +3995,9 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         skills_by_session,
         spans_by_session,
         fallback,
-        models: repo.config.models.clone(),
+        models,
         running_trials,
+        generation: LOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -4745,8 +4818,8 @@ fn eval_frame_rows_at(
     // and nothing at all otherwise — see `crate::screen::shell::strip`.
     let mut rows_out: Vec<String> = crate::screen::shell::strip();
 
-    let lines = loaded.map_or_else(Vec::new, |loaded| {
-        view_lines(loaded, &state.filters, pipelines, state.table)
+    let lines = loaded.map_or_else(Default::default, |loaded| {
+        state.table_lines(loaded, pipelines)
     });
     let right = filters_label(&state.scope_label, &state.filters, state.table, loaded);
     let title = frame_title(&state.filters, state.table);
@@ -5043,6 +5116,22 @@ struct ScreenState {
     /// any load has landed, and nothing on the screen changes the scope.
     scope_label: String,
     mode: Mode,
+    /// The table last built, kept so a frame that changes only the cursor
+    /// clips rows already built — see [`ScreenState::table_lines`].
+    built: RefCell<Option<TableCache>>,
+}
+
+/// A built table, and the inputs it was built from.
+///
+/// `view_lines` reads the loaded ledger, the filters (the sort and the
+/// figures view among them) and the table on screen, so those are the key.
+/// The pipelines are the same for the whole visit and the cursor is not an
+/// input: it only decides which rows a frame clips and which it marks.
+struct TableCache {
+    generation: u64,
+    kind: TableKind,
+    filters: Filters,
+    lines: Rc<Vec<Line>>,
 }
 
 impl ScreenState {
@@ -5054,7 +5143,62 @@ impl ScreenState {
             scope_label: filters.scope.label(),
             filters,
             mode: Mode::Browsing,
+            built: RefCell::new(None),
         }
+    }
+
+    /// The lines of the table on screen, built by [`view_lines`] only when
+    /// `loaded`, the filters or the table differ from the last build.
+    ///
+    /// Keyed on the inputs, not cleared at each place that changes one, so a
+    /// key that changes the table cannot forget to rebuild it. The cursor
+    /// keys leave every input alone, which makes a held arrow key cost a
+    /// re-clip of built rows instead of a rebuild.
+    fn table_lines(&self, loaded: &Loaded, pipelines: &Pipelines) -> Rc<Vec<Line>> {
+        let mut cache = self.built.borrow_mut();
+        if let Some(built) = cache.as_ref()
+            && built.generation == loaded.generation
+            && built.kind == self.table
+            && built.filters == self.filters
+        {
+            return Rc::clone(&built.lines);
+        }
+        let lines = Rc::new(view_lines(loaded, &self.filters, pipelines, self.table));
+        *cache = Some(TableCache {
+            generation: loaded.generation,
+            kind: self.table,
+            filters: self.filters.clone(),
+            lines: Rc::clone(&lines),
+        });
+        lines
+    }
+
+    /// Pull the cursor back onto the last row of the table on screen, when
+    /// it sits past it.
+    ///
+    /// The limit is the row count of the very lines the frame draws, so it
+    /// follows `tab`, `t`, a filter and a reload without each of them
+    /// knowing it. Without it `↓` counted on past the last row while the
+    /// marker, clamped at draw time, stayed on it, and `↑` looked dead until
+    /// every extra press had been undone.
+    fn clamp_cursor(&mut self, loaded: &Loaded, pipelines: &Pipelines) {
+        let rows = row_count(&self.table_lines(loaded, pipelines));
+        self.cursor = self.cursor.min(rows.saturating_sub(1));
+    }
+
+    /// [`ScreenState::settle`], and a table that landed shorter than the
+    /// cursor's position leaves the cursor on its new last row.
+    fn settle_clamped(
+        &mut self,
+        loaded: &mut Option<Loaded>,
+        failed: &mut Option<String>,
+        pipelines: &Pipelines,
+    ) -> bool {
+        let landed = self.settle(loaded, failed);
+        if landed && let Some(loaded) = loaded.as_ref() {
+            self.clamp_cursor(loaded, pipelines);
+        }
+        landed
     }
 
     /// Start loading through `filters`, under the loading popup.
@@ -5190,6 +5334,10 @@ fn run_screen(
 /// it answers itself: a scripted input always has a key pending, and would
 /// otherwise race the thread.
 ///
+/// While browsing, keys waiting when one is read are applied before the next
+/// frame, so a held key draws one frame for the burst rather than one each;
+/// see the loop for what ends a burst early.
+///
 /// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
 fn run_screen_with(
     repo: &Repo,
@@ -5210,8 +5358,12 @@ fn run_screen_with(
     let mut failed: Option<String> = None;
     state.start_loading(&mut start, state.filters.clone(), false);
 
-    loop {
-        state.settle(&mut loaded, &mut failed);
+    // The `q` a burst stopped on, kept for the next pass round the loop: the
+    // frame the keys before it made is drawn first, and it quits after.
+    let mut held_back: Option<Key> = None;
+
+    'frames: loop {
+        state.settle_clamped(&mut loaded, &mut failed, pipelines);
         match &failed {
             Some(message) => crate::screen::shell::message_frame(message, writer, out),
             None => draw(pipelines, loaded.as_ref(), &state, writer, out),
@@ -5221,15 +5373,23 @@ fn run_screen_with(
         // `crate::screen::shell::wait_key`. `spoolway eval` on its own installs
         // no handler, so there nothing is ever caught. The idle slices are
         // where a load running behind the popup is noticed landing.
-        let Some(key) = crate::screen::shell::wait_key(input, || {
-            if state.settle(&mut loaded, &mut failed) {
-                match &failed {
-                    Some(message) => crate::screen::shell::message_frame(message, writer, out),
-                    None => draw(pipelines, loaded.as_ref(), &state, writer, out),
-                }
+        let mut key = match held_back.take() {
+            Some(key) => key,
+            None => {
+                let Some(key) = crate::screen::shell::wait_key(input, || {
+                    if state.settle_clamped(&mut loaded, &mut failed, pipelines) {
+                        match &failed {
+                            Some(message) => {
+                                crate::screen::shell::message_frame(message, writer, out)
+                            }
+                            None => draw(pipelines, loaded.as_ref(), &state, writer, out),
+                        }
+                    }
+                }) else {
+                    break;
+                };
+                key
             }
-        }) else {
-            break;
         };
         if let Some(message) = failed {
             return Ok(match crate::screen::shell::leave_on(key) {
@@ -5242,203 +5402,246 @@ fn run_screen_with(
                 None => Leave::Quit,
             });
         }
-        // Browsing and loading are the modes with no filter panel, calendar
-        // or notice open: the only ones where `←` and `→` are a hosting
-        // shell's.
-        if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
-            && let Some(leave) = crate::screen::shell::leave_on(key)
-        {
-            return Ok(leave);
-        }
-        if key == Key::Char('q') {
-            break;
-        }
-        // Past here every mode reads the table's data. Only loading can be
-        // without it, and loading reads no key but the ones above.
-        if matches!(state.mode, Mode::Loading { .. }) {
-            continue;
-        }
-        let Some(loaded) = loaded.as_ref() else {
-            continue;
-        };
-
-        match &mut state.mode {
-            Mode::Loading { .. } => unreachable!("loading reads no key past `q`"),
-            Mode::Notice { .. } => {
-                // Any key dismisses it — the message was already read on the
-                // draw that preceded this key, the same reasoning the queue
-                // screen's own `Mode::Outcome` follows.
-                state.mode = Mode::Browsing;
-            }
-            Mode::Filter(draft) => match key {
-                Key::Esc => state.mode = Mode::Browsing,
-                Key::Up | Key::Char('k') => {
-                    draft.field = draft.field.saturating_sub(1);
-                }
-                Key::Down | Key::Char('j') => {
-                    draft.field = (draft.field + 1).min(draft.fields().len() - 1);
-                }
-                Key::Left | Key::Right => {
-                    handle_filter_change(loaded, draft, key == Key::Right);
-                }
-                // On a date row, `enter` opens the calendar instead of
-                // applying — the one row `enter` means something else on.
-                // Everywhere else it applies the draft and reloads.
-                Key::Enter
-                    if matches!(draft.current(), FilterField::Since | FilterField::Until) =>
+        // While browsing, every key waiting is applied before the next frame,
+        // so a held key never queues up behind a frame and runs after the
+        // person has stopped. Each one still goes through the handler below,
+        // in the order typed; only the drawing between them is skipped. In
+        // any other mode each key still draws its own frame.
+        loop {
+            let was_browsing = matches!(state.mode, Mode::Browsing);
+            let was_table = state.table;
+            'handle: {
+                // Browsing and loading are the modes with no filter panel, calendar
+                // or notice open: the only ones where `←` and `→` are a hosting
+                // shell's.
+                if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
+                    && let Some(leave) = crate::screen::shell::leave_on(key)
                 {
-                    let field = draft.current();
-                    let text = match field {
-                        FilterField::Since => draft.filters.since.as_str(),
-                        FilterField::Until => draft.filters.until.as_str(),
-                        _ => unreachable!("only since/until open a calendar"),
-                    };
-                    let (year, month, day) = calendar_open_date(text);
-                    state.mode = Mode::Calendar {
-                        draft: draft.clone(),
+                    return Ok(leave);
+                }
+                if key == Key::Char('q') {
+                    break 'frames;
+                }
+                // Past here every mode reads the table's data. Only loading can be
+                // without it, and loading reads no key but the ones above.
+                if matches!(state.mode, Mode::Loading { .. }) {
+                    break 'handle;
+                }
+                let Some(loaded) = loaded.as_ref() else {
+                    break 'handle;
+                };
+
+                match &mut state.mode {
+                    Mode::Loading { .. } => unreachable!("loading reads no key past `q`"),
+                    Mode::Notice { .. } => {
+                        // Any key dismisses it — the message was already read on the
+                        // draw that preceded this key, the same reasoning the queue
+                        // screen's own `Mode::Outcome` follows.
+                        state.mode = Mode::Browsing;
+                    }
+                    Mode::Filter(draft) => match key {
+                        Key::Esc => state.mode = Mode::Browsing,
+                        Key::Up | Key::Char('k') => {
+                            draft.field = draft.field.saturating_sub(1);
+                        }
+                        Key::Down | Key::Char('j') => {
+                            draft.field = (draft.field + 1).min(draft.fields().len() - 1);
+                        }
+                        Key::Left | Key::Right => {
+                            handle_filter_change(loaded, draft, key == Key::Right);
+                        }
+                        // On a date row, `enter` opens the calendar instead of
+                        // applying — the one row `enter` means something else on.
+                        // Everywhere else it applies the draft and reloads.
+                        Key::Enter
+                            if matches!(
+                                draft.current(),
+                                FilterField::Since | FilterField::Until
+                            ) =>
+                        {
+                            let field = draft.current();
+                            let text = match field {
+                                FilterField::Since => draft.filters.since.as_str(),
+                                FilterField::Until => draft.filters.until.as_str(),
+                                _ => unreachable!("only since/until open a calendar"),
+                            };
+                            let (year, month, day) = calendar_open_date(text);
+                            state.mode = Mode::Calendar {
+                                draft: draft.clone(),
+                                field,
+                                year,
+                                month,
+                                day,
+                            };
+                        }
+                        Key::Enter => {
+                            let candidate = draft.filters.clone();
+                            state.start_loading(&mut start, candidate, true);
+                        }
+                        _ => {}
+                    },
+                    Mode::Calendar {
+                        draft,
                         field,
                         year,
                         month,
                         day,
-                    };
-                }
-                Key::Enter => {
-                    let candidate = draft.filters.clone();
-                    state.start_loading(&mut start, candidate, true);
-                }
-                _ => {}
-            },
-            Mode::Calendar {
-                draft,
-                field,
-                year,
-                month,
-                day,
-            } => match key {
-                // The row is handed back exactly as it was — nothing in here
-                // touches `draft` itself until `enter` or `x` commits.
-                Key::Esc => state.mode = Mode::Filter(draft.clone()),
-                Key::Char('x') => {
-                    let mut next = draft.clone();
-                    field_text_mut(&mut next, *field).clear();
-                    state.mode = Mode::Filter(next);
-                }
-                Key::Enter => {
-                    let mut next = draft.clone();
-                    *field_text_mut(&mut next, *field) =
-                        format!("{:04}-{:02}-{:02}", *year, *month, *day);
-                    state.mode = Mode::Filter(next);
-                }
-                Key::Left => step_calendar_day(year, month, day, -1),
-                Key::Right => step_calendar_day(year, month, day, 1),
-                Key::Up => step_calendar_day(year, month, day, -7),
-                Key::Down => step_calendar_day(year, month, day, 7),
-                Key::PageUp => step_calendar_month(year, month, day, -1),
-                Key::PageDown => step_calendar_month(year, month, day, 1),
-                _ => {}
-            },
-            Mode::Sort {
-                descending,
-                columns,
-                cursor,
-            } => match key {
-                Key::Esc => state.mode = Mode::Browsing,
-                Key::Up | Key::Char('k') => *cursor = cursor.saturating_sub(1),
-                Key::Down | Key::Char('j') => *cursor = (*cursor + 1).min(columns.len()),
-                Key::Enter => {
-                    let sort = cursor.checked_sub(1).map(|i| Sort {
-                        key: columns[i].1.to_string(),
-                        descending: *descending,
-                    });
-                    match state.table {
-                        TableKind::Lanes => state.filters.lane_sort = sort,
-                        TableKind::Dirs => state.filters.dir_sort = sort,
-                        TableKind::Trials => state.filters.trial_sort = sort,
-                    }
-                    // The row the cursor was on has moved somewhere else in
-                    // the new order; the top is the one place still worth
-                    // reading first.
-                    state.cursor = 0;
-                    state.mode = Mode::Browsing;
-                }
-                _ => {}
-            },
-            Mode::Browsing => match key {
-                Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
-                Key::Down | Key::Char('j') => state.cursor += 1,
-                Key::Tab => {
-                    state.table = state.table.next();
-                    state.cursor = 0;
-                }
-                // Opening a trial is only a filter set for the person, so
-                // `tab` and the `trial` row's `all` are what leave it. The
-                // `pipeline` and `version` rows are cleared with it: either
-                // could hide one of the trial's own pipelines, and showing
-                // every one of those side by side is the point of opening it.
-                Key::Enter if state.table == TableKind::Trials => {
-                    let (rows, _) = screen_trial_rows(loaded, &state.filters);
-                    if let Some(row) = rows.get(state.cursor.min(rows.len().saturating_sub(1))) {
-                        state.filters.trial = Some(row.id.clone());
-                        state.filters.by = EvalBy::Pipeline;
-                        state.filters.pipeline = None;
-                        state.filters.version = None;
-                        state.table = TableKind::Lanes;
-                        state.cursor = 0;
-                    }
-                }
-                Key::Char('f') => {
-                    state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
-                }
-                Key::Char(c @ ('a' | 'd')) => {
-                    let columns = view_columns(loaded, &state.filters, pipelines, state.table);
-                    let current = match state.table {
-                        TableKind::Lanes => state.filters.lane_sort.clone(),
-                        TableKind::Dirs => state.filters.shown_dir_sort(),
-                        TableKind::Trials => state.filters.trial_sort.clone(),
-                    };
-                    // Opens on the column already sorted, so flipping its
-                    // direction is `d` and `enter`; on `default order` when
-                    // there is none on this view.
-                    let cursor = current
-                        .and_then(|s| columns.iter().position(|(_, key)| *key == s.key))
-                        .map_or(0, |i| i + 1);
-                    state.mode = Mode::Sort {
-                        descending: c == 'd',
+                    } => match key {
+                        // The row is handed back exactly as it was — nothing in here
+                        // touches `draft` itself until `enter` or `x` commits.
+                        Key::Esc => state.mode = Mode::Filter(draft.clone()),
+                        Key::Char('x') => {
+                            let mut next = draft.clone();
+                            field_text_mut(&mut next, *field).clear();
+                            state.mode = Mode::Filter(next);
+                        }
+                        Key::Enter => {
+                            let mut next = draft.clone();
+                            *field_text_mut(&mut next, *field) =
+                                format!("{:04}-{:02}-{:02}", *year, *month, *day);
+                            state.mode = Mode::Filter(next);
+                        }
+                        Key::Left => step_calendar_day(year, month, day, -1),
+                        Key::Right => step_calendar_day(year, month, day, 1),
+                        Key::Up => step_calendar_day(year, month, day, -7),
+                        Key::Down => step_calendar_day(year, month, day, 7),
+                        Key::PageUp => step_calendar_month(year, month, day, -1),
+                        Key::PageDown => step_calendar_month(year, month, day, 1),
+                        _ => {}
+                    },
+                    Mode::Sort {
+                        descending,
                         columns,
                         cursor,
-                    };
-                }
-                Key::Char('r') => {
-                    state.start_loading(&mut start, state.filters.clone(), false);
-                }
-                Key::Char('t') if state.table != TableKind::Trials => {
-                    state.filters.flip_figures();
-                }
-                Key::Char('e') if state.table != TableKind::Trials => {
-                    match export(repo, loaded, &state.filters, pipelines, state.table) {
-                        Ok((path, rows)) => {
-                            state.mode = Mode::Notice {
-                                title: "exported",
-                                body: format!(
-                                    "{}, by {}\n{}",
-                                    plural(rows, "row"),
-                                    by_label(&state.filters, state.table),
-                                    display_relative(&path, &repo.root),
-                                ),
-                                keys: None,
-                            };
+                    } => match key {
+                        Key::Esc => state.mode = Mode::Browsing,
+                        Key::Up | Key::Char('k') => *cursor = cursor.saturating_sub(1),
+                        Key::Down | Key::Char('j') => *cursor = (*cursor + 1).min(columns.len()),
+                        Key::Enter => {
+                            let sort = cursor.checked_sub(1).map(|i| Sort {
+                                key: columns[i].1.to_string(),
+                                descending: *descending,
+                            });
+                            match state.table {
+                                TableKind::Lanes => state.filters.lane_sort = sort,
+                                TableKind::Dirs => state.filters.dir_sort = sort,
+                                TableKind::Trials => state.filters.trial_sort = sort,
+                            }
+                            // The row the cursor was on has moved somewhere else in
+                            // the new order; the top is the one place still worth
+                            // reading first.
+                            state.cursor = 0;
+                            state.mode = Mode::Browsing;
                         }
-                        Err(err) => {
-                            state.mode = Mode::Notice {
-                                title: "eval",
-                                body: format!("{err:#}"),
-                                keys: Some(NOTICE_KEYS),
+                        _ => {}
+                    },
+                    Mode::Browsing => match key {
+                        Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
+                        Key::Down | Key::Char('j') => state.cursor += 1,
+                        Key::Tab => {
+                            state.table = state.table.next();
+                            state.cursor = 0;
+                        }
+                        // Opening a trial is only a filter set for the person, so
+                        // `tab` and the `trial` row's `all` are what leave it. The
+                        // `pipeline` and `version` rows are cleared with it: either
+                        // could hide one of the trial's own pipelines, and showing
+                        // every one of those side by side is the point of opening it.
+                        Key::Enter if state.table == TableKind::Trials => {
+                            let (rows, _) = screen_trial_rows(loaded, &state.filters);
+                            if let Some(row) =
+                                rows.get(state.cursor.min(rows.len().saturating_sub(1)))
+                            {
+                                state.filters.trial = Some(row.id.clone());
+                                state.filters.by = EvalBy::Pipeline;
+                                state.filters.pipeline = None;
+                                state.filters.version = None;
+                                state.table = TableKind::Lanes;
+                                state.cursor = 0;
                             }
                         }
-                    }
+                        Key::Char('f') => {
+                            state.mode =
+                                Mode::Filter(Draft::new(state.table, state.filters.clone()));
+                        }
+                        Key::Char(c @ ('a' | 'd')) => {
+                            let columns =
+                                view_columns(loaded, &state.filters, pipelines, state.table);
+                            let current = match state.table {
+                                TableKind::Lanes => state.filters.lane_sort.clone(),
+                                TableKind::Dirs => state.filters.shown_dir_sort(),
+                                TableKind::Trials => state.filters.trial_sort.clone(),
+                            };
+                            // Opens on the column already sorted, so flipping its
+                            // direction is `d` and `enter`; on `default order` when
+                            // there is none on this view.
+                            let cursor = current
+                                .and_then(|s| columns.iter().position(|(_, key)| *key == s.key))
+                                .map_or(0, |i| i + 1);
+                            state.mode = Mode::Sort {
+                                descending: c == 'd',
+                                columns,
+                                cursor,
+                            };
+                        }
+                        Key::Char('r') => {
+                            state.start_loading(&mut start, state.filters.clone(), false);
+                        }
+                        Key::Char('t') if state.table != TableKind::Trials => {
+                            state.filters.flip_figures();
+                        }
+                        Key::Char('e') if state.table != TableKind::Trials => {
+                            match export(repo, loaded, &state.filters, pipelines, state.table) {
+                                Ok((path, rows)) => {
+                                    state.mode = Mode::Notice {
+                                        title: "exported",
+                                        body: format!(
+                                            "{}, by {}\n{}",
+                                            plural(rows, "row"),
+                                            by_label(&state.filters, state.table),
+                                            display_relative(&path, &repo.root),
+                                        ),
+                                        keys: None,
+                                    };
+                                }
+                                Err(err) => {
+                                    state.mode = Mode::Notice {
+                                        title: "eval",
+                                        body: format!("{err:#}"),
+                                        keys: Some(NOTICE_KEYS),
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                 }
-                _ => {}
-            },
+            }
+            if let Some(loaded) = loaded.as_ref() {
+                state.clamp_cursor(loaded, pipelines);
+            }
+            // A key that opened a notice, the filter panel, the sort popup or
+            // the calendar, started a load, or moved to another table ends
+            // the burst: its frame is drawn before the next key is read, so
+            // a notice is never dismissed by a key typed behind it before it
+            // was seen. A scripted input always reports a key pending, so it
+            // drains to its end and the read below stops it.
+            if !(was_browsing && matches!(state.mode, Mode::Browsing))
+                || state.table != was_table
+                || !cfg!(unix)
+                || crate::platform::stop::asked()
+                || !input.byte_pending(std::time::Duration::ZERO)
+            {
+                break;
+            }
+            match crate::screen::read_key(input) {
+                Some(Key::Char('q')) => {
+                    held_back = Some(Key::Char('q'));
+                    break;
+                }
+                Some(next) => key = next,
+                None => break,
+            }
         }
     }
     Ok(Leave::Quit)
@@ -7829,8 +8032,9 @@ mod screen_tests {
             roots: Vec::new(),
             skills_by_session: HashMap::new(),
             spans_by_session: HashMap::new(),
-            models: BTreeMap::new(),
+            models: Prices::default(),
             running_trials: BTreeSet::new(),
+            generation: LOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -8086,6 +8290,162 @@ mod screen_tests {
         );
     }
 
+    /// The row the marker is on in the last frame drawn.
+    fn marked_row(text: &str) -> String {
+        last_frame(text)
+            .lines()
+            .find(|l| l.contains("│>"))
+            .unwrap_or_else(|| panic!("no marker in {}", last_frame(text)))
+            .to_string()
+    }
+
+    /// Extra `↓` on the last row leave the cursor there, so one `↑` moves
+    /// the marker up. Before the cursor was clamped, 50 presses put it 47
+    /// rows past the end of a three-row table and `↑` moved nothing.
+    #[test]
+    fn down_on_the_last_row_stays_there_and_one_up_moves_the_marker() {
+        let (repo, _root_guard) = fixture_to_sort("screen-cursor-stops");
+        let after_up = marked_row(&screen(&repo, &format!("{}k", "j".repeat(50))));
+        let second = marked_row(&screen(&repo, "j"));
+        let last = marked_row(&screen(&repo, "jj"));
+        assert_eq!(after_up, second);
+        assert_ne!(second, last);
+    }
+
+    /// `clamp_cursor` pulls a cursor past the end of the table on screen back
+    /// onto its last row. The filter is set by hand here, and the dirs and
+    /// trials tables of this ledger are empty, so they only show the cursor
+    /// held at the top. A load landing is driven through the screen by
+    /// `a_reload_that_lands_shorter_leaves_the_cursor_on_its_new_last_row`.
+    #[test]
+    fn a_table_that_shrinks_leaves_the_cursor_on_its_new_last_row() {
+        let (repo, _root_guard) = fixture_to_sort("screen-cursor-shrinks");
+        let pipelines = Pipelines::builtin();
+        let loaded = load(&repo, &no_filters()).unwrap();
+        let mut state = ScreenState::new(&no_args());
+        state.cursor = 2;
+        state.clamp_cursor(&loaded, &pipelines);
+        assert_eq!(state.cursor, 2, "three pipelines: row 2 is the last");
+
+        state.filters.pipeline = Some("gamma".into());
+        state.clamp_cursor(&loaded, &pipelines);
+        assert_eq!(state.cursor, 0, "one pipeline left");
+
+        for table in [TableKind::Dirs, TableKind::Trials] {
+            state.table = table;
+            state.cursor = 9;
+            state.clamp_cursor(&loaded, &pipelines);
+            assert_eq!(state.cursor, 0, "{table:?}");
+        }
+    }
+
+    /// An `r` reload that lands with fewer rows than the cursor's position
+    /// leaves the cursor on the new last row, so the first `↑` after it moves
+    /// the marker. `r` keeps the cursor where it was, and only the clamp as
+    /// the load lands pulls it back: without it the cursor stays one past
+    /// the two rows and the `↑` seems to do nothing.
+    #[test]
+    fn a_reload_that_lands_shorter_leaves_the_cursor_on_its_new_last_row() {
+        let (repo, _root_guard) = fixture_to_sort("screen-reload-shrinks");
+        let mut loads = 0;
+        let mut input = keys("jjrk");
+        let mut out = Vec::new();
+        run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |filters| {
+                loads += 1;
+                if loads == 1 {
+                    return load_now(&repo, filters);
+                }
+                // The second load: the ledger now holds two of the three
+                // pipelines.
+                let mut shorter = load(&repo, filters).unwrap();
+                shorter.entries.retain(|e| e.pipeline != "alpha");
+                shorter.fallback = fallback_keys(&shorter.entries);
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(Ok(shorter)).unwrap();
+                rx
+            },
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        assert_eq!(loads, 2, "`r` started the second load");
+        let last = last_frame(&drawn);
+        assert!(!last.contains("alpha"), "the shorter table: {last}");
+        let marked = marked_row(&drawn);
+        assert!(
+            marked.contains("gamma"),
+            "`↑` moved off the last row: {marked}"
+        );
+    }
+
+    /// 200 keys and then `←`: the tab switches after the one frame drawn
+    /// for the table. The keys alternate `↓` and `↑` so that every one of
+    /// them would change the frame, and the frame writer, which skips a
+    /// repeat of the last frame, could not hide a frame drawn per key.
+    #[test]
+    fn a_burst_of_keys_then_left_switches_after_one_frame() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-left");
+        let _hosting = Hosting::open(Tab::Eval);
+        let script = format!("{}\x1b[D", format!("{DOWN}k").repeat(100));
+        let mut input = keys(&script);
+        let mut out = Vec::new();
+        let leave = run_now(&repo, &no_args(), &mut input, &mut out);
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let drawn = String::from_utf8(out).unwrap();
+        assert_eq!(frames(&drawn).len(), 1, "one frame for the whole burst");
+    }
+
+    /// A key inside the burst still acts in the order typed: `q` ends the
+    /// screen where it stands, whatever follows it, after one frame for the
+    /// keys before it.
+    #[test]
+    fn a_q_inside_a_burst_still_quits_where_it_was_typed() {
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-q");
+        let mut input = keys("jkjjqjk");
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut input, &mut out);
+        assert_eq!(input.position(), 5, "nothing after the `q` was read");
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 2, "the table, then the keys before the `q`");
+        assert_eq!(marked_row(&drawn), marked_row(&screen(&repo, "jj")));
+    }
+
+    /// A key that opens the sort popup or a notice ends the burst, and the
+    /// frame it made is drawn before the next key is read — so a notice is
+    /// never dismissed by a key typed behind it before it was seen.
+    #[test]
+    fn a_key_that_opens_something_is_drawn_before_the_next_key_is_read() {
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-stops");
+
+        // Four moves, `a`, then two keys the popup reads: a frame for the
+        // table, one for the popup, and one for each popup key.
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut keys("jkjkajk"), &mut out);
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 4, "{drawn}");
+        assert!(all[1].contains("↑↓] column"), "popup drawn: {}", all[1]);
+
+        // `e` opens a notice; the key behind it dismisses it, and the
+        // notice has a frame of its own before that.
+        let mut out = Vec::new();
+        run_now(&repo, &no_args(), &mut keys("jkexjk"), &mut out);
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert!(
+            all.iter().any(|f| f.contains("exported")),
+            "the notice was drawn before it was dismissed: {drawn}"
+        );
+    }
+
     /// A scripted input that reports no key pending on its first poll, and
     /// answers the load in flight right then — so the result lands in
     /// `wait_key`'s idle slice, behind a frame already drawn, the way a slow
@@ -8282,6 +8642,136 @@ mod screen_tests {
             .unwrap();
         assert_eq!(landed.entries.len(), 1);
         assert_eq!(landed.entries[0].task, "a");
+    }
+
+    /// A cursor move re-clips the table already built; a new load, a filter,
+    /// a sort, `tab` and `t` each build it again. The built table is told
+    /// apart by pointer, since a rebuild hands back a new one.
+    #[test]
+    fn a_cursor_move_reuses_the_built_table_and_every_other_change_rebuilds_it() {
+        let entries: Vec<Entry> = (0..5)
+            .map(|n| tests_entry(&format!("task-{n}"), "implement"))
+            .collect();
+        let first = loaded(entries.clone());
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        state.filters.by = EvalBy::Task;
+
+        let built = state.table_lines(&first, &pipelines);
+        let marked = |state: &ScreenState| {
+            eval_frame_rows_at(&pipelines, Some(&first), state, Some(20))
+                .into_iter()
+                .position(|l| l.starts_with("│>") || l.starts_with("│ >"))
+        };
+        let at_top = marked(&state);
+        for cursor in 1..4 {
+            state.cursor = cursor;
+            assert!(
+                Rc::ptr_eq(&built, &state.table_lines(&first, &pipelines)),
+                "cursor {cursor} rebuilt the table"
+            );
+        }
+        assert_ne!(marked(&state), at_top, "the cursor row moved in the frame");
+
+        let rebuilt = |state: &ScreenState, loaded: &Loaded| {
+            let lines = state.table_lines(loaded, &pipelines);
+            let fresh = !Rc::ptr_eq(&built, &lines);
+            // Whatever rebuilt it is the table the next cursor move reuses.
+            assert!(Rc::ptr_eq(&lines, &state.table_lines(loaded, &pipelines)));
+            fresh
+        };
+
+        let reloaded = loaded(entries);
+        assert!(rebuilt(&state, &reloaded), "a new load");
+
+        let rebuilt_by = |edit: &dyn Fn(&mut ScreenState)| {
+            let mut state = ScreenState::new(&no_args());
+            state.filters.by = EvalBy::Task;
+            let before = state.table_lines(&first, &pipelines);
+            edit(&mut state);
+            !Rc::ptr_eq(&before, &state.table_lines(&first, &pipelines))
+        };
+        assert!(
+            rebuilt_by(&|s| s.filters.step = Some("implement".into())),
+            "a filter"
+        );
+        assert!(
+            rebuilt_by(&|s| {
+                s.filters.lane_sort = Some(Sort {
+                    key: "runs".into(),
+                    descending: true,
+                })
+            }),
+            "a sort"
+        );
+        assert!(rebuilt_by(&|s| s.table = s.table.next()), "tab");
+        assert!(rebuilt_by(&|s| s.filters.flip_figures()), "t");
+    }
+
+    /// Every figure on screen is priced from what the load resolved: a
+    /// price file that changes afterwards is not read until the next load.
+    #[test]
+    fn prices_are_resolved_once_per_load_and_no_file_is_read_between() {
+        let home = crate::scratch::root("eval-prices-per-load");
+        std::fs::create_dir_all(home.join(".spoolway")).unwrap();
+        let write_price = |input: f64| {
+            let table = serde_json::json!({
+                "source": "fixture",
+                "license": "MIT",
+                "generated": "2026-09-09",
+                "models": { "priced": { "input": input } },
+            });
+            std::fs::write(
+                home.join(".spoolway/model-prices.json"),
+                serde_json::to_vec(&table).unwrap(),
+            )
+            .unwrap();
+        };
+        let mut entry = tests_entry("a", "implement");
+        entry.model = "priced".into();
+        entry.tokens = Tokens {
+            input: 1_000_000,
+            ..Tokens::default()
+        };
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new(&no_args());
+        let total_of =
+            |loaded: &Loaded| match view_lines(loaded, &state.filters, &pipelines, state.table)
+                .pop()
+            {
+                Some(Line::Total(text)) => text,
+                _ => panic!("a table ends in its total"),
+            };
+
+        crate::platform::test_home::with_home(&home, || {
+            write_price(2.0);
+            let mut first = loaded(vec![entry.clone()]);
+            first.models = Prices::of(&BTreeMap::new(), first.entries.iter());
+            let before = total_of(&first);
+            assert!(before.contains("2.00"), "{before}");
+
+            write_price(9.0);
+            assert_eq!(total_of(&first), before, "the table re-read the file");
+            let (_, csv, _) = export_rows(&first, &state.filters, &pipelines, state.table);
+            assert!(csv.last().unwrap().contains("2.00"), "{csv:?}");
+            assert!(!csv.last().unwrap().contains("9.00"), "{csv:?}");
+
+            let mut second = loaded(vec![entry.clone()]);
+            second.models = Prices::of(&BTreeMap::new(), second.entries.iter());
+            assert!(total_of(&second).contains("9.00"), "the next load reads it");
+        });
+    }
+
+    /// The load itself prices every model its lines name, lanes and
+    /// directory sessions alike. The directory session banks a model no
+    /// lane uses, so pricing only the lanes leaves it out.
+    #[test]
+    fn load_resolves_the_models_of_its_lines() {
+        let (repo, _root_guard) = fixture_with_one_run("load-resolves-models");
+        bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
+        let loaded = load(&repo, &no_filters()).unwrap();
+        assert!(loaded.models.resolved.contains_key("qwen"));
+        assert!(loaded.models.resolved.contains_key("claude-opus-5"));
     }
 
     /// A table far taller than the terminal — 270 tasks on a 20-row one —
@@ -9296,6 +9786,68 @@ mod screen_tests {
             bank_dir(repo, &ts, "/w/perf", &subagent, 0.01);
         }
         root
+    }
+
+    /// An eval load against a home the size of the one this was found slow
+    /// on — about 2,000 transcripts and 6,000 ledger lines over 2,200 lane
+    /// sessions — finishes in under two seconds. Runs in every build, because
+    /// the debug build is the one the gate and CI run, and the bound holds
+    /// there too.
+    ///
+    /// Some sessions have no transcript, the way a ledger outlives the files
+    /// an agent prunes. The sweep must still find the rest in one walk and not
+    /// search the store again for each session it cannot find.
+    #[test]
+    fn a_load_at_the_size_of_a_real_machine_takes_under_two_seconds() {
+        use crate::usage::lane_env::{AMBIENT_ENV, out_of_lane};
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        const SESSIONS: usize = 2_200;
+        const TRANSCRIPTS: usize = 2_000;
+        const LEDGER_LINES: usize = 6_132;
+
+        let (repo, _guard) = fixture("eval-load-bound");
+        let root = crate::scratch::root("eval-load-bound-home");
+        let project = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&project).unwrap();
+        for i in 0..TRANSCRIPTS {
+            std::fs::write(
+                project.join(format!("lane-{i:04}.jsonl")),
+                perf_lines(&format!("lane-{i:04}"), 20),
+            )
+            .unwrap();
+        }
+        let old = chrono::Utc::now() - chrono::Duration::seconds(600);
+        for line in 0..LEDGER_LINES {
+            let session = format!("lane-{:04}", line % SESSIONS);
+            let at = old - chrono::Duration::seconds((LEDGER_LINES - line) as i64);
+            crate::usage::append(
+                &repo,
+                &Entry {
+                    ts: at.to_rfc3339(),
+                    kind: "claude".into(),
+                    agent: "claude".into(),
+                    model: "claude-opus-5".into(),
+                    session,
+                    ..lane_entry("demo", "implement")
+                },
+            )
+            .unwrap();
+        }
+
+        let elapsed = crate::platform::test_home::with_home(&root, || {
+            out_of_lane(|| {
+                let start = std::time::Instant::now();
+                let loaded = load(&repo, &no_filters()).unwrap();
+                assert!(!loaded.entries.is_empty());
+                start.elapsed()
+            })
+        });
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "an eval load over {SESSIONS} sessions and {LEDGER_LINES} ledger lines took \
+             {elapsed:?}, not under two seconds"
+        );
     }
 
     /// `load` must locate and read each session's transcript once, and each
