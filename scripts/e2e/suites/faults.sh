@@ -139,12 +139,12 @@ settle() {
 }
 
 # What a person abandoning a task by hand does, for a task a case leaves
-# parked: its lane's process ended, its worktree and branch removed with git,
+# parked: its lane's process group ended, its worktree and branch removed with git,
 # its file out of the queue. Same as `disaster.sh`'s `forget`.
 forget() {
   local id=$1 pid wt
   pid=$(cat "$SPOOLWAY_PROJECT_HOME/headless/$id · $(stage_of "$id").pid" 2>/dev/null)
-  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+  kill_lane_group "$pid"
   wt=$(worktree_of "$id")
   [ -n "$wt" ] && git worktree remove --force "$wt" 2>/dev/null
   git branch -D "task/$id" 2>/dev/null

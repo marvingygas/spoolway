@@ -99,7 +99,8 @@ verify_live codex "${SPOOLWAY_E2E_CODEX_MODEL:-}" SPOOLWAY_E2E_CODEX_MODEL
 # whatever the `--add-dir` grant said, and the case would pass on exactly the
 # binary it exists to catch. A real lane's worktree and main checkout both sit
 # under `$HOME`, so this does too. Taken back by the EXIT trap, which keeps
-# everything `lib.sh`'s own trap did.
+# what `lib.sh`'s own trap does for the screen, the dispatcher and the tally.
+# It drives no lanes of its own, so it has no `lanes_stop`.
 WT_ROOT=
 live_cleanup() {
   [ -n "$WT_ROOT" ] && rm -rf "$WT_ROOT"

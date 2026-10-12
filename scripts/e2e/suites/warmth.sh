@@ -87,6 +87,7 @@ MODEL=${SPOOLWAY_E2E_CLOUD_MODEL:-claude-haiku-4-5-20251001}
 # `project_home_after_init` corrected it to once `configure_project` ran.
 warmth_cleanup() {
   dispatcher_stop
+  lanes_stop
   [ -n "${SPOOLWAY_PROJECT_HOME:-}" ] && rm -rf "$SPOOLWAY_PROJECT_HOME"
 }
 trap warmth_cleanup EXIT
