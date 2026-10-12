@@ -16794,11 +16794,15 @@ mod tests {
             "nothing should have been banked: there was no transcript to read"
         );
 
+        // At least, not exactly: the pass first accrues the `Done` lane's
+        // seconds since `adopted(now_secs())` above, which is one more when a
+        // second boundary falls between the two, as it does under load.
         let after = load_lane_records(&repo);
         let record = after.get("demo · implement").unwrap();
-        assert_eq!(
-            record.busy_s, 55,
-            "the accrued busy time must survive a bank that appended nothing"
+        assert!(
+            record.busy_s >= 55,
+            "the accrued busy time must survive a bank that appended nothing: {}",
+            record.busy_s
         );
     }
 
