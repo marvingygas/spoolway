@@ -54,6 +54,10 @@ starts real processes, sessions and process groups, which is where macOS differs
 suites drive git, the queue and the TUI the same way on any Unix. Nobody who works on this
 repo has a Mac, so the runner is the only place this suite runs on macOS.
 
+The job runs before a release, not on every pull request. The release workflow runs it on
+the rehearsal and on the tag, so a red Mac stops the release. Pull requests and the daily
+run skip it, because at about fifteen minutes it is the slowest job in CI.
+
 The suites also need GNU `sed`, GNU `coreutils` and a current `bash`. They use `sed -i` with
 no suffix, `0,/re/` addresses, `timeout`, `date +%N` and `wait -n`, and the macOS versions
 of those tools support none of them. The job installs them with Homebrew and puts their
@@ -255,15 +259,18 @@ Pushes do not trigger it. The scheduled run's Linux job runs the same gate plus 
 successful scheduled run is skipped, and so is a pull request whose changed files are all
 under `docs/` or `site/`, or are `README.md`, `DOCS.md` or `log.md`.
 
-Every run of `verify.yml` also has a `verify / test-macos` job on `macos-latest`. It runs
+`verify.yml` also has a `verify / test-macos` job on `macos-latest`. It runs
 `cargo test --all-targets --locked`, then the `command-steps` suite from a release build. A
-failed run uploads the suite's scratch tree as an artifact on the run page. `main` requires
-this job together with `verify / test` and `verify / audit`.
+failed run uploads the suite's scratch tree as an artifact on the run page. Only the release
+workflow runs it by default. `ci.yml` skips it unless a manual dispatch passes `-f macos=true`.
+`main` still requires this job together with `verify / test` and `verify / audit`. A skipped
+job counts as passing there, so pull requests do not wait for it.
 
 Run it by hand before a release or to check a fix:
 
 ```sh
 gh workflow run ci --ref main -f tier=nightly
+gh workflow run ci --ref <branch> -f macos=true    # include the macOS job
 gh run list --workflow ci --limit 5
 gh run view <run-id> --json headSha,conclusion,jobs
 ```

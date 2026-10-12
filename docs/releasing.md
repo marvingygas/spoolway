@@ -68,7 +68,9 @@ cargo build --release --locked && ./target/release/spoolway whats-new
 ```
 
 `main` is protected. It takes no direct push, needs `verify / test`, `verify / audit` and
-`verify / test-macos` green, and needs a branch to be up to date before it merges. `ship` rebases a branch that fell behind and
+`verify / test-macos` green, and needs a branch to be up to date before it merges. Pull
+requests skip the macOS job, which counts as green there. The rehearsal below is where it
+runs, and `require_green` fails the rehearsal on a red one. `ship` rebases a branch that fell behind and
 waits for its checks again.
 
 The rehearsal and the tag, as `ship` runs them:

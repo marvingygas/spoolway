@@ -33,6 +33,10 @@ on:
         type: choice
         options: [smoke, pr, nightly]
         default: nightly
+      macos:
+        description: also run the macOS job (otherwise only a release runs it)
+        type: boolean
+        default: false
 
 # A pull request supersedes its own earlier run. A dispatch never cancels
 # another: the release pipeline dispatches this workflow against `main` once per
@@ -113,6 +117,9 @@ jobs:
       # "what every push and every pull request runs" — this is that.
       tier: ${{ inputs.tier || (github.event_name == 'pull_request' && 'pr' || 'nightly') }}
       run-tests: ${{ needs.changes.outputs.test != 'false' }}
+      # The Mac runs before a release, in release.yml, and not here unless a
+      # dispatch asks for it. See the `test-macos` job in verify.yml.
+      macos: ${{ inputs.macos == true }}
 
   # Every gate before a release runs at the version the repo already has, so a
   # check that is false only *while* a version is being cut passes every day and

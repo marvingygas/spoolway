@@ -47,8 +47,7 @@ then marks the pull requests merged on its own, because their head commits are o
 
 **`main` is protected, so the merge commit is checked on the pull request it closes.** Branch
 protection requires `verify / test`, `verify / audit` and `verify / test-macos` to have passed
-on the exact commit
-being pushed, admins included, and `ci.yml` runs on pull requests only. A plain
+on the exact commit being pushed (`test-macos` passes by being skipped: only a release runs it), admins included, and `ci.yml` runs on pull requests only. A plain
 `git push origin main` of a fresh merge is refused with `GH006 ... 3 of 3 required status
 checks are expected`. So the merge commit goes first to the tip's own branch — a fast-forward
 of it, since the tip is the merge's second parent — where the pull request's own CI runs on it,
@@ -118,12 +117,14 @@ gh pr checks <number> --watch
 
 `--watch` holds until every check on that head commit reaches a conclusion, then prints the
 table and exits non-zero if any of them failed. Run it per tip. There is no hurry to be clever
-here: `verify / test` takes something like eight minutes and `verify / test-macos` about fifteen, and a merge pushed on top of a red
+here: `verify / test` takes something like eight minutes, and a merge pushed on top of a red
 branch costs far more than that to unpick.
 
-The checks you will see are `changes`, `verify / test`, `verify / audit` and `verify / test-macos`. `dress-rehearsal`
-reports `SKIPPED` on pull requests by its own `if:`, and a skipped or neutral check is not a
-failure.
+The checks you will see are `changes`, `verify / test`, `verify / audit` and `verify / test-macos`.
+`verify / test-macos` and `dress-rehearsal` both report `SKIPPED` on pull requests by their own
+`if:`, and a skipped or neutral check is not a failure. The Mac runs before a release, in
+`release.yml`, so a macOS-only break surfaces there rather than in this pass. To check a branch
+on the Mac anyway, run `gh workflow run ci.yml --ref <branch> -f macos=true`.
 
 **Only the tip's checks decide a stack.** The tip is the commit that lands on `main`, so the
 tip is the only place the checks describe the merged tree. A branch below it may be legitimately

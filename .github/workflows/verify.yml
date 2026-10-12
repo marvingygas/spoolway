@@ -13,6 +13,10 @@ on:
         description: daily CI may skip tests for a commit already verified
         type: boolean
         default: true
+      macos:
+        description: run the macOS job (the release workflow always does)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -147,8 +151,16 @@ jobs:
   # The Mac. Linux CI never runs a line of the macOS code paths — the
   # `cfg`-gated process checks, the `libc` calls that differ — and nobody
   # who works on this repo has a Mac to run them on, so a runner is the only
-  # one there is. `verify / test-macos` is a required status context on
-  # `main`, so a red run here blocks the merge.
+  # one there is.
+  #
+  # It runs before a release, not on every pull request. It is the slowest
+  # job by far — about fifteen minutes against eight for `test` — and it set
+  # the length of every merge. `release.yml` leaves `macos` at its default,
+  # so the rehearsal and the tag both run it and a red Mac stops the release.
+  # `ci.yml` turns it off, and a manual dispatch there can turn it back on.
+  # `verify / test-macos` stays a required status context on `main`: a job
+  # skipped by its `if:` reports as passing, the same way a docs-only pull
+  # request already skips every job here.
   #
   # Only `command-steps` runs here, not the `pr` tier: it is the suite that
   # starts real processes, sessions and process groups, which is where macOS
@@ -162,7 +174,7 @@ jobs:
   # the system ones.
   test-macos:
     timeout-minutes: 45
-    if: inputs.run-tests
+    if: inputs.run-tests && inputs.macos
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
