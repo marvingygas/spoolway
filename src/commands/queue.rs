@@ -19463,7 +19463,11 @@ group_description: audit
                 let drawn = routines_screen(&repo, "\t ");
                 let frame = last_frame(&drawn);
                 assert!(!frame.contains("issue tracking"), "{frame}");
-                assert!(frame.contains("a task must set `group:`"), "{frame}");
+                // Read across the popup's rows: the refusal leads with the
+                // task's full path, and a longer temp directory (macOS)
+                // wraps the sentence at a different word.
+                let refusal = popup_rows(frame, "queue refused").join(" ");
+                assert!(refusal.contains("a task must set `group:`"), "{frame}");
                 assert!(hook_calls(&repo).is_empty());
                 assert!(repo.queued_ids().is_empty());
             }
