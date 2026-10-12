@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
+covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup
@@ -146,8 +146,10 @@ flowchart LR
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
-Existing files are kept. `--force` overwrites them. A skill file is the exception: `init`
-and `install` rewrite it whenever it differs from the shipped copy, `--force` or not.
+Existing files are kept. `--force` overwrites them. A skill file is the exception. `init` and
+`install` keep a skill file equal to the shipped copy and rewrite one that matches an older
+shipped copy, `--force` or not. A skill file that matches no shipped copy is refused. See
+[Files spoolway refuses](#files-spoolway-refuses).
 
 Running `init` again in a set-up project installs skills, restores any example file that went
 missing, and otherwise changes nothing. To change settings later, use `spoolway config set`.
@@ -300,7 +302,8 @@ folder sits inside a checkout that home mode promises to leave untouched.
 pi's trust note is not printed for a user-level install, since a user folder loads without
 being asked. `spoolway sync` keeps current any user folder holding one of the four shipped
 skills: `spoolway-plan`, `spoolway-tasks`, `spoolway-config`, `spoolway-calibrate`. Those
-names belong to spoolway, so a hand-made folder sharing one of them is overwritten too.
+names belong to spoolway, so a hand-made folder sharing one of them is checked like any other
+skill file. A file in it that matches no shipped copy is refused.
 `sync` never removes a retired skill name from a user folder.
 
 ### Checking the setup
@@ -384,10 +387,10 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. |
-| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, including any edit you made inside it. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
+| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, when it matches an older shipped copy. A key reference that matches no shipped copy is refused. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
-| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
+| Skills | Every installed provider's skill file that matches an older shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. A skill file that matches no shipped copy is refused. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
@@ -423,18 +426,26 @@ already changed, and not undone:
 
 `--dry-run` prints the list a real run would act on, file for file.
 
-`sync` never merges. A key block you edited by hand is replaced with the shipped one, and the
-report says so. A skill file has no such block: sync always rewrites it to match the shipped
-copy.
+`sync` never merges. It replaces a skill file, a key block or a settings reference that
+matches an older shipped copy. It refuses one that matches no shipped copy. See [Files spoolway
+refuses](#files-spoolway-refuses).
 
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
 beside it as `.bak`, with the same file mode. If that name is taken, it writes `.bak.1`, then
 `.bak.2`, and prints the path it used. That is also how to take a newer default prompt or
-skeleton on purpose. It does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
-back, overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
-`.spoolway/hooks/` also leaves it executable on Unix, whether or not its text changed.
-`spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
-names a command or flag this binary does not have.
+skeleton on purpose. Replacing a hook script under `.spoolway/hooks/` also leaves it executable
+on Unix, whether or not its text changed.
+
+| Path | What `--replace` writes |
+|---|---|
+| A prompt, task skeleton, document skeleton or hook script | The shipped file, whole. |
+| A project skill file, such as `.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. |
+| A user-level skill file, such as `~/.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. The path may start with `~` or be absolute. |
+| A pipeline file | The shipped key block. Every other line stays. |
+| `.spoolway/config.toml` | The file as `sync` rewrites it. Your values stay. |
+
+`spoolway doctor` reports files that are behind, and lists each refused file on its own line.
+`spoolway pipeline check` reports a prompt that names a command or flag this binary does not have.
 
 A relative path that starts with `.spoolway/` names the project's setup folder. In home mode that
 folder is the workspace's `config/`, so the file is written there and its `.bak` sits beside it.
@@ -482,7 +493,6 @@ wrote   .spoolway/config.toml
 wrote   .spoolway/pipelines/default.yml
 removed .spoolway/templates/task-log.md
 
-(migrated: key block in .spoolway/pipelines/default.yml replaced; edits are not kept)
 (set issue_tracking.key_in_names = true, the default)
 (kept 1 setting(s) this spoolway does not know, with their comments: unatended — a newer spoolway may read them, otherwise they are typos)
 (1 retired setting(s) dropped: sandbox.enabled)
@@ -490,47 +500,57 @@ removed .spoolway/templates/task-log.md
 Files were overwritten; your config values, prompts and task skeletons were kept.
 ```
 
-With `--dry-run`, the words read `would write` and `would remove`. The last line depends on what
-`sync` refused:
-
-| Refused | Last line |
-|---|---|
-| Only ordinary files | `Nothing else updating; the refused files above are still behind.` |
-| Only files a newer spoolway wrote | `Nothing else updating; the files above were written by a newer spoolway.` |
-| Both | `Nothing else updating; the files a newer spoolway wrote were left as they are, and the other refused files above are still behind.` |
+With `--dry-run`, the words read `would write` and `would remove`. When `sync` refused a file
+and wrote nothing else, the last line is `Nothing else updating; the refused files above were left
+as they are.`
 
 `sync` also deletes a leftover per-skill-file stamp, if it finds one. `spoolway doctor` notes a
 project that `sync` would change. Only `spoolway sync` writes the files.
 
-### Files a newer spoolway wrote
+### Files spoolway refuses
 
-`sync`, `init` and `install` record the spoolway version that last wrote a set of files in a
-marker file. The marker holds one line, such as `0.9.0`.
+`sync`, `init` and `install` compare each skill file, each pipeline key block and each
+`config.toml` settings reference with the copies spoolway has shipped. The comparison has three
+results:
 
-| Marker | Covers |
+| The file is | What happens |
 |---|---|
-| `.spoolway/spoolway-version` | The project's setup folder and its skills. In home mode it sits in the workspace's `config/`. Commit it with the rest of `.spoolway/` |
-| `~/.claude/skills/.spoolway-version` | The skills in that user folder, which every project on the machine shares. `~/.agents/skills/` and `~/.pi/agent/skills/` each hold one too |
+| Equal to this spoolway's copy | It is kept. |
+| Equal to a copy an older spoolway shipped | It is rewritten. |
+| Equal to no shipped copy | It is refused. A newer spoolway or a hand edit wrote it. |
 
-When a marker names a newer spoolway than the one you run, `sync` writes nothing in that
-scope. It names the version:
+A refused file is left as it is. The refusal names the file and the command that takes this
+spoolway's copy:
 
 ```
-refused .spoolway/spoolway-version — these files were written by spoolway 0.9.0, newer than this 0.8.0 — …
+refused .claude/skills/spoolway-plan/SKILL.md — not a copy this spoolway knows: a newer spoolway or a hand edit wrote it. Nothing here was rewritten. Run `spoolway sync --replace .claude/skills/spoolway-plan/SKILL.md` to take this spoolway's copy (yours is kept as a .bak).
 ```
 
-The project and each user folder are checked on their own. A refused user folder does not stop
-the project from syncing, and the other way round.
+`sync` refuses one file and still writes the others. `init` and `install` write no skill file
+when any skill file they would write is refused, and `init` writes none of its scaffold either.
+`--force` does not change this. A `config.toml` with no reference table at the top is not
+refused. `sync` adds the table.
 
-`init`, `install` and `install --user` refuse in the same way, `--force` included. `init` checks
-before it writes anything. The error names the marker and the version, and offers two ways out:
+`spoolway doctor` lists each refused file on its own line, with the reason. It leaves those
+files out of the count of files that are behind.
 
-- Install the named version or a later one, and run the command again.
-- Delete the marker file, to put this spoolway's copies over the newer ones.
+### The retired version marker
 
-A sync that writes anything also writes the marker, and lists it as a file written. A sync with nothing to write leaves the marker as it is. A binary that writes files records its
-own version in the marker and never lowers a newer one. A marker that is missing or unreadable
-never causes a refusal.
+Some builds of 0.10.0 leave a file named `.spoolway/spoolway-version` in the project, and a file
+named `.spoolway-version` in each user-level skills folder. spoolway does not read these files. A
+skill file written by a newer spoolway is caught by the comparison in [Files spoolway
+refuses](#files-spoolway-refuses).
+
+`sync`, `init` and `install` delete the marker files they find. In home mode the project's marker
+sits in the workspace's `config/`. Each deleted file is listed as `removed`, and `sync --dry-run`
+lists it as `would remove`.
+
+| Command | Markers it deletes |
+|---|---|
+| `sync` | The project's marker and all three user-level markers |
+| `init` | The project's marker. In home mode, also the user-level marker of the agent it installs for |
+| `install` | The project's marker |
+| `install --user` | The user-level marker of the agent it installs for |
 
 ## Platform notes
 

@@ -69,16 +69,15 @@ struct Skill {
     assets: &'static [(&'static str, &'static str)],
 }
 
-#[cfg(test)]
 impl Skill {
-    /// Every provider's copy of this skill, by the name that provider is
-    /// selected under. Tests walk this so a copy added here cannot skip the
-    /// checks the others pass.
-    fn copies(&self) -> [(&'static str, &'static str); 3] {
+    /// Every provider's copy of this skill. Walked by the tests and by
+    /// [`shipped_skill_files`], so a copy added here cannot skip the checks
+    /// the others pass or the list of known copies.
+    fn copies(&self) -> [(Provider, &'static str); 3] {
         [
-            ("claude", self.skill_md),
-            ("codex", self.codex_skill_md),
-            ("pi", self.pi_skill_md),
+            (Provider::Claude, self.skill_md),
+            (Provider::Codex, self.codex_skill_md),
+            (Provider::Pi, self.pi_skill_md),
         ]
     }
 }
@@ -157,6 +156,40 @@ const SKILLS: &[Skill] = &[
     },
 ];
 
+/// One skill file this binary ships, as [`crate::known_copies`] names it.
+pub struct ShippedSkillFile {
+    pub provider: Provider,
+    pub skill: &'static str,
+    /// Relative to the skill's directory: `SKILL.md` or `assets/<file>`.
+    pub file: String,
+    pub text: &'static str,
+}
+
+/// Every skill file this binary ships: each provider's `SKILL.md`, and each
+/// asset once, as the Claude copy that every provider is handed.
+pub fn shipped_skill_files() -> Vec<ShippedSkillFile> {
+    let mut files = Vec::new();
+    for skill in SKILLS {
+        for (provider, text) in skill.copies() {
+            files.push(ShippedSkillFile {
+                provider,
+                skill: skill.name,
+                file: "SKILL.md".to_string(),
+                text,
+            });
+        }
+        for (file, text) in skill.assets {
+            files.push(ShippedSkillFile {
+                provider: Provider::Claude,
+                skill: skill.name,
+                file: format!("assets/{file}"),
+                text,
+            });
+        }
+    }
+    files
+}
+
 /// Skill directories this project once shipped under a name it no longer
 /// uses, each with the reason `spoolway sync` reports beside it — a short,
 /// hand-written literal, and never derived from [`SKILLS`]: a skill this
@@ -218,6 +251,23 @@ pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
 pub struct Planned {
     pub path: PathBuf,
     pub contents: &'static str,
+    /// Which shipped file this is, so a file already on disk can be sorted
+    /// into this binary's copy, an older one, or one nobody shipped.
+    pub shipped: crate::known_copies::Shipped,
+}
+
+impl Planned {
+    /// What the file already at this path is, or `None` when there is none to
+    /// judge. A file that is not text is a hand edit, so it is unknown; a read
+    /// that fails for any other reason is left to the write to report.
+    pub(crate) fn on_disk(&self) -> Option<crate::known_copies::Known> {
+        use crate::known_copies::{Known, lookup};
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Some(lookup(&self.shipped, &text)),
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => Some(Known::Unknown),
+            Err(_) => None,
+        }
+    }
 }
 
 impl Provider {
@@ -316,13 +366,20 @@ impl Provider {
                     Provider::Codex => skill.codex_skill_md,
                     Provider::Pi => skill.pi_skill_md,
                 };
+                let shipped = |file: String| crate::known_copies::Shipped::Skill {
+                    provider: self,
+                    skill: skill.name.to_string(),
+                    file,
+                };
                 let mut files = vec![Planned {
                     path: dir.join("SKILL.md"),
                     contents: skill_md,
+                    shipped: shipped("SKILL.md".to_string()),
                 }];
                 files.extend(skill.assets.iter().map(|(file, contents)| Planned {
                     path: dir.join("assets").join(file),
                     contents,
+                    shipped: shipped(format!("assets/{file}")),
                 }));
                 files
             })
@@ -362,62 +419,85 @@ pub struct Outcome {
     /// the first time does not also claim there was "nothing to install" —
     /// see the `home-mode-messages` task.
     pub(crate) wrote: bool,
-    /// Version markers this run wrote, as a person would type them back.
-    /// A marker is a file the person finds in `git status`, so [`report`]
-    /// gives each its own `wrote` row.
-    markers: Vec<String>,
+    /// Retired version markers this run deleted, as a person would type them
+    /// back. The project's marker was a tracked file, so [`report`] gives each
+    /// removed marker its own `removed` row.
+    removed_markers: Vec<String>,
 }
 
-impl Outcome {
-    /// Add a marker a caller wrote on this install's behalf, so [`report`]
-    /// names it too.
-    fn also_wrote_marker(&mut self, shown: Option<String>) {
-        self.markers.extend(shown);
+/// Fail when a skill file `init` would write is none of the copies spoolway
+/// has shipped.
+///
+/// Asked by `init` before it writes anything: it lays down a scaffold ahead of
+/// the skills, and a refusal arriving with the skills would come after the
+/// scaffold was already down.
+pub(crate) fn ensure_installable(root: &Path, provider: Provider, user_level: bool) -> Result<()> {
+    // A user-level install writes nothing into the checkout, so the project's
+    // skill files are not its business. With no home directory it checks
+    // nothing at all: `install_user` gives the no-home error itself.
+    match (user_level, user_home()) {
+        (true, Some(home)) => ensure_known(&provider.plan_user(&home), crate::repo::shorten_home),
+        (true, None) => Ok(()),
+        (false, _) => ensure_known(&provider.plan(root), |path| {
+            crate::fmt::relative(root, path)
+        }),
     }
 }
 
-/// Fail when a scope `install`, `install --user` or `init` would write skills
-/// into carries a version marker naming a newer spoolway: the project's
-/// always, and the provider's user-level folder when `user_level`.
+/// Fail, writing nothing, when any of `planned` already exists as a file that
+/// is neither this binary's copy nor an older one it shipped.
 ///
-/// `init` calls this before it writes anything, because it lays down a whole
-/// scaffold ahead of the skills and `--force` rewrites files that are already
-/// there: a refusal that only came with the skills would arrive after the
-/// downgrade it names. `install` and `install_user` call the same checks
-/// themselves, so a caller that reaches them directly is still refused.
-pub(crate) fn ensure_not_newer(root: &Path, provider: Provider, user_level: bool) -> Result<()> {
-    crate::sync::ensure_project_not_newer(root)?;
-    if user_level && let Some(home) = user_home() {
-        crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
+/// Such a file was written by a newer spoolway or edited by hand, and
+/// installing over it would roll it back or discard the edit. Every offending
+/// file is named, each with the reason and the remedy `sync` gives, so one run
+/// shows the whole set rather than one file per attempt. `shown` spells a path
+/// the way a person would type it back to `spoolway sync --replace`.
+fn ensure_known(planned: &[Planned], shown: impl Fn(&Path) -> String) -> Result<()> {
+    let refused: Vec<String> = planned
+        .iter()
+        .filter(|file| file.on_disk() == Some(crate::known_copies::Known::Unknown))
+        .map(|file| {
+            let shown = shown(&file.path);
+            format!("refused {shown} — {}", crate::known_copies::refusal(&shown))
+        })
+        .collect();
+    match refused.is_empty() {
+        true => Ok(()),
+        false => anyhow::bail!("{}", refused.join("\n")),
     }
-    Ok(())
 }
 
-/// Write the provider's skill files, rewriting any that differ from the
-/// shipped copy and leaving the rest alone unless `force`. Rendering is left
-/// to [`report`], so a caller embedding the install does not inherit a
-/// nested file-by-file transcript.
+/// Write the provider's skill files: a missing one, and one that is an older
+/// copy spoolway shipped. One matching this binary's copy is left alone unless
+/// `force`, and one that is neither refuses the install before anything is
+/// written. Rendering is left to [`report`], so a caller embedding the install
+/// does not inherit a nested file-by-file transcript.
 ///
-/// Skill files belong to spoolway outright: `spoolway sync` rewrites every
-/// installed one that differs from the shipped copy, so there is nothing here
-/// for a per-file record to protect any more. The one thing that is
-/// protected is a newer spoolway's work: a project whose version marker names
-/// a spoolway newer than this binary is refused, `force` or not, exactly as
-/// `sync` refuses it (see [`crate::sync::ensure_not_newer`]).
+/// `spoolway sync` makes the same call per file, so a skill is brought forward
+/// by whichever command runs first. A file no spoolway shipped stops the
+/// install, `force` or not: `force` means "write files that already match",
+/// and an unknown file is a statement about the file, not about this run.
+///
+/// Also deletes the project's retired version marker, as `sync` does.
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
-    crate::sync::ensure_project_not_newer(root)?;
     let dest = crate::fmt::relative(root, &provider.skills_dir(root));
-    let mut outcome = write_planned(&provider.plan(root), provider.caveat(), force, dest)?;
-    outcome.also_wrote_marker(crate::sync::record_project_version(root)?);
+    let planned = provider.plan(root);
+    let mut outcome = write_planned(&planned, provider.caveat(), force, dest, |path| {
+        crate::fmt::relative(root, path)
+    })?;
+    outcome
+        .removed_markers
+        .extend(crate::sync::remove_marker(crate::sync::project_marker(
+            root,
+        ))?);
     Ok(outcome)
 }
 
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
 /// when there is no home directory to install under, rather than writing a
-/// `.claude/` into whatever directory a relative path would land in. Refused
-/// too when the folder's version marker names a newer spoolway, since every
-/// project on the machine shares these skills.
+/// `.claude/` into whatever directory a relative path would land in. Also
+/// deletes the folder's retired version marker.
 pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     let Some(home) = user_home() else {
         anyhow::bail!(
@@ -428,14 +508,21 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
             provider.name()
         );
     };
-    crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
     let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
-    let mut outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
-    outcome.also_wrote_marker(crate::sync::record_user_version(
-        &provider.user_skills_dir(&home),
-    )?);
+    let mut outcome = write_planned(
+        &provider.plan_user(&home),
+        None,
+        force,
+        dest,
+        crate::repo::shorten_home,
+    )?;
+    outcome
+        .removed_markers
+        .extend(crate::sync::remove_marker(crate::sync::user_marker(
+            &provider.user_skills_dir(&home),
+        ))?);
     Ok(outcome)
 }
 
@@ -460,18 +547,20 @@ pub(crate) fn user_home() -> Option<PathBuf> {
 /// Write each planned file, and carry `caveat` and `dest` on to [`report`].
 ///
 /// A file matching the shipped copy is left alone unless `force`, the same
-/// "nothing to do" `sync` would itself report. But a skill file belongs to
-/// spoolway outright — see [`install`]'s own comment — so a stale one left
-/// by an older release is rewritten here too, `force` or not: a repeat
-/// `init` that found only stale copies must say it wrote them, never "Skills
-/// already installed" beside content that still differs from what this
-/// binary ships.
+/// "nothing to do" `sync` would itself report. A stale one left by an older
+/// release is rewritten, `force` or not: a repeat `init` that found only stale
+/// copies must say it wrote them, never "Skills already installed" beside
+/// content that still differs from what this binary ships. A file that is
+/// none of the copies spoolway shipped is refused first, by [`ensure_known`],
+/// so no skill is rewritten in a set that holds one.
 fn write_planned(
     planned: &[Planned],
     caveat: Option<&'static str>,
     force: bool,
     dest: String,
+    shown: impl Fn(&Path) -> String,
 ) -> Result<Outcome> {
+    ensure_known(planned, shown)?;
     let mut wrote = false;
     for file in planned {
         if file.path.exists()
@@ -489,7 +578,7 @@ fn write_planned(
         caveat,
         dest,
         wrote,
-        markers: Vec::new(),
+        removed_markers: Vec::new(),
     })
 }
 
@@ -506,8 +595,8 @@ pub fn report(outcome: Outcome) {
     if let Some(caveat) = outcome.caveat {
         println!("  note  {caveat}");
     }
-    for marker in &outcome.markers {
-        println!("{}", crate::commands::init::report_row("wrote", marker));
+    for marker in &outcome.removed_markers {
+        println!("{}", crate::commands::init::report_row("removed", marker));
     }
     if outcome.wrote {
         println!("Skills installed successfully, into {}.", outcome.dest);
@@ -623,78 +712,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// `install` and `install --user` rewrite every skill that differs, so
-    /// under a marker naming a newer spoolway they would downgrade what that
-    /// spoolway wrote, which is the defect `sync` refuses for. `--force` is
-    /// no way round it, and the error names the version and the way out.
+    /// A version marker left by 0.10.0 is deleted by `install` and `install
+    /// --user`, each reporting its own file as removed, and a second run has
+    /// nothing left to name.
     #[test]
-    fn install_refuses_skills_a_newer_spoolway_wrote_even_forced() {
-        let home = crate::scratch::root("install-newer");
-        let _ = std::fs::remove_dir_all(&home);
-        let root = home.join("project");
-        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
-        let user_dir = Provider::Claude.user_skills_dir(&home);
-        let project_skill = Provider::Claude
-            .skills_dir(&root)
-            .join("spoolway-config")
-            .join("SKILL.md");
-        let user_skill = user_dir.join("spoolway-config").join("SKILL.md");
-        for skill in [&project_skill, &user_skill] {
-            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-            std::fs::write(skill, "written by a newer spoolway\n").unwrap();
-        }
-        let project_marker = root.join(".spoolway").join("spoolway-version");
-        let user_marker = user_dir.join(".spoolway-version");
-        std::fs::write(&project_marker, "999.0.0\n").unwrap();
-        std::fs::write(&user_marker, "999.0.0\n").unwrap();
-
-        for force in [false, true] {
-            let project = install(&root, Provider::Claude, force).err().unwrap();
-            let user = crate::platform::test_home::with_home(&home, || {
-                install_user(Provider::Claude, force).err().unwrap()
-            });
-            for error in [project, user] {
-                let text = format!("{error:#}");
-                assert!(text.contains("999.0.0"), "{text}");
-                assert!(text.contains("delete"), "{text}");
-            }
-        }
-
-        for skill in [&project_skill, &user_skill] {
-            assert_eq!(
-                std::fs::read_to_string(skill).unwrap(),
-                "written by a newer spoolway\n"
-            );
-        }
-        for marker in [&project_marker, &user_marker] {
-            assert_eq!(std::fs::read_to_string(marker).unwrap(), "999.0.0\n");
-        }
-
-        // The way out the error names: with the marker gone this binary's
-        // copies go in and its own version is recorded.
-        std::fs::remove_file(&project_marker).unwrap();
-        let outcome = install(&root, Provider::Claude, false).unwrap();
-        assert!(outcome.wrote);
-        assert_eq!(
-            std::fs::read_to_string(&project_marker).unwrap(),
-            format!("{}\n", crate::release::current())
-        );
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// The marker is a tracked file the person finds in `git status`, so the
-    /// install report gives it a row of its own, and only when it was written.
-    #[test]
-    fn install_names_a_version_marker_it_wrote() {
+    fn install_deletes_a_retired_version_marker_and_names_it() {
         let home = crate::scratch::root("install-marker-row");
         let _ = std::fs::remove_dir_all(&home);
         let root = home.join("project");
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        let project_marker = root.join(".spoolway").join("spoolway-version");
+        let user_marker = Provider::Claude
+            .user_skills_dir(&home)
+            .join(".spoolway-version");
+        std::fs::create_dir_all(user_marker.parent().unwrap()).unwrap();
+        std::fs::write(&project_marker, "0.10.0\n").unwrap();
+        std::fs::write(&user_marker, "0.10.0\n").unwrap();
 
-        let first = install(&root, Provider::Claude, false).unwrap();
-        assert_eq!(first.markers, [".spoolway/spoolway-version"]);
+        let project = install(&root, Provider::Claude, false).unwrap();
+        assert_eq!(project.removed_markers, [".spoolway/spoolway-version"]);
+        let user = crate::platform::test_home::with_home(&home, || {
+            install_user(Provider::Claude, false).unwrap()
+        });
+        assert_eq!(user.removed_markers, ["~/.claude/skills/.spoolway-version"]);
+        assert!(!project_marker.exists() && !user_marker.exists());
+
         let again = install(&root, Provider::Claude, false).unwrap();
-        assert!(again.markers.is_empty(), "{:?}", again.markers);
+        assert!(again.removed_markers.is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -714,7 +758,8 @@ mod tests {
             .user_skills_dir(&home)
             .join("spoolway-config")
             .join("SKILL.md");
-        std::fs::write(&stale, "stale, from an older release\n").unwrap();
+        let older = crate::known_copies::older::skill(Provider::Claude, "spoolway-config");
+        std::fs::write(&stale, older).unwrap();
 
         let outcome = crate::platform::test_home::with_home(&home, || {
             install_user(Provider::Claude, false).unwrap()
@@ -723,9 +768,108 @@ mod tests {
         assert!(outcome.wrote, "a stale skill file must count as written");
         assert_ne!(
             std::fs::read_to_string(&stale).unwrap(),
-            "stale, from an older release\n",
+            older,
             "the stale copy must be rewritten to the shipped one"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A skill file that is no copy any release shipped is a newer spoolway's
+    /// work or a hand edit. `install` and `install --user` refuse it, naming
+    /// the file and `sync --replace`, and write nothing at all, not even the
+    /// skills that are missing or stale beside it. `--force` is no way round.
+    #[test]
+    fn install_refuses_a_skill_no_release_shipped_and_writes_nothing() {
+        let home = crate::scratch::root("install-unknown");
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let project_skill = Provider::Claude
+            .skills_dir(&root)
+            .join("spoolway-config")
+            .join("SKILL.md");
+        let user_skill = Provider::Claude
+            .user_skills_dir(&home)
+            .join("spoolway-config")
+            .join("SKILL.md");
+        for skill in [&project_skill, &user_skill] {
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            std::fs::write(skill, "edited by hand\n").unwrap();
+        }
+
+        for force in [false, true] {
+            let project = format!(
+                "{:#}",
+                install(&root, Provider::Claude, force).err().unwrap()
+            );
+            assert!(
+                project.contains(
+                    "refused .claude/skills/spoolway-config/SKILL.md — not a copy this spoolway \
+                     knows"
+                ),
+                "{project}"
+            );
+            assert!(
+                project
+                    .contains("`spoolway sync --replace .claude/skills/spoolway-config/SKILL.md`"),
+                "{project}"
+            );
+            let user = crate::platform::test_home::with_home(&home, || {
+                format!("{:#}", install_user(Provider::Claude, force).err().unwrap())
+            });
+            assert!(
+                user.contains(
+                    "`spoolway sync --replace ~/.claude/skills/spoolway-config/SKILL.md`"
+                ),
+                "{user}"
+            );
+        }
+
+        for skill in [&project_skill, &user_skill] {
+            assert_eq!(std::fs::read_to_string(skill).unwrap(), "edited by hand\n");
+        }
+        assert!(
+            !Provider::Claude
+                .skills_dir(&root)
+                .join("spoolway-plan")
+                .exists(),
+            "no sibling skill was written"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A user-level install writes no skill into the checkout, so a hand-edited
+    /// one there is not its to refuse, whether or not there is a home to look
+    /// in. Without a home it checks nothing, since `install_user` gives that
+    /// error itself; otherwise a refusal would name `sync --replace` for a
+    /// project file that a home-mode `sync` itself will not replace.
+    #[test]
+    fn a_user_level_check_leaves_the_checkouts_skills_alone() {
+        let home = crate::scratch::root("installable-user-level");
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join("project");
+        let skill = Provider::Claude
+            .skills_dir(&root)
+            .join("spoolway-config")
+            .join("SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "edited by hand\n").unwrap();
+
+        let project = format!(
+            "{:#}",
+            ensure_installable(&root, Provider::Claude, false)
+                .err()
+                .unwrap()
+        );
+        assert!(
+            project.contains("refused .claude/skills/spoolway-config"),
+            "{project}"
+        );
+
+        ensure_installable(&root, Provider::Claude, true).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            ensure_installable(&root, Provider::Claude, true).unwrap();
+        });
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -795,6 +939,7 @@ mod tests {
             .find(|s| s.name == "spoolway-config")
             .expect("spoolway-config is a shipped skill");
         for (provider, copy) in skill.copies() {
+            let provider = provider.name();
             for route in [
                 "Edit the setup, for everyone",
                 "Try it, just for me",
@@ -930,6 +1075,7 @@ mod tests {
         for skill in SKILLS {
             let name = skill.name;
             for (provider, skill_md) in skill.copies() {
+                let provider = provider.name();
                 assert!(
                     skill_md.starts_with("---\n"),
                     "{name}'s {provider} copy has no frontmatter"
@@ -994,6 +1140,7 @@ mod tests {
             // validator will reject it on its own terms — so each one is
             // checked, not just the Claude copy the others are written from.
             for (provider, contents) in skill.copies() {
+                let provider = provider.name();
                 let front = contents
                     .split("---\n")
                     .nth(1)

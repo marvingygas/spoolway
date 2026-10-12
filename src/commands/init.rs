@@ -1083,12 +1083,13 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // the row a new workspace prints; a join or a move says it in a sentence
     // instead, as the last thing the run prints.
     // Before the first write below — a workspace, a binding, the scaffold —
-    // so a project a newer spoolway set up is left exactly as it was. The
-    // skills' own check, inside `install`, comes after all of those, and with
-    // `--force` the scaffold it follows has already overwritten the newer
-    // spoolway's files. A New, joined or moved checkout ends up in home mode,
-    // which keeps its skills in the user folder.
-    crate::install::ensure_not_newer(
+    // so a project a newer spoolway set up, or a skill file nobody shipped,
+    // is left exactly as it was. The skills' own check, inside `install`,
+    // comes after all of those, and with `--force` the scaffold it follows
+    // has already overwritten the newer spoolway's files. A New, joined or
+    // moved checkout ends up in home mode, which keeps its skills in the user
+    // folder.
+    crate::install::ensure_installable(
         root,
         answers.provider,
         !matches!(placement, Placement::Repo | Placement::Listed)
@@ -1319,13 +1320,13 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
-    // The version marker is a tracked file in the setup folder, so it gets a
-    // row among the others, above the `stamped` line that closes them. Home
-    // mode's setup lives in the workspace, which `install_user` does not
-    // reach, so it is recorded here for both modes; `install` in repo mode
-    // then finds it already current.
-    if let Some(shown) = crate::sync::record_project_version(root)? {
-        placer.rows.push(report_row("wrote", &shown));
+    // The retired version marker was a tracked file in the setup folder, so
+    // its removal gets a row among the others, above the `stamped` line that
+    // closes them. Home mode's setup lives in the workspace, which
+    // `install_user` does not reach, so it is deleted here for both modes;
+    // `install` in repo mode then finds it already gone.
+    if let Some(shown) = crate::sync::remove_marker(crate::sync::project_marker(root))? {
+        placer.rows.push(report_row("removed", &shown));
     }
 
     for row in &placer.rows {

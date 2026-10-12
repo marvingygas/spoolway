@@ -277,17 +277,7 @@ stage() {
 # release.
 assert_init_reused_everything() {
   local version=$1 out="$WORK/$1/init.out"
-  # Every fixture predates the version stamp `init` leaves in the setup folder
-  # (`sync::VERSION_MARKER`), so that one row is this run's to write; every
-  # file the fixture already has must still read `kept`.
-  grep -vF "  wrote    .spoolway/spoolway-version" "$out" >"$out.files"
-  lacks "the $version fixture's second init wrote nothing but the version stamp" \
-    "  wrote" "$out.files"
-  local stamp want
-  stamp=$(cat "$WORK/$version/proj/.spoolway/spoolway-version" 2>/dev/null)
-  want=$("$SPOOLWAY" --version | awk '{ print $2 }')
-  if [ "$stamp" = "$want" ]; then ok "and stamped the project with this binary's version"
-  else bad "and stamped the project with this binary's version (found '$stamp', want '$want')"; fi
+  lacks "the $version fixture's second init wrote nothing" "  wrote" "$out"
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
   has "and installed the skills the fixture never carried" \
@@ -302,9 +292,10 @@ assert_init_reused_everything() {
 # init` wrote `dispatch.worktree_root` and `issue_tracking.on_fail` blank —
 # neither was retired yet — and its own `config set` put
 # `housekeeping.retention_days` at 45, against the shipped default of 30.
-# The pipeline file's key block is 0.6.0's own too, byte for byte what this
-# binary still ships, so the only change `sync` should make to it at all is
-# the one line of hand-added prose riding below the fence unchanged.
+# The pipeline file's key block and the config's reference table are 0.6.0's
+# own too. Both are older copies this binary lists as known, so `sync` brings
+# them forward instead of refusing them as a newer spoolway's or a hand edit.
+# The one line of hand-added prose riding below the fence stays unchanged.
 stage 0.6.0
 assert_init_reused_everything 0.6.0
 PIPELINE=".spoolway/pipelines/default.yml"
@@ -357,6 +348,8 @@ works "the dry run listed the files the real run reported, file for file" \
 works "and the real run changed on disk exactly the files it reported" \
   cmp "$WORK/0.6.0/real.list" "$WORK/0.6.0/disk.list"
 
+lacks "sync refused no file of the 0.6.0 project as a copy it does not know" \
+  "refused " "$WORK/0.6.0/real.out"
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
 
@@ -419,7 +412,11 @@ else
   TRACKING=".spoolway/templates/tracking"
   mkdir -p "$TRACKING"
   : >"$TRACKING/epic.md"
-  sed -i 1d .spoolway/config.toml
+  # Back to the config 0.6.0 itself scaffolded: an older copy of the table,
+  # which `sync` brings forward, so this file is behind. (Deleting a line of
+  # the table instead would make it a table no release shipped, which `sync`
+  # refuses and so never writes.)
+  cp "$FIXTURES/0.6.0/.spoolway/config.toml" .spoolway/config.toml
   chmod 555 "$TRACKING"
   snapshot "$WORK/0.6.0/before-locked.sums"
   refuses "sync refuses when a file it must remove cannot be removed" \
@@ -453,5 +450,40 @@ must "a task queues against the upgraded project" \
 says "and the queue screen finds it there" \
   "upgrade-queued" \
   "$SPOOLWAY" queue list
+
+# --------------------------------------------- every fixture comes forward
+#
+# `sync` refuses a file that is no copy any release shipped, so a fixture is
+# the way to learn that the list of known copies has a gap: each one carries
+# only its `.spoolway/`, which makes its pipeline key block and config
+# reference table the older copies of that release, and `init` writes its
+# skills fresh. None of them may come back refused, and a second sync has
+# nothing left to do. 0.6.0 is checked above, beside the rest of what its
+# sync did.
+for fixture_dir in "$FIXTURES"/*/; do
+  version=$(basename "$fixture_dir")
+  [ "$version" = "0.6.0" ] && continue
+  [ -d "$fixture_dir/.spoolway" ] || continue
+  stage "$version"
+  # 0.10.0 recorded the spoolway version in a tracked file of the setup folder.
+  # Nothing reads it now, so the `init` that `stage` ran over the fixture
+  # deleted it, said so, and left none behind.
+  if [ -f "$fixture_dir/.spoolway/spoolway-version" ]; then
+    has "the $version fixture's second init reported its version file removed" \
+      "  removed  .spoolway/spoolway-version" "$WORK/$version/init.out"
+    if [ -e "$WORK/$version/proj/.spoolway/spoolway-version" ]; then
+      bad "and left no version file behind in the $version project"
+    else
+      ok "and left no version file behind in the $version project"
+    fi
+  fi
+  must "spoolway sync runs against the $version project" \
+    bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
+  lacks "sync refused no file of the $version project as a copy it does not know" \
+    "refused " "$WORK/$version/real.out"
+  says "and a second sync of the $version project has nothing left to do" \
+    "Nothing updating." \
+    "$SPOOLWAY" sync
+done
 
 finish

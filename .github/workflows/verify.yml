@@ -120,12 +120,8 @@ jobs:
           # "untracked under .spoolway/" exactly "written by the line above".
           # `--yes` because a runner is nobody to answer the confirmation
           # `init` opens with, and unanswered it declines and writes nothing.
-          # It also stamps `spoolway-version` with this binary's version, and
-          # the tracked stamp trails every version bump until the next sync
-          # takes it, so put the tracked one back before comparing.
           ./target/release/spoolway init --yes
           git clean -fd .spoolway
-          git checkout -- .spoolway/spoolway-version
           git diff --exit-code
           ./target/release/spoolway pipeline check
 

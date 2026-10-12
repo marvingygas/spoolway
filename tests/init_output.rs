@@ -240,74 +240,69 @@ fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
     assert_scaffold(&project, "claude");
 }
 
-/// The version marker is a file `init` leaves for the person to commit, so
-/// it gets a `wrote` row like every other file: on a fresh run, and again when
-/// a repeat run brings an older marker up to this binary's version, but not
-/// when the marker already names it.
+/// A version marker 0.10.0 left in the setup folder is deleted by `init`, which
+/// says so in a `removed` row like any other file it takes away, and a repeat
+/// run has nothing to name.
 #[test]
-fn init_names_the_version_marker_it_writes_and_only_then() {
+fn init_deletes_a_retired_version_marker_and_names_it() {
     let project = Project::new("marker-row");
     let marker = ".spoolway/spoolway-version";
-    let wrote = row("wrote", marker);
-
+    let removed = row("removed", marker);
     let fresh = stdout(&project.init("claude"));
-    assert!(fresh.contains(&wrote), "{fresh}");
+    assert!(!fresh.contains("spoolway-version"), "{fresh}");
+
+    std::fs::write(project.as_ref().join(marker), "0.10.0\n").unwrap();
+    let older = stdout(&project.init("claude"));
+    assert!(older.contains(&removed), "{older}");
+    assert!(!project.as_ref().join(marker).exists());
 
     let repeat = stdout(&project.init("claude"));
-    assert!(!repeat.contains(&wrote), "{repeat}");
-
-    std::fs::write(project.as_ref().join(marker), "0.0.1\n").unwrap();
-    let older = stdout(&project.init("claude"));
-    assert!(older.contains(&wrote), "{older}");
+    assert!(!repeat.contains("spoolway-version"), "{repeat}");
 }
 
-/// `init` rewrites every skill that differs from the shipped copy, and with
-/// `--force` every scaffold file too, so run over a project a newer spoolway
-/// set up it would downgrade them, which `sync` refuses to do. It stops before
-/// it writes anything, names the version, and leaves every file as it was.
+/// A skill file no spoolway shipped is refused by `init` before it writes the
+/// scaffold. The skills' own check comes after the scaffold, and `--force` has
+/// by then overwritten every scaffold file, so the refusal would arrive too
+/// late to leave the project as it was.
 #[test]
-fn init_refuses_to_rewrite_a_project_a_newer_spoolway_wrote() {
-    let project = Project::new("marker-newer");
+fn init_refuses_a_skill_no_spoolway_shipped_before_it_writes_the_scaffold() {
+    let project = Project::new("unknown-skill");
     project.init("claude");
-    let skill = project
-        .as_ref()
-        .join(".claude/skills/spoolway-config/SKILL.md");
-    let config = project.as_ref().join(".spoolway/config.toml");
-    std::fs::write(&skill, "written by a newer spoolway\n").unwrap();
-    std::fs::write(&config, "# written by a newer spoolway\n").unwrap();
-    std::fs::write(
-        project.as_ref().join(".spoolway/spoolway-version"),
-        "999.0.0\n",
-    )
-    .unwrap();
+    let skill = ".claude/skills/spoolway-config/SKILL.md";
+    std::fs::write(project.as_ref().join(skill), "edited by hand\n").unwrap();
+    let scaffold = scaffold_paths(&project);
+    for path in &scaffold {
+        std::fs::write(project.as_ref().join(path), "mine\n").unwrap();
+    }
 
-    for extra in [&[][..], &["--force"][..]] {
-        let mut args = vec!["init", "--yes", "--provider", "claude"];
-        args.extend_from_slice(extra);
-        let result = project.run_allowing_failure(&args);
+    let result =
+        project.run_allowing_failure(&["init", "--force", "--yes", "--provider", "claude"]);
 
-        assert!(!result.status.success(), "{}", stdout(&result));
-        let err = stderr(&result);
-        assert!(err.contains("999.0.0"), "{err}");
-        assert!(!stdout(&result).contains("  wrote "), "{}", stdout(&result));
+    assert!(!result.status.success(), "{}", stdout(&result));
+    let err = stderr(&result);
+    assert!(
+        err.contains(&format!("`spoolway sync --replace {skill}`")),
+        "{err}"
+    );
+    assert!(!stdout(&result).contains("  wrote "), "{}", stdout(&result));
+    for path in &scaffold {
         assert_eq!(
-            std::fs::read_to_string(&skill).unwrap(),
-            "written by a newer spoolway\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&config).unwrap(),
-            "# written by a newer spoolway\n",
-            "{extra:?} rewrote the config before refusing"
+            std::fs::read_to_string(project.as_ref().join(path)).unwrap(),
+            "mine\n",
+            "init --force rewrote {path} before refusing"
         );
     }
+    assert_eq!(
+        std::fs::read_to_string(project.as_ref().join(skill)).unwrap(),
+        "edited by hand\n"
+    );
 }
 
-/// A home-mode `init` keeps its skills in the user folder every project
-/// shares, so a newer marker there stops it before it makes a workspace, and
-/// the marker row it prints for a workspace's setup folder is spelled with
-/// `~` like the rows around it, not with the full path.
+/// A home-mode `init` keeps the marker in the workspace's setup folder and in
+/// the user skills folder. It deletes both, and the row for the workspace's is
+/// spelled with `~` like the rows around it, not with the full path.
 #[test]
-fn home_mode_init_checks_the_user_folder_first_and_spells_its_marker_with_a_tilde() {
+fn home_mode_init_deletes_both_markers_and_spells_the_workspace_one_with_a_tilde() {
     // The home directory sits beside the checkout rather than inside it, as
     // a real one does: inside, every workspace path would read as relative.
     let base = std::env::temp_dir().join(format!(
@@ -329,50 +324,42 @@ fn home_mode_init_checks_the_user_folder_first_and_spells_its_marker_with_a_tild
             .unwrap()
             .success()
     );
-    let user_marker = home.join(".claude/skills/.spoolway-version");
-    std::fs::create_dir_all(user_marker.parent().unwrap()).unwrap();
-    std::fs::write(&user_marker, "999.0.0\n").unwrap();
-    let init = || {
+    let init = |extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_spoolway"))
-            .args([
-                "init",
-                "--yes",
-                "--setup",
-                "home",
-                "--workspace",
-                "new",
-                "--provider",
-                "claude",
-                "--tracker",
-                "none",
-            ])
+            .args(["init", "--yes", "--provider", "claude", "--tracker", "none"])
+            .args(extra)
             .current_dir(&checkout)
             .env("HOME", &home)
             .output()
             .expect("run spoolway")
     };
 
-    let refused = init();
+    let first = init(&["--setup", "home", "--workspace", "new"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let config = std::fs::read_dir(home.join(".spoolway"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("config"))
+        .find(|dir| dir.join("config.toml").is_file())
+        .expect("the workspace's config folder");
+    let user_marker = home.join(".claude/skills/.spoolway-version");
+    std::fs::write(config.join("spoolway-version"), "0.10.0\n").unwrap();
+    std::fs::write(&user_marker, "0.10.0\n").unwrap();
 
-    assert!(!refused.status.success(), "{}", stdout(&refused));
-    assert!(stderr(&refused).contains("999.0.0"), "{}", stderr(&refused));
-    assert!(
-        !home.join(".spoolway").exists(),
-        "a refused init still made a workspace"
-    );
+    let done = init(&[]);
 
-    std::fs::remove_file(&user_marker).unwrap();
-    let done = init();
     assert!(done.status.success(), "{}", stderr(&done));
     let out = stdout(&done);
-    let marker_row = out
+    let rows: Vec<&str> = out
         .lines()
-        .find(|line| line.starts_with("  wrote    ") && line.ends_with("/spoolway-version"))
-        .unwrap_or_else(|| panic!("no marker row in:\n{out}"));
+        .filter(|line| line.starts_with("  removed  ") && line.ends_with("spoolway-version"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{out}");
     assert!(
-        marker_row.starts_with("  wrote    ~/.spoolway/"),
-        "{marker_row}"
+        rows.iter().all(|row| row.starts_with("  removed  ~/")),
+        "{rows:?}"
     );
+    assert!(!config.join("spoolway-version").exists());
+    assert!(!user_marker.exists());
     std::fs::remove_dir_all(&base).ok();
 }
 

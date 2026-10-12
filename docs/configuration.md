@@ -26,6 +26,10 @@ changes one key and leaves every other byte alone. It refuses a key the file doe
 hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
 created on first write.
 
+`spoolway sync` rewrites the table when it matches a table an older spoolway shipped. It refuses a
+table that matches none, and `spoolway sync --replace .spoolway/config.toml` rewrites the file and
+keeps its values. See [Files spoolway refuses](installation.md#files-spoolway-refuses).
+
 A key that `config set` creates is written where `spoolway sync` would put it, with no comment
 above it. The keys after it move down. The first `[models."<glob>"]` row also removes an empty
 `[models]` header. A file that only `config set` has changed is therefore not behind, and `sync`

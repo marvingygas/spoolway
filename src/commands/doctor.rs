@@ -2478,7 +2478,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
             crate::sync::Outcome::Wrote { path, .. }
             | crate::sync::Outcome::Migrated { path, .. }
             | crate::sync::Outcome::Removed { path, .. } => {
-                if !crate::sync::is_version_marker(path) && !behind.contains(&path.as_str()) {
+                if !behind.contains(&path.as_str()) {
                     behind.push(path);
                 }
             }
@@ -4425,29 +4425,28 @@ mod tests {
         );
     }
 
-    /// The version marker `sync` writes beside a stale file is not a second
-    /// file behind: one stale skill reads as one.
+    /// A file `sync` refuses as no copy any release shipped is listed on its
+    /// own line with its reason, and is not one of the files behind.
     #[test]
-    fn the_version_marker_is_not_counted_as_a_file_behind() {
+    fn a_refused_file_is_listed_apart_from_the_files_behind() {
         use crate::sync::Outcome;
+        let shown = ".claude/skills/spoolway-plan/SKILL.md";
+        let why = crate::known_copies::refusal(shown);
         let outcomes = vec![
+            Outcome::Blocked {
+                path: shown.into(),
+                why: why.clone(),
+            },
             Outcome::Wrote {
                 path: ".claude/skills/spoolway-config/SKILL.md".into(),
                 detail: "rewritten".into(),
-            },
-            Outcome::Wrote {
-                path: ".spoolway/spoolway-version".into(),
-                detail: "spoolway version recorded".into(),
-            },
-            Outcome::Wrote {
-                path: "~/.claude/skills/.spoolway-version".into(),
-                detail: "spoolway version recorded".into(),
             },
         ];
 
         assert_eq!(
             sync_notes(&outcomes, true),
             vec![
+                format!("{shown}: {why}"),
                 "1 file(s) are behind this spoolway — run spoolway sync to apply them".to_string()
             ]
         );
