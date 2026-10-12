@@ -1450,11 +1450,9 @@ A skill file that matches no copy spoolway has shipped also refuses `init` befor
 anything, `--force` included. The error names each such file and `spoolway sync --replace
 <path>`. See [Files spoolway refuses](installation.md#files-spoolway-refuses).
 
-A project whose `.spoolway/spoolway-version` names a newer spoolway than the one you run is
-refused before `init` writes anything, `--force` included. In home mode the agent's user-level
-marker is checked too. The error names the version. See [Files a newer spoolway
-wrote](installation.md#files-a-newer-spoolway-wrote). A run that writes the marker lists it as a
-`wrote` row, such as `wrote    .spoolway/spoolway-version`.
+`init` deletes a leftover `.spoolway/spoolway-version`, and in home mode the agent's user-level
+`.spoolway-version`, and lists each as a `removed` row, such as `removed  .spoolway/spoolway-version`.
+See [The retired version marker](installation.md#the-retired-version-marker).
 
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes
@@ -1489,15 +1487,14 @@ skills](installation.md#the-pipeline-skills).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--force` | | Overwrite files that already exist. Does not override a version marker naming a newer spoolway, or a skill file that matches no shipped copy |
+| `--force` | | Overwrite files that already exist. Does not override a skill file that matches no shipped copy |
 | `--user` | | Install into the agent's user folder instead of the project's |
 
 When any skill file `install` would write matches no copy spoolway has shipped, `install` writes
-nothing and fails, naming each such file and `spoolway sync --replace <path>`. When the folder's
-version marker names a newer spoolway than the one you run, `install` writes nothing and fails,
-naming the version and the marker file. A run that writes the marker lists it
-as a `wrote` row. See [Files a newer spoolway
-wrote](installation.md#files-a-newer-spoolway-wrote).
+nothing and fails, naming each such file and `spoolway sync --replace <path>`. See [Files
+spoolway refuses](installation.md#files-spoolway-refuses). `install` also deletes a leftover version
+marker in the folder it installs into, and lists it as a `removed` row. See [The retired version
+marker](installation.md#the-retired-version-marker).
 
 ### `spoolway update`
 
@@ -1556,11 +1553,9 @@ when it equals a copy an older spoolway shipped. One equal to no shipped copy is
 as it is. The refusal names the file and `spoolway sync --replace <path>`. See [Files spoolway
 refuses](installation.md#files-spoolway-refuses).
 
-`sync` also refuses to write a scope whose version marker names a newer spoolway than the one
-you run. The scopes are the project's setup folder with its skills, and each agent's user-level
-skills folder. A refused scope is left as it is, and the report names the newer version. A sync
-that writes anything also writes the marker. See [Files a newer spoolway
-wrote](installation.md#files-a-newer-spoolway-wrote).
+`sync` also deletes the version marker a build of 0.10.0 left in the project's setup folder and in
+each agent's user-level skills folder, and lists each as removed. See [The retired version
+marker](installation.md#the-retired-version-marker).
 
 The report lists refused files first. It then lists each file written or removed, and a line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings

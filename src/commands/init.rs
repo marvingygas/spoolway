@@ -1320,13 +1320,13 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
-    // The version marker is a tracked file in the setup folder, so it gets a
-    // row among the others, above the `stamped` line that closes them. Home
-    // mode's setup lives in the workspace, which `install_user` does not
-    // reach, so it is recorded here for both modes; `install` in repo mode
-    // then finds it already current.
-    if let Some(shown) = crate::sync::record_project_version(root)? {
-        placer.rows.push(report_row("wrote", &shown));
+    // The retired version marker was a tracked file in the setup folder, so
+    // its removal gets a row among the others, above the `stamped` line that
+    // closes them. Home mode's setup lives in the workspace, which
+    // `install_user` does not reach, so it is deleted here for both modes;
+    // `install` in repo mode then finds it already gone.
+    if let Some(shown) = crate::sync::remove_marker(crate::sync::project_marker(root))? {
+        placer.rows.push(report_row("removed", &shown));
     }
 
     for row in &placer.rows {

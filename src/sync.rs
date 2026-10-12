@@ -67,8 +67,7 @@
 //! spoolway or edited by hand, and it is refused, naming the file and `spoolway
 //! sync --replace <path>`, which takes this binary's copy over it and saves
 //! the file as a `.bak` first. `init` and `install` make the same call for the
-//! skills they write. A scope whose version marker names a newer spoolway is
-//! refused whole as well; see [`written_by_newer`].
+//! skills they write.
 //!
 //! This used to be `spoolway update`'s job, along with installing the binary
 //! itself. The two were split apart so `update` can run from any directory,
@@ -192,39 +191,19 @@ const NOOP: &str = "Nothing updating.";
 /// person edited it, so the line says only what was done to it.
 const REFUSED_ONLY: &str = "Nothing else updating; the refused files above were left as they are.";
 
-/// The same, when every refusal is a newer spoolway's version marker: those
-/// files are ahead of this binary, not behind it.
-const NEWER_ONLY: &str = "Nothing else updating; the files above were written by a newer spoolway.";
-
-/// The same, when a run refused both kinds: the version-refused files are
-/// named as a newer spoolway's, and the others are only said to be left alone.
-const MIXED_ONLY: &str = "Nothing else updating; the files a newer spoolway wrote and the other \
-                          refused files above were left as they are.";
-
 /// What a run refused, as far as its closing line cares.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refused {
     Nothing,
-    /// Only ordinary refusals: none of them a version marker.
+    /// At least one file was refused.
     Files,
-    /// Only version refusals: see [`written_by_newer`].
-    Newer,
-    /// Both: at least one version refusal and at least one other.
-    Mixed,
 }
 
 impl Refused {
     fn of(refused: &[(&str, &str)]) -> Refused {
-        match refused {
-            [] => Refused::Nothing,
-            _ => match (
-                refused.iter().any(|(path, _)| is_version_marker(path)),
-                refused.iter().all(|(path, _)| is_version_marker(path)),
-            ) {
-                (true, true) => Refused::Newer,
-                (true, false) => Refused::Mixed,
-                _ => Refused::Files,
-            },
+        match refused.is_empty() {
+            true => Refused::Nothing,
+            false => Refused::Files,
         }
     }
 }
@@ -238,8 +217,6 @@ impl Refused {
 fn closing_line(dry_run: bool, nothing_to_do: bool, refused: Refused) -> &'static str {
     match (dry_run, nothing_to_do, refused) {
         (_, true, Refused::Files) => REFUSED_ONLY,
-        (_, true, Refused::Newer) => NEWER_ONLY,
-        (_, true, Refused::Mixed) => MIXED_ONLY,
         (_, true, Refused::Nothing) => NOOP,
         (true, false, _) => DRY_RUN,
         (false, false, _) => KEPT,
@@ -865,206 +842,91 @@ fn plan(repo: &Repo) -> Result<(Vec<Outcome>, Vec<Act>)> {
     let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
     let mut outcomes = Vec::new();
     let mut acts = Vec::new();
-    let marker = repo.setup_dir().join(VERSION_MARKER);
-    let shown = crate::platform::relative(&repo.checkout, &marker);
-    match written_by_newer(&marker, &shown) {
-        Some(refusal) => outcomes.push(refusal),
-        None => {
-            ignores(repo, home_mode, &mut outcomes, &mut acts)?;
-            config(repo, &mut outcomes, &mut acts)?;
-            templates(repo, &mut outcomes, &mut acts)?;
-            skills(repo, home_mode, &mut outcomes, &mut acts)?;
-            retired_skills(repo, home_mode, &mut outcomes, &mut acts)?;
-            retired_templates(repo, &mut outcomes, &mut acts)?;
-            pipelines(repo, &mut outcomes, &mut acts)?;
-            stamp(&marker, &shown, 0, &mut outcomes, &mut acts);
-        }
-    }
+    ignores(repo, home_mode, &mut outcomes, &mut acts)?;
+    config(repo, &mut outcomes, &mut acts)?;
+    templates(repo, &mut outcomes, &mut acts)?;
+    skills(repo, home_mode, &mut outcomes, &mut acts)?;
+    retired_skills(repo, home_mode, &mut outcomes, &mut acts)?;
+    retired_templates(repo, &mut outcomes, &mut acts)?;
+    retired_markers(repo, &mut outcomes, &mut acts);
+    pipelines(repo, &mut outcomes, &mut acts)?;
     user_level(&mut outcomes, &mut acts)?;
     Ok((outcomes, acts))
 }
 
-/// The file, in a scope `sync` writes into, that records which spoolway last
-/// synced it: one `X.Y.Z` line. The project's copy sits in the setup folder,
-/// and each user-level skills folder holds a hidden one, since every project
-/// on the machine shares that folder.
+/// The file builds of 0.10.0 wrote to record which spoolway last synced a
+/// scope: one `X.Y.Z` line. The project's copy sat in the setup folder, and
+/// each user-level skills folder held a hidden one, since every project on the
+/// machine shares that folder.
 ///
-/// Without it a file a newer spoolway wrote looks exactly like a stale one,
-/// and an older binary rewrote it back to its own shipped copy, silently.
-const VERSION_MARKER: &str = "spoolway-version";
+/// Nothing reads it any more: whether a file is stale, or newer than this
+/// binary, is decided per file by [`crate::known_copies`]. It stays named here
+/// only so `sync`, `init` and `install` can delete the copies still on disk.
+const RETIRED_MARKER: &str = "spoolway-version";
 
-/// The hidden spelling of [`VERSION_MARKER`] inside a user-level skills
-/// folder, where a visible file would sit among the skill directories.
-const USER_VERSION_MARKER: &str = ".spoolway-version";
+/// The hidden spelling of [`RETIRED_MARKER`] inside a user-level skills
+/// folder, where a visible file would have sat among the skill directories.
+const RETIRED_USER_MARKER: &str = ".spoolway-version";
 
-/// Whether `path`, as the report names it, is a version marker rather than a
-/// file of the project's. `doctor` leaves it out of its count of files behind:
-/// the marker is written only beside a file that is behind, and counting it
-/// too would make one stale skill read as two.
-pub(crate) fn is_version_marker(path: &str) -> bool {
-    path.rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|name| name == VERSION_MARKER || name == USER_VERSION_MARKER)
-}
-
-/// Record this binary's version in a project's setup folder, as `init` and
-/// `install` leave a project: without it, an older binary's `sync` finds no
-/// marker and cannot tell files a newer spoolway wrote from stale ones.
-/// Does nothing when the project has no setup folder yet.
-///
-/// Answers the marker's path when it wrote one, spelled the way `init`'s rows
-/// spell a path — relative to the checkout, or with `~` outside it — so the
-/// caller can report a tracked file the person will find in `git status`.
-pub(crate) fn record_project_version(checkout: &Path) -> Result<Option<String>> {
-    let dir = crate::config::setup_dir_in(checkout);
-    match dir.is_dir() {
-        true => {
-            let marker = dir.join(VERSION_MARKER);
-            // A home-mode project's setup folder is the workspace's, outside
-            // the checkout; `relative` would answer its full absolute path,
-            // where every other path `init` and `install` print spells a
-            // file under the home directory with `~`.
-            let shown = match marker.starts_with(checkout) {
-                true => crate::platform::relative(checkout, &marker),
-                false => crate::repo::shorten_home(&marker),
-            };
-            Ok(record_version(&marker)?.then_some(shown))
-        }
-        false => Ok(None),
-    }
-}
-
-/// [`ensure_not_newer`] for a project's marker, before `install` writes its
-/// skills.
-pub(crate) fn ensure_project_not_newer(checkout: &Path) -> Result<()> {
-    let marker = crate::config::setup_dir_in(checkout).join(VERSION_MARKER);
-    ensure_not_newer(&marker, &crate::platform::relative(checkout, &marker))
-}
-
-/// [`ensure_not_newer`] for a user-level skills folder, before `install
-/// --user` writes into it.
-pub(crate) fn ensure_user_not_newer(skills_dir: &Path) -> Result<()> {
-    let marker = skills_dir.join(USER_VERSION_MARKER);
-    ensure_not_newer(&marker, &crate::repo::shorten_home(&marker))
-}
-
-/// [`record_project_version`] for a user-level skills folder, which
-/// `install --user` and a home-mode `init` fill.
-pub(crate) fn record_user_version(skills_dir: &Path) -> Result<Option<String>> {
-    let marker = skills_dir.join(USER_VERSION_MARKER);
-    let shown = crate::repo::shorten_home(&marker);
-    Ok(record_version(&marker)?.then_some(shown))
-}
-
-/// Write this binary's version to `marker`, unless it already holds that
-/// version or a newer one, and say whether it wrote. An older binary
-/// installing over a newer one's files must not lower the marker: that would
-/// hide the newer version from the next `sync`.
-fn record_version(marker: &Path) -> Result<bool> {
-    let current = crate::release::current();
-    if let Ok(text) = std::fs::read_to_string(marker) {
-        let on_disk = text.trim();
-        if on_disk == current || is_newer_core(on_disk) {
-            return Ok(false);
-        }
-    }
-    write_atomic(marker, format!("{current}\n"))?;
-    Ok(true)
-}
-
-/// Whether `version`, as a marker holds it, is a later release than this
-/// binary: the `X.Y.Z` core compared, any `-pre-release` or `+build` suffix
-/// dropped first.
-///
-/// This is deliberately not `release::is_newer`, which decides whether to
-/// nag about an upgrade and so answers `false` for every pre-release. A
-/// marker written by a `1.0.0-rc.1` build still names files this binary
-/// would downgrade, and the guard exists to stop exactly that. A marker that
-/// does not parse is not newer: refusing on one nobody can read would leave
-/// the project unsyncable.
-fn is_newer_core(version: &str) -> bool {
-    let core = |raw: &str| {
-        let core = raw.trim().split(['-', '+']).next()?;
-        crate::release_notes::Version::parse(core).ok()
+/// The retired marker in a project's setup folder, when there is one, and the
+/// way a report spells it: relative to the checkout, or with `~` outside it.
+/// A home-mode project's setup folder is the workspace's, which is outside the
+/// checkout, and `relative` would answer its full absolute path there where
+/// every other path `init` and `install` print spells a file under the home
+/// directory with `~`.
+pub(crate) fn project_marker(checkout: &Path) -> Option<(PathBuf, String)> {
+    let marker = crate::config::setup_dir_in(checkout).join(RETIRED_MARKER);
+    let shown = match marker.starts_with(checkout) {
+        true => crate::platform::relative(checkout, &marker),
+        false => crate::repo::shorten_home(&marker),
     };
-    match (core(version), core(crate::release::current())) {
-        (Some(marker), Some(current)) => marker > current,
-        _ => false,
-    }
+    marker.is_file().then_some((marker, shown))
 }
 
-/// The spoolway version `marker` names when that is newer than this binary,
-/// and `None` when it is absent, unreadable, unparseable or not newer.
+/// The retired marker in a user-level skills folder, when there is one, with
+/// the `~` spelling a report gives it.
+pub(crate) fn user_marker(skills_dir: &Path) -> Option<(PathBuf, String)> {
+    let marker = skills_dir.join(RETIRED_USER_MARKER);
+    let shown = crate::repo::shorten_home(&marker);
+    marker.is_file().then_some((marker, shown))
+}
+
+/// The reason `sync` gives beside a marker it removes. `init` and `install`
+/// print a bare `removed` row instead, as they do for every file they take away.
+const MARKER_GONE: &str = "no longer written";
+
+/// Remove the retired marker at `found`, for the commands that do not plan
+/// their writes the way `sync` does, and answer the path to report.
 ///
-/// Every doubtful marker answers `None`: this guards against a downgrade,
-/// and a marker nobody can read is no evidence of one.
-fn newer_version(marker: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(marker).ok()?;
-    let version = text.trim();
-    is_newer_core(version).then(|| version.to_string())
-}
-
-/// A refusal when `marker` names a spoolway newer than this binary, and
-/// `None` otherwise: see [`newer_version`].
-fn written_by_newer(marker: &Path, shown: &str) -> Option<Outcome> {
-    let version = newer_version(marker)?;
-    Some(Outcome::blocked(
-        shown,
-        format!(
-            "these files were written by spoolway {version}, newer than this {} — nothing \
-             here was rewritten; install spoolway {version} or later and run `spoolway \
-             sync` again",
-            crate::release::current()
+/// A marker that is already gone is not an error and is not reported: a
+/// home-mode workspace's `config/` is shared by every clone of it, so another
+/// clone's `sync` can delete the file between the check that found it and
+/// this removal.
+pub(crate) fn remove_marker(found: Option<(PathBuf, String)>) -> Result<Option<String>> {
+    let Some((marker, shown)) = found else {
+        return Ok(None);
+    };
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(Some(shown)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => bail!(
+            "could not remove {shown}, a version marker this spoolway no longer reads: {}\n  \
+             delete it by hand and run this again",
+            plain(&err)
         ),
-    ))
-}
-
-/// Fail when `marker` names a spoolway newer than this binary, for the
-/// commands that install a scope's skills outright. `shown` is the marker as
-/// the person would type it back.
-///
-/// `install` and `init` rewrite a skill file that is an older copy of the
-/// shipped one, and this check stops them downgrading the files a newer
-/// spoolway wrote just as it stops `sync`. `--force` does not override it: it
-/// means "write files that already match", and a newer marker is a statement
-/// about the files, not about this run. Deleting the marker is the way to
-/// take this binary's copies anyway, and the error says so; a file that is
-/// none of the copies any spoolway shipped is still refused after that, by
-/// [`crate::known_copies`], with `sync --replace` as its own way out.
-pub(crate) fn ensure_not_newer(marker: &Path, shown: &str) -> Result<()> {
-    match newer_version(marker) {
-        Some(version) => bail!(
-            "refused {shown} — these files were written by spoolway {version}, newer than this \
-             {} — nothing was installed\n  install spoolway {version} or later and run this \
-             again, or delete {shown} to install this spoolway's copies over them",
-            crate::release::current()
-        ),
-        None => Ok(()),
     }
 }
 
-/// Record this binary's version in `marker`, but only when the scope's sync
-/// wrote something past the first `acts_before` actions anyway.
+/// Delete the version marker a 0.10.0 `sync`, `init` or `install` left in the
+/// project's setup folder, which is the workspace's `config/` in home mode.
 ///
-/// A sync with nothing to do leaves the marker alone: bumping it on every run
-/// would make a no-op sync a write, and would claim files for this version
-/// that it never touched.
-fn stamp(
-    marker: &Path,
-    shown: &str,
-    acts_before: usize,
-    outcomes: &mut Vec<Outcome>,
-    acts: &mut Vec<Act>,
-) {
-    if acts.len() == acts_before {
-        return;
+/// Reported as a retired file removed, like a retired template, so a dry run
+/// lists it too. Nothing else in the setup folder is touched.
+fn retired_markers(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) {
+    if let Some((marker, shown)) = project_marker(&repo.checkout) {
+        acts.push(Act::remove_file(marker, &shown));
+        outcomes.push(Outcome::removed(shown, MARKER_GONE));
     }
-    let line = format!("{}\n", crate::release::current());
-    if std::fs::read_to_string(marker).is_ok_and(|on_disk| on_disk == line) {
-        return;
-    }
-    acts.push(Act::write(marker.to_path_buf(), shown, line));
-    outcomes.push(Outcome::wrote(shown, "spoolway version recorded"));
 }
 
 /// The user-level skill folders, kept current the same way a project folder is
@@ -1073,20 +935,20 @@ fn stamp(
 /// whichever release they last installed. Named with `~`, since they sit
 /// outside the checkout.
 ///
-/// Each folder is its own scope with its own
-/// [`USER_VERSION_MARKER`]: a folder a newer spoolway wrote is refused whole,
-/// and the others still sync.
+/// A folder's retired marker goes whether or not the folder still holds a
+/// skill file, because the marker was written beside the skills and outlives
+/// them when a person deletes those by hand.
 fn user_level(outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
-    for (dir, planned) in user_skills() {
-        let marker = dir.join(USER_VERSION_MARKER);
-        let shown = crate::repo::shorten_home(&marker);
-        if let Some(refusal) = written_by_newer(&marker, &shown) {
-            outcomes.push(refusal);
-            continue;
+    if let Some(home) = crate::install::user_home() {
+        for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
+            if let Some((marker, shown)) = user_marker(&provider.user_skills_dir(&home)) {
+                acts.push(Act::remove_file(marker, &shown));
+                outcomes.push(Outcome::removed(shown, MARKER_GONE));
+            }
         }
-        let before = acts.len();
+    }
+    for (_, planned) in user_skills() {
         refresh(planned, crate::repo::shorten_home, outcomes, acts)?;
-        stamp(&marker, &shown, before, outcomes, acts);
     }
     Ok(())
 }
@@ -5832,245 +5694,77 @@ mod tests {
         assert!(!repo.home.join("sync-stamp").exists());
     }
 
-    // An older binary's `sync` used to rewrite files a newer spoolway wrote,
-    // user-level skills included, and said nothing. The version that
-    // last synced a scope is recorded in a marker file holding one `X.Y.Z`
-    // line: `spoolway-version` in the project's setup folder, and
-    // `.spoolway-version` in each user-level skills folder. A marker newer
-    // than this binary means nothing in that scope is rewritten, and the
-    // report names the newer version.
-    const NEWER: &str = "999.0.0";
-
-    fn names_newer(outcomes: &[Outcome]) -> bool {
-        outcomes
-            .iter()
-            .any(|outcome| matches!(outcome, Outcome::Blocked { why, .. } if why.contains(NEWER)))
-    }
-
+    /// Builds of 0.10.0 wrote a version marker in the setup folder and in each
+    /// user-level skills folder. Nothing reads them now, so a sync deletes the
+    /// ones it finds and says so as it says any removal, and a second sync has
+    /// nothing left to report.
     #[test]
-    fn an_older_binary_does_not_rewrite_a_project_a_newer_one_synced() {
-        let (repo, _root_guard) = fixture("newer-project");
-        let home = crate::scratch::root("sync-newer-project-home");
+    fn sync_deletes_the_retired_version_markers() {
+        let (repo, _root_guard) = fixture("retired-markers");
+        let home = crate::scratch::root("sync-retired-markers-home");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let written = "[dispatch]\nlane_quiet = \"45m\"\n";
-        let config = crate::config::Config::path_in(&repo.root);
-        std::fs::write(&config, written).unwrap();
-        std::fs::write(
-            repo.setup_dir().join("spoolway-version"),
-            format!("{NEWER}\n"),
-        )
-        .unwrap();
-
-        let outcomes =
-            crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-
-        assert_eq!(
-            std::fs::read_to_string(&config).unwrap(),
-            written,
-            "an older binary rewrote a file a newer one wrote: {:?}",
-            outcome_lines(&outcomes)
-        );
-        assert!(
-            names_newer(&outcomes),
-            "the report does not name the newer version: {:?}",
-            outcome_lines(&outcomes)
-        );
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn an_older_binary_does_not_rewrite_user_skills_a_newer_one_wrote() {
-        let (repo, _root_guard) = fixture("newer-user-skills");
-        let home = crate::scratch::root("sync-newer-user-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        crate::platform::test_home::with_home(&home, || {
-            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
-        });
-        let claude_dir = crate::cli::Provider::Claude.user_skills_dir(&home);
-        let skill = claude_dir.join("spoolway-config").join("SKILL.md");
-        std::fs::write(&skill, "written by a newer spoolway\n").unwrap();
-        std::fs::write(claude_dir.join(".spoolway-version"), format!("{NEWER}\n")).unwrap();
-
-        let outcomes =
-            crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-
-        assert_eq!(
-            std::fs::read_to_string(&skill).unwrap(),
-            "written by a newer spoolway\n",
-            "an older binary rewrote a user-level skill a newer one wrote: {:?}",
-            outcome_lines(&outcomes)
-        );
-        assert!(
-            names_newer(&outcomes),
-            "the report does not name the newer version: {:?}",
-            outcome_lines(&outcomes)
-        );
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// What lets the guard work for a project a newer spoolway set up: `init`
-    /// and `install` leave the marker, so an older binary's `sync` finds it,
-    /// and recording never lowers one.
-    #[test]
-    fn install_leaves_a_version_marker_and_never_lowers_one() {
-        let (repo, _root_guard) = fixture("install-marker");
-        let home = crate::scratch::root("sync-install-marker-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(repo.setup_dir()).unwrap();
         let project = repo.setup_dir().join("spoolway-version");
         let user = crate::cli::Provider::Claude
             .user_skills_dir(&home)
             .join(".spoolway-version");
-        let line = format!("{}\n", crate::release::current());
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&project, "0.10.0\n").unwrap();
+        std::fs::write(&user, "0.10.0\n").unwrap();
 
-        crate::install::install(&repo.root, crate::cli::Provider::Claude, false).unwrap();
-        crate::platform::test_home::with_home(&home, || {
-            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
-        });
-        assert_eq!(std::fs::read_to_string(&project).unwrap(), line);
-        assert_eq!(std::fs::read_to_string(&user).unwrap(), line);
+        let dry = SyncArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        let planned = crate::platform::test_home::with_home(&home, || scan(&repo, &dry).unwrap());
+        let removed = |outcomes: &[Outcome]| -> Vec<String> {
+            let mut paths: Vec<String> = outcomes
+                .iter()
+                .filter_map(|outcome| match outcome {
+                    Outcome::Removed { path, .. } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            paths.sort();
+            paths
+        };
+        let want = [
+            ".spoolway/spoolway-version".to_string(),
+            "~/.claude/skills/.spoolway-version".to_string(),
+        ];
+        assert_eq!(removed(&planned), want, "{:?}", outcome_lines(&planned));
+        assert!(project.exists() && user.exists(), "a dry run deleted one");
 
-        // `init` records the project's marker on its own too, in home mode,
-        // where `install` only reaches the user folder; it must not lower one.
-        std::fs::write(&project, format!("{NEWER}\n")).unwrap();
-        assert_eq!(record_project_version(&repo.root).unwrap(), None);
-        assert_eq!(
-            std::fs::read_to_string(&project).unwrap(),
-            format!("{NEWER}\n"),
-            "recording lowered the marker a newer spoolway wrote"
-        );
+        let done = crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
+        assert_eq!(removed(&done), want, "{:?}", outcome_lines(&done));
+        assert!(!project.exists(), "the project marker is still there");
+        assert!(!user.exists(), "the user marker is still there");
+
+        let again = crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
+        assert!(removed(&again).is_empty(), "{:?}", outcome_lines(&again));
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The marker is how a project set up before it existed ever gets one: a
-    /// sync that writes something records this binary's version in each scope
-    /// it wrote, the project's and the user-level folder's. Deleting either
-    /// `stamp` call would leave that project unguarded for good.
+    /// A marker another clone's `sync` deleted after it was found is already
+    /// gone, so removing it answers nothing to report instead of an error.
     #[test]
-    fn a_sync_that_rewrites_a_stale_file_records_its_version() {
-        let (repo, _root_guard) = fixture("stamp-writes");
-        let home = crate::scratch::root("sync-stamp-writes-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let user_dir = crate::cli::Provider::Claude.user_skills_dir(&home);
-        let user_marker = user_dir.join(".spoolway-version");
-        let project_marker = repo.setup_dir().join("spoolway-version");
-        let line = format!("{}\n", crate::release::current());
-        crate::platform::test_home::with_home(&home, || {
-            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
-            scan(&repo, &args()).unwrap();
-        });
-        // A project and a user folder set up before the marker existed: both
-        // markers gone, and one stale file in each scope.
-        std::fs::remove_file(&project_marker).unwrap();
-        std::fs::remove_file(&user_marker).unwrap();
-        std::fs::write(
-            Config::path_in(&repo.root),
-            "[dispatch]\nlane_quiet = \"45m\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            user_dir.join("spoolway-config").join("SKILL.md"),
-            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-config"),
-        )
-        .unwrap();
-
-        crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-
-        assert_eq!(std::fs::read_to_string(&project_marker).unwrap(), line);
-        assert_eq!(std::fs::read_to_string(&user_marker).unwrap(), line);
-        let _ = std::fs::remove_dir_all(&home);
+    fn removing_a_marker_that_is_already_gone_is_not_an_error() {
+        let root = crate::scratch::root("marker-already-gone");
+        let gone = root.join("spoolway-version");
+        let found = Some((gone, ".spoolway/spoolway-version".to_string()));
+        assert_eq!(remove_marker(found).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A sync with nothing to write leaves the marker as it found it, absent
-    /// or older: bumping it would claim files for this version that this run
-    /// never looked at, and make a no-op sync a write.
-    #[test]
-    fn a_sync_with_nothing_to_do_leaves_the_markers_alone() {
-        let (repo, _root_guard) = fixture("stamp-noop");
-        let home = crate::scratch::root("sync-stamp-noop-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let user_marker = crate::cli::Provider::Claude
-            .user_skills_dir(&home)
-            .join(".spoolway-version");
-        let project_marker = repo.setup_dir().join("spoolway-version");
-        crate::platform::test_home::with_home(&home, || {
-            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
-            scan(&repo, &args()).unwrap();
-        });
-
-        std::fs::remove_file(&project_marker).unwrap();
-        std::fs::remove_file(&user_marker).unwrap();
-        crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-        assert!(
-            !project_marker.exists(),
-            "an idle sync wrote the project marker"
-        );
-        assert!(!user_marker.exists(), "an idle sync wrote the user marker");
-
-        std::fs::write(&project_marker, "0.0.1\n").unwrap();
-        std::fs::write(&user_marker, "0.0.1\n").unwrap();
-        crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-        assert_eq!(std::fs::read_to_string(&project_marker).unwrap(), "0.0.1\n");
-        assert_eq!(std::fs::read_to_string(&user_marker).unwrap(), "0.0.1\n");
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// A pre-release build's marker still names files this binary would
-    /// downgrade, so the guard compares the `X.Y.Z` core and not the rule
-    /// that decides whether to nag about an upgrade.
-    #[test]
-    fn a_pre_release_marker_counts_as_newer_by_its_core_version() {
-        assert!(is_newer_core("999.0.0-rc.1"));
-        assert!(is_newer_core("999.0.0+build.5\n"));
-        assert!(!is_newer_core(&format!(
-            "{}-rc.1",
-            crate::release::current()
-        )));
-        assert!(!is_newer_core(crate::release::current()));
-        assert!(!is_newer_core("0.0.1"));
-        assert!(!is_newer_core("not a version"));
-        assert!(!is_newer_core(""));
-
-        let (repo, _root_guard) = fixture("newer-pre-release");
-        let home = crate::scratch::root("sync-newer-pre-release-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let marker = repo.setup_dir().join("spoolway-version");
-        std::fs::write(&marker, "999.0.0-rc.1\n").unwrap();
-        let outcomes =
-            crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
-        assert!(names_newer(&outcomes), "{:?}", outcome_lines(&outcomes));
-        assert!(!record_version(&marker).unwrap(), "an install lowered it");
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "999.0.0-rc.1\n");
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// A version refusal is about files that are ahead, so its closing line
-    /// must not call them behind. Neither does any other refusal: a file that
-    /// matches no known copy may be a newer spoolway's or a hand edit, and the
-    /// line says only that it was left as it is. A mix of the two keeps the
-    /// newer spoolway's files apart.
+    /// A refusal is about files that may be ahead of this binary or hand
+    /// edited, so its closing line must not call them behind.
     #[test]
     fn no_closing_line_calls_a_refused_file_behind() {
-        let newer = [(".spoolway/spoolway-version", "newer")];
         let other = [(".spoolway/pipelines/default.yml", "never ends")];
-        let both = [newer[0], other[0]];
-        assert_eq!(Refused::of(&newer), Refused::Newer);
         assert_eq!(Refused::of(&other), Refused::Files);
-        assert_eq!(Refused::of(&both), Refused::Mixed);
         assert_eq!(Refused::of(&[]), Refused::Nothing);
-        assert!(!NEWER_ONLY.contains("behind"), "{NEWER_ONLY}");
-        assert_eq!(closing_line(false, true, Refused::Newer), NEWER_ONLY);
         assert!(!REFUSED_ONLY.contains("behind"), "{REFUSED_ONLY}");
         assert!(REFUSED_ONLY.contains("left as they are"), "{REFUSED_ONLY}");
-        assert_eq!(closing_line(false, true, Refused::Mixed), MIXED_ONLY);
-        assert_eq!(closing_line(true, true, Refused::Mixed), MIXED_ONLY);
-        assert!(MIXED_ONLY.contains("newer spoolway wrote"), "{MIXED_ONLY}");
-        assert!(!MIXED_ONLY.contains("behind"), "{MIXED_ONLY}");
+        assert_eq!(closing_line(false, true, Refused::Files), REFUSED_ONLY);
     }
 }

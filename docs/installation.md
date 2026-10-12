@@ -500,14 +500,9 @@ removed .spoolway/templates/task-log.md
 Files were overwritten; your config values, prompts and task skeletons were kept.
 ```
 
-With `--dry-run`, the words read `would write` and `would remove`. The last line depends on what
-`sync` refused:
-
-| Refused | Last line |
-|---|---|
-| Only ordinary files | `Nothing else updating; the refused files above were left as they are.` |
-| Only files a newer spoolway wrote | `Nothing else updating; the files above were written by a newer spoolway.` |
-| Both | `Nothing else updating; the files a newer spoolway wrote and the other refused files above were left as they are.` |
+With `--dry-run`, the words read `would write` and `would remove`. When `sync` refused a file
+and wrote nothing else, the last line is `Nothing else updating; the refused files above were left
+as they are.`
 
 `sync` also deletes a leftover per-skill-file stamp, if it finds one. `spoolway doctor` notes a
 project that `sync` would change. Only `spoolway sync` writes the files.
@@ -539,35 +534,23 @@ refused. `sync` adds the table.
 `spoolway doctor` lists each refused file on its own line, with the reason. It leaves those
 files out of the count of files that are behind.
 
-### Files a newer spoolway wrote
+### The retired version marker
 
-`sync`, `init` and `install` record the spoolway version that last wrote a set of files in a
-marker file. The marker holds one line, such as `0.9.0`.
+Some builds of 0.10.0 leave a file named `.spoolway/spoolway-version` in the project, and a file
+named `.spoolway-version` in each user-level skills folder. spoolway does not read these files. A
+skill file written by a newer spoolway is caught by the comparison in [Files spoolway
+refuses](#files-spoolway-refuses).
 
-| Marker | Covers |
+`sync`, `init` and `install` delete the marker files they find. In home mode the project's marker
+sits in the workspace's `config/`. Each deleted file is listed as `removed`, and `sync --dry-run`
+lists it as `would remove`.
+
+| Command | Markers it deletes |
 |---|---|
-| `.spoolway/spoolway-version` | The project's setup folder and its skills. In home mode it sits in the workspace's `config/`. Commit it with the rest of `.spoolway/` |
-| `~/.claude/skills/.spoolway-version` | The skills in that user folder, which every project on the machine shares. `~/.agents/skills/` and `~/.pi/agent/skills/` each hold one too |
-
-When a marker names a newer spoolway than the one you run, `sync` writes nothing in that
-scope. It names the version:
-
-```
-refused .spoolway/spoolway-version — these files were written by spoolway 0.9.0, newer than this 0.8.0 — …
-```
-
-The project and each user folder are checked on their own. A refused user folder does not stop
-the project from syncing, and the other way round.
-
-`init`, `install` and `install --user` refuse in the same way, `--force` included. `init` checks
-before it writes anything. The error names the marker and the version, and offers two ways out:
-
-- Install the named version or a later one, and run the command again.
-- Delete the marker file, to put this spoolway's copies over the newer ones.
-
-A sync that writes anything also writes the marker, and lists it as a file written. A sync with nothing to write leaves the marker as it is. A binary that writes files records its
-own version in the marker and never lowers a newer one. A marker that is missing or unreadable
-never causes a refusal.
+| `sync` | The project's marker and all three user-level markers |
+| `init` | The project's marker. In home mode, also the user-level marker of the agent it installs for |
+| `install` | The project's marker |
+| `install --user` | The user-level marker of the agent it installs for |
 
 ## Platform notes
 

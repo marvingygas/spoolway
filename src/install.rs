@@ -419,45 +419,19 @@ pub struct Outcome {
     /// the first time does not also claim there was "nothing to install" —
     /// see the `home-mode-messages` task.
     pub(crate) wrote: bool,
-    /// Version markers this run wrote, as a person would type them back.
-    /// A marker is a file the person finds in `git status`, so [`report`]
-    /// gives each its own `wrote` row.
-    markers: Vec<String>,
+    /// Retired version markers this run deleted, as a person would type them
+    /// back. The project's marker was a tracked file, so [`report`] gives each
+    /// removed marker its own `removed` row.
+    removed_markers: Vec<String>,
 }
 
-impl Outcome {
-    /// Add a marker a caller wrote on this install's behalf, so [`report`]
-    /// names it too.
-    fn also_wrote_marker(&mut self, shown: Option<String>) {
-        self.markers.extend(shown);
-    }
-}
-
-/// Fail when a scope `install`, `install --user` or `init` would write skills
-/// into carries a version marker naming a newer spoolway: the project's
-/// always, and the provider's user-level folder when `user_level`.
+/// Fail when a skill file `init` would write is none of the copies spoolway
+/// has shipped.
 ///
-/// `init` calls this before it writes anything, because it lays down a whole
-/// scaffold ahead of the skills and `--force` rewrites files that are already
-/// there: a refusal that only came with the skills would arrive after the
-/// downgrade it names. `install` and `install_user` call the same checks
-/// themselves, so a caller that reaches them directly is still refused.
-pub(crate) fn ensure_not_newer(root: &Path, provider: Provider, user_level: bool) -> Result<()> {
-    crate::sync::ensure_project_not_newer(root)?;
-    if user_level && let Some(home) = user_home() {
-        crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
-    }
-    Ok(())
-}
-
-/// [`ensure_not_newer`], and then the same question per file: fail when a
-/// skill file `init` would write is none of the copies spoolway has shipped.
-///
-/// Asked by `init` for the same reason as [`ensure_not_newer`]: it writes a
-/// scaffold ahead of the skills, and a refusal arriving with the skills would
-/// come after the scaffold was already down.
+/// Asked by `init` before it writes anything: it lays down a scaffold ahead of
+/// the skills, and a refusal arriving with the skills would come after the
+/// scaffold was already down.
 pub(crate) fn ensure_installable(root: &Path, provider: Provider, user_level: bool) -> Result<()> {
-    ensure_not_newer(root, provider, user_level)?;
     // A user-level install writes nothing into the checkout, so the project's
     // skill files are not its business. With no home directory it checks
     // nothing at all: `install_user` gives the no-home error itself.
@@ -500,30 +474,30 @@ fn ensure_known(planned: &[Planned], shown: impl Fn(&Path) -> String) -> Result<
 /// does not inherit a nested file-by-file transcript.
 ///
 /// `spoolway sync` makes the same call per file, so a skill is brought forward
-/// by whichever command runs first. Two things stop an install writing a file:
-/// a project whose version marker names a spoolway newer than this binary is
-/// refused, `force` or not, exactly as `sync` refuses it (see
-/// [`crate::sync::ensure_not_newer`]), and so is a file no spoolway shipped,
-/// which `force` does not override either: it means "write files that already
-/// match", and an unknown file is a statement about the file, not about this
-/// run.
+/// by whichever command runs first. A file no spoolway shipped stops the
+/// install, `force` or not: `force` means "write files that already match",
+/// and an unknown file is a statement about the file, not about this run.
+///
+/// Also deletes the project's retired version marker, as `sync` does.
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
-    crate::sync::ensure_project_not_newer(root)?;
     let dest = crate::fmt::relative(root, &provider.skills_dir(root));
     let planned = provider.plan(root);
     let mut outcome = write_planned(&planned, provider.caveat(), force, dest, |path| {
         crate::fmt::relative(root, path)
     })?;
-    outcome.also_wrote_marker(crate::sync::record_project_version(root)?);
+    outcome
+        .removed_markers
+        .extend(crate::sync::remove_marker(crate::sync::project_marker(
+            root,
+        ))?);
     Ok(outcome)
 }
 
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
 /// when there is no home directory to install under, rather than writing a
-/// `.claude/` into whatever directory a relative path would land in. Refused
-/// too when the folder's version marker names a newer spoolway, since every
-/// project on the machine shares these skills.
+/// `.claude/` into whatever directory a relative path would land in. Also
+/// deletes the folder's retired version marker.
 pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     let Some(home) = user_home() else {
         anyhow::bail!(
@@ -534,7 +508,6 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
             provider.name()
         );
     };
-    crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
     let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
@@ -545,9 +518,11 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
         dest,
         crate::repo::shorten_home,
     )?;
-    outcome.also_wrote_marker(crate::sync::record_user_version(
-        &provider.user_skills_dir(&home),
-    )?);
+    outcome
+        .removed_markers
+        .extend(crate::sync::remove_marker(crate::sync::user_marker(
+            &provider.user_skills_dir(&home),
+        ))?);
     Ok(outcome)
 }
 
@@ -603,7 +578,7 @@ fn write_planned(
         caveat,
         dest,
         wrote,
-        markers: Vec::new(),
+        removed_markers: Vec::new(),
     })
 }
 
@@ -620,8 +595,8 @@ pub fn report(outcome: Outcome) {
     if let Some(caveat) = outcome.caveat {
         println!("  note  {caveat}");
     }
-    for marker in &outcome.markers {
-        println!("{}", crate::commands::init::report_row("wrote", marker));
+    for marker in &outcome.removed_markers {
+        println!("{}", crate::commands::init::report_row("removed", marker));
     }
     if outcome.wrote {
         println!("Skills installed successfully, into {}.", outcome.dest);
@@ -737,95 +712,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// `install` and `install --user` rewrite every skill that differs, so
-    /// under a marker naming a newer spoolway they would downgrade what that
-    /// spoolway wrote, which is the defect `sync` refuses for. `--force` is
-    /// no way round it, and the error names the version and the way out.
+    /// A version marker left by 0.10.0 is deleted by `install` and `install
+    /// --user`, each reporting its own file as removed, and a second run has
+    /// nothing left to name.
     #[test]
-    fn install_refuses_skills_a_newer_spoolway_wrote_even_forced() {
-        let home = crate::scratch::root("install-newer");
-        let _ = std::fs::remove_dir_all(&home);
-        let root = home.join("project");
-        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
-        let user_dir = Provider::Claude.user_skills_dir(&home);
-        let project_skill = Provider::Claude
-            .skills_dir(&root)
-            .join("spoolway-config")
-            .join("SKILL.md");
-        let user_skill = user_dir.join("spoolway-config").join("SKILL.md");
-        for skill in [&project_skill, &user_skill] {
-            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-            std::fs::write(skill, "written by a newer spoolway\n").unwrap();
-        }
-        let project_marker = root.join(".spoolway").join("spoolway-version");
-        let user_marker = user_dir.join(".spoolway-version");
-        std::fs::write(&project_marker, "999.0.0\n").unwrap();
-        std::fs::write(&user_marker, "999.0.0\n").unwrap();
-
-        for force in [false, true] {
-            let project = install(&root, Provider::Claude, force).err().unwrap();
-            let user = crate::platform::test_home::with_home(&home, || {
-                install_user(Provider::Claude, force).err().unwrap()
-            });
-            for error in [project, user] {
-                let text = format!("{error:#}");
-                assert!(text.contains("999.0.0"), "{text}");
-                assert!(text.contains("delete"), "{text}");
-            }
-        }
-
-        for skill in [&project_skill, &user_skill] {
-            assert_eq!(
-                std::fs::read_to_string(skill).unwrap(),
-                "written by a newer spoolway\n"
-            );
-        }
-        for marker in [&project_marker, &user_marker] {
-            assert_eq!(std::fs::read_to_string(marker).unwrap(), "999.0.0\n");
-        }
-
-        // The marker gone, the skill a newer spoolway wrote is still no copy
-        // this binary knows, so it is refused on its own account, naming the
-        // way to take this binary's.
-        std::fs::remove_file(&project_marker).unwrap();
-        let refused = format!(
-            "{:#}",
-            install(&root, Provider::Claude, false).err().unwrap()
-        );
-        assert!(
-            refused.contains("spoolway sync --replace .claude/skills/spoolway-config/SKILL.md"),
-            "{refused}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&project_skill).unwrap(),
-            "written by a newer spoolway\n"
-        );
-
-        // With that file taken by `sync --replace` (here: removed), this
-        // binary's copies go in and its own version is recorded.
-        std::fs::remove_file(&project_skill).unwrap();
-        let outcome = install(&root, Provider::Claude, false).unwrap();
-        assert!(outcome.wrote);
-        assert_eq!(
-            std::fs::read_to_string(&project_marker).unwrap(),
-            format!("{}\n", crate::release::current())
-        );
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// The marker is a tracked file the person finds in `git status`, so the
-    /// install report gives it a row of its own, and only when it was written.
-    #[test]
-    fn install_names_a_version_marker_it_wrote() {
+    fn install_deletes_a_retired_version_marker_and_names_it() {
         let home = crate::scratch::root("install-marker-row");
         let _ = std::fs::remove_dir_all(&home);
         let root = home.join("project");
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        let project_marker = root.join(".spoolway").join("spoolway-version");
+        let user_marker = Provider::Claude
+            .user_skills_dir(&home)
+            .join(".spoolway-version");
+        std::fs::create_dir_all(user_marker.parent().unwrap()).unwrap();
+        std::fs::write(&project_marker, "0.10.0\n").unwrap();
+        std::fs::write(&user_marker, "0.10.0\n").unwrap();
 
-        let first = install(&root, Provider::Claude, false).unwrap();
-        assert_eq!(first.markers, [".spoolway/spoolway-version"]);
+        let project = install(&root, Provider::Claude, false).unwrap();
+        assert_eq!(project.removed_markers, [".spoolway/spoolway-version"]);
+        let user = crate::platform::test_home::with_home(&home, || {
+            install_user(Provider::Claude, false).unwrap()
+        });
+        assert_eq!(user.removed_markers, ["~/.claude/skills/.spoolway-version"]);
+        assert!(!project_marker.exists() && !user_marker.exists());
+
         let again = install(&root, Provider::Claude, false).unwrap();
-        assert!(again.markers.is_empty(), "{:?}", again.markers);
+        assert!(again.removed_markers.is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 

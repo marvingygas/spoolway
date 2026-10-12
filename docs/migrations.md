@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.9.0 to 0.10.0 | Row actions move behind `o` and popups take no letter answers; a job with no `base` never fires; `sync` writes a version marker older binaries refuse to overwrite; long task and step ids are refused; `--json` is refused where a command has no JSON form; `pipeline check` reads the live queue; resuming an archived task fails; silent lanes are reminded instead of escalated; agent launch failures go to `blocked`; a gated command reruns after an unblocker pass; background checks and failed removals hold a task on `done`; `eval` and the ledger carry command steps; `[models]` globs match more names; requeued tasks fire their hooks again; `doctor` fails more settings. | Learn the options menu, add `base` to every job, commit `.spoolway/spoolway-version`, shorten long ids, drop `--json` where refused, update scripts that read `eval`, the ledger or `queue list`, and clear what `spoolway doctor` fails. |
+| 0.9.0 to 0.10.0 | Row actions move behind `o` and popups take no letter answers; a job with no `base` never fires; `sync` refuses a file that matches no copy spoolway has shipped and deletes the version marker; long task and step ids are refused; `--json` is refused where a command has no JSON form; `pipeline check` reads the live queue; resuming an archived task fails; silent lanes are reminded instead of escalated; agent launch failures go to `blocked`; a gated command reruns after an unblocker pass; background checks and failed removals hold a task on `done`; `eval` and the ledger carry command steps; `[models]` globs match more names; requeued tasks fire their hooks again; `doctor` fails more settings. | Learn the options menu, add `base` to every job, shorten long ids, drop `--json` where refused, update scripts that read `eval`, the ledger or `queue list`, and clear what `spoolway doctor` fails. |
 | 0.8.0 to 0.9.0 | A job table with an unknown key never fires; a first cut refuses a leftover `task/<id>` branch; no command prints the update or sync notice; hook failures leave the board and make `doctor` exit non-zero; a partial `[models]` row keeps the price table's rates and window; `slots` caps a whole row; recorded costs include subagents and Claude Code's own total; `blocked.*` overrides apply; config reloads every pass; unknown keys load with a note; unattended escalations go to `blocked`; `openrouter/` models leave the price table. | Fix unknown job keys, clear leftover task branches, run `spoolway sync` in each project, review cost and session limits, read `spoolway doctor` and `spoolway override list`, and set `context_window` for `openrouter/` models. |
 | 0.7.1 to 0.8.0 | A pipeline with `end: true` or `on_pass: blocked` is refused when it loads; `session_reuse_idle` is renamed `prompt_cache_ttl` and defaults to five minutes on hosted models; `session_reuse_ctx` and `session_blocked_ctx` default to 20 and 40; `R` on the board is gone; `dispatch.herdr_mode` and `models.<glob>.exclusive` are retired; every step keeps its pane until its task is done; `loop:` limits every move; a running dispatcher routes on the pipelines it started with; a nested `.spoolway/` is refused; `config set` refuses values `doctor` would fail; `queue add --from` rows say `group issue` and `task issue`; `eval` gains USD columns. | Replace `end: true` and `on_pass: blocked`, set `prompt_cache_ttl` and `context_window` where the defaults do not fit, run `spoolway sync`, and restart the dispatcher after editing a pipeline. |
 | 0.7.0 to 0.7.1 | Pipelines that could never run are refused when they load: `loop: 0`, which 0.7.0 read as no limit, a first step of `blocked`, and a `gate_at:` that names no step; `spoolway jobs run` is removed; an unset or empty `HOME` is refused; `resume` refuses queued and running tasks; `gate: true` and `gate_at:` now work on a command step; leaving `blocked` resets every `loop:` count; each worktree builds into its own `target/`; workspace folders are never deleted; `init --force` keeps the provider and tracker; `sync --replace` writes `.bak.N`. | Delete every `loop: 0` line, drop `spoolway jobs run` from scripts, set `HOME` in CI, check queued tasks' `gate_at:`, remove the old `.cargo-target` folder once older tasks finish, and run `spoolway sync`. |
@@ -35,10 +35,11 @@ release record. This guide collects only the steps that may require action.
 
 ## Syncing with an older spoolway
 
-`spoolway sync` records the spoolway version in `.spoolway/spoolway-version` and in each
-user-level skills folder. A binary older than that version refuses to write the folder and names
-the newer version. Update the binary, or delete the marker file to take the older copies. See
-[Files a newer spoolway wrote](installation.md#files-a-newer-spoolway-wrote).
+`spoolway sync` compares each skill file, pipeline key block and config reference table with the
+copies spoolway has shipped. A file that matches none was written by a newer spoolway or edited by
+hand, so it is refused and left as it is. Update the binary, or run `spoolway sync --replace
+<path>` to take this binary's copy. See [Files spoolway
+refuses](installation.md#files-spoolway-refuses).
 
 ## Windows
 
@@ -52,9 +53,8 @@ wsl npm install -g spoolway
 
 ## 0.9.0 to 0.10.0
 
-Upgrade every machine and CI job that reads the project first. 0.9.0 does not read the version
-marker 0.10.0 writes, so it still overwrites newer files, and it refuses a job table that sets
-`base`. Then run `spoolway sync` in each project, commit the new `.spoolway/spoolway-version`, read
+Upgrade every machine and CI job that reads the project first. 0.9.0 still overwrites newer
+files, and it refuses a job table that sets `base`. Then run `spoolway sync` in each project, read
 the notes and failures `spoolway doctor` prints, work through the list, and restart the dispatcher.
 
 - Learn the options menu. A row's actions moved behind `o`, and popups list their answers as rows
@@ -77,9 +77,10 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   tasks set no `base:` no longer fires, where 0.9.0 cut them from the branch the main checkout had
   out. The dispatcher names it with ``job <name>: `<task>` sets no `base:`, and the job has no
   `base` key.`` The jobs screen has no `base` field, so add the key by hand.
-- Commit `.spoolway/spoolway-version`. A binary older than the version it names refuses to write
-  the project, and the same holds for `.spoolway-version` in each user skills folder. Delete the
-  marker to take an older binary's copies on purpose.
+- Expect `spoolway sync`, `init` and `install` to delete `.spoolway/spoolway-version`, and
+  `.spoolway-version` in each user skills folder, if a build of 0.10.0 wrote them. A 0.10.0 binary
+  built before the marker was retired refuses by that marker alone, so upgrade every machine and
+  CI job that runs those commands.
 - Finish or unqueue every task whose id is longer than 100 characters, then queue it again under a
   shorter id. Rename every pipeline step id longer than 64 characters. Both are refused whenever
   spoolway reads them, with ``task id `<id>` is <n> characters long, and the limit is 100``.

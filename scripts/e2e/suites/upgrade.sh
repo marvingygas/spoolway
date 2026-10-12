@@ -277,17 +277,7 @@ stage() {
 # release.
 assert_init_reused_everything() {
   local version=$1 out="$WORK/$1/init.out"
-  # Every fixture predates the version stamp `init` leaves in the setup folder
-  # (`sync::VERSION_MARKER`), so that one row is this run's to write; every
-  # file the fixture already has must still read `kept`.
-  grep -vF "  wrote    .spoolway/spoolway-version" "$out" >"$out.files"
-  lacks "the $version fixture's second init wrote nothing but the version stamp" \
-    "  wrote" "$out.files"
-  local stamp want
-  stamp=$(cat "$WORK/$version/proj/.spoolway/spoolway-version" 2>/dev/null)
-  want=$("$SPOOLWAY" --version | awk '{ print $2 }')
-  if [ "$stamp" = "$want" ]; then ok "and stamped the project with this binary's version"
-  else bad "and stamped the project with this binary's version (found '$stamp', want '$want')"; fi
+  lacks "the $version fixture's second init wrote nothing" "  wrote" "$out"
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
   has "and installed the skills the fixture never carried" \
@@ -475,6 +465,18 @@ for fixture_dir in "$FIXTURES"/*/; do
   [ "$version" = "0.6.0" ] && continue
   [ -d "$fixture_dir/.spoolway" ] || continue
   stage "$version"
+  # 0.10.0 recorded the spoolway version in a tracked file of the setup folder.
+  # Nothing reads it now, so the `init` that `stage` ran over the fixture
+  # deleted it, said so, and left none behind.
+  if [ -f "$fixture_dir/.spoolway/spoolway-version" ]; then
+    has "the $version fixture's second init reported its version file removed" \
+      "  removed  .spoolway/spoolway-version" "$WORK/$version/init.out"
+    if [ -e "$WORK/$version/proj/.spoolway/spoolway-version" ]; then
+      bad "and left no version file behind in the $version project"
+    else
+      ok "and left no version file behind in the $version project"
+    fi
+  fi
   must "spoolway sync runs against the $version project" \
     bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
   lacks "sync refused no file of the $version project as a copy it does not know" \
