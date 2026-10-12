@@ -17,6 +17,48 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.11.0
+
+### Highlights
+- A routine runs one copy at a time and reads by its own name: queueing it while a copy is still in the queue is refused with the step that copy is at, a job skips its window instead, and the board, the `queued` popup, the lane, its herdr workspace and `spoolway eval --by task` all show the routine's name where they showed a numbered id. (#929, #934, #942, #945)
+- Issue tracking can be turned off per group: on the queue screen and the routines tab, `enter` opens a checklist of the batch's groups, and a ticked group queues with `tracking: off` while every other group opens its tickets. `spoolway queue add --no-tracking <group>` does the same from a shell, and a task that sets `tracking: off` never reaches the `open` hook. (#930, #939, #941, #943)
+- A `background: true` command step is a sidecar with no verdict: its exit never moves the task, a task reaching `done` archives without waiting for it, and a run that exits non-zero or hits its `timeout:` leaves one line in the task's `## Status Log`. (#957, #958)
+- An older spoolway can no longer downgrade what a newer one wrote, file by file: `sync`, `init` and `install` keep a file equal to this spoolway's copy, rewrite one equal to an older shipped copy, and refuse one that matches no shipped copy, naming the `spoolway sync --replace <path>` that takes this spoolway's copy. (#954, #962, #965)
+- The board's `open` runs the editor you name once per machine in `~/.spoolway/editor.toml`: a Windows `.exe` editor on WSL gets the Windows form of the path and opens in its own window, a refusal shows in a popup with the fix, and `spoolway doctor -v` names the editor `open` will run. (#955, #960, #964)
+
+### Breaking changes and migration
+- A `background: true` step that declares `on_fail` no longer loads, where 0.10.0 sent the task there on a late failure and held it on `done` until the check ended. `spoolway pipeline check`, `spoolway doctor`, the dispatcher and `spoolway sync` refuse it with ``step `<id>` runs in the background but declares `on_fail` ``, and name both fixes: delete `on_fail:` to keep the step a sidecar, or delete `background:` to make it a check the task waits for. A task no longer waits on `done` for a background run, the NEXT reason `waiting on background <step>` and the recent move `failed <step> in the background, moved to <step>` are gone, and a run still going is stopped when its task is cleaned up. (#957, #958)
+- `spoolway sync` no longer overwrites a skill file, a pipeline key block or a `config.toml` settings reference that matches no copy spoolway has shipped. 0.10.0 replaced a hand-edited key block and always rewrote skill files; such a file is now refused, left as it is, and listed by `spoolway doctor` on a line of its own. `init` and `install` write no skill file when any of them is refused, `--force` included, and `init` then writes none of its scaffold either. Run `spoolway sync --replace <path>` for each refused file, which now also takes a project or user-level skill file, a pipeline file, whose key block alone is swapped, and `config.toml`, whose values are kept. (#954, #962)
+- The version marker is retired. `spoolway sync`, `init` and `install` delete `.spoolway/spoolway-version`, and `.spoolway-version` in each user skills folder, and list each as `removed`. Commit the deletion. 0.10.0 refuses to write over newer files only by that marker, so once it is gone a 0.10.0 binary overwrites skill files this release wrote and writes the marker again. Upgrade every machine and CI job that runs `sync`, `init` or `install`. (#965)
+- When issue tracking is on, the queue screen's and the routines tab's question is a checklist of groups headed `Deactivate issue tracking for selected groups:`, with nothing ticked. The `create and queue` and `queue only` rows are gone: `enter` alone opens every ticket, and `a` then `enter` queues the whole batch with `tracking: off`. While the hook runs the popup reads `running the hook: <n> of <total> tasks`, and the `queued` popup opens on `Hook executed successfully`, in place of the `opening issues` and `issues created` popups and their per-ticket rows. Update any pty or tmux script that answers or reads these popups. (#939, #941)
+- `spoolway queue add` calls no `open` hook for a task that sets `tracking: off`, where 0.10.0 called it and refused the whole batch when it failed. A group whose tasks all set `tracking: off` needs no `group_description:`, and gets no `issue_tracking.key_in_names` prefix, so its branches read `task/<id>`. (#930, #939)
+- A routine runs one copy at a time. Queueing a routine from the routines tab is refused while any task in the queue, paused and blocked ones included, carries its name in `routine:` or as its id, and a job skips its window with ``job <name> · due now · skipped, <routine> is still in the queue, at step <step>``. Let the copy finish, or resume, restart or unqueue it, before you queue the routine again. A routine is also refused while any file in the queue does not parse. (#934)
+- `routine:` is set by spoolway on every queued copy of a routine, so `spoolway queue add` refuses a task file that sets it with ``sets `routine:`, which spoolway sets on every task itself — remove it from the task``. Rename the key in task files that used it for their own metadata. (#929)
+- A copy of a routine is shown by the routine's name on the board and in the `queued` popup, and the board draws only a routine group's live copies. Its lane is named `<routine> · <step>`, its herdr workspace `spoolway/<routine>`, its tab `<routine>`, and its system prompt file `system-prompts/<routine> · <step>.md`. `spoolway lane` takes either name while the copy is in the queue, and `spoolway queue list` still prints the numbered id. Update scripts that find a routine copy's pane, workspace or system prompt by its numbered id. (#929, #942)
+- `spoolway eval --by task` labels each run of a routine copy by its routine, sorts rows newest start first, and writes WHEN as the run's start, `YYYY-MM-DD HH:MM` in local time, where 0.10.0 wrote the date alone. `--json` and `--csv` carry the same label in `task` and the same time in `when`, and `--task` still matches the task id. `usage.jsonl` lines for a routine copy gain a `routine` key. Update scripts that parse `when` as a date. (#945)
+- The board's `open` reads `~/.spoolway/editor.toml` before `$VISUAL` and `$EDITOR`, and with none of them set it runs `vim`, where 0.10.0 ran `vi`. `spoolway config edit` and `spoolway config override` keep `$VISUAL`, `$EDITOR`, then `vi`, and ignore `editor.toml`. (#955, #960)
+
+### Features
+- `spoolway doctor` lists each file `sync` refuses on a line of its own and leaves it out of the count of files that are behind; under `-v` an `editor` row names the program `open` runs, where it came from, and whether it opens its own window. (#962, #964)
+- The shipped `spoolway-config` skill edits a pipeline, prompt or setting in place on a private setup, in home mode or under `local/`, instead of making an override of it. Run `spoolway sync` to install it. (#951)
+
+### Fixes
+- A worktree cut whose `git fetch` hangs on its transport gives up within its bound and stops the fetch, and unrelated tasks start in the meantime. Each question to `origin` about a remote-only base gives up after 10 seconds: `spoolway dispatch` then starts and holds only that task, saying `origin` could not be asked, where 0.10.0 hung on a hung `origin` and refused an offline one as if the branch did not exist. (#933)
+- An unblocker lane that was mid-turn when a resume was refused can still report, and its report moves the task on instead of leaving it on `blocked`. (#944)
+- The eval tab's cursor stops at the table's last row, and keys typed faster than it draws are applied in order in one frame, so holding `↓` no longer keeps it moving after you let go. (#936)
+- The eval tab opens and rereads faster: it walks the claude and pi transcript stores once per read, prices every model once, and rebuilds the table only when its data changes. (#928, #931)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.11.0`, or run it without installing via `npx spoolway@0.11.0`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64; the GitHub release carries one archive per platform and `SHA256SUMS`.
+- Upgrade every machine and CI job that reads the project, then run `spoolway sync` in each project and commit the deleted `.spoolway/spoolway-version`. Fix every background step with `on_fail`, run `spoolway sync --replace` for each file it refuses, read the notes and failures `spoolway doctor` prints, work through the breaking changes above, and restart the dispatcher. The 0.10.0 to 0.11.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.11.0
+
 ## 0.10.0
 
 ### Highlights

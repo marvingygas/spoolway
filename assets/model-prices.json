@@ -1,7 +1,7 @@
 {
   "source": "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
   "license": "MIT",
-  "generated": "2026-10-11",
+  "generated": "2026-10-12",
   "models": {
     "ai21.j2-mid-v1": {
       "context_window": 8191,
@@ -4829,6 +4829,11 @@
       "input": 3.0,
       "output": 12.0
     },
+    "computer-use-preview-2025-03-11": {
+      "context_window": 8192,
+      "input": 3.0,
+      "output": 12.0
+    },
     "crusoe/Qwen/Qwen3-235B-A22B-Instruct-2507": {
       "context_window": 262144,
       "input": 3.0,
@@ -9153,7 +9158,19 @@
       "output": 0.6,
       "cache_read": 0.075
     },
+    "gpt-4o-mini-search-preview-2025-03-11": {
+      "context_window": 128000,
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.075
+    },
     "gpt-4o-search-preview": {
+      "context_window": 128000,
+      "input": 2.5,
+      "output": 10.0,
+      "cache_read": 1.25
+    },
+    "gpt-4o-search-preview-2025-03-11": {
       "context_window": 128000,
       "input": 2.5,
       "output": 10.0,
@@ -9467,6 +9484,11 @@
       "output": 10.0
     },
     "gpt-audio-mini": {
+      "context_window": 128000,
+      "input": 0.6,
+      "output": 2.4
+    },
+    "gpt-audio-mini-2025-10-06": {
       "context_window": 128000,
       "input": 0.6,
       "output": 2.4
@@ -10116,12 +10138,12 @@
       "output": 0.6
     },
     "meta.llama4-maverick-17b-instruct-v1:0": {
-      "context_window": 128000,
+      "context_window": 1000000,
       "input": 0.24,
       "output": 0.97
     },
     "meta.llama4-scout-17b-instruct-v1:0": {
-      "context_window": 128000,
+      "context_window": 10000000,
       "input": 0.17,
       "output": 0.66
     },
@@ -10154,6 +10176,12 @@
       "input": 0.1,
       "output": 0.2,
       "cache_read": 0.002
+    },
+    "meta/muse-wonder-1.0": {
+      "context_window": 1048576,
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2
     },
     "microsoft_365_copilot/chat": {},
     "minimax.minimax-m2": {
@@ -13549,8 +13577,7 @@
     },
     "together_ai/together/Tev1-4B-experimental": {
       "context_window": 32768,
-      "input": 0.042,
-      "cache_read": 0.042
+      "input": 0.042
     },
     "together_ai/zai-org/GLM-4.5-Air-FP8": {
       "context_window": 131072,
@@ -14003,12 +14030,12 @@
       "output": 0.72
     },
     "us.meta.llama4-maverick-17b-instruct-v1:0": {
-      "context_window": 128000,
+      "context_window": 1000000,
       "input": 0.24,
       "output": 0.97
     },
     "us.meta.llama4-scout-17b-instruct-v1:0": {
-      "context_window": 128000,
+      "context_window": 10000000,
       "input": 0.17,
       "output": 0.66
     },
@@ -14143,7 +14170,7 @@
       "output": 10.0
     },
     "us.writer.palmyra-x5-v1:0": {
-      "context_window": 1000000,
+      "context_window": 128000,
       "input": 0.6,
       "output": 6.0
     },
@@ -15769,7 +15796,7 @@
       "output": 10.0
     },
     "writer.palmyra-x5-v1:0": {
-      "context_window": 1000000,
+      "context_window": 128000,
       "input": 0.6,
       "output": 6.0
     },
