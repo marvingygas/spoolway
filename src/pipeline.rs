@@ -284,9 +284,8 @@ pub enum StepKind {
     ///
     /// Blocking by default: the task sits here until the process ends, and its
     /// exit code picks `on_pass` or `on_fail`. With `background: true` the task
-    /// leaves on the same pass it started, and the process runs on; if it
-    /// declares `on_fail`, a later pass that finds it exited non-zero routes
-    /// the task there, wherever it has reached by then.
+    /// leaves on the same pass it started, and the process runs on as a
+    /// sidecar: its exit never moves the task, and `on_fail` on it is refused.
     Command,
 }
 
@@ -544,11 +543,9 @@ pub struct Step {
     /// looks exactly like a slow one. What tells them apart is a number
     /// somebody wrote down.
     ///
-    /// It bounds a background run too, but stopping one at its timeout is not
-    /// a verdict `on_fail` can route on — the process is killed with no exit
-    /// code left behind, the same as one interrupted any other way. What it
-    /// stops is a process outliving the task that started it, on a task that
-    /// never reaches cleanup because it blocked on the way.
+    /// It bounds a background run too. What it stops is a process outliving
+    /// the task that started it, on a task that never reaches cleanup because
+    /// it blocked on the way.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -558,12 +555,11 @@ pub struct Step {
 
     /// Let the task move on while the command keeps running.
     ///
-    /// If the step declares `on_fail`, a later pass that finds the run exited
-    /// non-zero routes the task there — wherever it has reached by then, even
-    /// a step further down the pipeline than this one. A run that exits zero,
-    /// or is still going, changes nothing about where the task is. What the
-    /// command wrote is in its log either way, and a run still going at
-    /// cleanup is stopped with the task.
+    /// The run is a sidecar with no verdict: its exit code is never read to
+    /// route, so a run that fails, passes or is still going changes nothing
+    /// about where the task is, and `on_fail` on the step is refused at load.
+    /// What the command wrote is in its log, and a run still going at cleanup
+    /// is stopped with the task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
 
@@ -1420,10 +1416,22 @@ impl Pipeline {
                             step.id
                         );
                     }
+                    // A background run is a sidecar: its exit never moves the
+                    // task, so an `on_fail` there would promise a route
+                    // nothing takes. Read late, it would also pull the task
+                    // off whatever step an agent is mid-turn on.
+                    if step.background && step.on_fail.is_some() {
+                        bail!(
+                            "step `{}` runs in the background but declares `on_fail` — a \
+                             background run is a sidecar, and its exit never moves the task.\n  \
+                             keep it a sidecar:  delete `on_fail:`\n  \
+                             make it a check:    delete `background:`, and the step blocks",
+                            step.id
+                        );
+                    }
                     // A background step passes the moment it starts, so a
                     // gate there would hold the start, not the exit the docs
-                    // promise — and a late failure would pull the task off
-                    // `paused` from under whoever is looking at it.
+                    // promise.
                     if step.background && step.gate {
                         bail!(
                             "step `{}` runs in the background but declares `gate` — its pass \
@@ -3613,6 +3621,33 @@ mod tests {
         );
     }
 
+    /// A background run is a sidecar, so a route on its exit is refused, and
+    /// the message names both ways out. Any `on_fail` counts, `blocked` too.
+    #[test]
+    fn a_background_step_with_an_on_fail_is_refused() {
+        for on_fail in ["fix", "blocked"] {
+            let err = parse(&format!(
+                "steps:\n  - id: a\n    run: make\n    background: true\n    on_pass: z\n    \
+                 on_fail: {on_fail}\n  - id: fix\n    agent: pi\n    on_pass: z\n  \
+                 - id: z\n    run: x\n    on_pass: done\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("step `a` runs in the background but declares `on_fail`"),
+                "{err}"
+            );
+            assert!(
+                err.contains("keep it a sidecar:  delete `on_fail:`"),
+                "{err}"
+            );
+            assert!(
+                err.contains("make it a check:    delete `background:`, and the step blocks"),
+                "{err}"
+            );
+        }
+    }
+
     /// `last:` walks every task but one past the step, and a lane nobody
     /// started is a prompt that never reports — so whatever the step was for
     /// goes unjudged rather than undone. It is a command step's key, and every
@@ -3966,19 +4001,6 @@ mod tests {
         assert!(message.contains("form a loop nothing bounds"), "{message}");
         assert!(message.contains("`a`"), "{message}");
         assert!(message.contains("`b`"), "{message}");
-    }
-
-    /// A background step passes the moment it starts and its late failure moves
-    /// the task to `on_fail` only once, so a pipeline whose `on_fail` leads
-    /// somewhere that never comes back is not a loop and must keep loading.
-    #[test]
-    fn a_background_step_with_an_on_fail_that_never_returns_is_no_loop() {
-        parse(
-            "steps:\n  - id: build\n    run: make\n    background: true\n    on_pass: write\n    \
-             on_fail: fix\n  - id: write\n    agent: pi\n    on_pass: done\n  \
-             - id: fix\n    agent: pi\n    on_pass: done\n",
-        )
-        .unwrap();
     }
 
     /// One bounded route is enough for the whole cycle: it escalates, its

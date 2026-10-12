@@ -230,9 +230,6 @@ pub(crate) enum Move {
         to: String,
         cause: Option<Cause>,
     },
-    /// `from`, a `background: true` command step the task had already walked
-    /// past, exited non-zero and pulled the task down its `on_fail`.
-    FailedInBackground { from: String, to: String },
     /// `from`'s lane said so itself, with `--block` or `--pause`.
     Reported {
         what: Reported,
@@ -2329,10 +2326,6 @@ pub(crate) fn sentence(change: &Move) -> String {
         Move::Skipped { from, to, cause } => {
             (format!("skipped {from}, moved to {to}"), cause.as_ref())
         }
-        Move::FailedInBackground { from, to } => (
-            format!("failed {from} in the background, moved to {to}"),
-            None,
-        ),
         Move::Reported {
             what,
             from,
@@ -4937,10 +4930,6 @@ mod tests {
                         written.insert(sentence(&change));
                     }
                 }
-                written.insert(sentence(&Move::FailedInBackground {
-                    from: f.clone(),
-                    to: t.clone(),
-                }));
                 written.insert(sentence(&Move::Escalated {
                     from: f.clone(),
                     to: t.clone(),

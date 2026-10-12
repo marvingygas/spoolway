@@ -134,7 +134,7 @@ impl Runs {
     }
 
     /// Everything the command wrote, both streams, kept after the run is
-    /// forgotten — for a background run with no `on_fail` it is the *only*
+    /// forgotten — for a background run it is the *only*
     /// account of what happened, since nothing routes on its outcome.
     pub fn log_path(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.log"))
@@ -557,12 +557,10 @@ impl Runs {
     ///
     /// Called once the exit code has been routed on. A task arriving at the
     /// step again starts clean anyway — see [`Runs::begin_visit`] — so this is
-    /// not what keeps a revisit from routing on an old code. It matters for a
-    /// task that has left a background step: [`crate::dispatch::Dispatcher`]
-    /// rereads the leftover code of a background step the task is no longer
-    /// on and reroutes the task down that step's `on_fail`, on every pass,
-    /// until it is gone. A foreground step's leftover code is cleared without
-    /// rerouting.
+    /// not what keeps a revisit from routing on an old code. A background
+    /// step's leftover code is never routed, so it is not forgotten here: the
+    /// dispatcher rereads it on every pass to close the pane and bank the run,
+    /// and cleanup clears it with the task.
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.
