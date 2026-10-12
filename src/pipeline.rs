@@ -1070,7 +1070,7 @@ impl Pipeline {
 }
 
 // ---------------------------------------------------------------------------
-// The six retired shapes' own messages, each written once: `validate` and
+// The seven retired shapes' own messages, each written once: `validate` and
 // `refuse_retired_step_keys` bail on the first with these, and
 // `Pipeline::retired_shape_problems` collects every one — the same wording
 // either way, since `scripts/e2e/suites/upgrade.sh` greps these exact
@@ -1125,6 +1125,18 @@ fn end_message(step_id: &str) -> String {
 /// holds the same pass for a person and keeps where it was headed.
 fn on_pass_blocked_message(step_id: &str) -> String {
     format!("step `{step_id}` has on_pass: blocked — use gate: true to stop for a person")
+}
+
+/// A background command step declaring `on_fail`. 0.10.0 routed a late
+/// failure there; a background run is now a sidecar whose exit never moves
+/// the task, so the route is refused and both ways out are named.
+fn background_on_fail_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` runs in the background but declares `on_fail` — a background run \
+         is a sidecar, and its exit never moves the task.\n  \
+         keep it a sidecar:  delete `on_fail:`\n  \
+         make it a check:    delete `background:`, and the step blocks"
+    )
 }
 
 /// A step still declaring the retired `on_loop_max:`.
@@ -1421,13 +1433,7 @@ impl Pipeline {
                     // nothing takes. Read late, it would also pull the task
                     // off whatever step an agent is mid-turn on.
                     if step.background && step.on_fail.is_some() {
-                        bail!(
-                            "step `{}` runs in the background but declares `on_fail` — a \
-                             background run is a sidecar, and its exit never moves the task.\n  \
-                             keep it a sidecar:  delete `on_fail:`\n  \
-                             make it a check:    delete `background:`, and the step blocks",
-                            step.id
-                        );
+                        bail!(background_on_fail_message(&step.id));
                     }
                     // A background step passes the moment it starts, so a
                     // gate there would hold the start, not the exit the docs
@@ -1648,6 +1654,9 @@ impl Pipeline {
             }
             if step.on_pass.as_deref() == Some(BLOCKED) {
                 problems.push(on_pass_blocked_message(&step.id));
+            }
+            if step.background && step.on_fail.is_some() {
+                problems.push(background_on_fail_message(&step.id));
             }
         }
         problems

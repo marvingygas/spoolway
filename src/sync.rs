@@ -4439,6 +4439,48 @@ mod tests {
         );
     }
 
+    /// A background command step with `on_fail`, which 0.10.0 routed on a
+    /// late failure, no longer loads. A sync refuses the file with both ways
+    /// out and writes nothing to it, rather than report an upgrade done over
+    /// a pipeline the next command refuses.
+    #[test]
+    fn a_background_step_with_on_fail_is_refused_naming_both_fixes() {
+        let (repo, _root_guard) = fixture("pipeline-background-on-fail");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.yml");
+        let before = "steps:\n  \
+                      - id: implement\n    agent: pi\n    model: m\n    on_pass: lint\n  \
+                      - id: lint\n    run: x\n    background: true\n    on_pass: done\n    \
+                      on_fail: implement\n";
+        std::fs::write(&path, before).unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        let (shown, why) = refused[0];
+        assert!(shown.ends_with("default.yml"), "{shown}");
+        assert!(
+            why.starts_with(
+                "will not load: step `lint` runs in the background but declares `on_fail`"
+            ),
+            "{why}"
+        );
+        assert!(
+            why.contains("keep it a sidecar:  delete `on_fail:`"),
+            "{why}"
+        );
+        assert!(
+            why.contains("make it a check:    delete `background:`"),
+            "{why}"
+        );
+        let (wrote, _) = dedup_paths(&outcomes);
+        assert!(wrote.is_empty(), "{wrote:?}");
+    }
+
     /// Half a fence is the one shape worth a refusal: the lines under a start
     /// marker with no end could be anyone's.
     #[test]

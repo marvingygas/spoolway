@@ -475,8 +475,8 @@ anything:
 ```
 
 A file `sync` refuses is listed first in the panel, with the reason and what to do about it.
-A pipeline file carrying a step shape this release no longer loads, such as `loop: 0`, is
-refused too, naming the step and the edit. `sync` never edits a step for you.
+A pipeline file carrying a step shape this release no longer loads, such as `loop: 0` or a
+`background: true` step with `on_fail`, is refused too, naming the step and the edit. `sync` never edits a step for you.
 
 Enter writes the files and prints the report `sync` always prints. Esc, ctrl-c, or the terminal
 going away mid-question writes nothing and prints "Nothing was changed." With no terminal to
