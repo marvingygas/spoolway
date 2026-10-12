@@ -117,7 +117,19 @@ written to the tracked setup, repo mode only:
 **Tweak one value here** — a model, an effort, a timeout, a concurrency, a
 whole prompt, or any key `spoolway config contract` lists:
 
-- Reach for the override layer by default:
+- First find out whether the setup is already private. Read `mode` from
+  `spoolway config path --json`. Then look for `private` after the
+  pipeline's name in `spoolway pipeline show`.
+- In home mode, the whole setup is private. Edit the file in the workspace's
+  `config/` directly. Do not run `pipeline override`, `prompt override` or
+  `config override`.
+- In repo mode, a pipeline or prompt that exists only under `local/` is
+  private too. Edit the `local/` file directly. An override on it never
+  applies until the pipeline is promoted.
+- If the person asks for an override in either case, say in one line that the
+  setup is already private, so an override adds nothing. Edit the file
+  directly. Make the override only if they still insist.
+- Otherwise, reach for the override layer by default:
   - a step's field: `spoolway pipeline override <name> --set <step>.<key>=<value>`
   - a whole prompt: `spoolway prompt override <name>`, then edit the fork
   - a config key: `spoolway config override`, or set one key by hand in
