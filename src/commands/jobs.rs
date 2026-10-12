@@ -1092,10 +1092,11 @@ fn picked_task(
 }
 
 /// The routine picker's open, picked off the menu `o` opens over its own
-/// tasks pane: open the highlighted task in an editor pane, the same shape [`crate::commands::queue`]'s
+/// tasks pane: open the highlighted task in the editor `crate::editor::open`
+/// picks, the same shape [`crate::commands::queue`]'s
 /// own `open_highlighted_routine` gives the queue screen's routines pane,
-/// including the same [`JobMode::Outcome`] a backend with no pane to open
-/// one in is surfaced through. Returns to [`JobMode::PickRoutine`] with
+/// including the same [`JobMode::Outcome`] a refused open is surfaced
+/// through. Returns to [`JobMode::PickRoutine`] with
 /// `nav` and `draft` exactly as they were rather than [`JobMode::List`],
 /// since this item never leaves the walk the way the queue screen's open has
 /// nothing of its own to stay in.
@@ -1111,12 +1112,7 @@ fn open_highlighted_job_routine(
             nav: nav.clone(),
         };
     };
-    let command = crate::status::editor_command(&task.path);
-    let mux = match crate::mux::backend(repo) {
-        Ok(mux) => mux,
-        Err(err) => return JobMode::Outcome(Notice::new("open task", format!("o: {err:#}"))),
-    };
-    match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
+    match crate::editor::open(repo, &format!("{} · edit", task.id), &task.path) {
         Ok(()) => JobMode::PickRoutine {
             draft,
             nav: nav.clone(),
@@ -2593,7 +2589,7 @@ mod tests {
         assert_eq!(last_frame(&closed), last_frame(&picker));
     }
 
-    /// The menu's open on a headless run has no pane to open an editor in,
+    /// The menu's open of a terminal editor on a headless run has no pane to open it in,
     /// in the routine picker exactly as on the queue screen's own routines
     /// pane — see `open_highlighted_job_routine`'s own doc comment. The
     /// refusal surfaces as `JobMode::Outcome`, same as any other; staying on
@@ -2602,6 +2598,7 @@ mod tests {
     #[test]
     fn opening_from_the_routine_picker_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("jobs-screen-open-headless");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_routines(&repo);
 

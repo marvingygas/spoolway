@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
 ---
 
 # The dispatcher
@@ -405,7 +405,7 @@ in this order, and the cursor opens on the first item:
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `open` | Every row, `done` ones included. | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
+| `open` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
 | `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
@@ -419,6 +419,48 @@ and a done row lists `open` alone. A row whose task file is gone opens the menu 
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
 The board has no key that unqueues every task at once: `spoolway queue unqueue --all` does that
 from a shell.
+
+### Editor
+
+`open` runs one editor, chosen in this order. The first one that is set wins.
+
+| Order | Source |
+|---|---|
+| 1 | `command` under `[editor]` in `~/.spoolway/editor.toml` |
+| 2 | `$VISUAL` |
+| 3 | `$EDITOR` |
+| 4 | `vim` |
+
+The same choice serves every `open` in the terminal screens: the board, the queue screen's tasks
+and routines panes, and the jobs routine picker. `spoolway config edit` and `spoolway config
+override` do not use it. They read `$EDITOR` and fall back to `vi`.
+
+`editor.toml` is written by hand. This example opens tasks in Notepad:
+
+```toml
+[editor]
+command = "notepad.exe"
+```
+
+| Key | Default | What it controls |
+|---|---|---|
+| `command` | none | The command to run. It may hold flags, such as `code --wait`. The task path is added at the end. |
+| `window` | `true` when the program ends in `.exe`, otherwise `false` | `true` starts the editor in the background with no pane. `false` opens it in a pane. |
+
+A window editor runs in a session of its own, so quitting spoolway leaves it open. It starts on
+every backend, the headless one included. A terminal editor opens in a pane, and the headless
+backend has no pane to open it in.
+
+On WSL, a command whose program ends in `.exe` receives the Windows form of the path, such as
+`\\wsl.localhost\Ubuntu\home\you\...`. Other commands receive the Linux path.
+
+`open` refuses and starts nothing in these cases:
+
+| Case | What the refusal says |
+|---|---|
+| `editor.toml` does not parse, or holds a key other than `[editor]` `command` and `window` | The error names the file. The next editor is not tried. |
+| The program is not on `PATH` | The error names the program and says to fix `command` or delete the file. |
+| The Windows path conversion fails | The error names the task path. |
 
 ### Resume picker
 

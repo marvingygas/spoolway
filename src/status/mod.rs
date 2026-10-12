@@ -1247,8 +1247,9 @@ impl Board {
     }
 }
 
-/// The options menu's `open`: open task `id`'s file in an editor, in a pane
-/// the multiplexer opens — a no-op on a task the queue and the archive no
+/// The options menu's `open`: open task `id`'s file in the editor
+/// [`crate::editor::open`] picks — a terminal editor in a pane the
+/// multiplexer opens, a window editor in the background — a no-op on a task the queue and the archive no
 /// longer have. `repo.task` reads both, so this reaches a done row's task
 /// exactly as it does a live one — [`build`]'s own composed row list, which
 /// [`Board::drawn`] is taken from, is what lets the cursor land on that row
@@ -1256,8 +1257,9 @@ impl Board {
 /// and the board keeps redrawing and the pass loop keeps running while it
 /// is open, exactly as if nothing had happened.
 ///
-/// A backend with no pane to open one in — headless, which refuses the
-/// way `Mux::open_command`'s default does — is best-effort like every
+/// A terminal editor on a backend with no pane to open one in — headless,
+/// which refuses the way `Mux::open_command`'s default does — and any other
+/// refusal of the open is best-effort like every
 /// other action here: the refusal is swallowed, exactly as an `Err` out of
 /// `on_key` already is by the dispatch loop that calls it, and the task
 /// file it would have opened is left exactly as it was.
@@ -1265,23 +1267,8 @@ fn open_task(repo: &Repo, id: &str) -> Result<()> {
     let Ok(task) = repo.task(id) else {
         return Ok(());
     };
-    let command = editor_command(&task.path);
-    let mux = crate::mux::backend(repo)?;
-    let _ = mux.open_command(&repo.root, &format!("{id} · edit"), &command);
+    let _ = crate::editor::open(repo, &format!("{id} · edit"), &task.path);
     Ok(())
-}
-
-/// The command line a screen runs to open a task in an editor.
-///
-/// The same resolution `spoolway config edit` already uses: `$VISUAL`, then
-/// `$EDITOR`, then `vi`. Shared between the board's [`open_task`]
-/// and the queue screen's own `o` — `crate::commands::queue::open_highlighted`
-/// — so the two can never resolve to two different editors.
-pub(crate) fn editor_command(path: &Path) -> String {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
-    format!("{editor} '{}'", path.display())
 }
 
 /// What an `o` or `r` keypress is waiting to be answered — a menu or panel
@@ -9246,6 +9233,7 @@ mod tests {
     #[test]
     fn the_cursor_reaches_a_done_row_and_its_menu_opens_its_task() {
         let (mut repo, _root_guard) = fixture("cursor-reaches-done-row");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
@@ -11202,13 +11190,14 @@ mod tests {
         );
     }
 
-    /// `o` on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `Mux::open_command`'s default does — so the key is a no-op:
+    /// `o` on a headless run, with a terminal editor named, finds no pane to
+    /// open it in — headless refuses it the way `Mux::open_command`'s default does — so the key is a no-op:
     /// best-effort, like every other key here, and the task file it would
     /// have opened is left exactly as it was.
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
         let (mut repo, _root_guard) = fixture("open-key-headless");
+        let _home = crate::editor::pin_terminal_editor();
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
