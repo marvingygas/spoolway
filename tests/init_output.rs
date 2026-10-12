@@ -261,7 +261,7 @@ fn init_names_the_version_marker_it_writes_and_only_then() {
     assert!(older.contains(&wrote), "{older}");
 }
 
-/// `init` rewrites every skill that differs from the shipped copy, and with
+/// `init` rewrites a skill that is an older copy of the shipped one, and with
 /// `--force` every scaffold file too, so run over a project a newer spoolway
 /// set up it would downgrade them, which `sync` refuses to do. It stops before
 /// it writes anything, names the version, and leaves every file as it was.
@@ -300,6 +300,44 @@ fn init_refuses_to_rewrite_a_project_a_newer_spoolway_wrote() {
             "{extra:?} rewrote the config before refusing"
         );
     }
+}
+
+/// A skill file no spoolway shipped is refused by `init` before it writes the
+/// scaffold. The skills' own check comes after the scaffold, and `--force` has
+/// by then overwritten every scaffold file, so the refusal would arrive too
+/// late to leave the project as it was.
+#[test]
+fn init_refuses_a_skill_no_spoolway_shipped_before_it_writes_the_scaffold() {
+    let project = Project::new("unknown-skill");
+    project.init("claude");
+    let skill = ".claude/skills/spoolway-config/SKILL.md";
+    std::fs::write(project.as_ref().join(skill), "edited by hand\n").unwrap();
+    let scaffold = scaffold_paths(&project);
+    for path in &scaffold {
+        std::fs::write(project.as_ref().join(path), "mine\n").unwrap();
+    }
+
+    let result =
+        project.run_allowing_failure(&["init", "--force", "--yes", "--provider", "claude"]);
+
+    assert!(!result.status.success(), "{}", stdout(&result));
+    let err = stderr(&result);
+    assert!(
+        err.contains(&format!("`spoolway sync --replace {skill}`")),
+        "{err}"
+    );
+    assert!(!stdout(&result).contains("  wrote "), "{}", stdout(&result));
+    for path in &scaffold {
+        assert_eq!(
+            std::fs::read_to_string(project.as_ref().join(path)).unwrap(),
+            "mine\n",
+            "init --force rewrote {path} before refusing"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(project.as_ref().join(skill)).unwrap(),
+        "edited by hand\n"
+    );
 }
 
 /// A home-mode `init` keeps its skills in the user folder every project

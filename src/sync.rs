@@ -11,9 +11,11 @@
 //! the freshly rendered version — every byte around it is copied through without
 //! being read. Anything a person has changed is reported and left exactly as it
 //! is: this command's failure mode has to be "did nothing and said so", never
-//! "helped". [`skills`] does not keep this promise either, for the same reason
-//! [`config`] and [`pipelines`] do not — see the `config.toml` paragraph
-//! below.
+//! "helped". [`config`], [`pipelines`] and [`skills`] keep it too, in the part
+//! of their file that is spoolway's: a skill file, a pipeline's key block and
+//! `config.toml`'s reference table are refused when they have been edited. The
+//! rest of `config.toml` is still spoolway's to rewrite, as the paragraph
+//! below says.
 //!
 //! Prompts, their assets, and task skeletons are not here at all, and that is
 //! the design. All are prose a project owns outright, with nothing generated
@@ -49,15 +51,24 @@
 //!
 //! `config.toml` is the file that works the other way round, and [`config`]
 //! says why: there the values are the project's and everything around them —
-//! which settings are written down, and every comment — is spoolway's, and is
-//! rewritten outright. A pipeline file's key reference is the same bargain in
-//! one fenced block of an otherwise untouched file; [`pipelines`] says why it
-//! is documentation of the binary's contract rather than anything a project
-//! meant. A skill file is the whole-file version of the same bargain: nothing
-//! in one is a project's to have meant, so [`skills`] (and [`user_level`], for
-//! the agent's user folder) rewrites it outright wherever it differs from the
-//! shipped copy, hand edit or not — unless that scope's version marker names a
-//! newer spoolway, when the scope is refused whole; see [`written_by_newer`].
+//! which settings are written down, and every comment but the reference table
+//! — is spoolway's, and is rewritten from the binary. Only the reference
+//! table is checked against the copies spoolway has shipped. A pipeline file's
+//! key reference is the same bargain in one fenced block of an otherwise
+//! untouched file; [`pipelines`] says why it is documentation of the binary's
+//! contract rather than anything a project meant. A skill file is the
+//! whole-file version of the same bargain, and [`skills`] (and [`user_level`],
+//! for the agent's user folder) keeps it.
+//!
+//! The bargain has one condition, decided per file by [`crate::known_copies`].
+//! A skill file, key block or config reference table equal to this binary's
+//! copy is kept. One equal to a copy an older spoolway shipped is stale and is
+//! rewritten. One equal to nothing any spoolway shipped was written by a newer
+//! spoolway or edited by hand, and it is refused, naming the file and `spoolway
+//! sync --replace <path>`, which takes this binary's copy over it and saves
+//! the file as a `.bak` first. `init` and `install` make the same call for the
+//! skills they write. A scope whose version marker names a newer spoolway is
+//! refused whole as well; see [`written_by_newer`].
 //!
 //! This used to be `spoolway update`'s job, along with installing the binary
 //! itself. The two were split apart so `update` can run from any directory,
@@ -71,6 +82,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::SyncArgs;
+use crate::known_copies::{Known, Shipped, lookup, refusal};
 use crate::repo::Repo;
 use crate::task::write_atomic;
 
@@ -175,17 +187,19 @@ const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to ta
 /// a command that would do the exact same nothing.
 const NOOP: &str = "Nothing updating.";
 
-/// What a sync says when it refused a file and wrote nothing else.
-const REFUSED_ONLY: &str = "Nothing else updating; the refused files above are still behind.";
+/// What a sync says when it refused a file and wrote nothing else. A refused
+/// file is not necessarily behind: a newer spoolway may have written it, or a
+/// person edited it, so the line says only what was done to it.
+const REFUSED_ONLY: &str = "Nothing else updating; the refused files above were left as they are.";
 
 /// The same, when every refusal is a newer spoolway's version marker: those
 /// files are ahead of this binary, not behind it.
 const NEWER_ONLY: &str = "Nothing else updating; the files above were written by a newer spoolway.";
 
 /// The same, when a run refused both kinds: the version-refused files are
-/// ahead and the others behind, so the line has to tell them apart.
-const MIXED_ONLY: &str = "Nothing else updating; the files a newer spoolway wrote were left as \
-                          they are, and the other refused files above are still behind.";
+/// named as a newer spoolway's, and the others are only said to be left alone.
+const MIXED_ONLY: &str = "Nothing else updating; the files a newer spoolway wrote and the other \
+                          refused files above were left as they are.";
 
 /// What a run refused, as far as its closing line cares.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1009,12 +1023,14 @@ fn written_by_newer(marker: &Path, shown: &str) -> Option<Outcome> {
 /// commands that install a scope's skills outright. `shown` is the marker as
 /// the person would type it back.
 ///
-/// `install` and `init` rewrite every skill file that differs from the
-/// shipped copy, so without this check they would downgrade the files a newer
-/// spoolway wrote just as `sync` would. `--force` does not override it: it
+/// `install` and `init` rewrite a skill file that is an older copy of the
+/// shipped one, and this check stops them downgrading the files a newer
+/// spoolway wrote just as it stops `sync`. `--force` does not override it: it
 /// means "write files that already match", and a newer marker is a statement
 /// about the files, not about this run. Deleting the marker is the way to
-/// take this binary's copies anyway, and the error says so.
+/// take this binary's copies anyway, and the error says so; a file that is
+/// none of the copies any spoolway shipped is still refused after that, by
+/// [`crate::known_copies`], with `sync --replace` as its own way out.
 pub(crate) fn ensure_not_newer(marker: &Path, shown: &str) -> Result<()> {
     match newer_version(marker) {
         Some(version) => bail!(
@@ -1175,20 +1191,56 @@ fn worktree_root_outcome(repo: &Repo, shown: &str, old: &str) -> Outcome {
     Outcome::migrated(shown, report_detail, panel_detail)
 }
 
+/// A rewritten `config.toml` and the settings it carried over unknown.
+type ConfigRewrite = (String, Vec<Vec<String>>);
+
+/// What `config.toml` becomes under a sync: `text` rewritten from `current`,
+/// and the settings it carried over that this binary does not know. The inner
+/// `Err` is the reason there is nothing safe to write.
+///
+/// One place for the rewrite, because `sync --replace config.toml` promises to
+/// rewrite the file "as sync does": two copies of these steps would drift the
+/// next time one of them changed, and nothing would notice.
+fn rewritten_config(
+    current: &crate::config::Config,
+    text: &str,
+) -> Result<std::result::Result<ConfigRewrite, String>> {
+    // A key this binary does not know is not in what `current` renders, so it
+    // is carried over from the file with its comment instead — a typo is the
+    // person's to fix and a newer binary's key is that binary's to read, and
+    // neither is `sync`'s to delete. `doctor` and every load name them.
+    let unknown = crate::config::unknown_keys(text);
+    let (rewritten, kept) = crate::confdoc::keep(text, &current.render()?, &unknown)?;
+
+    // Its own work, checked. A rewrite may not change a single value — every one
+    // of them came out of this file a moment ago — so a rendering that no longer
+    // means what the file meant is a bug, and is not written.
+    if let Err(err) = current.agrees_with(&rewritten) {
+        return Ok(Err(format!(
+            "rewriting it would have changed what it says — {err:#}"
+        )));
+    }
+    Ok(Ok((rewritten, kept)))
+}
+
 /// The config file: rewritten whole, except for what you set it to.
 ///
 /// The one file spoolway owns outright and a person reads constantly, so the
 /// two halves are split the other way round from every other file here: the
 /// **values** are the project's and survive a sync untouched, and everything
 /// else — which settings are written down, what order they come in, and every
-/// comment — is spoolway's and is rewritten from the binary.
+/// comment but the reference table's — is spoolway's and is rewritten from the
+/// binary.
 ///
 /// That is why the explanations in `config.toml` can be trusted: a note there
 /// is what this binary says today, not a copy of what some older one said, and
-/// not somebody's sentence sitting where a note belongs. Prose about a
-/// project's own choices has somewhere better to live — a prompt, a pipeline,
-/// or project documentation — where it is read by whoever needs it
-/// rather than by nobody.
+/// not somebody's sentence sitting where a note belongs. The reference table on
+/// top is rewritten only when it is a table some spoolway shipped. A table
+/// equal to none of them was written by a newer spoolway or edited by hand, so
+/// the file is refused, naming `spoolway sync --replace <path>`, and nothing in
+/// it is rewritten. Prose about a project's own choices has somewhere better
+/// to live — a prompt, a pipeline, or project documentation — where it is read
+/// by whoever needs it rather than by nobody.
 ///
 /// Until this existed nothing brought a config forward at all, and the only
 /// thing that ever added a missing key was `config set` re-rendering the whole
@@ -1317,23 +1369,29 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         }
     }
 
-    // A key this binary does not know is not in what `current` renders, so it
-    // is carried over from the file with its comment instead — a typo is the
-    // person's to fix and a newer binary's key is that binary's to read, and
-    // neither is `sync`'s to delete. `doctor` and every load name them.
-    let unknown = crate::config::unknown_keys(&text);
-    let (rewritten, kept) = crate::confdoc::keep(&text, &current.render()?, &unknown)?;
-
-    // Its own work, checked. A rewrite may not change a single value — every one
-    // of them came out of this file a moment ago — so a rendering that no longer
-    // means what the file meant is a bug, and is not written.
-    if let Err(err) = current.agrees_with(&rewritten) {
-        outcomes.push(Outcome::blocked(
-            &shown,
-            format!("rewriting it would have changed what it says — {err:#}"),
-        ));
+    // The reference table on top is spoolway's to rewrite, but only when it is
+    // a table some spoolway wrote. One that is none of them was written by a
+    // newer spoolway or edited by hand, and rewriting the file would discard
+    // that. Nothing else in the file is touched either, since a rewrite is
+    // the whole file: `--replace` is the way to take this binary's.
+    //
+    // A file with no table at all is not that: nothing was edited, there is
+    // simply no table yet, so the rewrite adds it as it adds any setting the
+    // file never named. A hand-written `[dispatch]` with a couple of values is
+    // the usual case.
+    let table = reference_in(&text);
+    if !table.trim().is_empty() && lookup(&Shipped::ConfigReference, table) == Known::Unknown {
+        outcomes.push(Outcome::blocked(&shown, refusal(&shown)));
         return Ok(());
     }
+
+    let (rewritten, kept) = match rewritten_config(&current, &text)? {
+        Ok(rewrite) => rewrite,
+        Err(why) => {
+            outcomes.push(Outcome::blocked(&shown, why));
+            return Ok(());
+        }
+    };
 
     if rewritten == text {
         outcomes.push(Outcome::Kept);
@@ -1506,6 +1564,30 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     Ok(())
 }
 
+/// The reference table at the top of a `config.toml`: its leading run of
+/// comment lines, the span [`crate::confkv::reference_table`] writes above
+/// the blank line that separates it from the settings. Empty when the file
+/// starts with no comment, or with one that sits straight on a setting.
+///
+/// A file whose first line is not a comment has no table, and this answers the
+/// empty text.
+fn reference_in(text: &str) -> &str {
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.starts_with('#') {
+            break;
+        }
+        end += line.len();
+    }
+    // A comment block straight on top of a key or a table is that setting's
+    // own comment, not a table: the one `reference_table` writes is always
+    // followed by a blank line.
+    match text[end..].lines().next() {
+        Some(next) if !next.trim().is_empty() => "",
+        _ => &text[..end],
+    }
+}
+
 /// The page skeletons: their one machine-read block, and nothing else.
 ///
 /// These are meant to be restyled, so taking the file back only when it is
@@ -1617,21 +1699,29 @@ fn write_block(
     Ok(())
 }
 
-/// `--replace`: the whole shipped file, over whatever is there.
+/// `--replace`: this binary's copy, over whatever is there.
 ///
 /// The way back from a file so far from the shape we know that no region can be
-/// found in it, or one whose machine-readable block was hand-edited and so is
-/// left alone by the in-place rewrite. Everything about it is deliberately
-/// blunt: named paths only, the old contents saved beside the new, and a count
-/// of what is being discarded.
+/// found in it, one whose machine-readable block was hand-edited and so is
+/// left alone by the in-place rewrite, or one `sync` refused because no
+/// spoolway ever shipped it. For most files the copy is the whole file; a
+/// pipeline file swaps only its key block, and `config.toml` is rewritten as
+/// `sync` does, keeping its values (see [`Scope`]). Everything about it is
+/// deliberately blunt: named paths only, the old contents saved beside the
+/// new, and a count of what is being discarded.
 fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
     let mut failed = 0;
+    // Whether a file of the checkout was written, which is what `git diff`
+    // can show; a user-level skill sits outside it.
+    let mut in_checkout = false;
     let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
     for name in &args.replace {
         // A path spelled under `.spoolway/` names the project's setup folder,
         // which in home mode is the workspace's `config/` and not a folder
         // of the checkout. Anything else relative joins the checkout.
-        let path = if Path::new(name).is_absolute() {
+        let path = if let Some(under_home) = home_relative(name) {
+            under_home
+        } else if Path::new(name).is_absolute() {
             PathBuf::from(name)
         } else if Path::new(name).starts_with(crate::config::STATE_DIR) {
             repo.under_setup(name)
@@ -1658,17 +1748,18 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             }
         }
 
-        let Some(shipped) = shipped_for(repo, &path) else {
-            println!(
-                "  ! {shown}: not a file spoolway ships, so there is nothing to replace it with"
-            );
-            failed += 1;
-            continue;
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        let (shipped, scope) = match replacement_for(repo, &path, &on_disk) {
+            Ok(found) => found,
+            Err(why) => {
+                println!("  ! {shown}: {why}");
+                failed += 1;
+                continue;
+            }
         };
 
         let is_hook = path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout));
 
-        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
         if on_disk == shipped {
             // The text is already ours, but a hook's execute bit is not part
             // of that comparison — a stale checkout or an editor save can
@@ -1685,7 +1776,7 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
         let discarded = on_disk.lines().count();
 
         if args.dry_run {
-            println!("  would   {shown} (whole file, discarding {discarded} line(s))");
+            println!("  would   {shown} ({})", scope.dry_run(discarded));
             continue;
         }
 
@@ -1727,9 +1818,10 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
         match home_mode {
             // A workspace path is long, so the note goes on its own line,
             // under the path.
-            true => println!("  wrote   {shown}\n          (whole file, discarding your changes)"),
-            false => println!("  wrote   {shown} (whole file, discarding your changes)"),
+            true => println!("  wrote   {shown}\n          ({})", scope.wrote()),
+            false => println!("  wrote   {shown} ({})", scope.wrote()),
         }
+        in_checkout |= path.starts_with(&repo.checkout);
     }
 
     println!();
@@ -1739,19 +1831,115 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             args.replace.len()
         );
     }
-    if let Some(line) = replace_footer(repo, args.dry_run) {
+    // Nothing to diff when only user-level skills were written: they sit
+    // outside the checkout's git repository.
+    if (args.dry_run || in_checkout)
+        && let Some(line) = replace_footer(repo, args.dry_run)
+    {
         println!("{line}");
     }
     Ok(())
 }
 
+/// How much of a file `--replace` rewrites, and so what it tells the person.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// Every byte: a prompt, a template, a hook, a skill, a skeleton.
+    Whole,
+    /// A pipeline file's fenced key block. Every other line is kept.
+    KeyBlock,
+    /// `config.toml`, rewritten as `sync` does: values kept, the table and
+    /// comments spoolway's.
+    Config,
+}
+
+impl Scope {
+    /// What a dry run says it would do to the file.
+    fn dry_run(self, discarded: usize) -> String {
+        match self {
+            Scope::Whole => format!("whole file, discarding {discarded} line(s)"),
+            Scope::KeyBlock | Scope::Config => self.wrote().to_string(),
+        }
+    }
+
+    /// What the report says a write did.
+    fn wrote(self) -> &'static str {
+        match self {
+            Scope::Whole => "whole file, discarding your changes",
+            Scope::KeyBlock => "key block only, every other line kept",
+            Scope::Config => "rewritten as sync does, your values kept",
+        }
+    }
+}
+
+/// `name` as a path under the home directory when it is spelled with a
+/// leading `~`, the way `sync` names a user-level skill. `None` for any other
+/// spelling, and for a `~` with no home directory to resolve it against.
+fn home_relative(name: &str) -> Option<PathBuf> {
+    let rest = name.strip_prefix('~')?;
+    let home = crate::platform::home_dir()?;
+    match rest.strip_prefix(['/', '\\']) {
+        Some(rest) => Some(home.join(rest)),
+        None if rest.is_empty() => Some(home),
+        None => None,
+    }
+}
+
+/// The text `--replace` writes at `path`, given what is there now, and how much
+/// of the file that is. The `Err` is the reason there is nothing to write.
+///
+/// A file with one fixed shipped copy answers from [`shipped_for`]. A pipeline
+/// file and `config.toml` have none, since each holds values or steps that are
+/// the project's own, so their text is worked out from `on_disk`.
+fn replacement_for(
+    repo: &Repo,
+    path: &Path,
+    on_disk: &str,
+) -> std::result::Result<(String, Scope), String> {
+    if let Some(shipped) = shipped_for(repo, path) {
+        return Ok((shipped, Scope::Whole));
+    }
+
+    if path == crate::config::Config::path_in(&repo.checkout) {
+        // The same rewrite `config` plans, minus its report: the table and the
+        // settings spoolway writes come from the binary, and every value is
+        // read back out of this file.
+        let current = crate::config::Config::load_dropping_retired_keys(&repo.checkout)
+            .map_err(|err| format!("{err:#} — fix it with `spoolway config edit`"))?;
+        let (rewritten, _) =
+            rewritten_config(&current, on_disk).map_err(|err| format!("{err:#}"))??;
+        return Ok((rewritten, Scope::Config));
+    }
+
+    let in_pipelines = path.parent() == Some(&crate::pipeline::Pipelines::dir_in(&repo.checkout))
+        && path
+            .extension()
+            .is_some_and(|ext| ext == "yml" || ext == "yaml");
+    if in_pipelines {
+        return crate::pipeline::KEY_BLOCK
+            .replace(on_disk, crate::pipeline::key_block())
+            .map(|next| (next, Scope::KeyBlock))
+            .ok_or_else(|| {
+                format!(
+                    "it has no key block to swap, so spoolway has no place in it to write; paste \
+                     the `{}` and `{}` marker lines in where the block belongs, then run this again",
+                    crate::assets::PIPELINE_KEYS_BEGIN,
+                    crate::assets::PIPELINE_KEYS_END
+                )
+            });
+    }
+
+    Err("not a file spoolway ships, so there is nothing to replace it with".to_string())
+}
+
 /// How `--replace` names `path`: relative to the checkout, as ever, except
-/// that in home mode a file in the workspace's `config/` is named by its `~`
-/// form, since the long absolute path is not one the person typed.
+/// that a file outside it — a user-level skill, or in home mode a file in the
+/// workspace's `config/` — is named by its `~` form, since the long absolute
+/// path is not one the person typed.
 fn shown_path(repo: &Repo, path: &Path) -> String {
     let in_workspace =
         crate::repo::workspace_clone(&repo.root).is_some() && path.starts_with(repo.setup_dir());
-    match in_workspace {
+    match in_workspace || !path.starts_with(&repo.checkout) {
         true => crate::repo::shorten_home(path),
         false => crate::platform::relative(&repo.checkout, path),
     }
@@ -1855,6 +2043,25 @@ fn shipped_for_among(
             .map(|(_, body)| body.to_string());
     }
 
+    // A skill file, project or user level: whole-file, like the rest here, and
+    // the only way back to ours once `sync` has refused one it does not know.
+    // A project's skill folders are the checkout's, so in home mode, which
+    // writes nothing there, only the user-level ones answer.
+    let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
+    let providers = <crate::cli::Provider as clap::ValueEnum>::value_variants();
+    let project = providers
+        .iter()
+        .filter(|_| !home_mode)
+        .flat_map(|provider| provider.plan(&repo.checkout));
+    let user = crate::install::user_home().into_iter().flat_map(|home| {
+        providers
+            .iter()
+            .flat_map(move |provider| provider.plan_user(&home))
+    });
+    if let Some(planned) = project.chain(user).find(|planned| planned.path == path) {
+        return Some(planned.contents.to_string());
+    }
+
     // The ignore rules are deliberately not here. They are a block in a file the
     // project owns the rest of, so there is no whole-file version of it to write:
     // `ignores` above refreshes the block, on every run, and that is the only way
@@ -1951,9 +2158,14 @@ fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
         .collect()
 }
 
-/// Rewrite each of `planned` that differs from the shipped copy, or is
-/// missing, naming it as `shown` gives it — the half of [`skills`] a
-/// project folder and a user folder share.
+/// Bring each of `planned` forward, naming it as `shown` gives it — the half
+/// of [`skills`] a project folder and a user folder share.
+///
+/// A missing file is added, and one equal to the shipped copy is kept. One
+/// that matches an older copy a build shipped is stale and rewritten. One that
+/// matches no copy ever shipped was written by a newer spoolway or edited by
+/// hand, so it is refused and left as it is: rolling it back would be this
+/// command helping, the one thing it must not do. See [`crate::known_copies`].
 fn refresh(
     planned: Vec<crate::install::Planned>,
     shown: impl Fn(&Path) -> String,
@@ -1961,13 +2173,18 @@ fn refresh(
     acts: &mut Vec<Act>,
 ) -> Result<()> {
     for planned in planned {
-        let detail = match std::fs::read_to_string(&planned.path) {
-            Ok(on_disk) if on_disk == planned.contents => {
+        let detail = match planned.on_disk() {
+            Some(Known::Current) => {
                 outcomes.push(Outcome::Kept);
                 continue;
             }
-            Ok(_) => "rewritten",
-            Err(_) => "added",
+            Some(Known::Older) => "rewritten",
+            Some(Known::Unknown) => {
+                let shown = shown(&planned.path);
+                outcomes.push(Outcome::blocked(&shown, refusal(&shown)));
+                continue;
+            }
+            None => "added",
         };
         let shown = shown(&planned.path);
         acts.push(Act::write(planned.path, &shown, planned.contents));
@@ -1976,13 +2193,14 @@ fn refresh(
     Ok(())
 }
 
-/// Skills are rewritten to the shipped copy wherever a project installed
-/// them: a skill file belongs to spoolway outright, the same bargain
-/// `config.toml` keeps for everything around a project's own values, so
-/// there is no hand edit to protect here — nothing but the shipped copy was
-/// ever meant to be there. Writing them into a project that never ran
-/// `install` would still be this command choosing an agent on someone's
-/// behalf, so that guard stays.
+/// Skills are brought to the shipped copy wherever a project installed
+/// them: a skill file belongs to spoolway, the same bargain `config.toml`
+/// keeps for everything around a project's own values, but only while it is a
+/// copy some spoolway shipped. One equal to an older shipped copy is stale and
+/// rewritten; one equal to no shipped copy was written by a newer spoolway or
+/// edited by hand, and is refused per file (see [`refresh`]). Writing them
+/// into a project that never ran `install` would still be this command
+/// choosing an agent on someone's behalf, so that guard stays.
 ///
 /// Every provider, not just `claude`: `init` and `install` write the same
 /// skills under `.agents/skills/` and `.pi/skills/` too, and a codex or pi
@@ -2152,18 +2370,18 @@ fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
 /// A pipeline is the project's flow, written in the project's words, so almost
 /// none of the file is ours. The exception is the table of keys in its header:
 /// that is documentation of *this binary's* contract, and a copy of it written
-/// by an older release is a copy that is now wrong. So the fence is refreshed
-/// wherever it is found and every line around it — the title, the steps, the
-/// notes between them — is copied through unread.
+/// by an older release is a copy that is now wrong. So an older copy of the
+/// fence is refreshed wherever it is found and every line around it — the
+/// title, the steps, the notes between them — is copied through unread.
 ///
-/// Two departures from the module doc's promise, specific to a pipeline
-/// file — [`skills`] departs from the same promise too, in its own way; see
-/// the module doc's own paragraph on it. Both below are deliberate:
+/// Two rules specific to a pipeline file, both deliberate:
 ///
-/// - An edit inside the markers is discarded, not refused. This is
-///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
-///   project to have meant, because every sentence is a claim about what the
-///   binary does. A hand-edited one is a claim that has stopped being true.
+/// - The block is replaced only when it is a copy some spoolway shipped. An
+///   older one is stale, and every sentence in it is a claim about what the
+///   binary does, so nothing in it is a project's to have meant. One that
+///   matches no shipped copy was written by a newer spoolway or edited by hand,
+///   so it is refused, naming the file and `spoolway sync --replace <path>`,
+///   which swaps only the block and keeps every other line.
 /// - A file with no markers is never written, and is reported only by the
 ///   check below. Writing a block into a pipeline somebody wrote themselves
 ///   would be this command helping, which is the one thing it must never do.
@@ -2278,31 +2496,26 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         let found = region
             .read(&on_disk)
             .expect("the fence was just confirmed above");
-        if crate::skeleton::same(found, crate::pipeline::key_block()) {
-            outcomes.push(Outcome::Kept);
-        } else {
-            match region.replace(&on_disk, crate::pipeline::key_block()) {
+        match lookup(&Shipped::PipelineKeys, found) {
+            Known::Current => outcomes.push(Outcome::Kept),
+            // An older copy a release shipped: nothing in it is anyone's to
+            // have meant, so the whole block is swapped and no line of a
+            // person's is lost.
+            Known::Older => match region.replace(&on_disk, crate::pipeline::key_block()) {
                 Some(next) => {
                     on_disk = next;
                     changed = true;
                     outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
-                    // The block belongs to spoolway, so an edit inside it is
-                    // gone after this write. Said in the report, because the
-                    // line a person added is otherwise lost without a word.
-                    // Names the file: the notes print after every file line,
-                    // and an upgrade can replace the block in several files.
-                    outcomes.push(Outcome::migrated(
-                        &shown,
-                        format!(
-                            "migrated: the block between spoolway's key markers in {shown} was \
-                             replaced; a hand edit inside it is not kept"
-                        ),
-                        format!("migrated: key block in {shown} replaced; edits are not kept"),
-                    ));
                 }
                 None => {
                     outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
                 }
+            },
+            // No release shipped it: a newer spoolway wrote it, or somebody
+            // edited it. Rewriting would discard that, so the file is left
+            // exactly as it is.
+            Known::Unknown => {
+                outcomes.push(Outcome::blocked(&shown, refusal(&shown)));
             }
         }
 
@@ -2314,11 +2527,11 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 }
 
 // ---------------------------------------------------------------------------
-// The skill stamp is gone: a skill file belongs to spoolway outright now, so
-// there is no hand edit left to tell from a stale shipped copy, and nothing
-// here reads or writes one any more. [`remove_skill_stamp`] is the one thing
-// left to do with the name — clear out the file an upgraded project may
-// still be carrying from before this change.
+// The skill stamp is gone: [`crate::known_copies`] tells a stale shipped copy
+// from a hand edit now, so nothing here reads or writes a per-project record
+// of one any more. [`remove_skill_stamp`] is the one thing left to do with
+// the name — clear out the file an upgraded project may still be carrying
+// from before this change.
 // ---------------------------------------------------------------------------
 
 /// The skill stamp's old file name, under [`Repo::home`] — kept only so a
@@ -2701,10 +2914,9 @@ mod tests {
         std::fs::write(
             &pipeline_path,
             format!(
-                "# hotfix — mine.\n\n{}\n# Top level\n#   template    What this used to say.\n{}\n\n\
+                "# hotfix — mine.\n\n{}\n\n\
                  steps:\n  - id: work\n    run: x\n    on_pass: done\n",
-                crate::assets::PIPELINE_KEYS_BEGIN,
-                crate::assets::PIPELINE_KEYS_END
+                older_fence()
             ),
         )
         .unwrap();
@@ -2727,7 +2939,7 @@ mod tests {
             pipeline_after.contains(crate::pipeline::key_block()),
             "{pipeline_after}"
         );
-        assert!(!pipeline_after.contains("What this used to say"));
+        assert!(!pipeline_after.contains(crate::known_copies::older::key_block()));
         assert!(pipeline_after.contains("# hotfix — mine."));
         assert!(
             !repo.checkout.join(".spoolway").exists(),
@@ -2908,6 +3120,84 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// A config whose reference table is one an older release wrote is stale:
+    /// the file is rewritten with this binary's table and keeps its values.
+    #[test]
+    fn an_older_reference_table_is_replaced_and_the_values_kept() {
+        let (repo, _root_guard) = fixture("config-older-table");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n[dispatch]\nlane_quiet = \"45m\"\n",
+                crate::known_copies::older::config_reference()
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            after.starts_with(&crate::confkv::reference_table()),
+            "{after}"
+        );
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert!(refusals(&outcomes).is_empty());
+    }
+
+    /// A table that is none of the shipped ones was written by a newer
+    /// spoolway or edited by hand. The file is left byte for byte as it is,
+    /// values and unknown keys included, and refused with the remedy.
+    #[test]
+    fn a_reference_table_no_release_shipped_refuses_the_config() {
+        let (repo, _root_guard) = fixture("config-unknown-table");
+        let path = crate::config::Config::path_in(&repo.root);
+        let before = format!(
+            "{}# a row a newer spoolway added\n\n[dispatch]\nlane_quiet = \"45m\"\n",
+            crate::confkv::reference_table()
+                .trim_end_matches('\n')
+                .to_string()
+                + "\n"
+        );
+        std::fs::write(&path, &before).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let shown = ".spoolway/config.toml";
+        assert_eq!(
+            refusals(&outcomes),
+            [(shown, crate::known_copies::refusal(shown).as_str())]
+        );
+        assert!(dedup_paths(&outcomes).0.is_empty());
+    }
+
+    /// A config with no table at all has nothing that was edited: it gains
+    /// this binary's table like any setting the file never named. A comment
+    /// standing straight on a setting is that setting's, not a table.
+    #[test]
+    fn a_config_with_no_reference_table_gains_one() {
+        let (repo, _root_guard) = fixture("config-no-table");
+        let path = crate::config::Config::path_in(&repo.root);
+        for before in [
+            "[dispatch]\nlane_quiet = \"45m\"\n",
+            "# my note on the section\n[dispatch]\nlane_quiet = \"45m\"\n",
+        ] {
+            std::fs::write(&path, before).unwrap();
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                after.starts_with(&crate::confkv::reference_table()),
+                "{after}"
+            );
+            assert!(refusals(&outcomes).is_empty(), "{before:?}");
+        }
     }
 
     /// A key `config set` creates is already where `sync` would put it: the
@@ -3823,7 +4113,11 @@ mod tests {
             .next()
             .unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
-        std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+        std::fs::write(
+            &first.path,
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-plan"),
+        )
+        .unwrap();
 
         // `retired_skills`: a directory this binary no longer ships.
         let retired = claude_dir.join(crate::install::RETIRED_SKILLS[0].0);
@@ -4082,6 +4376,16 @@ mod tests {
         assert!(outcomes.is_empty(), "{:?}", outcome_lines(&outcomes));
     }
 
+    /// The fenced key reference as an older release wrote it, markers included:
+    /// a real earlier copy, so sync recognises it as stale rather than as an
+    /// unknown edit.
+    fn older_fence() -> String {
+        let file = crate::known_copies::older::pipeline_file();
+        let start = file.find(crate::assets::PIPELINE_KEYS_BEGIN).unwrap();
+        let end = file.find(crate::assets::PIPELINE_KEYS_END).unwrap();
+        file[start..end + crate::assets::PIPELINE_KEYS_END.len()].to_string()
+    }
+
     /// A pipeline file, written the way a project's is: a title of its own, the
     /// fenced key reference, and the flow underneath.
     fn pipeline_file(repo: &Repo, name: &str, block: &str) -> PathBuf {
@@ -4105,19 +4409,14 @@ mod tests {
     #[test]
     fn a_stale_key_reference_is_refreshed_and_the_rest_of_the_file_kept() {
         let (repo, _root_guard) = fixture("pipeline-stale");
-        let stale = format!(
-            "{}\n# Top level\n#   template    What this used to say.\n{}",
-            crate::assets::PIPELINE_KEYS_BEGIN,
-            crate::assets::PIPELINE_KEYS_END
-        );
-        let path = pipeline_file(&repo, "hotfix", &stale);
+        let path = pipeline_file(&repo, "hotfix", &older_fence());
 
         let mut outcomes = Vec::new();
         pipelines(&repo, &args(), &mut outcomes).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(after.contains(crate::pipeline::key_block()), "{after}");
-        assert!(!after.contains("What this used to say"));
+        assert!(!after.contains(crate::known_copies::older::key_block()));
         assert!(
             after.contains("# hotfix — mine"),
             "the title is the project's"
@@ -4132,28 +4431,29 @@ mod tests {
         );
     }
 
-    /// The departure from every other file here: an edit *inside* the fence is
-    /// discarded rather than refused. There is nothing in there for a project
-    /// to have meant — every line is a claim about what this binary does.
+    /// The other half of the rule: a block that is no copy any release shipped
+    /// is refused and left as it is, whether a newer spoolway wrote it or a
+    /// person edited it, and the refusal names the way to take this binary's.
     #[test]
-    fn an_edit_inside_the_markers_is_discarded_not_refused() {
+    fn an_edit_inside_the_markers_is_refused_and_left_alone() {
         let (repo, _root_guard) = fixture("pipeline-edited");
         let edited =
             crate::pipeline::key_block().replace("Absent: 30m.", "Absent: however long you like.");
         let path = pipeline_file(&repo, "default", &edited);
+        let before = std::fs::read_to_string(&path).unwrap();
 
         let mut outcomes = Vec::new();
         pipelines(&repo, &args(), &mut outcomes).unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
 
-        assert!(!after.contains("however long you like"));
-        assert!(after.contains("Absent: 30m."));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert_eq!(refused[0].0, ".spoolway/pipelines/default.yml");
         assert!(
-            !outcome_lines(&outcomes)
-                .iter()
-                .any(|line| line.starts_with("blocked")),
-            "a differing key block is rewritten, not reported: {:?}",
-            outcome_lines(&outcomes)
+            refused[0]
+                .1
+                .contains("`spoolway sync --replace .spoolway/pipelines/default.yml`"),
+            "{refused:?}"
         );
     }
 
@@ -4355,26 +4655,18 @@ mod tests {
         );
     }
 
-    /// Replacing the key block says so in a note of its own, since the
-    /// replaced lines are otherwise gone without a word.
+    /// Refreshing an older key block takes nothing a person wrote, so it says
+    /// nothing beyond the file line: no note claims an edit was lost.
     #[test]
-    fn a_replaced_key_block_is_named_in_the_report() {
+    fn a_refreshed_key_block_carries_no_note_about_lost_edits() {
         let (repo, _root_guard) = fixture("pipeline-replaced-note");
-        let stale = format!(
-            "{}\n# edited by hand\n{}\nname: p\n",
-            crate::assets::PIPELINE_KEYS_BEGIN,
-            crate::assets::PIPELINE_KEYS_END
-        );
-        pipeline_file(&repo, "p", &stale);
+        pipeline_file(&repo, "p", &older_fence());
 
         let mut outcomes = Vec::new();
         pipelines(&repo, &args(), &mut outcomes).unwrap();
 
-        let notes = migration_notes(&outcomes);
-        let note = notes
-            .get(".spoolway/pipelines/p.yml")
-            .expect("a note under the replaced file");
-        assert!(note[0].0.contains("replaced"), "{note:?}");
+        assert!(migration_notes(&outcomes).is_empty());
+        assert_eq!(dedup_paths(&outcomes).0, [".spoolway/pipelines/p.yml"]);
     }
 
     /// A config that never named `key_in_names` gains it at the default, and
@@ -4403,12 +4695,7 @@ mod tests {
     #[test]
     fn a_dry_run_leaves_a_stale_key_reference_where_it_is() {
         let (repo, _root_guard) = fixture("pipeline-dry");
-        let stale = format!(
-            "{}\n# Top level\n{}",
-            crate::assets::PIPELINE_KEYS_BEGIN,
-            crate::assets::PIPELINE_KEYS_END
-        );
-        let path = pipeline_file(&repo, "hotfix", &stale);
+        let path = pipeline_file(&repo, "hotfix", &older_fence());
         let before = std::fs::read_to_string(&path).unwrap();
 
         let mut outcomes = Vec::new();
@@ -4430,6 +4717,174 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// A user-level skill no release shipped is refused per folder file and
+    /// left alone, spelled with `~` so the remedy can be typed back.
+    #[test]
+    fn a_user_level_skill_no_release_shipped_is_refused_with_a_typed_back_path() {
+        let (repo, _root_guard) = fixture("skills-user-unknown");
+        let home = crate::scratch::root("sync-user-unknown-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
+        });
+        let edited = crate::cli::Provider::Claude
+            .user_skills_dir(&home)
+            .join("spoolway-plan")
+            .join("SKILL.md");
+        std::fs::write(&edited, "edited by hand\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        crate::platform::test_home::with_home(&home, || {
+            user_level(&mut outcomes, &mut Vec::new()).unwrap();
+        });
+
+        assert_eq!(
+            std::fs::read_to_string(&edited).unwrap(),
+            "edited by hand\n"
+        );
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert_eq!(refused[0].0, "~/.claude/skills/spoolway-plan/SKILL.md");
+        assert!(
+            refused[0]
+                .1
+                .contains("`spoolway sync --replace ~/.claude/skills/spoolway-plan/SKILL.md`"),
+            "{refused:?}"
+        );
+        let _ = (repo, std::fs::remove_dir_all(&home));
+    }
+
+    /// `--replace` takes this binary's copy over a skill `sync` refused: a
+    /// project's by its relative path, a user-level one by `~` or absolute,
+    /// each with the old file saved as a `.bak`.
+    #[test]
+    fn replace_takes_this_binarys_skill_over_a_refused_one() {
+        let (repo, _root_guard) = fixture("replace-skills");
+        let home = crate::scratch::root("sync-replace-skills-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let project = crate::cli::Provider::Claude.plan(&repo.checkout).remove(0);
+        let user = crate::cli::Provider::Claude.plan_user(&home).remove(0);
+        for file in [&project, &user] {
+            std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+            std::fs::write(&file.path, "edited by hand\n").unwrap();
+        }
+
+        crate::platform::test_home::with_home(&home, || {
+            let named = crate::platform::home_dir().unwrap();
+            let tilde = format!("~/{}", user.path.strip_prefix(&named).unwrap().display());
+            replace(
+                &repo,
+                &SyncArgs {
+                    replace: vec![".claude/skills/spoolway-plan/SKILL.md".to_string(), tilde],
+                    ..args()
+                },
+            )
+            .unwrap();
+        });
+
+        for file in [&project, &user] {
+            assert_eq!(std::fs::read_to_string(&file.path).unwrap(), file.contents);
+            let bak = file.path.with_extension("md.bak");
+            assert_eq!(std::fs::read_to_string(bak).unwrap(), "edited by hand\n");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// For a pipeline file `--replace` swaps the key block and nothing else,
+    /// whatever the block held, and keeps the old file as a `.bak`.
+    #[test]
+    fn replace_swaps_only_the_key_block_of_a_pipeline_file() {
+        let (repo, _root_guard) = fixture("replace-pipeline");
+        let edited = crate::pipeline::key_block().replace("Absent: 30m.", "Absent: forever.");
+        let path = pipeline_file(&repo, "default", &edited);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/pipelines/default.yml".to_string()],
+                ..args()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before.replace("Absent: forever.", "Absent: 30m."));
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("yml.bak")).unwrap(),
+            before
+        );
+    }
+
+    /// A pipeline file with no key block has no place for one to go. The
+    /// reason says how to opt in, and the file is not touched.
+    #[test]
+    fn replace_names_the_markers_a_pipeline_without_a_key_block_needs() {
+        let (repo, _root_guard) = fixture("replace-pipeline-bare");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.yml");
+        std::fs::write(&path, "steps:\n  - id: a\n    run: x\n    on_pass: done\n").unwrap();
+
+        let why = replacement_for(&repo, &path, &std::fs::read_to_string(&path).unwrap())
+            .err()
+            .expect("nothing to swap");
+
+        assert!(why.contains(crate::assets::PIPELINE_KEYS_BEGIN), "{why}");
+        assert!(why.contains(crate::assets::PIPELINE_KEYS_END), "{why}");
+    }
+
+    /// For `config.toml` `--replace` rewrites the file as `sync` does, so a
+    /// table `sync` refused is replaced, every value is kept, and the old
+    /// file is saved as a `.bak`.
+    #[test]
+    fn replace_rewrites_a_refused_config_keeping_its_values() {
+        let (repo, _root_guard) = fixture("replace-config");
+        let path = crate::config::Config::path_in(&repo.root);
+        let before = "# a table only a newer spoolway writes\n\n[dispatch]\nlane_quiet = \"45m\"\n";
+        std::fs::write(&path, before).unwrap();
+
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/config.toml".to_string()],
+                ..args()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with(&crate::confkv::reference_table()),
+            "{after}"
+        );
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            before
+        );
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        assert!(
+            refusals(&outcomes).is_empty(),
+            "a sync accepts what --replace wrote"
+        );
+    }
+
+    /// `reference_in` reads the table `reference_table` writes and nothing
+    /// that merely starts with a comment.
+    #[test]
+    fn the_reference_table_is_the_comment_block_above_the_first_blank_line() {
+        let table = crate::confkv::reference_table();
+        let file = format!("{table}[dispatch]\nbackend = \"herdr\"\n");
+        assert_eq!(reference_in(&file).trim_end(), table.trim_end());
+        assert_eq!(reference_in("[dispatch]\n"), "");
+        assert_eq!(reference_in("# on a key\nfoo = 1\n"), "");
+        assert_eq!(reference_in(""), "");
     }
 
     /// `--replace` is the way back from a file with no region left to find. It
@@ -4507,7 +4962,11 @@ mod tests {
             crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
         });
         std::fs::remove_file(&missing.path).unwrap();
-        std::fs::write(&stale.path, "an older copy").unwrap();
+        std::fs::write(
+            &stale.path,
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-plan"),
+        )
+        .unwrap();
 
         let mut outcomes = Vec::new();
         crate::platform::test_home::with_home(&home, || {
@@ -4626,7 +5085,9 @@ mod tests {
         });
         let claude_dir = crate::cli::Provider::Claude.user_skills_dir(&home);
         let stale = claude_dir.join("spoolway-config").join("SKILL.md");
-        std::fs::write(&stale, "stale, from before #593\n").unwrap();
+        let older =
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-config");
+        std::fs::write(&stale, older).unwrap();
 
         let mut outcomes = Vec::new();
         crate::platform::test_home::with_home(&home, || {
@@ -4635,7 +5096,7 @@ mod tests {
 
         let on_disk = std::fs::read_to_string(&stale).unwrap();
         assert_ne!(
-            on_disk, "stale, from before #593\n",
+            on_disk, older,
             "a user-level skill folder with no marker must still be \
              refreshed by sync"
         );
@@ -4653,7 +5114,11 @@ mod tests {
         for provider in [crate::cli::Provider::Codex, crate::cli::Provider::Pi] {
             let first = provider.plan(&repo.root).into_iter().next().unwrap();
             std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
-            std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+            std::fs::write(
+                &first.path,
+                crate::known_copies::older::skill(provider, "spoolway-plan"),
+            )
+            .unwrap();
         }
 
         let mut outcomes = Vec::new();
@@ -4666,6 +5131,14 @@ mod tests {
                     .iter()
                     .any(|l| l.starts_with("wrote") && l.contains(provider_dir)),
                 "{provider_dir} skills not refreshed: {lines:?}"
+            );
+        }
+        for provider in [crate::cli::Provider::Codex, crate::cli::Provider::Pi] {
+            let first = provider.plan(&repo.root).into_iter().next().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&first.path).unwrap(),
+                first.contents,
+                "{provider:?}'s stale skill was not rewritten"
             );
         }
     }
@@ -4708,13 +5181,11 @@ mod tests {
         );
     }
 
-    /// A skill file belongs to spoolway outright now, unlike a config value
-    /// or a skeleton's own styling — so a hand edit to one is not protected
-    /// the way [`BlockState::HandEdited`] protects a project's own prose.
-    /// Sync writes the shipped copy over it and says so, the same as any
-    /// other stale file.
+    /// A skill file that is no copy any release shipped was written by a newer
+    /// spoolway or edited by hand. Sync leaves it exactly as it is and refuses
+    /// it, naming the file and the `--replace` that takes this binary's copy.
     #[test]
-    fn a_hand_edited_skill_file_is_overwritten_and_named() {
+    fn a_hand_edited_skill_file_is_refused_and_left_alone() {
         let (repo, _root_guard) = fixture("skills-hand-edited");
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
@@ -4724,19 +5195,50 @@ mod tests {
 
         let mut outcomes = Vec::new();
         skills(&repo, &args(), false, &mut outcomes).unwrap();
-        let lines = outcome_lines(&outcomes);
+
+        assert_eq!(std::fs::read_to_string(&first.path).unwrap(), edited);
+        let shown = ".claude/skills/spoolway-plan/SKILL.md";
+        assert_eq!(
+            refusals(&outcomes),
+            [(shown, crate::known_copies::refusal(shown).as_str())]
+        );
+        assert!(
+            !dedup_paths(&outcomes).0.contains(&shown),
+            "a refused file is not a written one"
+        );
+    }
+
+    /// The same file, as an older release wrote it, is stale and rewritten.
+    #[test]
+    fn an_older_shipped_skill_file_is_rewritten_and_named() {
+        let (repo, _root_guard) = fixture("skills-older");
+        let first = crate::cli::Provider::Claude
+            .plan(&repo.root)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &first.path,
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-plan"),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), false, &mut outcomes).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&first.path).unwrap(),
-            first.contents,
-            "a skill file is spoolway's outright, so a hand edit does not survive a sync: {lines:?}"
+            first.contents
         );
         assert!(
-            lines
+            outcome_lines(&outcomes)
                 .iter()
                 .any(|l| l.starts_with("wrote") && l.contains("rewritten")),
-            "{lines:?}"
+            "{:?}",
+            outcome_lines(&outcomes)
         );
+        assert!(refusals(&outcomes).is_empty());
     }
 
     /// The 0.5.0 case the whole change is for: a project with no fingerprint
@@ -4749,7 +5251,11 @@ mod tests {
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
-        std::fs::write(&first.path, "0.5.0's text, no fingerprint ever recorded\n").unwrap();
+        std::fs::write(
+            &first.path,
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-plan"),
+        )
+        .unwrap();
 
         let mut outcomes = Vec::new();
         skills(&repo, &args(), false, &mut outcomes).unwrap();
@@ -5466,7 +5972,11 @@ mod tests {
             "[dispatch]\nlane_quiet = \"45m\"\n",
         )
         .unwrap();
-        std::fs::write(user_dir.join("spoolway-config").join("SKILL.md"), "stale\n").unwrap();
+        std::fs::write(
+            user_dir.join("spoolway-config").join("SKILL.md"),
+            crate::known_copies::older::skill(crate::cli::Provider::Claude, "spoolway-config"),
+        )
+        .unwrap();
 
         crate::platform::test_home::with_home(&home, || scan(&repo, &args()).unwrap());
 
@@ -5541,10 +6051,12 @@ mod tests {
     }
 
     /// A version refusal is about files that are ahead, so its closing line
-    /// must not call them behind; any other refusal keeps the line it always
-    /// had, and a mix of the two tells the ahead files from the behind ones.
+    /// must not call them behind. Neither does any other refusal: a file that
+    /// matches no known copy may be a newer spoolway's or a hand edit, and the
+    /// line says only that it was left as it is. A mix of the two keeps the
+    /// newer spoolway's files apart.
     #[test]
-    fn the_closing_line_calls_only_a_version_refusal_ahead() {
+    fn no_closing_line_calls_a_refused_file_behind() {
         let newer = [(".spoolway/spoolway-version", "newer")];
         let other = [(".spoolway/pipelines/default.yml", "never ends")];
         let both = [newer[0], other[0]];
@@ -5554,13 +6066,11 @@ mod tests {
         assert_eq!(Refused::of(&[]), Refused::Nothing);
         assert!(!NEWER_ONLY.contains("behind"), "{NEWER_ONLY}");
         assert_eq!(closing_line(false, true, Refused::Newer), NEWER_ONLY);
-        assert!(REFUSED_ONLY.ends_with("still behind."), "{REFUSED_ONLY}");
+        assert!(!REFUSED_ONLY.contains("behind"), "{REFUSED_ONLY}");
+        assert!(REFUSED_ONLY.contains("left as they are"), "{REFUSED_ONLY}");
         assert_eq!(closing_line(false, true, Refused::Mixed), MIXED_ONLY);
         assert_eq!(closing_line(true, true, Refused::Mixed), MIXED_ONLY);
         assert!(MIXED_ONLY.contains("newer spoolway wrote"), "{MIXED_ONLY}");
-        assert!(
-            MIXED_ONLY.contains("other refused files above are still behind"),
-            "{MIXED_ONLY}"
-        );
+        assert!(!MIXED_ONLY.contains("behind"), "{MIXED_ONLY}");
     }
 }

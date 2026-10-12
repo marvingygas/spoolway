@@ -1446,6 +1446,10 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
 | `--force` | | Overwrite existing config, pipeline and prompt files. Keeps the project's provider, tracker and project key unless `--provider` or `--tracker` is passed. In a home-mode clone, names the other clones that share that config before rewriting it |
 
+A skill file that matches no copy spoolway has shipped also refuses `init` before it writes
+anything, `--force` included. The error names each such file and `spoolway sync --replace
+<path>`. See [Files spoolway refuses](installation.md#files-spoolway-refuses).
+
 A project whose `.spoolway/spoolway-version` names a newer spoolway than the one you run is
 refused before `init` writes anything, `--force` included. In home mode the agent's user-level
 marker is checked too. The error names the version. See [Files a newer spoolway
@@ -1485,11 +1489,13 @@ skills](installation.md#the-pipeline-skills).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--force` | | Overwrite files that already exist. Does not override a version marker naming a newer spoolway |
+| `--force` | | Overwrite files that already exist. Does not override a version marker naming a newer spoolway, or a skill file that matches no shipped copy |
 | `--user` | | Install into the agent's user folder instead of the project's |
 
-When the folder's version marker names a newer spoolway than the one you run, `install` writes
-nothing and fails, naming the version and the marker file. A run that writes the marker lists it
+When any skill file `install` would write matches no copy spoolway has shipped, `install` writes
+nothing and fails, naming each such file and `spoolway sync --replace <path>`. When the folder's
+version marker names a newer spoolway than the one you run, `install` writes nothing and fails,
+naming the version and the marker file. A run that writes the marker lists it
 as a `wrote` row. See [Files a newer spoolway
 wrote](installation.md#files-a-newer-spoolway-wrote).
 
@@ -1525,7 +1531,7 @@ spoolway sync
 | Flag | Default | What it does |
 |---|---|---|
 | `--dry-run` | | Print what would change. Writes nothing |
-| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. In home mode a path under `.spoolway/` is the workspace's `config/`. Repeatable |
+| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. Takes a prompt, a skeleton, a hook script, a project skill file, a user-level skill file (absolute or starting with `~`), a pipeline file and `config.toml`. A pipeline file gets only its key block swapped. `config.toml` is rewritten as `sync` does and keeps your values. In home mode a path under `.spoolway/` is the workspace's `config/`. Repeatable |
 
 At a terminal, with something to write or remove, `sync` lists it and waits: enter writes the
 files and prints the report; esc, ctrl-c, or the terminal going away
@@ -1544,6 +1550,11 @@ for the messages.
 
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
+
+`sync` rewrites a skill file, a pipeline key block or a `config.toml` settings reference only
+when it equals a copy an older spoolway shipped. One equal to no shipped copy is refused and left
+as it is. The refusal names the file and `spoolway sync --replace <path>`. See [Files spoolway
+refuses](installation.md#files-spoolway-refuses).
 
 `sync` also refuses to write a scope whose version marker names a newer spoolway than the one
 you run. The scopes are the project's setup folder with its skills, and each agent's user-level
@@ -1608,6 +1619,10 @@ its event, task, exit code, remedy and log path.
 
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
+
+A note names each file `sync` refuses, on its own line with the reason. A refused file is not
+counted in the `file(s) are behind this spoolway` note. See [Files spoolway
+refuses](installation.md#files-spoolway-refuses).
 
 The `lanes can be started` check fails for `dispatch.backend = "headless"` unless
 `SPOOLWAY_TEST_BACKEND` is set. It gives the same reason `spoolway dispatch` gives.

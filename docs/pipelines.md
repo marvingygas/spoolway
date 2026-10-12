@@ -98,8 +98,9 @@ steps:
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
-`# <<< spoolway <<<`. `spoolway sync` rewrites that block. A file without the markers is
-never written to.
+`# <<< spoolway <<<`. `spoolway sync` rewrites that block when it matches an older shipped copy.
+It refuses a block that matches no shipped copy, and `spoolway sync --replace <file>` swaps in
+this spoolway's block. A file without the markers is never written to.
 
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs
 a command, and its exit code is the outcome. A step finishes the task with `on_pass: done`. A step stops the task for a person with `gate: true`.

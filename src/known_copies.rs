@@ -1,8 +1,8 @@
 //! Whether a text is a copy of a shipped file that spoolway wrote.
 //!
-//! `sync`, `init` and `install` rewrite a shipped file whenever it differs from
-//! this binary's copy. A file a newer spoolway wrote looks exactly like a stale
-//! one, so an older binary would roll it back. The way out needs nothing
+//! A shipped file that differs from this binary's copy is either stale or
+//! newer: a file a newer spoolway wrote looks exactly like a stale one, so an
+//! older binary that rewrote it would roll it back. The way out needs nothing
 //! recorded in the project: the binary carries `assets/known-copies.txt`, the
 //! fingerprints of the copies of every shipped file that earlier builds
 //! committed, and [`lookup`] sorts a text into this binary's copy, an older
@@ -15,9 +15,10 @@
 //! scaffolded, from `scripts/e2e/fixtures/`, because it was never a file in the
 //! repository. A table an unreleased build wrote is not listed.
 //!
-//! Nothing calls [`lookup`] yet; the commands that rewrite shipped files are
-//! wired to it separately.
-#![allow(dead_code)]
+//! `sync`, `init` and `install` ask [`lookup`] before they overwrite a skill
+//! file, a pipeline's key block or the config reference table. This binary's
+//! own copy is kept, an older one is rewritten, and one nobody shipped is
+//! refused with [`refusal`], because a newer spoolway or a person wrote it.
 
 use crate::cli::Provider;
 use crate::skeleton::fingerprint;
@@ -45,6 +46,20 @@ pub enum Shipped {
     PipelineKeys,
     /// The reference table at the top of `config.toml`.
     ConfigReference,
+}
+
+/// Why `sync`, `init` and `install` refuse a file that is none of the known
+/// copies. `shown` is the path as a person would type it back to `spoolway
+/// sync --replace`.
+///
+/// One wording for `sync`, `init` and `install`, so the three name the same
+/// reason and the same way out.
+pub fn refusal(shown: &str) -> String {
+    format!(
+        "not a copy this spoolway knows: a newer spoolway or a hand edit wrote it. Nothing \
+         here was rewritten. Run `spoolway sync --replace {shown}` to take this spoolway's \
+         copy (yours is kept as a .bak)."
+    )
 }
 
 /// What [`lookup`] found.
@@ -131,6 +146,53 @@ pub fn lookup(file: &Shipped, text: &str) -> Known {
         Known::Older
     } else {
         Known::Unknown
+    }
+}
+
+/// Real earlier copies of shipped files, for tests of the commands that
+/// rewrite them. A fingerprint cannot be forged, so a test that needs "an
+/// older copy" needs an actual one; each is a revision git history holds, kept
+/// under `tests/fixtures/known-copies/`. [`tests`] checks every one still
+/// looks up as [`Known::Older`].
+#[cfg(test)]
+pub(crate) mod older {
+    use super::*;
+
+    /// An earlier `SKILL.md` of `skill` for `provider`. Only the pairs the
+    /// tests use have a fixture.
+    pub fn skill(provider: Provider, skill: &str) -> &'static str {
+        match (provider, skill) {
+            (Provider::Claude, "spoolway-plan") => {
+                include_str!("../tests/fixtures/known-copies/older-claude-spoolway-plan-SKILL.md")
+            }
+            (Provider::Codex, "spoolway-plan") => {
+                include_str!("../tests/fixtures/known-copies/older-codex-spoolway-plan-SKILL.md")
+            }
+            (Provider::Pi, "spoolway-plan") => {
+                include_str!("../tests/fixtures/known-copies/older-pi-spoolway-plan-SKILL.md")
+            }
+            (Provider::Claude, "spoolway-config") => {
+                include_str!("../tests/fixtures/known-copies/older-claude-spoolway-config-SKILL.md")
+            }
+            _ => panic!("no older {skill} copy for {provider:?} is kept as a fixture"),
+        }
+    }
+
+    /// An earlier pipeline file, fenced key block included.
+    pub fn pipeline_file() -> &'static str {
+        include_str!("../tests/fixtures/known-copies/older-pipeline.yml")
+    }
+
+    /// The key block of [`pipeline_file`].
+    pub fn key_block() -> &'static str {
+        crate::pipeline::KEY_BLOCK
+            .read(pipeline_file())
+            .expect("the fixture pipeline carries the key block")
+    }
+
+    /// An earlier reference table, as it stood above a `config.toml`.
+    pub fn config_reference() -> &'static str {
+        include_str!("../tests/fixtures/known-copies/older-config-reference.txt")
     }
 }
 
@@ -247,6 +309,34 @@ mod tests {
             };
             assert_eq!(lookup(&asset, text), Known::Current, "{provider:?}");
         }
+    }
+
+    /// The older copies the other modules' tests lean on are older copies, not
+    /// the current text and not strangers. Without this a fixture that drifted
+    /// out of the list would turn those tests into ones about refusal.
+    #[test]
+    fn the_older_fixtures_look_up_as_older() {
+        for (provider, skill) in [
+            (Provider::Claude, "spoolway-plan"),
+            (Provider::Codex, "spoolway-plan"),
+            (Provider::Pi, "spoolway-plan"),
+            (Provider::Claude, "spoolway-config"),
+        ] {
+            let file = Shipped::Skill {
+                provider,
+                skill: skill.to_string(),
+                file: "SKILL.md".to_string(),
+            };
+            assert_eq!(lookup(&file, older::skill(provider, skill)), Known::Older);
+        }
+        assert_eq!(
+            lookup(&Shipped::PipelineKeys, older::key_block()),
+            Known::Older
+        );
+        assert_eq!(
+            lookup(&Shipped::ConfigReference, older::config_reference()),
+            Known::Older
+        );
     }
 
     /// The list's shape: a hand-appended line with a mistyped identity or a

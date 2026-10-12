@@ -4421,6 +4421,33 @@ mod tests {
         );
     }
 
+    /// A file `sync` refuses as no copy any release shipped is listed on its
+    /// own line with its reason, and is not one of the files behind.
+    #[test]
+    fn a_refused_file_is_listed_apart_from_the_files_behind() {
+        use crate::sync::Outcome;
+        let shown = ".claude/skills/spoolway-plan/SKILL.md";
+        let why = crate::known_copies::refusal(shown);
+        let outcomes = vec![
+            Outcome::Blocked {
+                path: shown.into(),
+                why: why.clone(),
+            },
+            Outcome::Wrote {
+                path: ".claude/skills/spoolway-config/SKILL.md".into(),
+                detail: "rewritten".into(),
+            },
+        ];
+
+        assert_eq!(
+            sync_notes(&outcomes, true),
+            vec![
+                format!("{shown}: {why}"),
+                "1 file(s) are behind this spoolway — run spoolway sync to apply them".to_string()
+            ]
+        );
+    }
+
     /// A file missing from a project `init` never wrote is not *behind* —
     /// `sync` has nothing to bring forward there — so it gets its own note
     /// naming that fact, one line per file, apart from the single count-based

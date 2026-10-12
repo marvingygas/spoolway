@@ -56,6 +56,10 @@ pub enum Command {
         you meant — is refreshed in place, with every other line copied through unread. The \
         old `.gitignore` block spoolway used to manage is removed. Skills for every provider \
         you have installed are refreshed too, in this project and in your user folder.\n\n\
+        A skill, key reference or config reference table is rewritten only when it is a copy \
+        some spoolway shipped. One that is not was written by a newer spoolway or edited by \
+        hand, so it is refused and left alone; `--replace` takes this spoolway's copy over it \
+        anyway.\n\n\
         Prompts, their assets, and task skeletons are not touched, ever. They are prose a \
         project owns outright, with nothing generated inside them; `spoolway pipeline check` \
         is what tells you when one names a command this binary no longer has, and `--replace` \
@@ -1631,7 +1635,10 @@ pub struct SyncArgs {
     /// saved beside it as a `.bak` first (`.bak.1`, `.bak.2`… if one is there
     /// already), so nothing you wrote is lost, only
     /// displaced. Repeat for each. The way back for a file so far from the
-    /// shape we know that no region can be found in it.
+    /// shape we know that no region can be found in it, and for one `sync`
+    /// refused as not a copy this spoolway knows. Takes a project or `~`
+    /// user-level skill, a pipeline file (only its key block is swapped) and
+    /// `config.toml` (rewritten as `sync` does, keeping your values).
     ///
     /// Paths are named one at a time on purpose: losing a file you asked for is
     /// a decision, losing eleven you forgot about is an accident.
