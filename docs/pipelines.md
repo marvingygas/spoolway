@@ -361,12 +361,21 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | Next step | starts when the command exits | starts at once |
 | Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. The exit is never read to route. |
 | `on_fail` | allowed | refused when the pipeline loads |
-| `timeout` | routes to `on_fail` | kills the run, nothing routes |
+| `timeout` | routes to `on_fail` | stops the run and writes a Status Log line, nothing routes |
 
 A background step is a sidecar with no verdict. Its run never moves the task, however it ends:
 a non-zero exit, a timeout and a pass all leave the task where it is. A task that reaches `done`
 is archived without waiting for the run, and a run still going is stopped when the task is
 cleaned up. A run that ends has its pane closed and is counted once in the ledger.
+
+A run that exits non-zero, or is stopped at its `timeout:`, leaves one line in the task's
+`## Status Log`. The line is saved even though the task does not move. A run that exits 0 leaves
+no line.
+
+```
+- 2026-10-12 21:40 `observe` (background) exited 3 — the task did not move; log: ~/.spoolway/demo/commands/demo · observe.log
+- 2026-10-12 21:41 `observe` (background) ran past its timeout of 3s and was stopped — the task did not move; log: ~/.spoolway/demo/commands/demo · observe.log
+```
 
 A pipeline that gives a background step an `on_fail` does not load. The message names both
 fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:

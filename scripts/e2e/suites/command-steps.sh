@@ -622,6 +622,38 @@ else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
 fi
 
+# ------------------------------------------------------- background, its end
+# A background run never moves its task, so its failure would reach nobody:
+# the dispatcher's own report scrolls away. The line in the task's
+# `## Status Log` is what a person or a later agent can still read.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default sidecar "exit 3" review --background
+SIDECAR_RELEASE="$LIVE/sidecar.release"
+rm -f "$SIDECAR_RELEASE"
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$SIDECAR_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+dispatcher_restart
+task_doc "$LIVE/sidecar.md" sidecar "$BODY" "group: sidecar"
+must "a task with a failing background step" "$SPOOLWAY" queue add --from "$LIVE/sidecar.md"
+
+# Read while `hold` keeps the task in the queue, so its file is still there.
+if poll_until 300 grep -q "(background) exited 3" "$SPOOLWAY_PROJECT_HOME/queue/sidecar.md"; then
+  ok "a background command that exits non-zero leaves its line in the Status Log"
+else
+  bad "a background command that exits non-zero leaves its line in the Status Log"
+fi
+if [ "$(stage_of sidecar)" = "hold" ]; then
+  ok "and the task is still on the step it was on"
+else
+  bad "and the task is still on the step it was on (at \`$(stage_of sidecar)\`)"
+fi
+touch "$SIDECAR_RELEASE"
+drive sidecar gone 300 || true
+forget sidecar
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+dispatcher_restart
+
 # --------------------------------------------------------- background, on_fail
 # A background run is a sidecar, so a route on its exit is refused at load:
 # `pipeline check` says so and names both ways out.

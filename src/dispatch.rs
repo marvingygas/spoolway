@@ -735,10 +735,23 @@ impl FinishedCommand {
     }
 }
 
+/// The `## Status Log` line for a background run that ended badly. It says
+/// the task did not move, so an agent reading it does not take it for a failed
+/// check on the step it is working. The log path is home-shortened, as the
+/// board's other paths are.
+fn sidecar_end_line(step_id: &str, what: &str, log: &Path) -> String {
+    format!(
+        "`{step_id}` (background) {what} — the task did not move; log: {}",
+        crate::repo::shorten_home(log)
+    )
+}
+
 /// Bank one command step's run to the usage ledger, once. `pipeline` is the
 /// task's pipeline, and `blocked` is whether the move this run chose landed
 /// on `blocked`. The run's verdict is `pass` or `fail` when it exited or
 /// timed out, and absent when it vanished, since no verdict exists then.
+/// Answers whether a line was banked: `false` for a run the ledger already
+/// holds, or when the append failed.
 fn bank_command_run(
     repo: &Repo,
     task: &Task,
@@ -746,7 +759,7 @@ fn bank_command_run(
     pipeline: Option<&Pipeline>,
     finished: &FinishedCommand,
     blocked: bool,
-) {
+) -> bool {
     use crate::usage::CommandEnd;
     let outcome = match (finished.ended, finished.exit) {
         (CommandEnd::Exited, Some(0)) => Some("pass"),
@@ -787,7 +800,7 @@ fn bank_command_run(
         }),
         project: String::new(),
     };
-    crate::usage::bank_command_run(repo, &entry);
+    crate::usage::bank_command_run(repo, &entry)
 }
 
 /// What one session has banked to the usage ledger so far — the running
@@ -1673,9 +1686,9 @@ impl<'a> Dispatcher<'a> {
                 // step that started it will never look at it again — this is
                 // the only place left that can. Without it, `background: true`
                 // plus a task that blocks on the way is a process nothing ever
-                // stops. It only stops and banks: a background run has no
-                // verdict, so nothing it does moves the task.
-                self.reap_stale_runs(&tasks[index], &pipeline, report, keys);
+                // stops. It stops, banks and logs a failed end: a background run
+                // has no verdict, so nothing it does moves the task.
+                self.reap_stale_runs(&mut tasks[index], &pipeline, report, keys);
 
                 // Only a dependent in this task's own group can hold its
                 // `last:` step back — see `fall_through`'s own doc, updated
@@ -5506,6 +5519,15 @@ impl<'a> Dispatcher<'a> {
     /// finished run, whose pane is closed and whose run is banked to the
     /// ledger once, because nothing else will ever come back to either.
     ///
+    /// A sidecar that exits non-zero, or is stopped at its timeout, leaves one
+    /// line in the task's `## Status Log` and the task stays where it is.
+    /// Nothing else would tell a person or a later agent that it ended: the
+    /// dispatcher's report scrolls away. The line is written on the pass that
+    /// banks the run, the only read the ledger counts, so a code left on disk
+    /// and read again every pass is not logged again. An exit 0 writes
+    /// nothing. The caller saves a task only when it moved, so the line is
+    /// saved here.
+    ///
     /// A run left behind by a foreground step is stopped and forgotten
     /// without its exit being read: the task moved on by some road that did
     /// not stop it, and the step's `on_fail` no longer applies.
@@ -5518,8 +5540,8 @@ impl<'a> Dispatcher<'a> {
     /// foreground run it is given, and that file records a process a
     /// foreground step left running on purpose.
     fn reap_stale_runs(
-        &self,
-        task: &Task,
+        &mut self,
+        task: &mut Task,
         pipeline: &Pipeline,
         report: &mut Report,
         keys: &[String],
@@ -5555,19 +5577,33 @@ impl<'a> Dispatcher<'a> {
                         continue;
                     }
                     let elapsed = runs.elapsed(key).unwrap_or_default();
-                    bank_command_run(
-                        self.repo,
+                    // The run is stopped only once its end is saved. A stopped
+                    // run no longer reads as `Running`, so a line dropped by a
+                    // write that lost to another would never be retried with
+                    // the timeout wording.
+                    let ended = self.end_sidecar_run(
                         task,
                         step_id,
-                        Some(pipeline),
+                        pipeline,
                         &FinishedCommand::without_code(
                             &runs,
                             key,
                             crate::usage::CommandEnd::Timeout,
                             elapsed.as_secs_f64().round() as i64,
                         ),
-                        false,
+                        Some(sidecar_end_line(
+                            step_id,
+                            &format!(
+                                "ran past its timeout of {} and was stopped",
+                                crate::config::human_duration::format(limit)
+                            ),
+                            &runs.log_path(key),
+                        )),
+                        report,
                     );
+                    if !ended {
+                        continue;
+                    }
                     runs.stop(key);
                     report.actions.push(format!(
                         "{}: background `{step_id}` ran past its timeout of {} and was stopped \
@@ -5587,18 +5623,77 @@ impl<'a> Dispatcher<'a> {
                     // Banked on the first read, and then skipped on every
                     // later one: the code stays on disk and is read again
                     // each pass, and the run's own id keeps it to one line.
-                    bank_command_run(
-                        self.repo,
-                        task,
-                        step_id,
-                        Some(pipeline),
-                        &FinishedCommand::exited(&runs, key, code),
-                        false,
-                    );
+                    let finished = FinishedCommand::exited(&runs, key, code);
+                    let line = (code != 0).then(|| {
+                        sidecar_end_line(step_id, &format!("exited {code}"), &runs.log_path(key))
+                    });
+                    self.end_sidecar_run(task, step_id, pipeline, &finished, line, report);
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Record the end of one background run: a `## Status Log` line saved to
+    /// the task when `line` is given, then the ledger line. Answers whether
+    /// the end is recorded; on `false` nothing was banked, so the next pass
+    /// reads the same end and tries again.
+    ///
+    /// The line is written only for a run the ledger does not hold yet, and
+    /// the run is banked only once the line is saved. The other order loses
+    /// the line for good when `persist` drops the write because a report, a
+    /// pause or an unqueue landed mid-pass: the run would already read as
+    /// banked, and no later pass would write it. A dropped write also puts
+    /// the task back as it was read, so the line is not left in memory for
+    /// the pass's later saves to carry.
+    ///
+    /// A ledger append that fails after the line was saved leaves the run
+    /// unbanked, so the next pass writes the line again. That is reported, as
+    /// a problem naming the ledger, so a Status Log that keeps growing has a
+    /// reason on record.
+    fn end_sidecar_run(
+        &mut self,
+        task: &mut Task,
+        step_id: &str,
+        pipeline: &Pipeline,
+        finished: &FinishedCommand,
+        line: Option<String>,
+        report: &mut Report,
+    ) -> bool {
+        let mut wrote = false;
+        if let Some(line) = line
+            && !crate::usage::command_run_banked(self.repo, &finished.id)
+        {
+            let before = task.clone();
+            task.log_status(&line);
+            match self.persist(task) {
+                Ok(true) => {}
+                Ok(false) => {
+                    *task = before;
+                    return false;
+                }
+                Err(err) => {
+                    *task = before;
+                    report.problems.push(format!(
+                        "{}: could not save the Status Log line for background `{step_id}`: \
+                         {err:#}",
+                        task.id()
+                    ));
+                    return false;
+                }
+            }
+            wrote = true;
+        }
+        // The run was unbanked when it was checked above, so a `false` here
+        // after a saved line can only be a failed append.
+        if !bank_command_run(self.repo, task, step_id, Some(pipeline), finished, false) && wrote {
+            report.problems.push(format!(
+                "{}: wrote the Status Log line for background `{step_id}` but could not bank \
+                 the run to the usage ledger, so the next pass will write it again",
+                task.id()
+            ));
+        }
+        true
     }
 
     /// Move a task to the blocked step and tell a person about it — or, in an
@@ -22872,10 +22967,11 @@ mod tests {
         runs.stop(&key);
     }
 
-    /// A background command is a sidecar: one that fails changes nothing about
-    /// its task, however far the task has moved on and whatever `on_fail` the
-    /// step carries. The run is still ended properly, with its pane closed
-    /// and one line banked to the ledger however many passes read the code.
+    /// A background command is a sidecar: one that fails never moves its task,
+    /// however far the task has moved on and whatever `on_fail` the step
+    /// carries, and leaves one line in its Status Log saying so. The run is
+    /// still ended properly, with its pane closed and one line banked to the
+    /// ledger however many passes read the code.
     ///
     /// `reap_stale_runs` is called directly rather than through a second
     /// `pass()`: a second real pass would also re-examine `review`, the agent
@@ -22934,7 +23030,7 @@ mod tests {
         for _ in 0..3 {
             let mut report = Report::default();
             Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-                &task,
+                &mut task,
                 pipeline,
                 &mut report,
                 &keys,
@@ -22959,6 +23055,163 @@ mod tests {
         );
         assert_eq!(rows[0].command.as_ref().unwrap().exit, Some(1));
         assert!(!rows[0].blocked);
+        // The line is on disk, though the task never moved and the caller
+        // saves a task only when it did.
+        let saved = reload(&path);
+        let log = saved.section("## Status Log").unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("(background) exited 1"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one line however many passes: {log}");
+        assert!(
+            lines[0].contains("`implement`")
+                && lines[0].contains("the task did not move")
+                && lines[0].contains(&crate::repo::shorten_home(&runs.log_path(&key))),
+            "{}",
+            lines[0]
+        );
+    }
+
+    /// A write that loses to another writer mid-pass must not cost the
+    /// sidecar its line. A report, a pause or an unqueue can land between the
+    /// pass's read of the task and the reap; `persist` then drops the write.
+    /// The run is banked only after the line is saved, so the next pass reads
+    /// the same exit code, writes the line then, and writes it once.
+    #[test]
+    fn a_sidecar_line_dropped_by_a_concurrent_write_arrives_on_a_later_pass() {
+        let (repo, _root_guard) = fixture("command-background-dropped-line");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 1", true);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let keys = runs.keys_for_task("demo");
+        let count = || {
+            reload(&path)
+                .section("## Status Log")
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("(background) exited 1"))
+                .count()
+        };
+
+        // The pass read the task, then somebody else wrote it.
+        let mut task = reload(&path);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        dispatcher
+            .file_seen
+            .insert("demo".to_string(), file_fingerprint(&task));
+        let mut stranger = reload(&path);
+        stranger.log_status("a report landed");
+        stranger.save().unwrap();
+
+        let mut report = Report::default();
+        dispatcher.reap_stale_runs(&mut task, pipeline, &mut report, &keys);
+        assert_eq!(count(), 0, "the dropped write wrote nothing");
+        assert!(
+            !task
+                .section("## Status Log")
+                .unwrap_or_default()
+                .contains("(background)"),
+            "the dropped line is not left in memory for a later save"
+        );
+        assert!(
+            command_rows(&repo).is_empty(),
+            "not banked until it is saved"
+        );
+
+        // The next pass reads the task afresh and reaps again, twice.
+        for _ in 0..2 {
+            let mut task = reload(&path);
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+            dispatcher
+                .file_seen
+                .insert("demo".to_string(), file_fingerprint(&task));
+            dispatcher.reap_stale_runs(&mut task, pipeline, &mut Report::default(), &keys);
+        }
+        assert_eq!(count(), 1, "the line arrives once");
+        assert_eq!(command_rows(&repo).len(), 1);
+    }
+
+    /// A ledger that refuses the append after the line was saved leaves the
+    /// run unbanked, so the next pass writes the line again. That must be on
+    /// record: the reap reports a problem naming the task, the step and the
+    /// ledger. A directory where the ledger file should be makes the append
+    /// fail at its open, while the ledger still reads as empty.
+    #[test]
+    fn a_sidecar_line_whose_ledger_append_fails_is_reported() {
+        let (repo, _root_guard) = fixture("command-background-append-fails");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 1", true);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let keys = runs.keys_for_task("demo");
+        let count = || {
+            reload(&path)
+                .section("## Status Log")
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("(background) exited 1"))
+                .count()
+        };
+        std::fs::create_dir_all(repo.usage_file()).unwrap();
+
+        let reap = || {
+            let mut task = reload(&path);
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+            dispatcher
+                .file_seen
+                .insert("demo".to_string(), file_fingerprint(&task));
+            let mut report = Report::default();
+            dispatcher.reap_stale_runs(&mut task, pipeline, &mut report, &keys);
+            report.problems
+        };
+
+        let problems = reap();
+        assert!(
+            problems.iter().any(|p| p.contains("demo")
+                && p.contains("`implement`")
+                && p.contains("usage ledger")),
+            "{problems:?}"
+        );
+        assert_eq!(count(), 1, "the line is saved though the append failed");
+
+        // Unbanked, so the next pass writes the line again and says so again.
+        let problems = reap();
+        assert!(
+            problems.iter().any(|p| p.contains("usage ledger")),
+            "{problems:?}"
+        );
+        assert_eq!(count(), 2, "a refused append writes the line again");
+
+        std::fs::remove_dir(repo.usage_file()).unwrap();
+        assert!(command_rows(&repo).is_empty(), "nothing was banked");
     }
 
     /// A task at `done` archives with a background run still going. Nothing
@@ -23053,7 +23306,7 @@ mod tests {
         let mut report = Report::default();
         let keys = runs.keys_for_task(task.id());
         Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-            &task,
+            &mut task,
             pipeline,
             &mut report,
             &keys,
@@ -23096,7 +23349,7 @@ mod tests {
         let mut report = Report::default();
         let keys = runs.keys_for_task(task.id());
         Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-            &task,
+            &mut task,
             pipeline,
             &mut report,
             &keys,
@@ -23142,7 +23395,7 @@ mod tests {
         Dispatcher::new(&repo, &pipelines, &mux)
             .pass(&mut || {})
             .unwrap();
-        let task = reload(&path);
+        let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
         let key = crate::command_step::Runs::key("implement", "demo");
@@ -23159,7 +23412,7 @@ mod tests {
         let mut report = Report::default();
         let keys = runs.keys_for_task(task.id());
         Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-            &task,
+            &mut task,
             pipeline,
             &mut report,
             &keys,
@@ -23180,7 +23433,7 @@ mod tests {
         for _ in 0..3 {
             let mut report = Report::default();
             Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-                &task,
+                &mut task,
                 pipeline,
                 &mut report,
                 &keys,
@@ -23190,6 +23443,13 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
         assert!(!rows[0].blocked);
+        assert!(
+            !reload(&path)
+                .section("## Status Log")
+                .unwrap_or_default()
+                .contains("(background)"),
+            "an exit 0 writes nothing to the task"
+        );
     }
 
     /// The pane a background run landed in is nobody's to close but
@@ -23210,7 +23470,7 @@ mod tests {
         Dispatcher::new(&repo, &pipelines, &mux)
             .pass(&mut || {})
             .unwrap();
-        let task = reload(&path);
+        let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
         let key = crate::command_step::Runs::key("implement", "demo");
@@ -23232,7 +23492,7 @@ mod tests {
         let mut report = Report::default();
         let keys = runs.keys_for_task(task.id());
         Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
-            &task,
+            &mut task,
             pipeline,
             &mut report,
             &keys,
@@ -23421,6 +23681,20 @@ mod tests {
             crate::usage::CommandEnd::Timeout
         );
         assert!(!rows[0].blocked, "a reaped timeout moves no task");
+        let saved = reload(&path);
+        let log = saved.section("## Status Log").unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("(background) ran past its timeout of"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{log}");
+        assert!(
+            lines[0].contains("`implement`")
+                && lines[0].contains("the task did not move")
+                && lines[0].contains(&crate::repo::shorten_home(&runs.log_path(&key))),
+            "{}",
+            lines[0]
+        );
     }
 
     // ------------------------------------------------------- serial command steps
