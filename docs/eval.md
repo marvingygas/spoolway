@@ -111,10 +111,19 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 | `by` | One row is |
 |---|---|
 | `group` | A task `group:`, every run its tasks made |
-| `task` | A run of one task, with its pipeline, version and date |
+| `task` | A run of one task, with its pipeline, version and start time. A copy of a routine is named by its routine. |
 | `pipeline` | A pipeline |
 | `step` | A pipeline's step, in the pipeline's own walk order |
 | `version` | A pipeline and one `pipeline_version:` it ran under, newest first |
+
+Under `by task`, each row is one run. Two runs of the same task or routine stay two rows.
+
+| Column | What it shows under `by task` |
+|---|---|
+| `TASK` | The routine's name when the run's ledger lines carry `routine`. Otherwise the task id. |
+| `WHEN` | The run's start in local time, as `YYYY-MM-DD HH:MM`. It is the time of the run's earliest ledger line. |
+
+Rows read newest start first. `--json` and `--csv` carry the same label in `task` and the same time in `when`. `--task` still matches the task id.
 
 | Column | What it is |
 |---|---|
@@ -218,10 +227,10 @@ trial id. See [Trials](planning.md#trials).
 spoolway eval --by task --trial t-8c21e0
 ```
 ```
-TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
-cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
-cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
-Total                                              2             0                             709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68     1h 07m
+TASK                PIPELINE   VER  WHEN              RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+cart-totals-1       impl       1.0  2026-09-26 14:05     1   83%       0           19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
+cart-totals-2       impl_fast  1.0  2026-09-26 14:07     1  100%       0           14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
+Total                                                    2             0                             709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68     1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```

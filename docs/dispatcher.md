@@ -283,7 +283,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 
 | Column | What it shows |
 |---|---|
-| TASK | The task id. |
+| TASK | The task id. For a copy of a routine, the routine's name. See [Routines](planning.md#routines). |
 | PIPELINE | The pipeline the task runs on. |
 | STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
@@ -326,7 +326,7 @@ stateDiagram-v2
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`, or `waiting on background <step>` for a task at `done` whose background check with `on_fail` is still running. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
-| `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
+| `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
 ### Recent moves
@@ -731,7 +731,7 @@ A blocked task keeps its pane open until it is resumed.
 ## Where a lane lives
 
 Every task runs in a herdr workspace of its own, nested under the project's row as
-`spoolway/<task>`. There is no setting for the layout. A config that still names
+`spoolway/<task>`. A copy of a routine uses the routine's name in place of the task id. There is no setting for the layout. A config that still names
 `dispatch.herdr_mode` loads with a note, and `spoolway sync` drops the key.
 
 A task that an older release left in a pane of the shared `spoolway-dispatcher` workspace is
@@ -740,7 +740,7 @@ the checkout it already has.
 
 Under a multiplexer every lane is a real pane you can watch and type into. Each agent step of a
 task gets a pane of its own, and keeps it until the task is done. See [Finished lanes keep their
-pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. Sessions you start by
+pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by
 hand are never touched.
 
 The board itself stays in the pane you ran `spoolway dispatch` in.
@@ -755,7 +755,7 @@ grows as a spiral. A step that comes back is the exception. See [Finished lanes 
 pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
 unless it is its workspace's only tab.
 
-A task's tab is renamed to the task's slug, and stays that way across a dispatcher restart. Its
+A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with

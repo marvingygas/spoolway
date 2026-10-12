@@ -100,8 +100,12 @@ impl Runs {
     /// What a run is addressed by afterwards: `<task> · <step>`, the same
     /// shape a lane name has, so a person reading the project's own
     /// `commands/` sees the names they already know from `headless/`.
+    ///
+    /// `task` is the numbered id, never a routine's name: a routine's copies
+    /// share a lane name, and a new copy must not read the pid and exit files
+    /// an earlier one left. See [`crate::mux::run_key`].
     pub fn key(step: &str, task: &str) -> String {
-        crate::mux::lane_name(step, task)
+        crate::mux::run_key(step, task)
     }
 
     /// Which of `peers` holds a `serial: true` step right now: the first

@@ -108,6 +108,23 @@ pub(crate) const RETIRED_PARK_KEYS: &[&str] = &[
 pub struct Frontmatter {
     pub id: String,
 
+    /// The routine this task is a queued copy of: the routine file's own
+    /// `id:`, copied verbatim when the routines tab or a job queues it.
+    ///
+    /// A copy's [`Self::id`] carries a number so two runs of one routine
+    /// never share a file, branch, worktree or lock. This is the name a
+    /// person reads in its place, on the board's TASK column and in the
+    /// `queued` popup. Nothing on disk is keyed by it, so a copy whose line
+    /// was edited away shows its id and runs as before. It is never worked
+    /// out by cutting `-N` off an id: an ordinary task called `fix-2` is not
+    /// a routine called `fix`.
+    ///
+    /// One of `queue::RESERVED_KEYS`: `queue add` refuses a task that sets
+    /// it, and unqueueing a copy drops it, so a task queued any other way
+    /// never has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<String>,
+
     /// A Conventional Commits line naming what this task does — a type, the
     /// area of code in parentheses, a colon, and one short present-tense
     /// sentence: `feat(queue): add a --dry-run flag`.
@@ -792,6 +809,23 @@ pub struct Task {
 impl Task {
     pub fn id(&self) -> &str {
         &self.front.id
+    }
+
+    /// The routine this task is a queued copy of — see
+    /// [`Frontmatter::routine`]. A `routine:` left blank counts as edited
+    /// away, the same as one removed, so a copy is never drawn under an
+    /// empty name.
+    pub fn routine(&self) -> Option<&str> {
+        self.front
+            .routine
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    /// The name a person reads for this task: its [`Self::routine`] when it
+    /// has one, and its id otherwise.
+    pub fn display_name(&self) -> &str {
+        self.routine().unwrap_or(&self.front.id)
     }
 
     pub fn stage(&self) -> &str {

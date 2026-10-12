@@ -88,6 +88,17 @@ pub fn lane_cmd(
     )
 }
 
+/// The id of the live task whose lane has `half` for its task half: the task
+/// with that id, else the one whose `routine:` it is — see
+/// [`crate::mux::lane_owner`]. A name no live task answers to is returned as
+/// it stands, so a lane whose task has left the queue still reports its
+/// session.
+fn task_id_of(repo: &Repo, half: &str) -> String {
+    let tasks = repo.tasks().unwrap_or_default();
+    crate::mux::lane_owner(half, &tasks)
+        .map_or_else(|| half.to_string(), |task| task.id().to_string())
+}
+
 /// A person's answer to a lane that ended its turn on a question.
 ///
 /// Open a lane's session in this terminal, with its whole conversation.
@@ -100,12 +111,14 @@ pub fn lane_cmd(
 /// because at least one kind keys its session store on that directory.
 pub fn attach(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AttachArgs) -> Result<()> {
     let lane = args.lane.trim();
-    let Some((_, task_id)) = crate::mux::parse_lane_name(lane, &pipelines.all_step_ids()) else {
+    let Some((_, half)) = crate::mux::parse_lane_name(lane, &pipelines.all_step_ids()) else {
         bail!(
             "`{lane}` is not a spoolway lane — a lane is named `<task> · <step>`, and \
              a dispatch run's board names the waiting ones"
         );
     };
+
+    let task_id = task_id_of(repo, half);
 
     if mux.resident_while_waiting()
         && let Ok(lanes) = mux.list_lanes()
@@ -135,7 +148,7 @@ pub fn attach(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AttachAr
     // kind stores sessions per directory, and resuming from anywhere else
     // would find nothing.
     let cwd = repo
-        .task(task_id)
+        .task(&task_id)
         .ok()
         .and_then(|task| task.front.worktree_path.clone())
         .filter(|path| path.is_dir())
@@ -167,14 +180,14 @@ pub fn answer(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AnswerAr
     }
 
     let lane_name = args.lane.trim();
-    let (_, task_id) = crate::mux::parse_lane_name(lane_name, &pipelines.all_step_ids())
+    let (_, half) = crate::mux::parse_lane_name(lane_name, &pipelines.all_step_ids())
         .with_context(|| {
             format!(
                 "`{lane_name}` is not a lane name — lanes are `<task> · <step>`, and \
                  `spoolway lane` lists the ones that exist"
             )
         })?;
-    let task = repo.task(task_id)?;
+    let task = repo.task(&task_id_of(repo, half))?;
 
     let lanes = mux.list_lanes()?;
     let lane = lanes
@@ -302,18 +315,21 @@ fn print_lane_text(lane: &str, text: &str, json: bool) -> Result<()> {
 /// where the whole of it lives.
 ///
 /// `None` when this lane has no command run at all, which is every agent lane
-/// — the caller then reads the pane as it always did. A lane key is a command
-/// run's key, so no lookup beyond the file is needed.
+/// — the caller then reads the pane as it always did. The lane name is turned
+/// into its run key first, because a routine copy's lane name drops the
+/// numbered id the command run is filed under.
 fn command_log(repo: &Repo, lane: &str, lines: usize) -> Option<String> {
     let runs = crate::command_step::Runs::new(&repo.root);
-    let path = runs.log_path(lane);
+    // Filed under the numbered id, which a routine's lane name drops.
+    let key = crate::mux::lane_key(lane, &repo.tasks().unwrap_or_default());
+    let path = runs.log_path(&key);
     let body = std::fs::read_to_string(&path).ok()?;
 
     let tail: Vec<&str> = body.lines().rev().take(lines).collect();
     let tail: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
 
-    let state = match runs.state(lane) {
-        crate::command_step::RunState::Running => match runs.elapsed(lane) {
+    let state = match runs.state(&key) {
+        crate::command_step::RunState::Running => match runs.elapsed(&key) {
             Some(for_) => format!(
                 "running for {}",
                 crate::config::human_duration::format(for_)
@@ -336,6 +352,26 @@ fn command_log(repo: &Repo, lane: &str, lines: usize) -> Option<String> {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// `attach` and `answer` turn a lane name's task half into the live task:
+    /// a routine's name finds its copy, a numbered id still finds itself, and a
+    /// name no live task answers to is returned as it stands. Without the
+    /// routine lookup `spoolway lane "rel · implement" -m ...` failed with
+    /// `no task rel`.
+    #[test]
+    fn a_routine_lane_name_finds_its_live_copy_by_routine_and_by_id() {
+        let (repo, _root_guard) = fixture("lane-routine-owner");
+        let doc = crate::commands::testutil::task_text(
+            "rel-1",
+            "routine: rel\nstage: implement\n",
+            crate::commands::testutil::BODY,
+        );
+        std::fs::write(repo.queue_dir().join("rel-1.md"), doc).unwrap();
+
+        assert_eq!(task_id_of(&repo, "rel"), "rel-1");
+        assert_eq!(task_id_of(&repo, "rel-1"), "rel-1");
+        assert_eq!(task_id_of(&repo, "gone"), "gone");
+    }
 
     /// A lane can no longer answer for itself: `spoolway lane -m` refuses
     /// before it ever touches a `Mux`, which is why a real `Headless` backend

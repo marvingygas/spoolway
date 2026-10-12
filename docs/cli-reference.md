@@ -208,7 +208,7 @@ A task whose start branch does not exist is not queued. Neither is any task in t
 depends on it. These tasks stay in the pending directory and the rest of the selection is queued.
 See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
 
-Queueing a group or a routine ends on a popup naming what queued. A task left out is listed under
+Queueing a group or a routine ends on a popup naming what queued. A copy of a routine is listed by its routine's name. A task left out is listed under
 `not queued, start branch doesn't exist`. A task left out only for its dependency has
 `(depends on <id>)` beside it. Under the list, one sentence names each task whose own start branch
 is missing:
@@ -686,6 +686,11 @@ spoolway lane "<task> · <step>"
 spoolway lane "<task> · <step>" -m "yes, use the second option"
 spoolway lane "<task> · <step>" --attach
 ```
+
+A lane is named for its task id. A copy of a routine is named for its routine, so `release · ship`
+reaches the live copy of `release`. The copy's numbered id also works, for
+example `release-6 · ship`. Once the copy has left the queue, only the numbered id reads its
+transcript.
 
 | Flag | Default | What it does |
 |---|---|---|

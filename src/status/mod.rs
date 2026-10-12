@@ -175,6 +175,12 @@ pub enum Phase {
 
 pub struct Row {
     pub id: String,
+    /// The routine this task is a queued copy of, from its `routine:` —
+    /// [`crate::task::Task::routine`]'s own answer. The board's TASK column
+    /// draws it in place of [`Self::id`], whose `-N` only keeps two runs'
+    /// files apart. `None` on a task queued any other way, on a copy whose
+    /// line was edited away, and on every archived row — see [`done_rows`].
+    pub routine: Option<String>,
     /// The group this task came from, verbatim. `None` is a task queued
     /// outside any group — see [`NO_GROUP`].
     pub group: Option<String>,
@@ -285,6 +291,13 @@ pub struct Row {
 }
 
 impl Row {
+    /// What the board's TASK column draws: the [`Self::routine`] a queued
+    /// copy was made from, and the id otherwise. Everything that acts on a
+    /// row — the cursor, a key, a command — still goes by [`Self::id`].
+    pub fn name(&self) -> &str {
+        self.routine.as_deref().unwrap_or(&self.id)
+    }
+
     /// Where this row sorts. Group first and always: the outer order is the
     /// group's name, so a group stays where a reader last found it rather than
     /// moving up the board as its tasks get into trouble.
@@ -1111,7 +1124,8 @@ impl Board {
             return Ok(());
         };
         self.mode = BoardMode::ConfirmRestart(RestartConfirm {
-            session: crate::commands::abandoned_session(repo, &step, &id),
+            session: crate::commands::abandoned_session(repo, &step, &task),
+            lane: crate::mux::lane_name(&step, &task),
             id,
             step,
             error: None,
@@ -1431,6 +1445,7 @@ struct PauseConfirm {
 pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     let abort = |kind| Abort {
         task: "login".to_string(),
+        lane: "login · implement".to_string(),
         step: "implement".to_string(),
         kind,
         elapsed: Some(Duration::from_secs(141)),
@@ -1461,6 +1476,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let restart = RestartConfirm {
         id: "login".to_string(),
+        lane: "login · implement".to_string(),
         step: "implement".to_string(),
         session: None,
         error: None,
@@ -1533,6 +1549,9 @@ struct ResumePicker {
 struct RestartConfirm {
     /// The task being restarted.
     id: String,
+    /// The lane it would start over, named as the multiplexer and `spoolway
+    /// lane` name it — see [`crate::mux::lane_name`].
+    lane: String,
     /// The step it would start over — [`crate::commands::restart_step`]'s.
     step: String,
     /// The conversation the restart throws away, if one is on record.
@@ -1827,6 +1846,9 @@ pub(crate) struct CommandRunning {
 /// any more until the panel naming it is actually answered.
 struct Abort {
     task: String,
+    /// The agent lane this would interrupt, by [`crate::mux::lane_name`] —
+    /// blank for a command run, which is stopped by its run key instead.
+    lane: String,
     step: String,
     kind: AbortKind,
     /// How long this abort has been running, off the same two clocks the
@@ -1877,6 +1899,7 @@ fn live_aborts(
         });
         out.push(Abort {
             task: task.id().to_string(),
+            lane: crate::mux::lane_name(task.stage(), task),
             step: task.stage().to_string(),
             kind: AbortKind::Agent,
             elapsed,
@@ -1885,6 +1908,7 @@ fn live_aborts(
     for cr in running_command_steps(repo, tasks, pipelines) {
         out.push(Abort {
             task: cr.task,
+            lane: String::new(),
             step: cr.step,
             kind: AbortKind::Command,
             elapsed: cr.elapsed,
@@ -1902,8 +1926,7 @@ fn live_aborts(
 fn carry_out_abort(mux: &dyn crate::mux::Mux, runs: &crate::command_step::Runs, abort: &Abort) {
     match abort.kind {
         AbortKind::Agent => {
-            let name = crate::mux::lane_name(&abort.step, &abort.task);
-            let _ = mux.interrupt_lane(&name);
+            let _ = mux.interrupt_lane(&abort.lane);
         }
         AbortKind::Command => {
             runs.stop(&crate::command_step::Runs::key(&abort.step, &abort.task));
@@ -2407,7 +2430,7 @@ pub(crate) fn live_agent_lane_tasks(
         if step.kind() != crate::pipeline::StepKind::Agent {
             continue;
         }
-        let name = crate::mux::lane_name(task.stage(), task.id());
+        let name = crate::mux::lane_name(task.stage(), task);
         if lanes
             .iter()
             .any(|l| l.name == name && crate::dispatch::owns_cwd(&mine, &l.cwd))
@@ -2711,6 +2734,7 @@ fn build(
     let finishing = if holder.is_none() {
         Some(finish_settled(
             repo,
+            &tasks,
             &mut active_rows,
             &lanes,
             &mut memory.frozen,
@@ -2721,12 +2745,11 @@ fn build(
     };
 
     // Archived tasks stay on the board, dimmed, only as long as their group
-    // still has something in the queue — so the groups worth pulling from
-    // the archive are exactly the ones already among the active rows.
-    let active_groups: BTreeSet<String> =
-        active_rows.iter().filter_map(|r| r.group.clone()).collect();
+    // still has something in the queue — `done_rows` reads which groups
+    // those are, and which of them are routines, off the active rows.
+    let done = done_rows(repo, pipelines, &active_rows)?;
     let mut rows = active_rows;
-    rows.extend(done_rows(repo, pipelines, &active_groups)?);
+    rows.extend(done);
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
 
     let totals = group_totals(&ledger, &rows);
@@ -3436,10 +3459,7 @@ fn slots_used<'a>(
         if !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
             continue;
         }
-        let Some((step_id, task_id)) = crate::mux::parse_lane_name(&lane.name, &step_ids) else {
-            continue;
-        };
-        let Some(task) = tasks.iter().find(|t| t.id() == task_id) else {
+        let Some((step_id, task)) = crate::mux::parse_lane(&lane.name, &step_ids, tasks) else {
             continue;
         };
         let Ok(pipeline) = pipelines.for_task(task) else {
@@ -3823,14 +3843,15 @@ fn build_rows(
         // match below, because it is a fact about the step a task sits on
         // and not about any one of the states that match branches out into.
         let arrivals = task.rounds_at(shown_stage);
-        let lane = crate::mux::lane_name(task.stage(), task.id());
+        let lane = crate::mux::lane_name(task.stage(), task);
+        let key = crate::mux::run_key(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
         // checkout path is no test of ownership here the way it is in a pass.
         let live_lane = lanes.iter().find(|l| l.name == lane);
         let live = live_lane.is_some();
         // One read of the transcript, for the three figures that come off it.
         let session = live
-            .then(|| live_session(repo, ledger, &lane, &mut live_sessions))
+            .then(|| live_session(repo, ledger, &lane, &key, &mut live_sessions))
             .flatten();
 
         // A command step's run is not a lane. It is a detached process the
@@ -3841,12 +3862,12 @@ fn build_rows(
         // board of queued rows that do not move is a board saying the
         // dispatcher has stopped, which is the one thing it was not doing.
         //
-        // `Runs::key` builds the string `mux::lane_name` builds, so `lane` is
-        // already the key this asks about.
+        // Asked by `key`, not `lane`: a run is filed under the numbered id,
+        // where a routine's lane drops it.
         let command_run = step
             .filter(|step| step.kind() == crate::pipeline::StepKind::Command)
-            .filter(|_| runs.state(&lane) == crate::command_step::RunState::Running)
-            .and(Some(&lane));
+            .filter(|_| runs.state(&key) == crate::command_step::RunState::Running)
+            .and(Some(&key));
 
         // A `serial:` step this task has not started because another task's
         // run of it is still going — the same question
@@ -3855,7 +3876,7 @@ fn build_rows(
         // this pipeline, since a run's key names no pipeline of its own.
         let serial_holder = step
             .filter(|step| step.serial && step.kind() == crate::pipeline::StepKind::Command)
-            .filter(|_| runs.state(&lane) == crate::command_step::RunState::Fresh)
+            .filter(|_| runs.state(&key) == crate::command_step::RunState::Fresh)
             .and_then(|step| {
                 runs.serial_holder(
                     &step.id,
@@ -3926,7 +3947,7 @@ fn build_rows(
                 // as `queued` demanded to let this task start at all, and no
                 // lane of its own still mid-turn — resuming into a pane a
                 // person or an agent is actively using would race it.
-                let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
+                let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task);
                 (
                     State::Blocked,
                     blocked_next(task, pipeline, resumable, dependents),
@@ -3969,7 +3990,7 @@ fn build_rows(
                     let parked_by_a_person =
                         task.front.parked_from.is_some() && !task.front.escalated;
                     let resumable = graph.ready(task.id())
-                        && (parked_by_a_person || !lane_busy(lanes, &step_ids, task.id()));
+                        && (parked_by_a_person || !lane_busy(lanes, &step_ids, task));
                     let target = paused_next(task, pipeline, dependents);
                     // The word this pause caught, ahead of the arrow — "review
                     // failed → e2e" rather than a bare "→ e2e" — so a caught
@@ -4082,6 +4103,7 @@ fn build_rows(
         };
         rows.push(Row {
             id: task.id().to_string(),
+            routine: task.routine().map(str::to_string),
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
             after: stacked_after(repo, tasks, task),
@@ -4134,18 +4156,19 @@ fn build_rows(
     Ok(rows)
 }
 
-/// Whether any of `task_id`'s own lanes — wherever the pipeline last put one,
+/// Whether any of `task`'s own lanes — wherever the pipeline last put one,
 /// not necessarily the step it is parked on — is mid-turn right now.
 ///
 /// A parked task's lane keeps the name of the step it paused or blocked at,
 /// not `paused`/`blocked` itself: nothing ever starts a lane *at* either of
 /// those, so building a lane name from the task's current stage — the way an
 /// ordinary running row does — would look for a lane that can never exist.
-/// Matched by task id alone instead, the same way `spoolway resume` frees a
+/// Matched by task alone instead, the same way `spoolway resume` frees a
 /// stale one.
-fn lane_busy(lanes: &[crate::mux::Lane], step_ids: &[&str], task_id: &str) -> bool {
+fn lane_busy(lanes: &[crate::mux::Lane], step_ids: &[&str], task: &crate::task::Task) -> bool {
     lanes.iter().any(|lane| {
-        crate::mux::parse_lane_name(&lane.name, step_ids).is_some_and(|(_, id)| id == task_id)
+        crate::mux::parse_lane_name(&lane.name, step_ids).is_some()
+            && crate::mux::lane_of_task(&lane.name, task)
             // Spelled out rather than `is_busy()`: resuming into a lane on a
             // permission prompt would race the prompt exactly as resuming
             // into a working one would race the turn, so `Blocked` keeps a
@@ -4208,13 +4231,14 @@ fn header_cells(phase: Phase, finishing: Option<usize>, version: String) -> Vec<
 /// like any other: with no dispatcher up, nothing is reminding it either.
 ///
 /// `frozen` is the board's memory of the TIME each finished step read the
-/// first frame it was seen finished, by lane name, so its clock stops there
+/// first frame it was seen finished, by run key, so its clock stops there
 /// rather than going on counting from `launched_at` — the same kind of
 /// memory `Board::arrived` keeps for the handoff grace. A lane that starts
 /// working again, or leaves the board, drops its entry, so it counts live
 /// once more.
 fn finish_settled(
     repo: &Repo,
+    tasks: &[crate::task::Task],
     rows: &mut [Row],
     lanes: &[crate::mux::Lane],
     frozen: &mut BTreeMap<String, Option<i64>>,
@@ -4229,34 +4253,41 @@ fn finish_settled(
         ) {
             continue;
         }
-        let lane = crate::mux::lane_name(&row.stage, &row.id);
+        // `Row` holds no task, only its id, so the lane name comes from the
+        // task the row was built from. A row whose task has left the queue
+        // since has no lane of its own to find.
+        let lane = tasks
+            .iter()
+            .find(|task| task.id() == row.id)
+            .map(|task| crate::mux::lane_name(&row.stage, task));
+        let key = crate::mux::run_key(&row.stage, &row.id);
         // The TIME this row reads if it has finished, before any frozen
         // figure: a lane's own `now - launched_at`, already on the row, or an
         // exited run's time since it started, which `build_rows` never put
         // there because it only times a run still in flight.
-        let time = match lanes.iter().find(|l| l.name == lane) {
+        let time = match lanes.iter().find(|l| Some(&l.name) == lane.as_ref()) {
             Some(live) if live.status.is_settled() => row.lane_time,
             Some(_) => {
                 working += 1;
                 continue;
             }
-            None => match runs.state(&lane) {
+            None => match runs.state(&key) {
                 crate::command_step::RunState::Running => {
                     working += 1;
                     continue;
                 }
                 crate::command_step::RunState::Exited(_) => {
-                    runs.elapsed(&lane).map(|ran| ran.as_secs() as i64)
+                    runs.elapsed(&key).map(|ran| ran.as_secs() as i64)
                 }
                 _ => continue,
             },
         };
         row.state = State::Finished;
         row.next = "moves on when dispatching starts".to_string();
-        row.lane_time = *frozen.entry(lane.clone()).or_insert(time);
-        finished.insert(lane);
+        row.lane_time = *frozen.entry(key.clone()).or_insert(time);
+        finished.insert(key);
     }
-    frozen.retain(|lane, _| finished.contains(lane));
+    frozen.retain(|key, _| finished.contains(key));
     working
 }
 
@@ -4512,6 +4543,7 @@ fn unroutable_row(
 ) -> Row {
     Row {
         id: task.id().to_string(),
+        routine: task.routine().map(str::to_string),
         group: task.front.group.clone(),
         issue_url: issue_url_of(task),
         after: stacked_after(repo, tasks, task),
@@ -4573,25 +4605,43 @@ fn issue_url_of(task: &crate::task::Task) -> Option<String> {
 }
 
 /// Every task whose file has moved to the project's own `archive/`, as
-/// dimmed `● done` rows — but only for a group named among `active_groups`. A
-/// group with nothing left in the queue is not on the board at all, so its
-/// archived tasks are not either: this is what keeps a finished group from
-/// lingering on the board forever.
-fn done_rows(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    active_groups: &BTreeSet<String>,
-) -> Result<Vec<Row>> {
+/// dimmed `● done` rows — but only for a group one of the `live` rows
+/// belongs to. A group with nothing left in the queue is not on the board at
+/// all, so its archived tasks are not either: this is what keeps a finished
+/// group from lingering on the board forever.
+///
+/// A group with a live row carrying [`Row::routine`] gets no archived rows
+/// either. Its archive holds every earlier run of the routine, and drawing
+/// them would add every run's spend to the group's total line, which
+/// [`view::group_totals`] sums over the rows drawn. That covers copies
+/// archived before `routine:` existed too, since the rule reads the live
+/// copy, never the archived ones.
+fn done_rows(repo: &Repo, pipelines: &Pipelines, live: &[Row]) -> Result<Vec<Row>> {
+    let mut active_groups: BTreeSet<&str> = BTreeSet::new();
+    let mut routine_groups: BTreeSet<&str> = BTreeSet::new();
+    for row in live {
+        let Some(group) = row.group.as_deref() else {
+            continue;
+        };
+        active_groups.insert(group);
+        if row.routine.is_some() {
+            routine_groups.insert(group);
+        }
+    }
     let archived = cached_archive(&repo.archive_dir())?;
     Ok(archived
         .iter()
         .filter_map(|entry| {
             let group = Some(entry.group.clone()).filter(|group| !group.is_empty())?;
-            if !active_groups.contains(&group) {
+            if !active_groups.contains(group.as_str()) || routine_groups.contains(group.as_str()) {
                 return None;
             }
             Some(Row {
                 id: entry.id.clone(),
+                // The archive index keeps no `routine:`. A group with a live
+                // routine copy draws no archived row at all, so a done row
+                // only ever shows its id.
+                routine: None,
                 group: Some(group),
                 issue_url: entry.url.clone(),
                 // An archived task's own group has already landed, so the
@@ -4810,12 +4860,13 @@ fn live_session(
     repo: &Repo,
     ledger: &[crate::usage::Entry],
     lane: &str,
+    key: &str,
     touched: &mut HashSet<String>,
 ) -> Option<Reading> {
     // `lane_session_in`, not `lane_session`: the latter reads the whole
     // ledger fresh with no cache, which this call already holds as `ledger`
     // — see `build`'s own comment on why it is read once and shared.
-    let (kind, session) = crate::dispatch::lane_session_in(repo, ledger, lane)?;
+    let (kind, session) = crate::dispatch::lane_session_in(repo, ledger, lane, key)?;
     touched.insert(session.clone());
     let cache = LIVE_SESSION_CACHE.get_or_init(Mutex::default);
     let mut cache = cache.lock().ok()?;
@@ -6686,7 +6737,7 @@ mod tests {
         let mut rows = vec![state(idle)];
         let mut l = lane("login · implement", &repo.root);
         l.status = idle;
-        finish_settled(&repo, &mut rows, &[l], &mut BTreeMap::new());
+        finish_settled(&repo, &tasks, &mut rows, &[l], &mut BTreeMap::new());
         assert!(matches!(rows[0].state, State::Finished));
     }
 
@@ -6742,7 +6793,7 @@ mod tests {
         let graph = Graph::build(&tasks, &repo.archive_dir());
         let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
         let mut frozen = BTreeMap::new();
-        let working = finish_settled(&repo, &mut rows, &lanes, &mut frozen);
+        let working = finish_settled(&repo, &tasks, &mut rows, &lanes, &mut frozen);
 
         assert_eq!(working, 3);
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
@@ -6753,6 +6804,35 @@ mod tests {
             assert!(matches!(row(id).state, State::Finished), "{id}");
             assert_eq!(row(id).next, "moves on when dispatching starts");
         }
+    }
+
+    /// A routine copy's lane is named for its routine, so a stopped board
+    /// finds a settled copy's lane by that name and reads it finished. A
+    /// name built from the row's numbered id would match no lane and leave
+    /// the copy reading `Running`.
+    #[test]
+    fn a_stopped_board_finishes_a_settled_routine_copy() {
+        let (repo, _root_guard) = fixture("stopped-board-routine");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "release-6", &[], Some("implement"));
+        let mut task = repo.task("release-6").unwrap();
+        task.front.routine = Some("release".into());
+        task.save().unwrap();
+        let mut settled = lane("release · implement", &repo.root);
+        settled.status = crate::mux::LaneStatus::Done;
+        let lanes = [settled];
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let working = finish_settled(&repo, &tasks, &mut rows, &lanes, &mut BTreeMap::new());
+
+        assert_eq!(working, 0);
+        assert!(
+            matches!(rows[0].state, State::Finished),
+            "{}",
+            rows[0].state.word()
+        );
     }
 
     /// A finished step's TIME is the figure the board read the first frame
@@ -6775,7 +6855,7 @@ mod tests {
             let tasks = repo.tasks().unwrap();
             let graph = Graph::build(&tasks, &repo.archive_dir());
             let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, lanes, &[], None).unwrap();
-            let working = finish_settled(&repo, &mut rows, lanes, frozen);
+            let working = finish_settled(&repo, &tasks, &mut rows, lanes, frozen);
             (working, rows.into_iter().find(|r| r.id == "login").unwrap())
         };
 
@@ -6827,13 +6907,19 @@ mod tests {
         let graph = Graph::build(&tasks, &repo.archive_dir());
         let mut frozen = BTreeMap::new();
         let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
-        assert_eq!(finish_settled(&repo, &mut rows, &[], &mut frozen), 1);
+        assert_eq!(
+            finish_settled(&repo, &tasks, &mut rows, &[], &mut frozen),
+            1
+        );
         assert!(matches!(rows[0].state, State::Running));
 
         std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
         let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         assert!(matches!(rows[0].state, State::Queued), "the premise");
-        assert_eq!(finish_settled(&repo, &mut rows, &[], &mut frozen), 0);
+        assert_eq!(
+            finish_settled(&repo, &tasks, &mut rows, &[], &mut frozen),
+            0
+        );
         assert!(matches!(rows[0].state, State::Finished));
         assert_eq!(rows[0].next, "moves on when dispatching starts");
         assert!(rows[0].lane_time.is_some(), "an exited run keeps its time");
@@ -7313,14 +7399,56 @@ mod tests {
         .unwrap();
 
         let active = rows(&repo, &pipelines).unwrap();
-        let active_groups: BTreeSet<String> =
-            active.iter().filter_map(|r| r.group.clone()).collect();
-        let done = done_rows(&repo, &pipelines, &active_groups).unwrap();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
 
         let ids: Vec<&str> = done.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["signup"], "`finished-group` has nothing queued");
         assert!(matches!(done[0].state, State::Done));
         assert_eq!(done[0].group.as_deref(), Some("auth"));
+    }
+
+    /// A group whose live task is a routine copy gets no archived rows, even
+    /// from copies archived before `routine:` existed. A plan's group keeps
+    /// them, and so does a copy whose `routine:` was edited away: the rule
+    /// reads the live task's line and nothing else.
+    #[test]
+    fn a_group_with_a_live_routine_copy_draws_no_archived_rows() {
+        let (repo, _root_guard) = fixture("done-rows-routine");
+        let pipelines = Pipelines::builtin();
+        let queue_copy = |id: &str, group: &str, routine: &str| {
+            add_to(&repo, id, &[], Some("implement"), Some(group));
+            let mut task = repo.task(id).unwrap();
+            task.front.routine = Some(routine.into());
+            task.save().unwrap();
+        };
+        queue_copy("release-6", "release", "release");
+        queue_copy("fix-2", "fix", " ");
+        add_to(&repo, "login", &[], Some("implement"), Some("auth"));
+
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        for (id, group) in [
+            ("release-4", "release"),
+            ("release-5", "release"),
+            ("fix-1", "fix"),
+            ("signup", "auth"),
+        ] {
+            std::fs::write(
+                repo.archive_dir().join(format!("{id}.md")),
+                format!("---\nid: {id}\nstage: done\ngroup: {group}\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let active = rows(&repo, &pipelines).unwrap();
+        let copy = active.iter().find(|r| r.id == "release-6").unwrap();
+        assert_eq!(copy.routine.as_deref(), Some("release"));
+        let blank = active.iter().find(|r| r.id == "fix-2").unwrap();
+        assert_eq!(blank.routine, None, "a blank line counts as edited away");
+
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
+        let mut ids: Vec<&str> = done.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["fix-1", "signup"]);
     }
 
     /// `cached_archive` reads the directory once and again only past a
@@ -7367,7 +7495,10 @@ mod tests {
         use crate::archive_index::testutil::*;
         let (repo, _root_guard) = fixture("done-rows-index");
         let pipelines = Pipelines::builtin();
-        let active: BTreeSet<String> = ["auth".to_string()].into();
+        let active = [Row {
+            group: Some("auth".into()),
+            ..crate::status::testutil::row("login")
+        }];
         let url = "url: https://acme.example/1\n";
         let rows_now = || {
             let rows = done_rows(&repo, &pipelines, &active).unwrap();
@@ -7510,7 +7641,7 @@ mod tests {
     #[test]
     fn live_session_uses_the_ledger_render_already_holds() {
         let (repo, _root_guard) = fixture("live-session-ledger-reuse");
-        let lane = crate::mux::lane_name("implement", "demo");
+        let lane = crate::mux::run_key("implement", "demo");
 
         crate::usage::append(
             &repo,
@@ -7525,7 +7656,7 @@ mod tests {
         )];
 
         let mut touched = HashSet::new();
-        live_session(&repo, &ledger, &lane, &mut touched);
+        live_session(&repo, &ledger, &lane, &lane, &mut touched);
 
         assert!(
             touched.contains("memory-session"),
@@ -7571,9 +7702,7 @@ mod tests {
         let hotfix_row = active.iter().find(|r| r.id == "hotfix").unwrap();
         assert_eq!(hotfix_row.pipeline, "bugfix");
 
-        let active_groups: BTreeSet<String> =
-            active.iter().filter_map(|r| r.group.clone()).collect();
-        let done = done_rows(&repo, &pipelines, &active_groups).unwrap();
+        let done = done_rows(&repo, &pipelines, &active).unwrap();
         assert_eq!(
             done[0].pipeline, "retired",
             "a deleted pipeline's name still prints — done_rows must never fail the board over it"

@@ -329,7 +329,7 @@ pub fn report(
             println!(
                 "{id}: {current} --{outcome}--> {} - held here for a person{at}{}",
                 crate::pipeline::PAUSED,
-                stop_choices(&id, &current)
+                stop_choices(&id, &crate::mux::lane_name(&current, &task))
             )
         }
         // `blocked` had nowhere else to send this — see `paused_from_blocked`
@@ -339,7 +339,7 @@ pub fn report(
         None if paused_from_blocked => println!(
             "{id}: {current} --{outcome}--> {} - nothing here could clear it{}",
             crate::pipeline::PAUSED,
-            stop_choices(&id, &current)
+            stop_choices(&id, &crate::mux::lane_name(&current, &task))
         ),
         // The unblocker passed and the lap bound parked the task anyway —
         // see `UNBLOCK_LAP_LIMIT`. The lane that reported reads this next
@@ -349,7 +349,7 @@ pub fn report(
             "{id}: {current} --{outcome}--> {} - {}{}",
             crate::pipeline::PAUSED,
             pause_note.as_deref().unwrap_or_default(),
-            stop_choices(&id, &current)
+            stop_choices(&id, &crate::mux::lane_name(&current, &task))
         ),
         // The routed destination was a cleanup terminal, and the worktree
         // still has uncommitted work in it — see `held_dirty` above.
@@ -1565,15 +1565,15 @@ fn is_past_gate(pipeline: &Pipeline, origin: &str, gate_step: &str, candidate: &
 /// just landed on `paused`, the only place this particular moment is ever
 /// seen: nothing rereads a task's own status log for it.
 ///
-/// `step` is the step this report just settled — the one `spoolway lane
-/// --attach` opens, since the same lane's pane is what stays up once a
-/// report lands the task on a stop.
-fn stop_choices(id: &str, step: &str) -> String {
+/// `lane` is the lane of the step this report just settled — the one
+/// `spoolway lane --attach` opens, since the same lane's pane is what stays
+/// up once a report lands the task on a stop.
+fn stop_choices(id: &str, lane: &str) -> String {
     format!(
         "\n\n  resume         [r]   spoolway resume {id}\n  \
          open the pane  [o]   spoolway lane '{}' --attach\n  \
          park it        [p]   spoolway queue pause {id}",
-        crate::mux::lane_name(step, id)
+        lane
     )
 }
 
@@ -2467,8 +2467,8 @@ fn task_lanes(
         .filter(|lane| {
             let ours =
                 lane.cwd == repo.root || Some(&lane.cwd) == task.front.worktree_path.as_ref();
-            let this_task = crate::mux::parse_lane_name(&lane.name, &step_ids)
-                .is_some_and(|(_, task_id)| task_id == task.front.id);
+            let this_task = crate::mux::parse_lane_name(&lane.name, &step_ids).is_some()
+                && crate::mux::lane_of_task(&lane.name, task);
             ours && this_task
         })
         .collect()
@@ -2606,7 +2606,7 @@ pub(crate) fn restart_with(
 
     // Read before the lane goes: the dispatcher's own record of it is dropped
     // once the lane is gone, and the ledger is what outlives that.
-    let session = abandoned_session(repo, &step, &task.front.id);
+    let session = abandoned_session(repo, &step, &task);
     let step_ids = pipelines.all_step_ids();
     let lanes: Vec<_> = task_lanes(repo, pipelines, &task, mux.list_lanes()?)
         .into_iter()
@@ -2677,15 +2677,16 @@ pub(crate) fn restart_with(
     Ok(())
 }
 
-/// The conversation a restart of `step` on task `id` throws away, if one is
-/// on record.
+/// The conversation a restart of `step` on `task` throws away, if one is on
+/// record.
 ///
 /// Shared by `spoolway restart`'s own report and the board's `restart` panel,
 /// so the session a person confirms is the one the command says it abandoned.
-pub(crate) fn abandoned_session(repo: &Repo, step: &str, id: &str) -> Option<AbandonedSession> {
+pub(crate) fn abandoned_session(repo: &Repo, step: &str, task: &Task) -> Option<AbandonedSession> {
     let ledger = crate::usage::read(repo).unwrap_or_default();
-    let lane = crate::mux::lane_name(step, id);
-    let (_, session) = crate::dispatch::lane_session_in(repo, &ledger, &lane)?;
+    let lane = crate::mux::lane_name(step, task);
+    let key = crate::mux::run_key(step, task.id());
+    let (_, session) = crate::dispatch::lane_session_in(repo, &ledger, &lane, &key)?;
     let banked = ledger.iter().any(|entry| entry.session == session);
     Some(AbandonedSession {
         id: session,
@@ -2835,7 +2836,7 @@ mod tests {
     /// gated pass or a caught block prints into the pane it just parked.
     #[test]
     fn stop_choices_prints_every_action_key_first() {
-        let choices = stop_choices("confirm-dialog", "look");
+        let choices = stop_choices("confirm-dialog", "confirm-dialog · look");
         assert_eq!(
             choices,
             "\n\n  resume         [r]   spoolway resume confirm-dialog\n  \
@@ -7497,7 +7498,8 @@ mod tests {
         headless
             .start_lane(
                 &crate::mux::LaneSpec {
-                    name: &crate::mux::lane_name("implement", "stuck"),
+                    name: &crate::mux::run_key("implement", "stuck"),
+                    key: &crate::mux::run_key("implement", "stuck"),
                     label: "implementer",
                     kind: "pi",
                     pane_id: "p1",
@@ -7549,7 +7551,8 @@ mod tests {
             headless
                 .start_lane(
                     &crate::mux::LaneSpec {
-                        name: &crate::mux::lane_name(step, "stuck"),
+                        name: &crate::mux::run_key(step, "stuck"),
+                        key: &crate::mux::run_key(step, "stuck"),
                         label: step,
                         kind: "pi",
                         pane_id: "p1",
@@ -7582,7 +7585,7 @@ mod tests {
             .collect();
         assert_eq!(
             left,
-            [crate::mux::lane_name("review", "stuck")],
+            [crate::mux::run_key("review", "stuck")],
             "the lane on the resumed step is closed, the one on another step stays"
         );
     }
@@ -7663,6 +7666,7 @@ mod tests {
             .start_lane(
                 &crate::mux::LaneSpec {
                     name: "stuck · handover",
+                    key: "stuck · handover",
                     label: "github",
                     kind: "pi",
                     pane_id: "p1",
@@ -7708,7 +7712,7 @@ mod tests {
         fn with_lane(repo: &Repo, task: &str, status: crate::mux::LaneStatus) -> Self {
             Self {
                 lanes: vec![crate::mux::Lane {
-                    name: crate::mux::lane_name("implement", task),
+                    name: crate::mux::run_key("implement", task),
                     kind: "pi".into(),
                     status,
                     pane_id: "p1".into(),
@@ -7828,7 +7832,7 @@ mod tests {
 
         restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
 
-        let lane = crate::mux::lane_name("implement", "stuck");
+        let lane = crate::mux::run_key("implement", "stuck");
         assert_eq!(
             mux.calls(),
             [format!("interrupt {lane}"), format!("stop {lane}")]
@@ -7861,7 +7865,7 @@ mod tests {
             mux.calls(),
             [format!(
                 "stop {}",
-                crate::mux::lane_name("implement", "stuck")
+                crate::mux::run_key("implement", "stuck")
             )]
         );
     }
@@ -7878,13 +7882,13 @@ mod tests {
         task.save().unwrap();
         let mut mux = RestartMux::with_lane(&repo, "stuck", crate::mux::LaneStatus::Done);
         let mut review = mux.lanes[0].clone();
-        review.name = crate::mux::lane_name("review", "stuck");
+        review.name = crate::mux::run_key("review", "stuck");
         review.status = crate::mux::LaneStatus::Working;
         mux.lanes.push(review);
 
         restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
 
-        let lane = crate::mux::lane_name("review", "stuck");
+        let lane = crate::mux::run_key("review", "stuck");
         assert_eq!(
             mux.calls(),
             [format!("interrupt {lane}"), format!("stop {lane}")]

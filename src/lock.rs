@@ -237,12 +237,13 @@ impl TaskLock {
 
     /// Take the lock, waiting out a live holder up to [`TaskLock::WAIT`] and
     /// reaping a crashed holder's file on the way. Returns `Err` when a live
-    /// process still holds it after the wait. What that means is the
-    /// caller's. The dispatcher treats it as "not serialised this time,
-    /// proceed unlocked", because failing a whole pass for one contended task
-    /// file is the worse outcome. `save_new_tasks` in `commands::queue`
-    /// propagates it, because proceeding would let two adds of one id both
-    /// succeed.
+    /// process still holds it after the wait, as a [`TaskLockHeld`] so a
+    /// caller can tell that apart from failing to write the lock at all.
+    /// What that means is the caller's. The dispatcher treats it as "not
+    /// serialised this time, proceed unlocked", because failing a whole pass
+    /// for one contended task file is the worse outcome. `save_new_tasks` in
+    /// `commands::queue` propagates it, because proceeding would let two adds
+    /// of one id both succeed.
     pub fn acquire(path: &Path) -> Result<TaskLock> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -268,11 +269,11 @@ impl TaskLock {
                     // on (see `acquire`'s own doc).
                     Some(Some(pid)) => {
                         if std::time::Instant::now() >= deadline {
-                            bail!(
-                                "task lock at {} is still held by pid {pid} after {:?}",
-                                path.display(),
-                                Self::WAIT
-                            );
+                            return Err(TaskLockHeld {
+                                path: path.to_path_buf(),
+                                pid,
+                            }
+                            .into());
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     }
@@ -290,6 +291,30 @@ impl TaskLock {
         }
     }
 }
+
+/// [`TaskLock::acquire`] gave up on a lock a live process still held after
+/// [`TaskLock::WAIT`]. A type of its own so a caller that can simply try
+/// again later, as a job firing can on the dispatcher's next pass, tells
+/// waiting out a holder apart from a lock it could not write at all.
+#[derive(Debug)]
+pub struct TaskLockHeld {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl std::fmt::Display for TaskLockHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "task lock at {} is still held by pid {} after {:?}",
+            self.path.display(),
+            self.pid,
+            TaskLock::WAIT
+        )
+    }
+}
+
+impl std::error::Error for TaskLockHeld {}
 
 impl Drop for TaskLock {
     fn drop(&mut self) {

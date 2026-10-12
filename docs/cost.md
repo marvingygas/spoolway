@@ -10,6 +10,9 @@ the ledger, in `~/.spoolway/<project>/usage.jsonl`. It holds one line per lane a
 command step run. A command step line carries no tokens and no cost. See
 [The command steps table](eval.md#the-command-steps-table).
 
+A line written for a copy of a routine carries `routine`, the routine's id. A line for any other
+task leaves it out.
+
 ## How the numbers get there
 
 spoolway does not talk to a model. Each agent writes its own transcript with per-turn token

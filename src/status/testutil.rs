@@ -124,6 +124,7 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
         run: None,
         trial: None,
         trial_group: None,
+        routine: None,
         dir: None,
         hand: false,
         command: None,
@@ -148,6 +149,7 @@ pub fn arrivals(n: usize) -> VecDeque<RecentEvent> {
 pub fn row(id: &str) -> Row {
     Row {
         id: id.into(),
+        routine: None,
         group: Some("demo".into()),
         issue_url: None,
         after: None,
@@ -228,10 +230,11 @@ fn headless_lane_running(
 
     let mux = crate::mux::backend(repo).unwrap();
     let pane = mux.create_pane(&repo.root, id).unwrap();
-    let name = crate::mux::lane_name(step, id);
+    let name = crate::mux::run_key(step, id);
     mux.start_lane(
         &crate::mux::LaneSpec {
             name: &name,
+            key: &name,
             label,
             kind: "pi",
             pane_id: &pane.pane_id,

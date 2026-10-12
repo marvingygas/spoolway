@@ -499,6 +499,7 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             front: Frontmatter {
                 id: id.into(),
+                routine: None,
                 title: String::new(),
                 stage: stage.into(),
                 depends_on: depends_on.iter().map(|d| d.to_string()).collect(),

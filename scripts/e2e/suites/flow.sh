@@ -280,6 +280,42 @@ says "a lane's transcript outlives it" "stand-in argv" "$SPOOLWAY" lane "land ·
 says "and is headed by the turn and the lane's own name" "=== turn 1 (land · implement) ===" \
   "$SPOOLWAY" lane "land · implement"
 
+# -------------------------------------------------------- a routine copy's lane
+# A copy of a routine is named for the routine on the board, so its lane reads
+# `<routine> · <step>`, while the pid, exit and log files stay keyed by the
+# numbered id. `queue add` refuses `routine:`, so the copy is queued as an
+# ordinary task and given the key in its queue file while no dispatcher runs.
+dispatcher_stop
+queue_copy() {
+  task_doc "$LIVE/$1.md" "$1" "$BODY" "group: relcopies"
+  "$SPOOLWAY" queue add --from "$LIVE/$1.md" >/dev/null || return 1
+  sed -i "0,/^id: $1\$/s//id: $1\nroutine: rel/" "$SPOOLWAY_PROJECT_HOME/queue/$1.md"
+  grep -qx 'routine: rel' "$SPOOLWAY_PROJECT_HOME/queue/$1.md"
+}
+must "a first copy of the routine, queued" queue_copy rel-1
+if drive rel-1 gone; then ok "a routine copy runs to the end"
+else bad "a routine copy runs to the end (stuck at \`$(stage_of rel-1)\`)"; fi
+if grep -qF "started rel · implement" "$E2E_DISPATCH_LOG"; then ok "its lane is named for the routine"
+else bad "its lane is named for the routine"; grep 'started' "$E2E_DISPATCH_LOG" | tail -5 | sed 's/^/        /'; fi
+if grep -qF "started rel-1 · implement" "$E2E_DISPATCH_LOG"; then bad "and not for the numbered id"
+else ok "and not for the numbered id"; fi
+# The routine name finds only a live copy, so once the copy is gone the
+# transcript is read by the numbered id it was queued under, and is headed by
+# the routine's name.
+says "spoolway lane reads its transcript by the numbered id, headed by the routine" \
+  "=== turn 1 (rel · implement) ===" "$SPOOLWAY" lane "rel-1 · implement"
+present "its log is keyed by the numbered id" "$SPOOLWAY_PROJECT_HOME/headless/logs/rel-1 · implement.log"
+
+# A second copy, once the first has left the queue, starts with a log of its own.
+dispatcher_stop
+must "a second copy of the routine, queued" queue_copy rel-2
+if drive rel-2 gone; then ok "the next copy runs to the end"
+else bad "the next copy runs to the end (stuck at \`$(stage_of rel-2)\`)"; fi
+present "the next copy keeps a log of its own" "$SPOOLWAY_PROJECT_HOME/headless/logs/rel-2 · implement.log"
+if [ "$(grep -c '=== turn' "$SPOOLWAY_PROJECT_HOME/headless/logs/rel-1 · implement.log")" -eq 1 ]; then
+  ok "and the first copy's log gained nothing from it"
+else bad "and the first copy's log gained nothing from it"; fi
+
 # ------------------------------------------------------ the compaction threshold
 # A model's `compact_ctx` reaches its claude lanes as an environment variable.
 # `land` ran above on a model that sets none, so its reviewer saw nothing; a

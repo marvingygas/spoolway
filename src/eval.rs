@@ -177,9 +177,8 @@ fn run_to(
     let refs: Vec<&Entry> = entries.iter().collect();
     let mut rows = lane_rows(&refs, args.by, &fallback, &repo.config.models, pipelines);
     // A trial's arms read against the first one, so the first one has to be
-    // the arm that started first — not whichever finished last, which is
-    // what the newest-first order every other `--by task` reads in would put
-    // on top.
+    // the arm that started first — the last row of the newest-first order
+    // every other `--by task` reads in, not its top.
     let trial_arms = args.trial.is_some() && args.by == EvalBy::Task && !rows.is_empty();
     if trial_arms {
         rows.sort_by(|a, b| a.first_ts.cmp(&b.first_ts));
@@ -277,6 +276,20 @@ pub(crate) fn local_date(ts: &str) -> String {
         .map(|at| {
             at.with_timezone(&chrono::Local)
                 .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "—".to_string())
+}
+
+/// `YYYY-MM-DD HH:MM` in local time: the `WHEN` of `--by task`. A run is
+/// dated to the minute it started, so two runs of one routine on the same
+/// day read apart, where [`local_date`] would draw both the same. A `ts`
+/// that does not parse draws as a dash, the same as there.
+fn local_minute(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|at| {
+            at.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
         .unwrap_or_else(|_| "—".to_string())
@@ -1092,8 +1105,9 @@ const NO_GROUP: &str = "—";
 /// Every row `entries` makes under `by`, in the table's default order — the
 /// one it reads in until a sort reorders it, and the one a sort's ties keep.
 ///
-/// Group, task and pipeline read newest first — whichever row's newest lane
-/// is newest leads, so this morning's work heads the table. Step keeps each
+/// Group and pipeline read newest first — whichever row's newest lane is
+/// newest leads, so this morning's work heads the table. Task reads newest
+/// first by when each run started, the time its `WHEN` draws. Step keeps each
 /// pipeline together, newest pipeline first, its steps in their pipeline's
 /// own walk order; version keeps each pipeline together the same way, its
 /// highest version first.
@@ -1172,21 +1186,28 @@ fn grouped_rows<'a>(
                 EvalBy::Group | EvalBy::Pipeline => (key[..1].to_vec(), key[..1].to_vec()),
                 EvalBy::Step => (key[..2].to_vec(), key[..2].to_vec()),
                 // A run's pipeline and version are its latest lane's: a run
-                // re-routed mid-way is described by where it ended up.
-                EvalBy::Task => (
-                    vec![
-                        latest.task.clone(),
-                        latest.pipeline.clone(),
-                        latest.pipeline_version.clone(),
-                        local_date(&latest.ts),
-                    ],
-                    vec![
-                        key[1].clone(),
-                        latest.task.clone(),
-                        latest.pipeline.clone(),
-                        local_date(&latest.ts),
-                    ],
-                ),
+                // re-routed mid-way is described by where it ended up. Its
+                // label is the routine it is a copy of, where its lines name
+                // one, so every run of one routine reads under one name; the
+                // row stays keyed by run, so two of them never merge. `WHEN`
+                // is when the run started, not when it was last banked.
+                EvalBy::Task => {
+                    let label = lanes
+                        .iter()
+                        .rev()
+                        .find_map(|e| e.routine.clone())
+                        .unwrap_or_else(|| latest.task.clone());
+                    let when = local_minute(&earliest.ts);
+                    (
+                        vec![
+                            label.clone(),
+                            latest.pipeline.clone(),
+                            latest.pipeline_version.clone(),
+                            when.clone(),
+                        ],
+                        vec![key[1].clone(), label, latest.pipeline.clone(), when],
+                    )
+                }
                 EvalBy::Version => (
                     vec![key[0].clone(), key[1].clone(), local_date(&earliest.ts)],
                     vec![key[0].clone(), local_date(&earliest.ts)],
@@ -1205,8 +1226,13 @@ fn grouped_rows<'a>(
         .collect();
 
     match by {
-        EvalBy::Group | EvalBy::Task | EvalBy::Pipeline => {
+        EvalBy::Group | EvalBy::Pipeline => {
             rows.sort_by(|a, b| b.1.0.last_ts.cmp(&a.1.0.last_ts));
+        }
+        // By the start `WHEN` draws, so the column reads in order even where
+        // a run that started earlier banked its last line after a later one.
+        EvalBy::Task => {
+            rows.sort_by(|a, b| b.1.0.first_ts.cmp(&a.1.0.first_ts));
         }
         EvalBy::Step | EvalBy::Version => {
             let pipeline_rank = newest_first_rank(entries, |e| e.pipeline.as_str());
@@ -2265,9 +2291,9 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
                 .single_version()
                 .map(|v| SortValue::Version(v.to_string())),
         },
-        // Dates as drawn are the local day only; the raw timestamps also
-        // order two runs that ended on the same one.
-        "when" => SortValue::text(&row.last_ts),
+        // The raw start, which `WHEN` draws to the minute only, so two runs
+        // that started in the same minute still sort apart.
+        "when" => SortValue::text(&row.first_ts),
         "first" => SortValue::text(&row.first_ts),
         "runs" => SortValue::figure(m.runs as f64),
         "lanes" => SortValue::figure(m.lanes as f64),
@@ -3075,9 +3101,8 @@ const SESSIONS_SKILL_WIDTH: usize = 17;
 const SESSIONS_MODEL_MIN_WIDTH: usize = 16;
 
 /// `MM-DD HH:MM` in local time — a session has no run and no version to lead
-/// a row with, so `WHEN` carries the minute a lane's own `WHEN` leaves at the
-/// day: the population here is a person's own hands-on work, not a lane
-/// launched once and read back later.
+/// a row with, so `WHEN` carries the minute it started: the same minute
+/// `--by task` draws for a run, without the year in front.
 fn session_when(at: chrono::DateTime<chrono::Utc>) -> String {
     at.with_timezone(&chrono::Local)
         .format("%m-%d %H:%M")
@@ -6053,6 +6078,7 @@ mod tests {
             run: Some(format!("r-{task}")),
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,
@@ -6507,7 +6533,7 @@ mod tests {
     }
 
     /// `--by task` is one row per run — the runs view it replaces — naming
-    /// the task, the pipeline and version it ran under, and its date.
+    /// the task, the pipeline and version it ran under, and when it started.
     #[test]
     fn by_task_is_one_row_per_run_with_its_pipeline_version_and_date() {
         let mut review = lane("login", "review", 1, Some("pass"));
@@ -6525,10 +6551,121 @@ mod tests {
                 "login",
                 "default",
                 "1.1",
-                &local_date("2026-08-04T07:00:00+00:00")
+                &local_minute("2026-08-04T07:00:00+00:00")
             ]
         );
         assert_eq!(rows[0].keys[0], "r-login", "the export carries the run id");
+    }
+
+    /// Three runs: two of one routine on one day, and one banked before
+    /// lines carried a routine. The second routine run's lines span the
+    /// morning, so its `WHEN` has an earliest and a latest to choose from.
+    fn routine_runs() -> Vec<Entry> {
+        let line = |task: &str, step: &str, run: &str, routine: Option<&str>, ts: &str| Entry {
+            ts: ts.into(),
+            run: Some(run.into()),
+            routine: routine.map(str::to_string),
+            ..lane(task, step, 1, Some("pass"))
+        };
+        vec![
+            line(
+                "release-6",
+                "implement",
+                "r6",
+                None,
+                "2026-10-11T07:05:00+00:00",
+            ),
+            line(
+                "release-7",
+                "implement",
+                "r7",
+                Some("release"),
+                "2026-10-14T09:12:00+00:00",
+            ),
+            line(
+                "release-7",
+                "review",
+                "r7",
+                Some("release"),
+                "2026-10-14T11:30:00+00:00",
+            ),
+            line(
+                "release-8",
+                "implement",
+                "r8",
+                Some("release"),
+                "2026-10-14T15:40:00+00:00",
+            ),
+        ]
+    }
+
+    /// A run whose lines carry a routine is labelled by it, and two runs of
+    /// one routine stay two rows; a run whose lines carry none keeps its task
+    /// id. `WHEN` is each run's earliest line to the minute, the same width
+    /// on every row. Fails before the label: the rows read `release-8` and
+    /// `release-7`, each dated to the day of its latest line.
+    #[test]
+    fn by_task_labels_a_routine_run_by_its_routine_and_dates_it_to_the_minute() {
+        let rows = rows_by(&routine_runs(), EvalBy::Task);
+        let runs: Vec<&str> = rows.iter().map(|r| r.keys[0].as_str()).collect();
+        assert_eq!(runs, ["r8", "r7", "r6"], "one row per run, newest first");
+        let labels: Vec<&str> = rows.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(labels, ["release", "release", "release-6"]);
+        let when: Vec<&str> = rows.iter().map(|r| r.cells[3].as_str()).collect();
+        assert_eq!(
+            when,
+            [
+                local_minute("2026-10-14T15:40:00+00:00"),
+                local_minute("2026-10-14T09:12:00+00:00"),
+                local_minute("2026-10-11T07:05:00+00:00"),
+            ]
+        );
+        assert!(
+            when.iter()
+                .all(|w| w.chars().count() == "YYYY-MM-DD HH:MM".len()),
+            "{when:?}"
+        );
+    }
+
+    /// `--json` names a routine run by the label the table draws, beside
+    /// the run id that keeps it apart, and carries its start to the minute.
+    #[test]
+    fn a_routine_runs_json_row_carries_its_label_and_start_time() {
+        let entries = routine_runs();
+        let rows = rows_by(&entries, EvalBy::Task);
+        let json = lanes_json(EvalBy::Task, &rows, &total_of(&entries));
+        let row = &json["rows"][1];
+        assert_eq!(row["run"], "r7");
+        assert_eq!(row["task"], "release");
+        assert_eq!(row["when"], local_minute("2026-10-14T09:12:00+00:00"));
+        assert_eq!(json["rows"][2]["task"], "release-6");
+    }
+
+    /// With no sort chosen, runs read newest start first, the order `WHEN`
+    /// draws: `r8` started after `r7`, so it leads though `r7` banked its last
+    /// line later. Fails while the order read each run's latest line, which
+    /// put `r7` first.
+    #[test]
+    fn by_task_reads_newest_start_first() {
+        let mut entries = routine_runs();
+        entries[2].ts = "2026-10-14T18:00:00+00:00".into();
+        let rows = rows_by(&entries, EvalBy::Task);
+        let runs: Vec<&str> = rows.iter().map(|r| r.keys[0].as_str()).collect();
+        assert_eq!(runs, ["r8", "r7", "r6"]);
+    }
+
+    /// A sort on `WHEN` reads the start each row draws, not its latest line:
+    /// `r7` started before `r8` though its last line came later, so it sorts
+    /// first ascending. Fails while the sort read the latest line, which put
+    /// `r8` first.
+    #[test]
+    fn a_sort_on_when_follows_each_runs_start() {
+        let mut entries = routine_runs();
+        entries[2].ts = "2026-10-14T18:00:00+00:00".into();
+        let mut rows = rows_by(&entries, EvalBy::Task);
+        sort_lane_rows(EvalBy::Task, &mut rows, &sorted("when", false));
+        let runs: Vec<&str> = rows.iter().map(|r| r.keys[0].as_str()).collect();
+        assert_eq!(runs, ["r6", "r7", "r8"]);
     }
 
     #[test]
@@ -7298,6 +7435,7 @@ mod tests {
             run: None,
             trial: None,
             trial_group: None,
+            routine: None,
             dir: Some(dir.into()),
             hand: false,
             command: None,
@@ -7986,6 +8124,7 @@ mod screen_tests {
                 run: Some(format!("r-{task}")),
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -8088,6 +8227,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -8774,6 +8914,61 @@ mod screen_tests {
         assert!(loaded.models.resolved.contains_key("claude-opus-5"));
     }
 
+    /// The eval tab draws the same label and start time, and a terminal too
+    /// narrow for the whole row still cuts it from the right: the figure
+    /// columns go first, and the naming columns, `WHEN` last among them,
+    /// stay whole for as long as they fit.
+    #[test]
+    fn the_eval_tab_draws_a_routine_runs_label_and_cuts_figures_first() {
+        let line = |task: &str, run: &str, routine: Option<&str>, ts: &str| Entry {
+            ts: ts.into(),
+            run: Some(run.into()),
+            routine: routine.map(str::to_string),
+            ..tests_entry(task, "implement")
+        };
+        let loaded = loaded(vec![
+            line("release-6", "r6", None, "2026-10-11T07:05:00+00:00"),
+            line(
+                "release-7",
+                "r7",
+                Some("release"),
+                "2026-10-14T09:12:00+00:00",
+            ),
+            line(
+                "release-8",
+                "r8",
+                Some("release"),
+                "2026-10-14T15:40:00+00:00",
+            ),
+        ]);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        state.filters.by = EvalBy::Task;
+        let nine_twelve = local_minute("2026-10-14T09:12:00+00:00");
+
+        let frame = eval_frame_rows_at(&pipelines, Some(&loaded), &state, None);
+        assert!(
+            frame
+                .iter()
+                .any(|l| l.contains("release  ") && l.contains(&nine_twelve)),
+            "{}",
+            frame.join("\n")
+        );
+
+        let lines = view_lines(&loaded, &state.filters, &pipelines, state.table);
+        let Line::Head(_, header) = &lines[0] else {
+            panic!("the table opens on its header");
+        };
+        let naming = header.find("WHEN").unwrap() + nine_twelve.len();
+        let runs = header.find("RUNS").unwrap() + "RUNS".len();
+        let narrow = render_lines(&lines, 0, 1 + naming);
+        assert!(narrow[0].trim_end().ends_with("WHEN"), "{}", narrow[0]);
+        assert!(narrow[2].ends_with(&nine_twelve), "{}", narrow[2]);
+        let wider = render_lines(&lines, 0, 1 + runs);
+        assert!(wider[0].ends_with("RUNS"), "{}", wider[0]);
+        assert!(!wider[0].contains("USD"), "{}", wider[0]);
+    }
+
     /// A table far taller than the terminal — 270 tasks on a 20-row one —
     /// keeps its `Total` line as the frame's last body line, under the
     /// scroll indicator, and its header as the first, wherever the cursor
@@ -8959,6 +9154,7 @@ mod screen_tests {
             run: None,
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,
@@ -9379,6 +9575,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: Some(dir.to_string()),
                 hand: false,
                 command: None,
@@ -10065,6 +10262,7 @@ mod screen_tests {
             run: Some(format!("r-{task}")),
             trial: None,
             trial_group: None,
+            routine: None,
             dir: None,
             hand: false,
             command: None,

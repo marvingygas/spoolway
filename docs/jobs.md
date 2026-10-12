@@ -29,7 +29,7 @@ flowchart LR
   B -- no --> E[read the queue]
   B -- yes --> H{unknown key<br/>in its table?}
   H -- yes --> I[name it, skip, record it] --> E
-  H -- no --> C{previous run<br/>still queued?}
+  H -- no --> C{previous run or any task<br/>named after the routine<br/>still queued?}
   C -- yes --> D[skip, record it] --> E
   C -- no --> J{every task has<br/>a usable base?}
   J -- no --> K[name it, queue nothing,<br/>record it] --> E
@@ -43,7 +43,19 @@ The fired minute is written to `jobs.state.json`, so a job fires once per matchi
 window that passes between two passes of one running dispatcher still fires, up to one hour
 back. A window that passes while no dispatcher runs is not caught up when a dispatcher
 starts. A disabled job skips its windows, so enabling it again does not fire the window it
-was off for. A job whose previous run is still in the queue skips its window.
+was off for. A job whose previous run is still in the queue skips its window. So does a job
+whose routine has any other live copy, such as one queued from the routines tab. A routine runs
+one copy at a time.
+
+The dispatcher names each such skip once per matching minute, with the step the copy is at:
+
+```
+job nightly · due now · skipped, audit is still in the queue, at step queued
+```
+
+A job also fires nothing while a file in the queue will not parse, and the dispatcher names the
+file. If another submission of the same routine is being queued at that moment, the job fires
+on a later pass of the same minute.
 
 A job whose routine folder holds a `*.md` file that does not parse fires nothing. The dispatcher
 names each such file once per matching minute.

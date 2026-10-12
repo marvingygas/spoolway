@@ -140,6 +140,10 @@ pub struct LaneSpec<'a> {
     /// `<task> · <step>` — see [`lane_name`] — the name every later call
     /// addresses it by.
     pub name: &'a str,
+    /// What the lane's pid and exit files are named by — [`run_key`], the
+    /// numbered id rather than a routine's name, so two copies sharing
+    /// `name` never share files.
+    pub key: &'a str,
     /// What the pane is labelled. Purely for the person looking at it: the
     /// lane's identity is [`LaneSpec::name`], which is the multiplexer's own
     /// session name and is what [`Mux::list_lanes`] reads back. The task's
@@ -2145,8 +2149,87 @@ impl Mux for Herdr {
 /// a session whose name does not parse — see [`parse_lane_name`] — since that
 /// is an unrelated agent a human happens to have open in the same
 /// multiplexer.
-pub fn lane_name(step: &str, task: &str) -> String {
-    tab_label(task, step)
+///
+/// The task half is [`crate::task::Task::display_name`]: a routine's copy is
+/// named for its routine, so the pane reads what the board reads. It takes
+/// the task rather than its id so no caller can build the name from the
+/// numbered id by mistake. Turning a name back into a task is
+/// [`parse_lane`], and a lane started before a copy had a routine name
+/// still parses, because the id is tried first.
+pub fn lane_name(step: &str, task: &crate::task::Task) -> String {
+    tab_label(task.display_name(), step)
+}
+
+/// What a run's pid and exit files are named by: `<id> · <step>`, always the
+/// numbered id, even for a routine's copy whose [`lane_name`] drops the
+/// number.
+///
+/// Two copies of one routine share a lane name but never a key, so a new
+/// copy cannot read the pid or exit file an earlier one left behind and
+/// mistake it for its own run. These files are internal and never typed by a
+/// person.
+pub fn run_key(step: &str, task_id: &str) -> String {
+    tab_label(task_id, step)
+}
+
+/// The [`run_key`] of the lane called `name`, given the live queue `tasks`.
+///
+/// A lane called for a routine is turned back into the live copy that
+/// carries it, because its name drops the numbered id the key is made of. A
+/// name that names no live task, or is not a lane at all, is returned as it
+/// stands: right for a lane started before copies were named for their
+/// routine, and harmless for one that is not ours.
+pub fn lane_key(name: &str, tasks: &[crate::task::Task]) -> String {
+    let half = lane_task(name);
+    let step = name
+        .get(half.len()..)
+        .and_then(|rest| rest.strip_prefix(LANE_NAME_SEPARATOR));
+    match (step, lane_owner(half, tasks)) {
+        (Some(step), Some(task)) => run_key(step, task.id()),
+        _ => name.to_string(),
+    }
+}
+
+/// The live task a lane name's task half names: the task with that id, else
+/// the task whose `routine:` it is.
+///
+/// The id is tried first so a lane started before routine copies were named
+/// for their routine, which carries the numbered id, is still found. A
+/// routine name never equals a live task's id and at most one live task
+/// carries it, so the second try has one answer. `tasks` is the live queue.
+pub fn lane_owner<'t>(
+    task_half: &str,
+    tasks: &'t [crate::task::Task],
+) -> Option<&'t crate::task::Task> {
+    tasks
+        .iter()
+        .find(|task| task.id() == task_half)
+        .or_else(|| tasks.iter().find(|task| task.routine() == Some(task_half)))
+}
+
+/// Whether the lane `name` belongs to `task`: its task half is the task's id
+/// or the task's `routine:`.
+///
+/// For callers that already hold the task and ask about each lane in turn,
+/// where [`parse_lane`] would search the queue for every lane. A name that is
+/// not a lane at all has the whole string as its task half and so matches
+/// nothing, since an id holds no separator.
+pub fn lane_of_task(name: &str, task: &crate::task::Task) -> bool {
+    let half = lane_task(name);
+    task.id() == half || task.routine() == Some(half)
+}
+
+/// [`parse_lane_name`], and the live task the name belongs to.
+///
+/// `None` for a name that is not a lane of ours, and for one whose task is not
+/// in `tasks`: a lane left behind by a task that has since left the queue.
+pub fn parse_lane<'a, 't>(
+    name: &'a str,
+    steps: &[&str],
+    tasks: &'t [crate::task::Task],
+) -> Option<(&'a str, &'t crate::task::Task)> {
+    let (step, half) = parse_lane_name(name, steps)?;
+    lane_owner(half, tasks).map(|task| (step, task))
 }
 
 /// What the shared workspace earlier releases opened for every run was called.
@@ -2690,17 +2773,19 @@ pub fn parse_lane_name<'a>(name: &'a str, steps: &[&str]) -> Option<(&'a str, &'
     Some((step, task))
 }
 
-/// The task id half of a `<task> · <step>` name — everything before the
-/// separator, or the whole string when there is none.
+/// The task half of a `<task> · <step>` name — everything before the
+/// separator, or the whole string when there is none. It is a task id, or a
+/// routine copy's routine name; [`lane_owner`] turns it into the task.
 ///
 /// Unlike [`parse_lane_name`] this needs no list of valid steps: the callers
 /// that reach for it — [`crate::retain`]'s sweep and
 /// [`crate::tracking::failures`] — only want to know *which task* a
 /// scratch directory, headless record or hook run file belongs to, and do
-/// not care whether the step half is one a pipeline still defines. A scratch
-/// entry carries no separator at all and is named for its task outright, so
-/// the whole name is the id there. A task id holds no spaces (see
-/// [`crate::config::check_id`]), so `" · "` stays unambiguous.
+/// not care whether the step half is one a pipeline still defines. A headless
+/// record is named by the lane name, so for a routine copy the half is the
+/// routine. A scratch entry carries no separator at all and is named for its
+/// task outright, so the whole name is the id there. A task id holds no
+/// spaces (see [`crate::config::check_id`]), so `" · "` stays unambiguous.
 pub fn lane_task(name: &str) -> &str {
     name.split_once(LANE_NAME_SEPARATOR)
         .map_or(name, |(task, _)| task)
@@ -3503,7 +3588,7 @@ mod tests {
     /// differently, and has to come back.
     #[test]
     fn a_lane_name_crosses_the_wire_and_comes_back() {
-        let lane = lane_name("pr-review", "add-health-endpoint");
+        let lane = run_key("pr-review", "add-health-endpoint");
         let wire = to_agent_name(&lane);
         assert_eq!(wire, "add-health-endpoint__pr-review");
         assert_eq!(from_agent_name(&wire), lane);
@@ -3554,7 +3639,7 @@ mod tests {
     #[test]
     fn lane_names_round_trip_with_hyphenated_ids() {
         let steps = ["implement", "pr", "e2e"];
-        let name = lane_name("implement", "add-health-endpoint");
+        let name = run_key("implement", "add-health-endpoint");
         assert_eq!(name, "add-health-endpoint · implement");
         assert_eq!(
             parse_lane_name(&name, &steps),
@@ -3567,7 +3652,7 @@ mod tests {
         // Splitting on `" · "` rather than matching a step prefix means a
         // step id holding hyphens needs no special casing at all.
         let steps = ["pr", "pr-review"];
-        let name = lane_name("pr-review", "thing");
+        let name = run_key("pr-review", "thing");
         assert_eq!(name, "thing · pr-review");
         assert_eq!(parse_lane_name(&name, &steps), Some(("pr-review", "thing")));
     }
@@ -3582,6 +3667,74 @@ mod tests {
         // ahead of it, is not a lane either.
         assert_eq!(parse_lane_name("add-auth · unknown-step", &steps), None);
         assert_eq!(parse_lane_name(" · implement", &steps), None);
+    }
+
+    /// A queued task, as the queue directory would hold it: `routine` is the
+    /// copy's `routine:` line, when it has one.
+    fn queued(id: &str, routine: Option<&str>) -> crate::task::Task {
+        let routine = routine
+            .map(|r| format!("routine: {r}\n"))
+            .unwrap_or_default();
+        crate::task::Task::parse(
+            PathBuf::from(format!("{id}.md")),
+            &format!("---\nid: {id}\n{routine}stage: implement\n---\n"),
+        )
+        .unwrap()
+    }
+
+    /// A routine's copy is named for its routine, so the pane reads what the
+    /// board reads; a task with no `routine:` keeps the name it always had.
+    /// Before lanes were named for their routine both read `release-6 · ship`.
+    #[test]
+    fn a_routine_copys_lane_is_named_for_its_routine() {
+        let copy = queued("release-6", Some("release"));
+        assert_eq!(lane_name("ship", &copy), "release · ship");
+        let plain = queued("fix-2", None);
+        assert_eq!(lane_name("ship", &plain), "fix-2 · ship");
+    }
+
+    /// The files a run keeps are named by the numbered id whatever the lane is
+    /// called, so two copies of one routine, which share a lane name, never
+    /// share a file.
+    #[test]
+    fn two_copies_of_a_routine_share_a_lane_name_but_not_a_run_key() {
+        let first = queued("release-5", Some("release"));
+        let second = queued("release-6", Some("release"));
+        assert_eq!(lane_name("ship", &first), lane_name("ship", &second));
+        assert_ne!(run_key("ship", first.id()), run_key("ship", second.id()));
+        assert_eq!(run_key("ship", second.id()), "release-6 · ship");
+    }
+
+    /// A lane name's task half finds the task with that id first, then the
+    /// live task whose `routine:` it is. The id comes first so a lane started
+    /// before copies were named for their routine, which carries the numbered
+    /// id, is still found.
+    #[test]
+    fn a_lane_name_finds_its_task_by_id_then_by_routine() {
+        let tasks = [queued("release-6", Some("release")), queued("fix-2", None)];
+        let steps = ["ship"];
+        let found = |name| parse_lane(name, &steps, &tasks).map(|(step, t)| (step, t.id()));
+        assert_eq!(found("release · ship"), Some(("ship", "release-6")));
+        assert_eq!(found("release-6 · ship"), Some(("ship", "release-6")));
+        assert_eq!(found("fix-2 · ship"), Some(("ship", "fix-2")));
+        // A routine with no live copy, and a name that is not a lane at all.
+        assert_eq!(found("nightly · ship"), None);
+        assert_eq!(found("release · unknown-step"), None);
+        assert!(lane_of_task("release · ship", &tasks[0]));
+        assert!(lane_of_task("release-6 · ship", &tasks[0]));
+        assert!(!lane_of_task("release · ship", &tasks[1]));
+    }
+
+    /// A lane's run key is the numbered id whatever name the lane goes by, and a
+    /// name that is not a lane of a live task is returned as it stands.
+    #[test]
+    fn a_lane_name_turns_into_its_run_key() {
+        let tasks = [queued("release-6", Some("release")), queued("fix-2", None)];
+        assert_eq!(lane_key("release · ship", &tasks), "release-6 · ship");
+        assert_eq!(lane_key("release-6 · ship", &tasks), "release-6 · ship");
+        assert_eq!(lane_key("fix-2 · ship", &tasks), "fix-2 · ship");
+        assert_eq!(lane_key("nightly · ship", &tasks), "nightly · ship");
+        assert_eq!(lane_key("not a lane", &tasks), "not a lane");
     }
 
     /// `check_task_id` no longer measures an id against any lane it might
@@ -3626,7 +3779,7 @@ mod tests {
     /// dependence on a project's own record.
     #[test]
     fn a_short_lane_resolves_to_its_readable_wire_name_with_no_alias_needed() {
-        let lane = lane_name("pr-review", "add-health-endpoint");
+        let lane = run_key("pr-review", "add-health-endpoint");
         assert_eq!(
             resolve_wire_name(&lane, None),
             Some("add-health-endpoint__pr-review".to_string())
@@ -3639,7 +3792,7 @@ mod tests {
     /// once herdr gets a short internal alias instead of a refusal.
     #[test]
     fn a_long_lane_resolves_only_through_its_alias() {
-        let lane = lane_name("merge-released-repair", "release-spoolway-2");
+        let lane = run_key("merge-released-repair", "release-spoolway-2");
         assert!(to_agent_name(&lane).chars().count() > AGENT_NAME_MAX);
         assert_eq!(resolve_wire_name(&lane, None), None);
         assert_eq!(
@@ -3667,7 +3820,7 @@ mod tests {
     /// plain reversible decode, exactly as it always has.
     #[test]
     fn list_lanes_falls_back_to_the_reversible_decode_with_no_alias_record() {
-        let lane = lane_name("pr-review", "add-health-endpoint");
+        let lane = run_key("pr-review", "add-health-endpoint");
         let wire = to_agent_name(&lane);
         assert_eq!(resolve_lane_name(&wire, None), lane);
     }

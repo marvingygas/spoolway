@@ -252,11 +252,39 @@ A routine folder that holds a `*.md` file that does not parse is not queued. The
 such file with a `spoolway task contract --from "<file>"` command that prints the reason, and
 nothing from the folder is queued.
 
+A routine runs one copy at a time. A routine is refused while any task in the queue carries its
+name in `routine:` or has its name as its id. Paused and blocked tasks count. For a folder, one
+such task refuses the whole batch. Nothing is queued, and the `not queued` popup names each live
+task and the step it is at:
+
+```
+not queued
+
+  release-spoolway is still in the queue, at step ship.
+
+  A routine runs one copy at a time. Let it finish, resume or
+  restart it from the board if it has stopped, or unqueue it
+  if it has not started. Then queue the routine again.
+
+  [enter] close
+```
+
+`enter` closes the popup. A routine is also refused while any file in the queue will not parse,
+because a live copy could be hiding in it. The popup names each such file and its reason.
+
 The tab reads the routine folders again each time you switch to it, so a routine saved with
 `save as routine` a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.
+
+Each copy also carries `routine: <id>`, the `id:` of the routine file it was copied from. The
+board's TASK column and the `queued` popup show that name in place of the numbered id. A copy
+whose `routine:` line is removed shows its id and still runs. `spoolway queue list` always prints
+the numbered id.
+
+A group with a live copy of a routine draws only its live copies. Earlier runs of the routine do
+not come back onto the board, so the group's total line is the cost of the run in flight.
 
 Pick `save as routine` from a pending group's options menu to save it as a routine. The panel is prefilled with the group's
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier

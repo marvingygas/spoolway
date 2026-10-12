@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::AgentProfile;
 use crate::graph::Graph;
 use crate::mux::{
-    Lane, LaneSpec, LaneStatus, Mux, SweepTab, lane_name, parse_lane_name, tab_label,
+    Lane, LaneSpec, LaneStatus, Mux, SweepTab, lane_name, parse_lane, parse_lane_name,
 };
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
 use crate::platform::PathExt;
@@ -473,9 +473,33 @@ pub(crate) struct LaneRecord {
     /// verdict. `None` until the lane is seen to have reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verdict: Option<crate::task::LastReport>,
+    /// The numbered id of the task this lane runs for.
+    ///
+    /// Records are keyed by lane name, and every copy of a routine shares
+    /// one: a record an earlier copy left behind is called `rel · implement`
+    /// too. The name alone cannot say whose it is, so [`LaneRecord::is_of`]
+    /// reads it from here. Empty for a record saved before copies were named
+    /// for their routine, whose name is still the numbered id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    task: String,
 }
 
 impl LaneRecord {
+    /// Whether this record belongs to the task numbered `task_id`, for the
+    /// lane called `name`.
+    ///
+    /// A record that carries its task says so. One that does not predates
+    /// routine lane names, so its name is the numbered id and must equal
+    /// `task_id`. Without this check a routine's next copy would adopt the
+    /// record an earlier copy left, and bank that copy's session under its own
+    /// id.
+    pub(crate) fn is_of(&self, name: &str, task_id: &str) -> bool {
+        match self.task.is_empty() {
+            true => crate::mux::lane_task(name) == task_id,
+            false => self.task == task_id,
+        }
+    }
+
     /// What every caller that keeps its record in `self.lanes` after a
     /// `true` from `record_usage` owes `busy_s` — see that field's own doc
     /// for the full contract and the list of callers this way. A plain
@@ -534,11 +558,14 @@ impl LaneRecord {
             launch_grace_since: None,
             opening: Vec::new(),
             verdict: None,
+            task: String::new(),
         }
     }
 
     /// [`LaneRecord::adopted`], with the usage ledger's own last line for
-    /// `name` recovered into it where one exists.
+    /// `name` recovered into it where one exists. The ledger is keyed by
+    /// task id, so the line is found by the lane's [`crate::mux::run_key`],
+    /// which `repo` turns a routine's name back into.
     ///
     /// `lanes.json` is only written back at the end of a pass — see
     /// `Dispatcher::pass`, which now writes it on the error paths too but
@@ -557,13 +584,23 @@ impl LaneRecord {
     /// from: one from a spoolway that predates it, or a project whose `args`
     /// drop `{session_id}`. Nothing here can recover what was never written
     /// down.
-    pub(crate) fn readopted(name: &str, now: i64, ledger: &[crate::usage::Entry]) -> LaneRecord {
+    pub(crate) fn readopted(
+        repo: &Repo,
+        name: &str,
+        now: i64,
+        ledger: &[crate::usage::Entry],
+    ) -> LaneRecord {
+        let tasks = repo.tasks().unwrap_or_default();
+        let key = crate::mux::lane_key(name, &tasks);
         let mut record = LaneRecord::adopted(now);
-        if let Some(entry) = ledger
-            .iter()
-            .rev()
-            .find(|entry| lane_name(&entry.step, &entry.task) == name && !entry.session.is_empty())
-        {
+        // The live task the name answers to, so a record taken up for a
+        // routine's copy is that copy's and no later one's.
+        if let Some(task) = crate::mux::lane_owner(crate::mux::lane_task(name), &tasks) {
+            record.task = task.id().to_string();
+        }
+        if let Some(entry) = ledger.iter().rev().find(|entry| {
+            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
+        }) {
             record.session = entry.session.clone();
             record.kind = entry.kind.clone();
             record.agent = entry.agent.clone();
@@ -740,6 +777,7 @@ fn bank_command_run(
         run: task.front.run.clone(),
         trial: task.front.trial.clone(),
         trial_group: task.front.trial_group.clone(),
+        routine: task.front.routine.clone(),
         dir: None,
         hand: false,
         command: Some(crate::usage::CommandRun {
@@ -1365,8 +1403,11 @@ impl<'a> Dispatcher<'a> {
             .iter()
             .filter(|lane| owns_cwd(&mine, &lane.cwd))
             .filter_map(|lane| {
-                parse_lane_name(&lane.name, &step_ids)
-                    .map(|(step, task)| (step.to_string(), task.to_string(), lane))
+                // The task half is turned into an id here, once, so every
+                // later use of `owned` compares ids whichever name the lane
+                // carries.
+                parse_lane(&lane.name, &step_ids, &tasks)
+                    .map(|(step, task)| (step.to_string(), task.id().to_string(), lane))
             })
             .collect();
 
@@ -2666,15 +2707,17 @@ impl<'a> Dispatcher<'a> {
     /// `lanes.json` forever once the task it belongs to has left the queue.
     /// This is the other half: anything whose task id no longer appears among
     /// `tasks`, or whose name does not even parse into a known step, is
-    /// stale by definition and is dropped here instead.
+    /// stale by definition and is dropped here instead. So is a record whose
+    /// name now answers to a different task than the one it was made for: a
+    /// routine's copies share a lane name, and the record an earlier copy left
+    /// must not pass for the next copy's.
     ///
     /// Checked against `tasks`, the queue this pass already read at the top,
     /// rather than reading the queue directory a second time — the two must
     /// agree on what counts as current, and re-reading risks them not.
     fn prune_stale_lane_records(&mut self, tasks: &[Task], step_ids: &[&str]) {
-        self.lanes.retain(|name, _| {
-            parse_lane_name(name, step_ids)
-                .is_some_and(|(_, task_id)| tasks.iter().any(|t| t.id() == task_id))
+        self.lanes.retain(|name, record| {
+            parse_lane(name, step_ids, tasks).is_some_and(|(_, task)| record.is_of(name, task.id()))
         });
     }
 
@@ -2735,7 +2778,7 @@ impl<'a> Dispatcher<'a> {
                 let ledger = self.ledger();
                 self.lanes.insert(
                     lane.name.clone(),
-                    LaneRecord::readopted(&lane.name, now, &ledger),
+                    LaneRecord::readopted(self.repo, &lane.name, now, &ledger),
                 );
             }
             let record = self.lanes.get_mut(&lane.name).expect("just inserted above");
@@ -2989,10 +3032,9 @@ impl<'a> Dispatcher<'a> {
                 report.problems.push(format!("{}: {err:#}", lane.name));
                 return false;
             }
-            let record = self
-                .lanes
-                .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+            let record = self.lanes.remove(&lane.name).unwrap_or_else(|| {
+                LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
+            });
             self.record_usage(&record, task_id, step_id, task, &pipeline);
             report.actions.push(format!("freed {}", lane.name));
             return true;
@@ -3000,7 +3042,7 @@ impl<'a> Dispatcher<'a> {
         let record = self
             .lanes
             .entry(lane.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+            .or_insert_with(|| LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger));
         record.kept = true;
         record.held_for_block = false;
         record.person_turn_busy = false;
@@ -3037,7 +3079,7 @@ impl<'a> Dispatcher<'a> {
         let record = self
             .lanes
             .entry(lane.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+            .or_insert_with(|| LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger));
         record.held_for_block = true;
         let record = record.clone();
         let pipeline = task
@@ -3301,6 +3343,7 @@ impl<'a> Dispatcher<'a> {
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
+            routine: task.and_then(|t| t.front.routine.clone()),
             dir: None,
             hand: false,
             command: None,
@@ -3411,7 +3454,7 @@ impl<'a> Dispatcher<'a> {
             .entry(lane.name.clone())
             .or_insert_with(|| LaneRecord {
                 output_hash: fallback.unwrap_or_default(),
-                ..LaneRecord::readopted(&lane.name, now, &ledger)
+                ..LaneRecord::readopted(self.repo, &lane.name, now, &ledger)
             });
 
         match (wrote_at, fallback) {
@@ -3927,18 +3970,15 @@ impl<'a> Dispatcher<'a> {
         let ledger = self.ledger();
         let record = match hold {
             true => {
-                let record = self
-                    .lanes
-                    .entry(lane.name.clone())
-                    .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+                let record = self.lanes.entry(lane.name.clone()).or_insert_with(|| {
+                    LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
+                });
                 record.held_for_block = true;
                 Some(record.clone())
             }
-            false => Some(
-                self.lanes
-                    .remove(&lane.name)
-                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger)),
-            ),
+            false => Some(self.lanes.remove(&lane.name).unwrap_or_else(|| {
+                LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
+            })),
         };
         let banked = match &record {
             Some(record) => {
@@ -4379,7 +4419,7 @@ impl<'a> Dispatcher<'a> {
                     // hand-edited, or carried over from a spoolway that
                     // never wrote the field — would get a free pass with
                     // nothing behind it to be graceful about.
-                    let lane = lane_name(&step.id, tasks[candidate.task_index].id());
+                    let lane = lane_name(&step.id, &tasks[candidate.task_index]);
                     let marked_at = self.lanes.get(&lane).and_then(|r| r.launch_grace_since);
                     if tasks[candidate.task_index].front.launched_at.is_some()
                         && (!self.lanes.contains_key(&lane) || marked_at.is_some())
@@ -4392,7 +4432,7 @@ impl<'a> Dispatcher<'a> {
                                     lane.clone(),
                                     LaneRecord {
                                         launch_grace_since: Some(since),
-                                        ..LaneRecord::readopted(&lane, since, &ledger)
+                                        ..LaneRecord::readopted(self.repo, &lane, since, &ledger)
                                     },
                                 );
                             }
@@ -4478,8 +4518,16 @@ impl<'a> Dispatcher<'a> {
             // it spent first: those tokens were real, and a task that took
             // three attempts should say so. This is also the bank that makes
             // closing its pane safe, even if the old lane is still mid-turn.
-            let lane = lane_name(&step.id, task.id());
-            let previous = self.lanes.remove(&lane);
+            let lane = lane_name(&step.id, task);
+            let mut previous = self.lanes.remove(&lane);
+            // A record under this name that is another task's is an earlier
+            // copy of the routine: its spend is banked under its own id, its
+            // record is not taken over, and it does not lend its start time
+            // to this name in the kept-pane scoring below.
+            if let Some(other) = previous.take_if(|record| !record.is_of(&lane, task.id())) {
+                let id = other.task.clone();
+                self.record_usage(&other, &id, &step.id, None, &pipeline.name);
+            }
             if let Some(previous) = &previous {
                 self.record_usage(previous, task.id(), &step.id, Some(task), &pipeline.name);
             }
@@ -4499,7 +4547,7 @@ impl<'a> Dispatcher<'a> {
                     let step_ids = self.pipelines.all_step_ids();
                     let newest = kept_panes
                         .iter()
-                        .filter(|(name, _)| crate::mux::lane_task(name) == task.id())
+                        .filter(|(name, _)| crate::mux::lane_of_task(name, task))
                         .max_by_key(|(name, _)| {
                             // This step's own record was removed above, so
                             // its start time comes from `previous`; read from
@@ -4803,6 +4851,7 @@ impl<'a> Dispatcher<'a> {
                             launch_grace_since: None,
                             opening: started.opening,
                             verdict: None,
+                            task: task.id().to_string(),
                         },
                     );
                     // Written now, not left for the end of the pass: the unsent
@@ -6384,8 +6433,10 @@ fn ensure_workspace(
         // any more. A genuinely borrowed checkout gets the unstamped pane it
         // always did: it is not this task's to remove either way.
         let workspace = match task.front.borrowed {
-            true => mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?,
-            false => mux.reopen_owned_pane(&checkout, &format!("spoolway/{}", task.id()))?,
+            true => mux.create_pane(&checkout, &format!("spoolway/{}", task.display_name()))?,
+            false => {
+                mux.reopen_owned_pane(&checkout, &format!("spoolway/{}", task.display_name()))?
+            }
         };
         task.front.workspace_id = Some(workspace.workspace_id);
         task.front.pane_id = Some(workspace.pane_id.clone());
@@ -6469,7 +6520,7 @@ fn ensure_workspace(
             // cleanup has to know that, so it is written down rather than
             // guessed at later — by then our own worktree would look the same.
             Some(checkout) => {
-                let label = format!("spoolway/{}", task.id());
+                let label = format!("spoolway/{}", task.display_name());
                 let workspace = match own_cut {
                     true => mux.reopen_owned_pane(&checkout, &label)?,
                     false => mux.create_pane(&checkout, &label)?,
@@ -6582,7 +6633,7 @@ fn ensure_workspace(
                     &repo.root,
                     &branch,
                     &starts_from,
-                    &format!("spoolway/{}", task.id()),
+                    &format!("spoolway/{}", task.display_name()),
                 )?;
                 crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
                 task.front.workspace_id = Some(workspace.workspace_id);
@@ -6611,7 +6662,7 @@ fn ensure_workspace(
     // and `start_command_in_pane` split from: a backend with no tab, like
     // headless, has nothing here to rename.
     if let Some(tab_id) = task.front.tab_id.as_deref() {
-        mux.rename_tab(tab_id, task.id())?;
+        mux.rename_tab(tab_id, task.display_name())?;
     }
 
     Ok((
@@ -6632,6 +6683,9 @@ fn ensure_workspace(
 /// only those two, and not the prep ahead of them, move onto threads.
 struct Boot {
     name: String,
+    /// What the lane's pid and exit files are named by — see
+    /// [`crate::mux::run_key`].
+    key: String,
     label: String,
     kind: String,
     pane_id: String,
@@ -6671,6 +6725,7 @@ impl Boot {
     fn lane_spec(&self) -> LaneSpec<'_> {
         LaneSpec {
             name: &self.name,
+            key: &self.key,
             label: &self.label,
             kind: &self.kind,
             pane_id: &self.pane_id,
@@ -6915,7 +6970,8 @@ fn prepare_boot(
     // see [`Dispatcher::ledger`] and review finding 33.
     ledger: &[crate::usage::Entry],
 ) -> Result<Boot> {
-    let name = lane_name(&step.id, task.id());
+    let name = lane_name(&step.id, task);
+    let key = crate::mux::run_key(&step.id, task.id());
 
     // Read before `ensure_workspace`, which is the one thing here that can cut
     // the task a new workspace underneath us. A pane being replaced belongs to
@@ -6935,7 +6991,7 @@ fn prepare_boot(
     // so the rest are only closed when it is.
     if let Some(workspace) = placement.as_deref() {
         for (lane, pane) in kept_panes {
-            if crate::mux::lane_task(lane) != task.id() {
+            if !crate::mux::lane_of_task(lane, task) {
                 continue;
             }
             if !mux
@@ -7090,7 +7146,7 @@ fn prepare_boot(
     // carries what the old lane knew; a park leaves its Handoff and commits.
     let price = crate::models::resolve(&repo.config.models, &model).price;
     let one_shot = (resuming && !restarting)
-        .then(|| lane_session_in(repo, ledger, &name))
+        .then(|| lane_session_in(repo, ledger, &name, &key))
         .flatten()
         .filter(|(kind, session)| !session_is_cold(price.as_ref(), kind, session));
     // `session:` is a different question from the one-shot flag, not a
@@ -7243,7 +7299,7 @@ fn prepare_boot(
     // this label, which its own turn header still needs.
     let label = match task.front.tab_id.is_some() {
         true => step.id.clone(),
-        false => tab_label(task.id(), &step.id),
+        false => crate::mux::lane_name(&step.id, task),
     };
     let (pane_id, replaced) = match fresh_pane {
         Some(pane_id) => (pane_id, Vec::new()),
@@ -7294,6 +7350,7 @@ fn prepare_boot(
 
     Ok(Boot {
         name,
+        key,
         label,
         kind: profile.kind.clone(),
         pane_id,
@@ -7417,7 +7474,13 @@ fn write_system_prompt(repo: &Repo, lane: &str, body: &str) -> Result<PathBuf> {
 /// already holds a cached ledger per frame, so `status::live_session` calls
 /// [`lane_session_in`] directly with that instead of coming through here.
 pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
-    lane_session_in(repo, &crate::usage::read(repo).unwrap_or_default(), lane)
+    let key = crate::mux::lane_key(lane, &repo.tasks().unwrap_or_default());
+    lane_session_in(
+        repo,
+        &crate::usage::read(repo).unwrap_or_default(),
+        lane,
+        &key,
+    )
 }
 
 /// `pub(crate)`, not private: `status::live_session` calls this directly with
@@ -7428,24 +7491,35 @@ pub(crate) fn lane_session_in(
     repo: &Repo,
     ledger: &[crate::usage::Entry],
     lane: &str,
+    key: &str,
 ) -> Option<(String, String)> {
+    // A record is skipped when it is another task's than the one `key` was
+    // worked out for. A `key` equal to `lane` means the name already is the run
+    // key, either a task with no `routine:` or a name no live task answers to,
+    // so the record under it is that run's own: a lane whose task has left the
+    // queue still reports the session its record holds.
+    //
     // `peek_lane_records`, not `load_lane_records`: the board calls this for
     // every live lane on every frame, and a corrupt file must not be logged
     // to the problem log once a second while it stays open.
     if let Some(record) = peek_lane_records(repo).get(lane)
+        && (key == lane || record.is_of(lane, crate::mux::lane_task(key)))
         && !record.session.is_empty()
         && !record.kind.is_empty()
     {
         return Some((record.kind.clone(), record.session.clone()));
     }
 
-    // Composed with `lane_name` rather than matched by hand, so a step id or
-    // a task id holding the separator still names the same lane both here
-    // and everywhere else one is built.
+    // Composed with `run_key` rather than matched by hand, so a step id or a
+    // task id holding the separator still names the same lane both here and
+    // everywhere else one is built. The key, not `lane`: a routine's copies
+    // share one lane name, and an earlier copy's session is not this one's.
     ledger
         .iter()
         .rev()
-        .find(|entry| lane_name(&entry.step, &entry.task) == lane && !entry.session.is_empty())
+        .find(|entry| {
+            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
+        })
         .map(|entry| (entry.kind.clone(), entry.session.clone()))
 }
 
@@ -8529,7 +8603,7 @@ mod tests {
             .iter()
             .filter(|task| task.stage() == step)
             .map(|task| Lane {
-                name: lane_name(step, task.id()),
+                name: crate::mux::run_key(step, task.id()),
                 status: LaneStatus::Idle,
                 cwd: task.front.worktree_path.clone().unwrap(),
                 ..lane_at(&repo.root, "", LaneStatus::Idle)
@@ -8928,6 +9002,7 @@ mod tests {
         let path = repo.queue_dir().join(format!("{id}.md"));
         let mut front = Frontmatter {
             id: id.to_string(),
+            routine: None,
             title: String::new(),
             stage: stage.to_string(),
             depends_on: Vec::new(),
@@ -9632,7 +9707,7 @@ mod tests {
         });
         let mux = FakeMux::new(vec![lane(
             &repo,
-            &lane_name("implement", "beta-1"),
+            &crate::mux::run_key("implement", "beta-1"),
             LaneStatus::Working,
         )]);
 
@@ -10864,6 +10939,27 @@ mod tests {
              cut: {:?}",
             mux.calls()
         );
+    }
+
+    /// A routine copy's tab is renamed to its routine, not its numbered id,
+    /// so the tab reads what the board reads. Its lane is named for the
+    /// routine too, and its branch keeps the numbered id.
+    #[test]
+    fn a_routine_copys_tab_is_renamed_to_its_routine() {
+        let (repo, _root_guard) = fixture("split-tab-routine");
+        add_task_with(&repo, "release-6", "queued", |front| {
+            front.routine = Some("release".to_string());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            mux.did("create_workspace"),
+            ["create_workspace on task/release-6 from work"]
+        );
+        assert_eq!(mux.did("rename_tab"), ["rename_tab w9:t1 release"]);
+        assert_eq!(mux.did("start"), ["start release · implement"]);
     }
 
     /// A split task's tab is renamed again on a later pass that finds the
@@ -16183,6 +16279,61 @@ mod tests {
         assert_eq!(line.trial_group.as_deref(), Some("demo"), "{banked:?}");
     }
 
+    /// A routine copy's ledger line carries its routine's id, copied off the
+    /// task the same way `trial` is, so `spoolway eval` can label every run
+    /// of one routine by that name rather than by each copy's numbered id.
+    #[test]
+    fn a_routine_copys_banked_line_carries_its_routine() {
+        let (mut repo, _root_guard) = fixture("routine-copy-banks-routine");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "release-6", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.routine = Some("release".into());
+        }));
+
+        let session = "routine-copy";
+        let kind = local_kind(&repo);
+        write_entry(
+            &repo,
+            "release-6",
+            "implement",
+            &kind,
+            "priced-model",
+            session,
+        );
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "release-6 · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "release-6 · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .rfind(|e| e.session == session)
+            .expect("the finished lane's own bank");
+        assert_eq!(line.routine.as_deref(), Some("release"), "{banked:?}");
+    }
+
     /// A held lane's `wall_s` is a delta against what the hold-time line
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
@@ -16233,6 +16384,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -16309,7 +16461,7 @@ mod tests {
 
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: "s1".into(),
                 kind: "pi".into(),
@@ -16469,7 +16621,7 @@ mod tests {
         });
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: "s1".into(),
                 kind: "pi".into(),
@@ -16512,7 +16664,7 @@ mod tests {
         });
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: "s1".into(),
                 kind: "pi".into(),
@@ -16569,7 +16721,7 @@ mod tests {
         });
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 busy_polled_at: Some(now_secs() - 8),
                 ..kept_record("s1", now_secs() - 8)
@@ -16662,7 +16814,7 @@ mod tests {
 
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: "s1".into(),
                 kind: "pi".into(),
@@ -16711,7 +16863,7 @@ mod tests {
         let session = "hold-no-transcript";
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: session.into(),
                 kind: local_kind(&repo),
@@ -16973,7 +17125,11 @@ mod tests {
         // Past `LAUNCH_GRACE`, whichever dispatcher looks — this one or a
         // fresh one after a restart, `age_lane` standing in for either —
         // the same silence finally means what it says.
-        age_lane(&repo, &lane_name("implement", "demo"), LAUNCH_GRACE);
+        age_lane(
+            &repo,
+            &crate::mux::run_key("implement", "demo"),
+            LAUNCH_GRACE,
+        );
         let mux = FakeMux::new(vec![]);
         run_pass(&repo, &mux);
         let task = reload(&path);
@@ -16999,7 +17155,7 @@ mod tests {
         });
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord::adopted(now_secs()),
         );
         save_lane_records(&repo, &records).unwrap();
@@ -17178,6 +17334,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17219,6 +17376,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17301,6 +17459,7 @@ mod tests {
                 run: None,
                 trial: None,
                 trial_group: None,
+                routine: None,
                 dir: None,
                 hand: false,
                 command: None,
@@ -17418,7 +17577,7 @@ mod tests {
         let home = pi_home_with(session, 4_242);
         let mut records = HashMap::new();
         records.insert(
-            lane_name("implement", "demo"),
+            crate::mux::run_key("implement", "demo"),
             LaneRecord {
                 session: session.to_string(),
                 kind: local_kind(&repo),
@@ -17563,7 +17722,7 @@ mod tests {
             ..LaneRecord::adopted(now_secs())
         };
         let mut records = HashMap::new();
-        records.insert(lane_name("implement", "demo"), record);
+        records.insert(crate::mux::run_key("implement", "demo"), record);
         save_lane_records(&repo, &records).unwrap();
 
         let pipelines = Pipelines::builtin();
@@ -17749,11 +17908,197 @@ mod tests {
         let (repo, _root_guard) = fixture("session-retired");
         write_entry(&repo, "demo", "fix", "claude", "test-model", "old-session");
 
-        let found = lane_session(&repo, &lane_name("fix", "demo"));
+        let found = lane_session(&repo, &crate::mux::run_key("fix", "demo"));
 
         assert_eq!(
             found,
             Some(("claude".to_string(), "old-session".to_string()))
+        );
+    }
+
+    /// A routine's copies share one lane name, but a copy's session is its
+    /// own: asked for by the routine's name, `lane_session` answers with the
+    /// live copy's ledger line and never an earlier copy's, which went by the
+    /// same name and a different id.
+    #[test]
+    fn a_routine_lanes_session_is_the_live_copys_and_not_an_earlier_ones() {
+        let (repo, _root_guard) = fixture("session-routine");
+        add_task_with(&repo, "fix-6", "implement", |front| {
+            front.routine = Some("fix".to_string());
+        });
+        write_entry(
+            &repo,
+            "fix-5",
+            "implement",
+            "claude",
+            "test-model",
+            "earlier-copy",
+        );
+        write_entry(
+            &repo,
+            "fix-6",
+            "implement",
+            "claude",
+            "test-model",
+            "live-copy",
+        );
+
+        let by_routine = lane_session(&repo, "fix · implement");
+        let by_id = lane_session(&repo, "fix-6 · implement");
+
+        let live = Some(("claude".to_string(), "live-copy".to_string()));
+        assert_eq!(by_routine, live);
+        assert_eq!(by_id, live, "a lane named by its id before the upgrade");
+    }
+
+    /// A routine's copies share one lane name, so the record an earlier copy
+    /// left in `lanes.json` is under the very name the next copy starts. It is
+    /// dropped by the prune rather than kept for the live copy to adopt, while
+    /// the live copy's own record, and a record from before copies were named
+    /// for their routine, stay. Before the record carried its task, all three
+    /// parsed to the live copy and the earlier one was kept.
+    #[test]
+    fn an_earlier_copys_lane_record_is_not_kept_for_the_next_copy() {
+        let (repo, _root_guard) = fixture("prune-routine-copy");
+        add_task_with(&repo, "fix-6", "implement", |front| {
+            front.routine = Some("fix".to_string());
+        });
+        let pipelines = Pipelines::builtin();
+        let mux = FakeMux::new(vec![]);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let record = |task: &str| LaneRecord {
+            task: task.to_string(),
+            ..kept_record("s", 1)
+        };
+        dispatcher
+            .lanes
+            .insert("fix · implement".to_string(), record("fix-5"));
+        dispatcher
+            .lanes
+            .insert("fix · review".to_string(), record("fix-6"));
+        dispatcher
+            .lanes
+            .insert("fix-6 · document".to_string(), record(""));
+
+        let tasks = repo.tasks().unwrap();
+        dispatcher.prune_stale_lane_records(&tasks, &pipelines.all_step_ids());
+
+        let mut kept: Vec<_> = dispatcher.lanes.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["fix · review", "fix-6 · document"]);
+    }
+
+    /// With no live copy to compare against, a kept record under a routine's
+    /// lane name still answers: a lane whose task has left the queue reports
+    /// its session. Skipping it on the task check alone left `spoolway lane
+    /// --attach` with "no session recorded" once the copy was gone.
+    #[test]
+    fn a_routine_lane_with_no_live_copy_still_reports_its_kept_session() {
+        let (repo, _root_guard) = fixture("session-routine-gone");
+        let mut records = HashMap::new();
+        records.insert(
+            "fix · implement".to_string(),
+            LaneRecord {
+                task: "fix-5".to_string(),
+                kind: "claude".to_string(),
+                ..kept_record("kept-copy", 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        assert_eq!(
+            lane_session(&repo, "fix · implement"),
+            Some(("claude".to_string(), "kept-copy".to_string()))
+        );
+    }
+
+    /// The next copy of a routine starts under the name an earlier copy's
+    /// record is still saved under, because the prune runs at the end of a
+    /// pass. The earlier copy's session is banked under its own id and the new
+    /// record is the new copy's own. Before records carried their task it was
+    /// banked under the new copy's id.
+    #[test]
+    fn the_next_copy_starting_banks_an_earlier_copys_record_under_its_own_id() {
+        let (mut repo, _root_guard) = fixture("start-routine-copy");
+        repo.config.dispatch.keep_finished_lanes = false;
+        add_task_with(&repo, "fix-6", "queued", |front| {
+            front.routine = Some("fix".to_string());
+        });
+        let session = "earlier-copy";
+        let mut records = HashMap::new();
+        records.insert(
+            "fix · implement".to_string(),
+            LaneRecord {
+                task: "fix-5".to_string(),
+                kind: "claude".to_string(),
+                agent: "claude".to_string(),
+                model: "claude-test".to_string(),
+                ..kept_record(session, 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+        let home = crate::scratch::root("dispatch-start-routine-copy-home");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            "{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\
+             \"model\":\"claude-test\",\"usage\":{\"input_tokens\":700,\
+             \"output_tokens\":5,\"cache_read_input_tokens\":0,\
+             \"cache_creation_input_tokens\":0}}}\n",
+        )
+        .unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked: Vec<_> = crate::usage::read(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.session == session)
+            .collect();
+        assert_eq!(banked.len(), 1, "banked once: {banked:?}");
+        assert_eq!(banked[0].task, "fix-5");
+        assert_eq!(mux.did("start"), ["start fix · implement"]);
+        let started = &load_lane_records(&repo)["fix · implement"];
+        assert_eq!(started.task, "fix-6");
+        assert_ne!(started.session, session);
+    }
+
+    /// A kept record under a routine's lane name belongs to the copy that made
+    /// it. Asking for the live copy's session must not return an earlier
+    /// copy's, which the record-first lookup did before records carried their
+    /// task.
+    #[test]
+    fn a_routine_lanes_session_skips_an_earlier_copys_record() {
+        let (repo, _root_guard) = fixture("session-routine-record");
+        add_task_with(&repo, "fix-6", "implement", |front| {
+            front.routine = Some("fix".to_string());
+        });
+        write_entry(
+            &repo,
+            "fix-6",
+            "implement",
+            "claude",
+            "test-model",
+            "live-copy",
+        );
+        let mut records = HashMap::new();
+        records.insert(
+            "fix · implement".to_string(),
+            LaneRecord {
+                task: "fix-5".to_string(),
+                kind: "claude".to_string(),
+                ..kept_record("earlier-copy", 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        assert_eq!(
+            lane_session(&repo, "fix · implement"),
+            Some(("claude".to_string(), "live-copy".to_string()))
         );
     }
 
@@ -18734,7 +19079,10 @@ mod tests {
             record.kind = "claude".to_string();
             record.session = "ceiling-session-reported".to_string();
             let mut records = HashMap::new();
-            records.insert(lane_name(crate::pipeline::BLOCKED, "demo"), record);
+            records.insert(
+                crate::mux::run_key(crate::pipeline::BLOCKED, "demo"),
+                record,
+            );
             save_lane_records(&repo, &records).unwrap();
         }
 
@@ -18742,7 +19090,7 @@ mod tests {
         // turn actually has by the time the next pass looks.
         let mux = FakeMux::new(vec![lane(
             &repo,
-            &lane_name(crate::pipeline::BLOCKED, "demo"),
+            &crate::mux::run_key(crate::pipeline::BLOCKED, "demo"),
             LaneStatus::Done,
         )]);
         // 800 input plus the fixture's own 100-token cache write is 900 of a
@@ -18815,13 +19163,16 @@ mod tests {
             record.started_at_ms = started_at_ms;
             record.last_progress = second - 60;
             let mut records = HashMap::new();
-            records.insert(lane_name(crate::pipeline::BLOCKED, "demo"), record);
+            records.insert(
+                crate::mux::run_key(crate::pipeline::BLOCKED, "demo"),
+                record,
+            );
             save_lane_records(&repo, &records).unwrap();
         }
 
         let mux = FakeMux::new(vec![lane(
             &repo,
-            &lane_name(crate::pipeline::BLOCKED, "demo"),
+            &crate::mux::run_key(crate::pipeline::BLOCKED, "demo"),
             LaneStatus::Done,
         )]);
         // The report counts: the lane is finished and the task, still on
@@ -18847,7 +19198,7 @@ mod tests {
         // Left at 0 it would quietly send every launched lane back to the
         // whole-second compare.
         let fresh = load_lane_records(&repo)
-            .remove(&lane_name(crate::pipeline::BLOCKED, "demo"))
+            .remove(&crate::mux::run_key(crate::pipeline::BLOCKED, "demo"))
             .expect("the fresh lane is recorded");
         assert!(
             fresh.started_at_ms >= before_ms,
@@ -21053,6 +21404,7 @@ mod tests {
                     run: None,
                     trial: None,
                     trial_group: None,
+                    routine: None,
                     dir: None,
                     hand: false,
                     project: String::new(),
@@ -21282,7 +21634,7 @@ mod tests {
             .expect("clean_up archived the task without banking the lane");
         assert_eq!(line.tokens.input, 5_000);
         // The lane's own step, not the terminal `done` the task now sits on:
-        // `lane_name(&line.step, &line.task)` has to name a lane that existed.
+        // `run_key(&line.step, &line.task)` has to name a run that existed.
         assert_eq!(line.step, "implement");
         assert_eq!(line.task, "demo");
     }
@@ -22314,6 +22666,26 @@ mod tests {
         assert_eq!(rows[0].command.as_ref().unwrap().exit, Some(0));
         assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
         assert!(!rows[0].blocked);
+        assert_eq!(rows[0].routine, None, "the task is no routine's copy");
+    }
+
+    /// A command step's row for a routine copy carries the routine's id, the
+    /// same as a lane's line does.
+    #[test]
+    fn a_routine_copys_command_row_carries_its_routine() {
+        let (repo, _root_guard) = fixture("command-ledger-routine");
+        let path = add_task_with_worktree(&repo, "release-6", "implement");
+        let mut task = reload(&path);
+        task.front.routine = Some("release".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].routine.as_deref(), Some("release"));
     }
 
     /// A run's wall time is rounded to the nearest second, not cut down to
