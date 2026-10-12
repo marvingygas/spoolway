@@ -1553,7 +1553,7 @@ when it equals a copy an older spoolway shipped. One equal to no shipped copy is
 as it is. The refusal names the file and `spoolway sync --replace <path>`. See [Files spoolway
 refuses](installation.md#files-spoolway-refuses).
 
-`sync` also deletes the version marker a build of 0.10.0 left in the project's setup folder and in
+`sync` also deletes the version marker spoolway 0.10.0 left in the project's setup folder and in
 each agent's user-level skills folder, and lists each as removed. See [The retired version
 marker](installation.md#the-retired-version-marker).
 
