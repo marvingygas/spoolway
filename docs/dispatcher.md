@@ -458,9 +458,16 @@ On WSL, a command whose program ends in `.exe` receives the Windows form of the 
 
 | Case | What the refusal says |
 |---|---|
-| `editor.toml` does not parse, or holds a key other than `[editor]` `command` and `window` | The error names the file. The next editor is not tried. |
+| `editor.toml` does not parse, or holds a key other than `[editor]` `command` and `window` | The error names the file and the parser's own message. The next editor is not tried. |
+| The command is empty | The error says the command is empty and names the fix. |
 | The program is not on `PATH` | The error names the program and says to fix `command` or delete the file. |
-| The Windows path conversion fails | The error names the task path. |
+| The Windows path conversion fails | The error names the task path and says why the conversion failed. |
+| A terminal editor is chosen on the headless backend | The error says the backend has no pane to open a command in. |
+
+A refusal shows in a popup titled `open task`. The popup holds the whole error, including its fix,
+and closes with `enter` alone. It appears on the board, the queue screen's tasks and routines
+panes, and the jobs routine picker, and the text is the same on each. The board keeps redrawing
+and the dispatcher keeps running while the popup is open.
 
 ### Resume picker
 

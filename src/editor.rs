@@ -178,6 +178,17 @@ pub(crate) fn open(repo: &crate::repo::Repo, label: &str, task: &Path) -> Result
     crate::mux::backend(repo)?.open_command(&repo.root, label, &plan.line)
 }
 
+/// The popup every open in the TUI shows when [`open`] refuses, titled
+/// `open task` and closed with `enter`. The refusal is carried whole, `{:#}`
+/// rather than `{}`, because the remedy can sit in its context chain: an
+/// `editor.toml` that does not parse names its fix on the outer layer, and
+/// the parse error under it says which line is wrong. Built here, once, so
+/// the board, the pending screen, the routines pane and the jobs routine
+/// picker cannot word the same refusal differently.
+pub(crate) fn refusal(err: &anyhow::Error) -> crate::screen::Notice {
+    crate::screen::Notice::new("open task", format!("o: {err:#}"))
+}
+
 /// Start `line` in the background in a session of its own, so quitting
 /// spoolway never closes an unsaved editor. Nothing waits on it: a failure
 /// after the start shows in the editor's own window.
@@ -371,6 +382,44 @@ mod tests {
         i.wsl = true;
         let err = format!("{:#}", plan(&i, Path::new("/home/u/t.md")).err().unwrap());
         assert!(err.contains("/home/u/t.md"), "{err}");
+    }
+
+    /// The popup carries each refusal whole: the remedy for a missing
+    /// program, and every layer of a chain, so a file that does not parse
+    /// shows both its fix and the parser's own line, and a failed
+    /// conversion both the path and why `wslpath` gave up.
+    #[test]
+    fn the_refusal_popup_carries_the_whole_error() {
+        let d = dir();
+        let text = |i: &Inputs, task: &str| {
+            let notice = refusal(&plan(i, Path::new(task)).err().unwrap());
+            assert_eq!(notice.title, "open task");
+            notice.text
+        };
+
+        write_file(&d, "[editor]\ncommand = \"notepd.exe\"\n");
+        let i = inputs(&d, bin(&d, &["vim"]), &no_wslpath);
+        assert_eq!(
+            text(&i, "/x"),
+            format!("o: `notepd.exe` is not on PATH — {REMEDY}")
+        );
+
+        write_file(&d, "[editor\ncommand = ");
+        let shown = text(&i, "/x");
+        assert!(
+            shown.contains("does not parse — fix it or delete it: "),
+            "{shown}"
+        );
+        assert!(shown.contains("line 1"), "the parser's own layer: {shown}");
+
+        write_file(&d, "[editor]\ncommand = \"notepad.exe\"\n");
+        let fail = |_: &Path| bail!("wslpath exited 1");
+        let mut i = inputs(&d, bin(&d, &["notepad.exe"]), &fail);
+        i.wsl = true;
+        assert_eq!(
+            text(&i, "/home/u/t.md"),
+            "o: could not convert /home/u/t.md to a Windows path: wslpath exited 1"
+        );
     }
 
     #[test]

@@ -1117,7 +1117,7 @@ fn open_highlighted_job_routine(
             draft,
             nav: nav.clone(),
         },
-        Err(err) => JobMode::Outcome(Notice::new("open task", format!("o: {err:#}"))),
+        Err(err) => JobMode::Outcome(crate::editor::refusal(&err)),
     }
 }
 

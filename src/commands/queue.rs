@@ -5889,10 +5889,11 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 ///
 /// A refused open is surfaced through [`Mode::Outcome`] rather than lost: an
 /// `Err` this discarded would leave a person picking open with no sign it did
-/// anything at all. The refusals are a terminal editor on a backend with no
-/// pane to open one in — headless, which refuses the way
+/// anything at all. Among the refusals are a terminal editor on a backend
+/// with no pane to open one in — headless, which refuses the way
 /// `Mux::open_command`'s default does — an `editor.toml` that does not parse,
-/// and an editor program that is not on `PATH`.
+/// an editor program that is not on `PATH`, and a path `wslpath` cannot
+/// convert.
 fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode {
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return Mode::Browsing;
@@ -5902,7 +5903,10 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     };
     match crate::editor::open(repo, &format!("{} · edit", task.id), &task.path) {
         Ok(()) => Mode::Browsing,
-        Err(err) => outcome("open task", format!("o: {err:#}")),
+        Err(err) => Mode::Outcome {
+            notice: crate::editor::refusal(&err),
+            routines: None,
+        },
     }
 }
 
@@ -5920,7 +5924,10 @@ fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &Routi
     };
     match crate::editor::open(repo, &format!("{} · edit", task.id), &task.path) {
         Ok(()) => Mode::Routines(nav.clone()),
-        Err(err) => outcome_over(Some(nav), "open task", format!("o: {err:#}")),
+        Err(err) => Mode::Outcome {
+            notice: crate::editor::refusal(&err),
+            routines: Some(nav.clone()),
+        },
     }
 }
 
