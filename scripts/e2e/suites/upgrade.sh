@@ -24,17 +24,14 @@
 # whether *moving* to them across a real upgrade still lands the value,
 # which is a question about `spoolway sync`, not about either setting.
 #
-# nightly only — see run.sh's own header for why, and the task's own goal:
-# this is a release-time question ("does this binary still read what a past
-# release wrote"), not a per-chain one. A `suite` step runs its tier once, on
-# the last task of a chain, under a 45-minute timeout: the `pr` tier through
-# `scripts/e2e-pr.sh` in `impl`, and the narrower `smoke` tier through
-# `scripts/e2e-smoke.sh` in `impl_lite`. Neither carries `upgrade`, and an
-# ordinary chain's diff essentially never touches `spoolway sync`'s own
-# upgrade step or a shipped pipeline's key block. So leaving `upgrade`
-# out of `pr_suites` costs either gate nothing. The `nightly` tier still asks the question: once
-# a day against main, and again from the release workflow before every tag,
-# which is when an answer here is actually worth having.
+# Runs in the `pr` and `nightly` tiers. It once ran in `nightly` only, on the
+# argument that an ordinary chain never touches `spoolway sync`'s upgrade
+# step. That was wrong: a change to what `init` writes made this suite's
+# "second init wrote anything at all" check fail, and only `main`'s gate
+# saw it, after the merge. The suite takes about a second and a half, so
+# a pull request pays almost nothing to learn that its change no longer
+# reads what a past release wrote. `nightly` still asks the question daily
+# against main, and again from the release workflow before every tag.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
