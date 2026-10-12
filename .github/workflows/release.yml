@@ -71,7 +71,7 @@ jobs:
 
       # `if-no-files-found: error` means a missing binary fails here rather
       # than silently shipping a platform package with nothing in it.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target.triple }}
           path: target/${{ matrix.target.triple }}/release/spoolway
@@ -126,7 +126,7 @@ jobs:
           printf '%s\n' "$body" > release-body.md
           cat release-body.md
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: release-body
           path: release-body.md
@@ -144,14 +144,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       # Lands each target's binary at artifacts/<triple>/spoolway, which is where
       # build-npm.mjs looks for them.
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -244,7 +244,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
