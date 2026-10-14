@@ -30,7 +30,8 @@
 # same kind of row straight back to `queued`, dependency or not, and opens
 # the step picker on a real gate beside it. Restart from the menu restarts a
 # parked row's step from its own panel and is checked for the new session the
-# step comes back on. Last of all is the pass-yields
+# step comes back on, then restarts a running command step from the panel's
+# command form and is checked for the second run. Last of all is the pass-yields
 # section, which queues six more hang lanes of its own — placed after the
 # `r` section simply so it does not disturb the state that section's own
 # assertions read, not because anything here is scarce enough to make the
@@ -853,6 +854,89 @@ if poll_until 15 _restart_spent; then ok "and the restart key is spent by that l
 else bad "and the restart key is spent by that launch"; fi
 # Hanging again, as `stuck` is set to: parked so it holds no slot below.
 must "the board-restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
+
+# ------------------------ restart picked from a command step's menu
+# The same panel over a task standing on a command step, which has no lane
+# and no session: it names the step and the run instead, and `enter` ends the
+# command's process and runs the step again from the start. `build` records
+# each run's shell pid in a file of its own, so a second line is a second run,
+# and waits for a release file, so the task finishes once this section is done
+# with it rather than holding a running command into the sections below. The
+# pipeline is written while the board is down, since a running dispatcher
+# keeps the pipelines it started with.
+board_stop
+BUILD_RUNS="$LIVE/build.runs"
+BUILD_RELEASE="$LIVE/build.release"
+rm -f "$BUILD_RUNS" "$BUILD_RELEASE"
+cat > .spoolway/pipelines/board-build.yml <<YML
+steps:
+  - id: build
+    run: echo \$\$ >> "$BUILD_RUNS"; for _ in \$(seq 1 3000); do [ -e "$BUILD_RELEASE" ] && exit 0; sleep 0.1; done
+    on_pass: done
+YML
+task_doc "$LIVE/build-cmd.md" build-cmd "$BODY" "group: build-cmd" \
+  "pipeline: board-build"
+must "build-cmd queues" "$SPOOLWAY" queue add --from "$LIVE/build-cmd.md"
+board_start
+
+if poll_until 60 test -s "$BUILD_RUNS"; then ok "the command step is running"
+else bad "the command step is running"; fi
+BUILD_FIRST=$(head -n1 "$BUILD_RUNS" 2>/dev/null)
+
+# Walked from the top as the section above does. `build-cmd` is running, so
+# its menu is open, pause and restart, and restart is two down.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
+next_frame 3
+SAW_RESTART=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  MARK=$(wc -l < "$BOARD_LOG")
+  press o
+  next_frame 3
+  SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
+  if grep -qF -- "╭─ build-cmd ─" <<<"$SINCE"; then
+    press $'\x1b[B'
+    next_frame 3
+    press $'\x1b[B'
+    next_frame 3
+    press $'\r'
+    next_frame 3
+    SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
+    SAW_RESTART=build-cmd
+    for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
+      "The command's process is ended and \`build\` runs again" \
+      "from the start. Its log is kept as the previous log." "> restart" \
+      "[enter] confirm   [esc] close"; do
+      if grep -qF -- "$want" <<<"$SINCE"; then ok "the command form says: $want"
+      else bad "the command form says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+    done
+    for unwanted in "lane      build-cmd" "session   "; do
+      if grep -qF -- "$unwanted" <<<"$SINCE"; then
+        bad "the command form names no $unwanted"; tail -30 "$BOARD_LOG" | sed 's/^/        /'
+      else ok "the command form names no $unwanted"; fi
+    done
+    press $'\r'
+    next_frame 3
+    break
+  else
+    press $'\x1b'
+    next_frame 3
+  fi
+  press $'\x1b[B'
+  next_frame 3
+done
+if [ "$SAW_RESTART" = build-cmd ]; then ok "restart in a command step's menu opens the command form"
+else bad "restart in a command step's menu opens the command form"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+build_ran_again() { [ "$(wc -l < "$BUILD_RUNS")" -ge 2 ]; }
+if poll_until 60 build_ran_again; then ok "enter on the panel runs the command again from the start"
+else bad "enter on the panel runs the command again from the start"; fi
+if [ -n "$BUILD_FIRST" ] && ! kill -0 "$BUILD_FIRST" 2>/dev/null; then
+  ok "and the run that was going is gone"
+else bad "and the run that was going is gone (pid $BUILD_FIRST)"; fi
+lacks "and no conversation is named for a command" "restart:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/build-cmd.md"
+touch "$BUILD_RELEASE"
+if poll_until 60 _gone build-cmd; then ok "the released command finishes its task"
+else bad "the released command finishes its task"; fi
 
 # ------------------------- a schedule catches a failing step, not only a pass
 # The pause panel above already proved it writes and clears `gate_at`; what a schedule

@@ -385,23 +385,56 @@ const RESTART_WRAP: usize = 56;
 /// got as far as a turn — rather than printed empty, the same as
 /// `spoolway restart` prints no session line then. A refusal its answer met
 /// is printed under the closing sentence, above the one answer, `restart`.
+///
+/// A command step has no lane and no session, so its form names the step and
+/// the run in their place, and says the command's process is ended and run
+/// again. When no run is going, on a task paused on or blocked off the step,
+/// the `run` row is left out and the closing sentence only says the step runs
+/// again, since there is no process left to end.
 pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
-    let mut body = vec![
-        format!("step      {}", confirm.step),
-        format!("lane      {}", confirm.lane),
-    ];
-    if let Some(session) = &confirm.session {
-        body.push(format!("session   {}", session.describe()));
+    let mut body = Vec::new();
+    // The command form opens on a blank row that sets its two short rows
+    // apart from the title; the agent form keeps the rows it has always had.
+    if matches!(confirm.ends, RestartEnds::Command { .. }) {
+        body.push(String::new());
     }
-    body.push(String::new());
-    body.extend(crate::screen::wrap(
-        &format!(
-            "The lane is torn down and `{}` is briefed from scratch. Its conversation is not \
-             kept.",
+    body.push(format!("step      {}", confirm.step));
+    let closing = match &confirm.ends {
+        RestartEnds::Agent { lane, session } => {
+            body.push(format!("lane      {lane}"));
+            if let Some(session) = session {
+                body.push(format!("session   {}", session.describe()));
+            }
+            format!(
+                "The lane is torn down and `{}` is briefed from scratch. Its conversation is not \
+                 kept.",
+                confirm.step
+            )
+        }
+        RestartEnds::Command {
+            elapsed: Some(elapsed),
+        } => {
+            body.push(format!(
+                "run       {} · {}",
+                AbortKind::Command.word(),
+                human_secs(elapsed.as_secs() as i64)
+            ));
+            format!(
+                "The command's process is ended and `{}` runs again from the start. Its log is \
+                 kept as the previous log.",
+                confirm.step
+            )
+        }
+        // No run is going: a pause already ended its process, or it exited
+        // on its own. Saying the restart ends one would name a process that
+        // is not there.
+        RestartEnds::Command { elapsed: None } => format!(
+            "`{}` runs again from the start. Its log is kept as the previous log.",
             confirm.step
         ),
-        RESTART_WRAP,
-    ));
+    };
+    body.push(String::new());
+    body.extend(crate::screen::wrap(&closing, RESTART_WRAP));
     if let Some(err) = &confirm.error {
         body.push(String::new());
         body.extend(
@@ -4747,12 +4780,14 @@ mod tests {
     fn the_restart_panel_draws_its_mockup_within_eighty_columns() {
         let mut confirm = RestartConfirm {
             id: "prompt-cache-ttl-default".to_string(),
-            lane: "prompt-cache-ttl-default · review-spec".to_string(),
             step: "review-spec".to_string(),
-            session: Some(crate::commands::AbandonedSession {
-                id: "32b0d7bd-1111-2222-3333-444455556666".to_string(),
-                banked: true,
-            }),
+            ends: RestartEnds::Agent {
+                lane: "prompt-cache-ttl-default · review-spec".to_string(),
+                session: Some(crate::commands::AbandonedSession {
+                    id: "32b0d7bd-1111-2222-3333-444455556666".to_string(),
+                    banked: true,
+                }),
+            },
             error: None,
         };
         let panel = restart_confirm_panel(&confirm);
@@ -4791,6 +4826,101 @@ mod tests {
             assert!(line.chars().count() <= 80, "{line}");
         }
         assert!(panel.iter().any(|line| line.contains("a report landed")));
+        assert!(panel[panel.len() - 4].contains("> restart"));
+        assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
+    }
+
+    /// `restart_confirm_panel`'s command form draws its mockup row for row:
+    /// the step and the run in place of a lane and a session, and a closing
+    /// sentence about the command. When no run is going the `run` row is left
+    /// out and the sentence names no process to end, and a refusal printed in
+    /// the panel still fits an 80-column pane.
+    #[test]
+    fn the_restart_panel_draws_its_command_form_within_eighty_columns() {
+        let mut confirm = RestartConfirm {
+            id: "solo".to_string(),
+            step: "build".to_string(),
+            ends: RestartEnds::Command {
+                elapsed: Some(Duration::from_secs(252)),
+            },
+            error: None,
+        };
+        let body = |confirm: &RestartConfirm| -> Vec<String> {
+            let panel = restart_confirm_panel(confirm);
+            panel[1..panel.len() - 1]
+                .iter()
+                .map(|line| line.trim_matches('│').trim_end().to_string())
+                .collect()
+        };
+        let closing = [
+            "  The command's process is ended and `build` runs again",
+            "  from the start. Its log is kept as the previous log.",
+        ];
+        let running = body(&confirm);
+        assert_eq!(
+            running,
+            [
+                "",
+                "  step      build",
+                "  run       command · 4m 12s",
+                "",
+                closing[0],
+                closing[1],
+                "",
+                "  > restart",
+                "",
+                "  [enter] confirm   [esc] close",
+            ]
+        );
+        let panel = restart_confirm_panel(&confirm);
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ restart solo ─")),
+            "{}",
+            panel[0]
+        );
+
+        // Held, no process is left to end, so the closing sentence does not
+        // say one is.
+        confirm.ends = RestartEnds::Command { elapsed: None };
+        assert_eq!(
+            body(&confirm),
+            [
+                "",
+                "  step      build",
+                "",
+                "  `build` runs again from the start. Its log is kept as",
+                "  the previous log.",
+                "",
+                "  > restart",
+                "",
+                "  [enter] confirm   [esc] close",
+            ]
+        );
+
+        confirm.ends = RestartEnds::Command {
+            elapsed: Some(Duration::from_secs(252)),
+        };
+        confirm.error = Some(
+            "task `solo` changed while the restart was being written — a report landed first, \
+             so the restart was not written and the command was left running."
+                .to_string(),
+        );
+        let panel = restart_confirm_panel(&confirm);
+        for line in &panel {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        let refusal = panel
+            .iter()
+            .position(|line| line.contains("task `solo` changed"))
+            .expect("the refusal is printed");
+        let closed = panel
+            .iter()
+            .position(|line| line.contains("Its log is kept"))
+            .unwrap();
+        assert!(
+            closed < refusal,
+            "the refusal sits under the closing sentence"
+        );
         assert!(panel[panel.len() - 4].contains("> restart"));
         assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
     }

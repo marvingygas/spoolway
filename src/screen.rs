@@ -885,7 +885,7 @@ mod tests {
             crate::commands::jobs_asking_panels(),
         ]
         .concat();
-        assert_eq!(popups.len(), 15, "every popup is walked");
+        assert_eq!(popups.len(), 16, "every popup is walked");
         let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
         for (name, panel) in popups {
             let drawn = panel.join("\n");

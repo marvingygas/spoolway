@@ -734,7 +734,7 @@ impl Board {
     /// Browsing, `↑`/`↓` move the cursor, and `o` opens the options menu of
     /// the row it sits on — see [`Board::open_options`]. The menu lists only
     /// what that row can do right now, in a fixed order: `open` its task
-    /// file, `pause` it, `restart` its step with a fresh session, or
+    /// file, `pause` it, `restart` its step from scratch, or
     /// `unqueue` it back to pending with every still-queued task that
     /// depends on it. `r` is the one row action left on a key of its own: it
     /// opens a picker of the cursor's task's steps if its own resume key is
@@ -742,16 +742,17 @@ impl Board {
     /// from the dispatch tab's own `enter`, not from here. An action opens a
     /// confirm panel first wherever what it is about to do is not free to
     /// undo — `unqueue` and `restart` open one unconditionally, since
-    /// writing a task back to pending and throwing a conversation away are
-    /// exactly that — see [`BoardMode`]. With a menu or panel already open
-    /// every other key is read by it instead. Each one lists its answers:
-    /// `↑` and `↓` move its own cursor rather than the board's, `enter` runs
-    /// the answer under it, and `esc` closes it with nothing changed. No
-    /// letter answers one — the letter that opened it, a `q`, or any other
-    /// key it does not read is ignored, the same as it is while browsing. A
-    /// pause panel's second answer leaves every named abort running and
-    /// schedules its task's `gate_at` on the step it is on instead. A refused
-    /// open's popup has no answers and closes on `enter` alone.
+    /// writing a task back to pending and throwing a conversation or a
+    /// command's run away are exactly that — see [`BoardMode`]. With a menu
+    /// or panel already open every other key is read by it instead. Each one
+    /// lists its answers: `↑` and `↓` move its own cursor rather than the
+    /// board's, `enter` runs the answer under it, and `esc` closes it with
+    /// nothing changed. No letter answers one — the letter that opened it, a
+    /// `q`, or any other key it does not read is ignored, the same as it is
+    /// while browsing. A pause panel's second answer leaves every named abort
+    /// running and schedules its task's `gate_at` on the step it is on
+    /// instead. A refused open's popup has no answers and closes on `enter`
+    /// alone.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -1122,8 +1123,9 @@ impl Board {
     }
 
     /// The options menu's `restart`: open [`BoardMode::ConfirmRestart`] on
-    /// task `id`, naming the step a restart would start over and the session
-    /// it would throw away.
+    /// task `id`, naming the step a restart would start over and what it
+    /// ends there: the lane and session of an agent step, or the run of a
+    /// command step, which has neither — see [`RestartEnds`].
     ///
     /// A no-op on a task the queue and the archive no longer have, or one
     /// `spoolway restart` itself would refuse — one that never started, one
@@ -1131,19 +1133,48 @@ impl Board {
     /// [`crate::commands::restart_step`] is asked rather than the row's
     /// state, so the panel only ever offers a restart the command carries
     /// out.
+    ///
+    /// Reads the step on [`restart_graph`]'s graph, the one
+    /// [`Board::on_key_restart_confirm`] restarts on: a pipeline file edited
+    /// mid-run can turn the step from a command into an agent step or back,
+    /// and a panel drawn from the board's own copy would then name what the
+    /// restart does not end. When the running dispatcher's copy refuses the
+    /// task outright, the panel still opens, with that refusal printed in it.
     fn begin_restart(&mut self, repo: &Repo, pipelines: &Pipelines, id: String) -> Result<()> {
         let Ok(task) = repo.task(&id) else {
             return Ok(());
         };
-        let Ok(step) = restartable_step(&task, pipelines) else {
+        let (routed, refused) = restart_graph(repo, pipelines, &id);
+        let Ok(step) = restartable_step(&task, &routed) else {
             return Ok(());
         };
+        let on_command = routed.for_task(&task).is_ok_and(|pipeline| {
+            pipeline
+                .step(&step)
+                .is_some_and(|declared| declared.kind() == crate::pipeline::StepKind::Command)
+        });
+        let ends = if on_command {
+            // Only a run still going gets a `run` line: an exited run keeps
+            // its pid file until the dispatcher reads the exit, and that
+            // file's age would read as a command still at work.
+            let runs = crate::command_step::Runs::new(&repo.commands_dir());
+            let key = crate::command_step::Runs::key(&step, task.id());
+            RestartEnds::Command {
+                elapsed: (runs.state(&key) == crate::command_step::RunState::Running)
+                    .then(|| runs.elapsed(&key))
+                    .flatten(),
+            }
+        } else {
+            RestartEnds::Agent {
+                session: crate::commands::abandoned_session(repo, &step, &task),
+                lane: crate::mux::lane_name(&step, &task),
+            }
+        };
         self.mode = BoardMode::ConfirmRestart(RestartConfirm {
-            session: crate::commands::abandoned_session(repo, &step, &task),
-            lane: crate::mux::lane_name(&step, &task),
             id,
             step,
-            error: None,
+            ends,
+            error: refused,
         });
         Ok(())
     }
@@ -1325,9 +1356,9 @@ enum BoardMode {
         dir: PathBuf,
     },
     /// `restart` on a task `spoolway restart` accepts: the step it would start
-    /// over and the session it would abandon. Its one answer, `restart`,
-    /// carries the restart out, and `esc` leaves the task and its lane
-    /// exactly as they were.
+    /// over and the session it would abandon, or on a command step the run it
+    /// would end. Its one answer, `restart`, carries the restart out, and
+    /// `esc` leaves the task, its lane and its run exactly as they were.
     ConfirmRestart(RestartConfirm),
     /// The options menu's `open` was refused — see [`open_task`]. Held until
     /// `enter` closes it, with no other answer to pick. The pass loop keeps
@@ -1406,8 +1437,10 @@ fn options_panel(menu: &OptionsMenu) -> Vec<String> {
 /// acts, so the menu never offers what would then silently do nothing:
 /// `open` reads the task from the queue or the archive, as [`open_task`]
 /// does; `pause` needs it in the queue and [`pausable`]; `restart` needs
-/// [`restartable_step`] to accept it; `unqueue` needs it in the queue and
-/// [`not_started`]. Resume is never listed: it stays on the board's `r`.
+/// [`restartable_step`] to accept it on [`restart_graph`]'s graph, the one
+/// [`Board::begin_restart`] opens its panel on; `unqueue` needs it in the
+/// queue and [`not_started`]. Resume is never listed: it stays on the
+/// board's `r`.
 fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAction>> {
     let tasks = repo.tasks()?;
     let queued = tasks.iter().find(|t| t.id() == id);
@@ -1415,9 +1448,9 @@ fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAc
     let applies = |action| match action {
         RowAction::Open => task.is_some(),
         RowAction::Pause => queued.is_some_and(pausable),
-        RowAction::Restart => task
-            .as_ref()
-            .is_some_and(|task| restartable_step(task, pipelines).is_ok()),
+        RowAction::Restart => task.as_ref().is_some_and(|task| {
+            restartable_step(task, &restart_graph(repo, pipelines, id).0).is_ok()
+        }),
         RowAction::Unqueue => queued.is_some_and(not_started),
     };
     Ok([
@@ -1493,9 +1526,19 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let restart = RestartConfirm {
         id: "login".to_string(),
-        lane: "login · implement".to_string(),
         step: "implement".to_string(),
-        session: None,
+        ends: RestartEnds::Agent {
+            lane: "login · implement".to_string(),
+            session: None,
+        },
+        error: None,
+    };
+    let restart_command = RestartConfirm {
+        id: "login".to_string(),
+        step: "handover".to_string(),
+        ends: RestartEnds::Command {
+            elapsed: Some(Duration::from_secs(141)),
+        },
         error: None,
     };
     let entry = |id: &str, depends_on: &[&str]| ChainEntry {
@@ -1513,6 +1556,10 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
             pause_confirm_panel("login", &abort(AbortKind::Command), true, 0),
         ),
         ("restart", restart_confirm_panel(&restart)),
+        (
+            "restart, command step",
+            restart_confirm_panel(&restart_command),
+        ),
         (
             "unqueue",
             unqueue_confirm_panel(&[entry("login", &[])], pending),
@@ -1566,15 +1613,54 @@ struct ResumePicker {
 struct RestartConfirm {
     /// The task being restarted.
     id: String,
-    /// The lane it would start over, named as the multiplexer and `spoolway
-    /// lane` name it — see [`crate::mux::lane_name`].
-    lane: String,
     /// The step it would start over — [`crate::commands::restart_step`]'s.
     step: String,
-    /// The conversation the restart throws away, if one is on record.
-    session: Option<crate::commands::AbandonedSession>,
+    /// What the restart ends on that step, which decides the panel's form.
+    ends: RestartEnds,
     /// The last refusal `restart` met, printed in the panel until `esc`.
     error: Option<String>,
+}
+
+/// What a restart ends on its step: an agent's lane and conversation, or a
+/// command's run. A command step has no lane and no session, so the panel
+/// names neither for it and says what happens to the command instead.
+enum RestartEnds {
+    Agent {
+        /// The lane it would start over, named as the multiplexer and
+        /// `spoolway lane` name it — see [`crate::mux::lane_name`].
+        lane: String,
+        /// The conversation the restart throws away, if one is on record.
+        session: Option<crate::commands::AbandonedSession>,
+    },
+    Command {
+        /// How long the command's run has been going, or `None` when no run
+        /// is going — a task paused on or blocked off the step.
+        elapsed: Option<Duration>,
+    },
+}
+
+/// The graph the options menu's `restart` reads task `id` on, and the
+/// refusal the running dispatcher's copy gave it, if it gave one.
+///
+/// That copy, from [`routed_for`], is what confirming the panel restarts on,
+/// so the menu and the panel read it too. When it refuses the task — one on
+/// a pipeline added or renamed since the run started, say — the board's own
+/// graph stands in for drawing, and the refusal goes into the panel: an
+/// `Err` out of `on_key` is dropped without a word, so returning it would
+/// leave a menu item that does nothing and says nothing. Confirming asks the
+/// dispatcher's copy again, so nothing is restarted on the stand-in graph.
+fn restart_graph<'a>(
+    repo: &Repo,
+    pipelines: &'a Pipelines,
+    id: &str,
+) -> (std::borrow::Cow<'a, Pipelines>, Option<String>) {
+    match routed_for(repo, pipelines, id) {
+        Ok(routed) => (routed, None),
+        Err(err) => (
+            std::borrow::Cow::Borrowed(pipelines),
+            Some(format!("{err:#}")),
+        ),
+    }
 }
 
 /// The step `spoolway restart` would start over for `task`, or its refusal.
@@ -9206,6 +9292,34 @@ mod tests {
         }
     }
 
+    /// `o` lists `restart` on a row standing on a command step, whether its
+    /// task is running the command, paused on the step or blocked off it.
+    #[test]
+    fn the_options_menu_lists_restart_on_a_command_step_row() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("options-command-step");
+        let pipelines = Pipelines::builtin();
+        // `handover` is the default pipeline's command step.
+        add_to(&repo, "running", &[], Some("handover"), Some("running"));
+        add_to(&repo, "paused", &[], Some("handover"), Some("paused"));
+        let mut paused = repo.task("paused").unwrap();
+        paused.front.parked_from = Some("handover".into());
+        paused.set_stage(crate::pipeline::PAUSED, Some("parked by hand"));
+        paused.save().unwrap();
+        add_to(&repo, "blocked", &[], Some("handover"), Some("blocked"));
+        let mut blocked = repo.task("blocked").unwrap();
+        blocked.front.blocked_from = Some("handover".into());
+        blocked.set_stage(crate::pipeline::BLOCKED, Some("blocked by hand"));
+        blocked.save().unwrap();
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down]);
+        for id in ["running", "paused", "blocked"] {
+            board.cursor = Some(id.to_string());
+            let items = menu_items(&mut board, &repo, &pipelines);
+            assert!(items.contains(&RowAction::Restart), "{id}: {items:?}");
+        }
+    }
+
     /// The menu is a popup titled with the task's id, its items named by
     /// their verb alone straight under the title, the cursor on the first,
     /// closed on `[enter] confirm   [esc] close`. `↓` moves the cursor and
@@ -10762,6 +10876,200 @@ mod tests {
         assert_eq!(task.stage(), crate::pipeline::QUEUED);
         assert_eq!(task.front.restart, None);
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// `restart` on a row running a command step opens the panel's command
+    /// form, naming the run rather than a lane or a session, and `enter`
+    /// carries out what `spoolway restart` does there: the command's
+    /// process is ended, the task stays on the step and no `restart:` is
+    /// written, since a command holds no conversation.
+    #[test]
+    fn confirming_the_restart_panel_on_a_command_step_stops_its_run() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-command");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        let pid = runs
+            .start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+
+        let mut board = board_picking(&repo, &pipelines, RowAction::Restart, &[]);
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("step      handover"), "{frame}");
+        assert!(frame.contains("run       command · "), "{frame}");
+        assert!(!frame.contains("lane      "), "{frame}");
+        assert!(!frame.contains("session   "), "{frame}");
+        assert!(
+            frame.contains("The command's process is ended and `handover` runs"),
+            "{frame}"
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), "handover");
+        assert_eq!(task.front.restart, None);
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(!crate::headless::alive(pid), "the command must be gone");
+    }
+
+    /// A command step's panel refuses the same way an agent step's does
+    /// when the task moved on while it was open, and leaves the command
+    /// running.
+    #[test]
+    fn a_command_step_moved_on_is_not_restarted_from_a_stale_panel() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-command-moved");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+
+        let mut board = board_picking(&repo, &pipelines, RowAction::Restart, &[]);
+        let mut task = repo.task("login").unwrap();
+        task.set_stage("review", Some("sent back while the panel was open"));
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        let BoardMode::ConfirmRestart(confirm) = &board.mode else {
+            panic!("the panel closed on a task that moved");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("moved to `review` since this panel opened")),
+            "{:?}",
+            confirm.error
+        );
+        assert_eq!(repo.task("login").unwrap().stage(), "review");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        runs.stop(&key);
+    }
+
+    /// The panel's form is read off the running dispatcher's copy of the
+    /// pipeline, the one `enter` restarts on, and not the board's own: here
+    /// `handover` was edited into an agent step since the run started, but
+    /// the run still treats it as the command it loaded, so the panel names
+    /// the command's run rather than a lane, and `enter` ends that run.
+    #[test]
+    fn the_restart_panel_names_what_the_running_dispatchers_copy_restarts() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-command-routed");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let loaded = Pipelines::builtin();
+        let mut edited = loaded.clone();
+        edited
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap()
+            .run = None;
+        add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        let pid = runs
+            .start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+
+        let mut board = board_picking(&repo, &edited, RowAction::Restart, &[]);
+        let frame = watching_frame(&mut board, &repo, &edited);
+        assert!(frame.contains("run       command · "), "{frame}");
+        assert!(!frame.contains("lane      "), "{frame}");
+
+        board.on_key(&repo, &edited, Key::Enter).unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(!crate::headless::alive(pid), "the command must be gone");
+    }
+
+    /// When the running dispatcher's copy refuses the task — its pipeline
+    /// was renamed since the run started — `restart` still opens its panel,
+    /// with that refusal printed in it, rather than closing the menu on
+    /// nothing; and `enter` restarts nothing, leaving the command running.
+    #[test]
+    fn a_restart_the_running_dispatchers_copy_refuses_says_so_in_its_panel() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-routed-refused");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        let mut loaded = pipelines.clone();
+        let default = loaded.pipelines.remove("default").unwrap();
+        loaded.pipelines.insert("renamed".into(), default);
+        add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+
+        let mut board = board_picking(&repo, &pipelines, RowAction::Restart, &[]);
+        let refused = "is not one the running dispatcher";
+        let BoardMode::ConfirmRestart(confirm) = &board.mode else {
+            panic!("restart opened no panel");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(refused)),
+            "{:?}",
+            confirm.error
+        );
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains(refused), "{frame}");
+
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        let BoardMode::ConfirmRestart(confirm) = &board.mode else {
+            panic!("the panel closed on a refused restart");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(refused)),
+            "{:?}",
+            confirm.error
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        runs.stop(&key);
+    }
+
+    /// The menu asks the running dispatcher's copy whether `restart` applies,
+    /// the same copy picking it opens the panel on: a task on a step added to
+    /// the board's files since the run started is one the run cannot restart,
+    /// so its row does not list `restart` to then do nothing.
+    #[test]
+    fn the_options_menu_asks_the_running_dispatchers_copy_about_restart() {
+        let (repo, _root_guard) = fixture("restart-menu-routed");
+        let loaded = Pipelines::builtin();
+        let mut edited = loaded.clone();
+        let default = edited.pipelines.get_mut("default").unwrap();
+        let mut added = default.step("handover").unwrap().clone();
+        added.id = "polish".into();
+        default.steps.push(added);
+        add(&repo, "login", &[], Some("polish"));
+
+        let mut board = board_after(&repo, &edited, &[crate::screen::Key::Down]);
+        assert!(menu_items(&mut board, &repo, &edited).contains(&RowAction::Restart));
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        assert!(!menu_items(&mut board, &repo, &edited).contains(&RowAction::Restart));
     }
 
     /// The second answer a second time, on a fresh panel over the same

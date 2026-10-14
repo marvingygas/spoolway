@@ -548,7 +548,9 @@ it.
 
 ### Restart panel
 
-`restart` from a row's options menu opens a panel titled `restart <task>`. It names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
+`restart` from a row's options menu opens a panel titled `restart <task>`. The panel has one form for an agent step and one for a command step.
+
+The agent form names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
 
 ```
 ╭─ restart login ─────────────────────────────────────╮
@@ -566,12 +568,29 @@ it.
 ╰─────────────────────────────────────────────────────╯
 ```
 
+The command form is drawn for a command step, which has no lane and no session. It names the step and the run instead. The `run` row gives how long the command has been running, and is left out when no run is going, as on a paused or blocked task. The closing sentence says the command's process is ended and the step runs again from the start, with its log kept as the previous log. When no run is going there is no process to end, so the sentence only says the step runs again from the start and its log is kept.
+
+```
+╭─ restart solo ──────────────────────────────────────────╮
+│                                                         │
+│  step      build                                        │
+│  run       command · 4m 12s                             │
+│                                                         │
+│  The command's process is ended and `build` runs again  │
+│  from the start. Its log is kept as the previous log.   │
+│                                                         │
+│  > restart                                              │
+│                                                         │
+│  [enter] confirm   [esc] close                          │
+╰─────────────────────────────────────────────────────────╯
+```
+
 | Key | What it does |
 |---|---|
 | `enter` on `restart` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The options menu lists `restart` only for a task that `spoolway restart` accepts. A queued, done or hook-held row does not list it. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
+The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Footer
 
