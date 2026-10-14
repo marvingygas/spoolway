@@ -2143,17 +2143,7 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
             });
             continue;
         };
-        let answered = std::process::Command::new(&required.tool)
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|out| {
-                format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                )
-            });
+        let answered = doctor::tool_version_answer(&required.tool);
         match answered.as_deref().and_then(doctor::parse_version) {
             Some(found) if !doctor::below_floor(&found, &floor) => {}
             Some(found) => unmet.push(UnmetRequirement {

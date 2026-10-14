@@ -555,6 +555,19 @@ comment line, one per tool. `spoolway doctor` reads these lines and checks each 
 `--version` output against the floor. Only `<tool> >= <version>` is understood; any other
 shape in the line is reported as unreadable rather than interpreted.
 
+A hook script names the command that proves its tracker login works with a `# spoolway-login:
+<command>` comment line, such as `# spoolway-login: acli jira auth status`. `spoolway doctor`
+splits the line on whitespace and runs it itself, with no shell, giving it 15 seconds. It never
+runs the hook. Both shipped scripts declare one: `acli jira auth status` for `jira.sh` and `gh
+auth status` for `github.sh`.
+
+| Situation | What `spoolway doctor` shows |
+|---|---|
+| The command exits 0 | A passing `<hook> login` row |
+| The command exits non-zero or times out | A failing row with the command, the first line of its stderr and how to log in again |
+| The command's tool is below the floor the hook declares for it | No login row |
+| The command's tool is not on PATH | A note naming the tool, unless another row already reports it |
+| The hook declares `# spoolway-requires:` tools but no login line | A note showing the line to add |
 Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a job the
 dispatcher fires — checks the same lines before it opens any ticket. A tool below its floor,
 or missing from PATH, gates the submission. On a screen it shows what is unmet as a popup: `enter` on `queue anyway, without issue tracking` queues with `tracking: off` written

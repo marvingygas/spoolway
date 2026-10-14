@@ -1109,6 +1109,15 @@ must "the hook is switched to the real jira.sh" \
   "$SPOOLWAY" config set issue_tracking.hook jira.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key KAN
 
+# The login row runs the shipped jira.sh's own `# spoolway-login:` line, so a
+# lapsed Jira login shows up in `doctor` before a group is queued. The stub
+# answers `jira auth status` as unauthorized only while the variable is set.
+says "doctor passes the jira.sh login row while acli is logged in" \
+  "ok    jira.sh login" "$SPOOLWAY" doctor -v
+ACLI_STUB_AUTH=unauthorized says "doctor fails the jira.sh login row on a lapsed login" \
+  "FAIL  jira.sh login: \`acli jira auth status\` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate" \
+  "$SPOOLWAY" doctor
+
 # Same Context/Acceptance shape the Jira live proof used, with its own
 # prefixed title too — one task proves the title strip, the Story/Sub-task
 # split, both labels on both items, and the real ADF the hook's own

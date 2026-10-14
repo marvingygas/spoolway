@@ -6,6 +6,7 @@
 #
 # spoolway-requires: bash >= 3.2
 # spoolway-requires: gh >= 2.97.0
+# spoolway-login: gh auth status
 #
 # 3.2 is stock macOS's own bash, not a round number picked for looks: the
 # trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR

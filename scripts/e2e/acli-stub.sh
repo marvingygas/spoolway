@@ -44,6 +44,13 @@ case "${1:-}" in
   jira)
     case "${2:-}" in
       auth)
+        # `ACLI_STUB_AUTH=unauthorized` is a lapsed login: the one line real
+        # `acli` prints on stderr before exiting non-zero, which `spoolway
+        # doctor`'s login row quotes back.
+        if [ "${ACLI_STUB_AUTH:-}" = unauthorized ]; then
+          echo "✗ Error: unauthorized: use 'acli jira auth login' to authenticate" >&2
+          exit 1
+        fi
         # `site_host` in jira.sh reads only the `  Site: …` line back —
         # real `acli jira auth status` prints several more, which this
         # double does not bother reproducing.

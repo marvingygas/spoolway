@@ -276,6 +276,26 @@ mod tests {
         );
     }
 
+    /// `spoolway doctor` runs the `# spoolway-login:` command each shipped hook
+    /// declares, read back through `crate::tracking::login_command`.
+    #[test]
+    fn shipped_hooks_declare_their_login_commands() {
+        let words = |name: &str| crate::tracking::login_command(hook_script(name));
+        assert_eq!(
+            words("jira.sh"),
+            Some(vec![
+                "acli".into(),
+                "jira".into(),
+                "auth".into(),
+                "status".into()
+            ])
+        );
+        assert_eq!(
+            words("github.sh"),
+            Some(vec!["gh".into(), "auth".into(), "status".into()])
+        );
+    }
+
     /// `hand_off_for_review` — the `done` branch — relabels the ticket for
     /// review and tells it where to find the pull request, never commenting
     /// on the pull request itself: nobody wants a comment there, and a merge

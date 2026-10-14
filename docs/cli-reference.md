@@ -1605,6 +1605,14 @@ A note names each project home under `~/.spoolway/` whose recorded checkout is g
 so you can delete the folder. A workspace is named only when all of its clones are gone.
 `doctor` deletes nothing.
 
+When the configured hook declares a `# spoolway-login: <command>` line, the full run adds one
+row labelled `<hook> login`. It runs that command and fails on a non-zero exit or after 15
+seconds, as below. The warnings screen shown before dispatching never runs it.
+
+```
+  FAIL  jira.sh login: `acli jira auth status` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate. Log in again with `acli jira auth login`, then re-run `spoolway doctor`.
+```
+
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.
 
