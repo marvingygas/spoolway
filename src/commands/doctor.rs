@@ -1936,6 +1936,16 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
 fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     crate::models::unrouted(pipelines, &config.models)
         .into_iter()
+        // The blank `prompt_cache_ttl` row `init` and `sync` write for a hosted
+        // agent kind is there to be seen and filled in, not a row a rename
+        // left behind, so a row with no other key is not noted. Whatever it
+        // gains besides the lifetime makes it count again.
+        .filter(|glob| {
+            !config
+                .models
+                .get(*glob)
+                .is_some_and(crate::models::sets_only_a_lifetime)
+        })
         .map(|glob| Finding::Note(format!("model `{glob}` routes to no step")))
         .collect()
 }
@@ -2540,8 +2550,8 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                 .filter_map(|step| step.model.as_deref())
                 .filter(|model| !model.trim().is_empty())
                 .find_map(|model| {
-                    let price = crate::models::resolve(&config.models, model).price;
-                    let limit = crate::usage::ModelPrice::cache_ttl_limit(price.as_ref())?;
+                    let lifetime = crate::models::resolve(&config.models, model).lifetime;
+                    let limit = crate::usage::ModelPrice::cache_ttl_limit(lifetime)?;
                     Some((model, limit))
                 });
             match limited {
@@ -3227,6 +3237,50 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:#?}");
         assert!(notes[0].contains("model `Qwen3.6-35B-A3B`"), "{}", notes[0]);
         assert!(!notes[0].contains("Ornith"), "{}", notes[0]);
+    }
+
+    /// The blank `prompt_cache_ttl` row `init` and `sync` write is not a row a
+    /// rename left behind, so it is not noted, whether blank or filled in. A
+    /// row that sets anything else is still noted.
+    #[test]
+    fn a_row_holding_only_prompt_cache_ttl_is_not_noted_as_unrouted() {
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    model: m\n    on_pass: finish\n  - id: \
+             finish\n    run: x\n    on_pass: done\n",
+        );
+        let mut config = Config::default();
+        config.models.insert(
+            "claude-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl_blank: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "gpt-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "old-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl_blank: true,
+                slots: 2,
+                ..Default::default()
+            },
+        );
+
+        let notes: Vec<String> = unrouted_model_notes(&pipelines, &config)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, ["model `old-*` routes to no step"], "{notes:#?}");
     }
 
     /// A prompt directory no step runs is noted — the `summariser/` a 0.1.0

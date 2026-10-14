@@ -1189,6 +1189,9 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // that makes the first answer sufficient to understand every agent name
     // written below. The defaults contain this profile by construction.
     config.agents.retain(|name, _| name == profile);
+    // A hosted provider shows `prompt_cache_ttl` from the first file on, so a
+    // person sees the cache lifetime is theirs to choose. `pi` adds nothing.
+    config.add_blank_cache_ttl_rows();
     config.unattended.blocked_agent = profile.to_string();
     // An unblocker is an agent step too. Leaving both knobs blank avoids
     // silently choosing more for it than init chooses for declared steps.
@@ -2003,6 +2006,35 @@ mod tests {
             !root.join(".claude").exists(),
             "only one provider was asked for"
         );
+    }
+
+    /// A hosted provider's `config.toml` shows `prompt_cache_ttl` blank under
+    /// that provider's model glob, and `pi` writes no `[models]` row at all.
+    #[test]
+    fn init_writes_a_blank_prompt_cache_ttl_row_for_a_hosted_provider() {
+        for (provider, glob) in [
+            (PlanningAgent::Claude, Some("claude-*")),
+            (PlanningAgent::Codex, Some("gpt-*")),
+            (PlanningAgent::Pi, None),
+        ] {
+            let root = scaffold(
+                &format!("blank-ttl-{}", provider.name()),
+                &InitArgs {
+                    provider: Some(provider),
+                    ..confirmed()
+                },
+            );
+            let text = std::fs::read_to_string(Config::path_in(&root)).unwrap();
+            match glob {
+                Some(glob) => assert!(
+                    text.contains(&format!("[models.\"{glob}\"]\nprompt_cache_ttl = \"\"\n")),
+                    "{text}"
+                ),
+                None => assert!(!text.contains("[models."), "{text}"),
+            }
+            let config = Config::load(&root).unwrap();
+            assert_eq!(config.models.len(), usize::from(glob.is_some()));
+        }
     }
 
     /// `--provider pi` is accepted at `init`, the same as `install` and the

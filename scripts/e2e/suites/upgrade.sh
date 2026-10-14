@@ -356,6 +356,13 @@ lacks "sync dropped the retired herdr_mode key, and its header row with it" \
 has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml
 
+# The fixture's project has a `claude` profile and no `[models]` row, so the
+# sync adds the blank cache-lifetime row the hosted kind brings.
+has "sync added a claude-* row for the fixture's claude profile" \
+  '[models."claude-*"]' .spoolway/config.toml
+has "and wrote its prompt_cache_ttl blank" \
+  'prompt_cache_ttl = ""' .spoolway/config.toml
+
 # Every release through 0.6.0 had `init` write `key_in_names = false`, its
 # default then. The default is `true` now, but a project that spelled `false`
 # keeps it until its owner flips it: `sync` refreshes the reference header

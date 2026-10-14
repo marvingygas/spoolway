@@ -550,6 +550,11 @@ impl Source {
 pub struct Resolved {
     pub price: Option<ModelPrice>,
     pub source: Source,
+    /// The `prompt_cache_ttl` that applies to the model, read through
+    /// [`ModelPrice::cache_ttl_limit`]. Carried apart from `price` because a
+    /// row that sets only a lifetime has no price to give a model no table
+    /// knows, yet its lifetime still applies to that model.
+    pub lifetime: Option<std::time::Duration>,
 }
 
 /// Resolve `model`: this project's own `[models]` table first — see
@@ -562,39 +567,73 @@ pub struct Resolved {
 /// `prompt_cache_ttl` zeroed the model's window and prices, so its cost read
 /// as $0 and `unattended.max_cost_usd` never stopped a run. A model with no
 /// entry in either table has nothing to fall back to, so its unset fields
-/// stay zero. Two fields are exceptions to "every unset field": the higher
-/// price tier and `cache_write_1h`. See [`overlay`] for when each is and is
-/// not carried over.
+/// stay zero. A row that sets only `prompt_cache_ttl` prices nothing: over a
+/// model a table knows it keeps that table as the source, and over a model no
+/// table knows it leaves the model unpriced, with just the lifetime in
+/// [`Resolved::lifetime`]. Two fields are exceptions to "every unset field":
+/// the higher price tier and `cache_write_1h`. See [`overlay`] for when each
+/// is and is not carried over.
 ///
 /// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
 /// win writes one in `[models]`, which is checked first for exactly that
 /// reason.
 pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Resolved {
+    let resolved = |price: Option<ModelPrice>, source| Resolved {
+        lifetime: price.and_then(|price| price.prompt_cache_ttl),
+        price,
+        source,
+    };
     if let Some(key) = resolved_row(config_models, model) {
         let row = config_models[key];
-        let base = refreshed_price(model).or_else(|| builtin().get(model).copied());
-        return Resolved {
-            price: Some(base.map_or(row, |base| overlay(row, base))),
-            source: Source::Config,
-        };
+        let refreshed = refreshed_price(model);
+        let base = refreshed.or_else(|| builtin().get(model).copied());
+        if sets_only_a_lifetime(&row) {
+            // The row `init` and `sync` write for a hosted agent kind, or one
+            // a person filled in with just a lifetime. It prices nothing, so
+            // it must not turn a model the tables know into a "config" price
+            // or a model they do not know into a free one: the first keeps
+            // the table it came from as its source, and the second stays
+            // unknown, with only the lifetime the row chose.
+            return match base {
+                Some(base) => resolved(
+                    Some(overlay(row, base)),
+                    if refreshed.is_some() {
+                        Source::Refreshed
+                    } else {
+                        Source::Builtin
+                    },
+                ),
+                None => Resolved {
+                    price: None,
+                    source: Source::Unknown,
+                    lifetime: row.prompt_cache_ttl,
+                },
+            };
+        }
+        return resolved(
+            Some(base.map_or(row, |base| overlay(row, base))),
+            Source::Config,
+        );
     }
     if let Some(entry) = refreshed_price(model) {
-        return Resolved {
-            price: Some(entry),
-            source: Source::Refreshed,
-        };
+        return resolved(Some(entry), Source::Refreshed);
     }
     if let Some(entry) = builtin().get(model) {
-        return Resolved {
-            price: Some(*entry),
-            source: Source::Builtin,
-        };
+        return resolved(Some(*entry), Source::Builtin);
     }
-    Resolved {
-        price: None,
-        source: Source::Unknown,
-    }
+    resolved(None, Source::Unknown)
+}
+
+/// Whether `row` sets nothing but `prompt_cache_ttl`, blank or valued. Also
+/// what `doctor` asks to leave such a row out of its unrouted-row notes.
+pub(crate) fn sets_only_a_lifetime(row: &ModelPrice) -> bool {
+    (row.prompt_cache_ttl.is_some() || row.prompt_cache_ttl_blank)
+        && ModelPrice {
+            prompt_cache_ttl: None,
+            prompt_cache_ttl_blank: false,
+            ..*row
+        } == ModelPrice::default()
 }
 
 /// `row` with each field it leaves unset taken from `base`.
@@ -909,7 +948,7 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         .collect();
     if !unknown.is_empty() {
         println!(
-            "\nUnpriced and unsized — not in litellm's table, and nothing in [models] names it: {}",
+            "\nUnpriced and unsized — not in litellm's table, and nothing in [models] prices it: {}",
             unknown.join(", ")
         );
         println!("Add one with `spoolway config set models.'<model-glob>'.input <usd per 1M>`.");
@@ -1465,6 +1504,58 @@ mod tests {
             let resolved = resolve(&BTreeMap::new(), "not-a-real-model");
             assert_eq!(resolved.source, Source::Unknown);
             assert!(resolved.price.is_none());
+        });
+    }
+
+    /// The blank row `init` and `sync` write over `claude-*` or `gpt-*` is no
+    /// price: a model the tables know keeps their source and prices, and one
+    /// they do not know stays unknown instead of becoming a free "config" one.
+    #[test]
+    fn a_blank_lifetime_row_neither_prices_nor_hides_an_unknown_model() {
+        let home = fixture_home("models-blank-lifetime-row");
+        crate::platform::test_home::with_home(&home, || {
+            let config = BTreeMap::from([(
+                "claude-*".to_string(),
+                ModelPrice {
+                    prompt_cache_ttl_blank: true,
+                    ..Default::default()
+                },
+            )]);
+            let unknown = resolve(&config, "claude-made-up-9");
+            assert_eq!(unknown.source, Source::Unknown);
+            assert!(unknown.price.is_none());
+
+            let known = resolve(&config, "claude-opus-5");
+            assert_eq!(known.source, Source::Builtin);
+            assert_eq!(known.price.unwrap().input, builtin()["claude-opus-5"].input);
+        });
+    }
+
+    /// A lifetime a person chose reaches every claude model through
+    /// `lifetime`, while a model the tables do not know stays unpriced, so its
+    /// cost is still unknown rather than $0, and a known one keeps its table
+    /// as the source.
+    #[test]
+    fn a_valued_lifetime_row_sets_the_lifetime_without_pricing() {
+        let home = fixture_home("models-valued-lifetime-row");
+        crate::platform::test_home::with_home(&home, || {
+            let ttl = std::time::Duration::from_secs(3600);
+            let config = BTreeMap::from([(
+                "claude-*".to_string(),
+                ModelPrice {
+                    prompt_cache_ttl: Some(ttl),
+                    ..Default::default()
+                },
+            )]);
+            let unknown = resolve(&config, "claude-made-up-9");
+            assert_eq!(unknown.source, Source::Unknown);
+            assert!(unknown.price.is_none());
+            assert_eq!(unknown.lifetime, Some(ttl));
+
+            let known = resolve(&config, "claude-opus-5");
+            assert_eq!(known.source, Source::Builtin);
+            assert_eq!(known.lifetime, Some(ttl));
+            assert_eq!(known.price.unwrap().input, builtin()["claude-opus-5"].input);
         });
     }
 

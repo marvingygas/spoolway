@@ -35,6 +35,9 @@ above it. The keys after it move down. The first `[models."<glob>"]` row also re
 `[models]` header. A file that only `config set` has changed is therefore not behind, and `sync`
 leaves it as it is.
 
+`spoolway sync` also adds the blank `prompt_cache_ttl` row for each `claude` or `codex` profile
+that has no row for its glob. See [`[models."<glob>"]`](#modelsglob--what-a-model-costs-and-how-big-its-window-is).
+
 A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
 points at. If the link points at a file that does not exist yet, `config set` creates that file.
 
@@ -710,10 +713,15 @@ also matches `vendor/name`. Leave a field out and it keeps the value from the bu
 refreshed price table, when that table has an entry for the model. Only a model with no
 entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets
 `cache_write_5m` and leaves `cache_write_1h` out prices hourly cache writes at its own
-five-minute rate, not at the table's hourly rate. `[models]` ships empty:
-the built-in price table covers known models, so a row only corrects a price or describes a
-local model. An unpriced model is reported as unpriced, not counted as free. See
-[Cost accounting](cost.md).
+five-minute rate, not at the table's hourly rate. The built-in price table covers known models,
+so a row only corrects a price or describes a local model. A row that sets only
+`prompt_cache_ttl` prices nothing. An unpriced model is reported as unpriced, not counted as
+free. See [Cost accounting](cost.md).
+
+`spoolway init` and `spoolway sync` add a blank row for each hosted agent profile. A `claude`
+profile brings `[models."claude-*"]` and a `codex` profile brings `[models."gpt-*"]`. Each row
+holds `prompt_cache_ttl = ""`, which shows that the cache lifetime is yours to choose. A `pi`
+profile brings no row. A row that already exists is left as it is.
 
 | Key | Default | What it controls |
 |---|---|---|
@@ -723,7 +731,7 @@ local model. An unpriced model is reported as unpriced, not counted as free. See
 | `cache_read` | table entry, else `0` | USD per million cached input tokens read. |
 | `cache_write_5m` | table entry, else `0` | USD per million tokens written to a five-minute cache. |
 | `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
-| `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
+| `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. `init` and `sync` write `""` on the `claude-*` and `gpt-*` rows. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it. |
 | `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. |
@@ -746,7 +754,8 @@ The window here is what spoolway believes, not what the server reports. Keep it 
 the server yourself.
 
 `spoolway doctor` notes a row with `slots` but no `local`, a row no pipeline step uses, and a
-row that still names `cache_ttl` or `session_reuse_idle`.
+row that still names `cache_ttl` or `session_reuse_idle`. It does not note an unused row that
+sets only `prompt_cache_ttl`.
 
 ## Unknown keys
 

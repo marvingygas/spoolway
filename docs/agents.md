@@ -87,7 +87,9 @@ The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that p
 There is no default. A model that sets none has no limit, whether or not it is marked
 `local = true`, and that includes a model with no `[models]` entry at all. Writing
 `prompt_cache_ttl = ""` means the same as leaving it out. It records that you have not chosen
-yet, and `spoolway sync` keeps it in the file.
+yet. `spoolway init` and `spoolway sync` write that blank row for `claude-*` when the project
+has a `claude` profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that
+is already there, with its value.
 
 ```toml
 [models."claude-*"]

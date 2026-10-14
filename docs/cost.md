@@ -235,7 +235,8 @@ A model is priced from the first table that knows it:
 A project row keeps the refreshed or built-in value for every field it leaves out, when those tables
 know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
-A model in none of them has an unknown cost, not a free one. `spoolway models` lists every
+A model in none of them has an unknown cost, not a free one. A project row that sets only
+`prompt_cache_ttl` does not price a model. A model that no table knows stays unpriced under it. `spoolway models` lists every
 model the pipelines name, its window, its rates, which table answered, and how old that table
 is. `spoolway doctor` notes a table older than `housekeeping.price_max_age_days`.
 

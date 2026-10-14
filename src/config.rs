@@ -1998,6 +1998,36 @@ impl Config {
         }
     }
 
+    /// Give each hosted agent kind in `agents` a `[models]` row for its glob
+    /// that says `prompt_cache_ttl = ""`: `claude-*` for a `claude` profile,
+    /// `gpt-*` for a `codex` one. A `pi` profile brings no row.
+    ///
+    /// The blank is how a person sees that the cache lifetime is theirs to
+    /// choose, now that no value is assumed for them. A row already there is
+    /// left exactly as it is, so a value the person set is never replaced, and
+    /// a second call changes nothing. Called by `init` and by `spoolway sync`
+    /// before the config is rendered, so the row is part of what the rewrite
+    /// renders and `agrees_with` compares like with like.
+    pub(crate) fn add_blank_cache_ttl_rows(&mut self) {
+        let globs: Vec<&'static str> = self
+            .agents
+            .values()
+            .filter_map(|profile| match profile.kind.as_str() {
+                "claude" => Some("claude-*"),
+                "codex" => Some("gpt-*"),
+                _ => None,
+            })
+            .collect();
+        for glob in globs {
+            self.models
+                .entry(glob.to_string())
+                .or_insert_with(|| crate::usage::ModelPrice {
+                    prompt_cache_ttl_blank: true,
+                    ..Default::default()
+                });
+        }
+    }
+
     /// Fill in what a loaded config must never hold blank, and clear what it
     /// must never hold at all.
     ///
@@ -4023,7 +4053,10 @@ mod tests {
         let config: Config = toml::from_str(raw).expect("a blank must parse");
         let price = &config.models["claude-*"];
         assert_eq!(price.prompt_cache_ttl, None);
-        assert_eq!(crate::usage::ModelPrice::cache_ttl_limit(Some(price)), None);
+        assert_eq!(
+            crate::usage::ModelPrice::cache_ttl_limit(price.prompt_cache_ttl),
+            None
+        );
         let rendered = toml::to_string(&config).unwrap();
         assert!(rendered.contains("prompt_cache_ttl = \"\""), "{rendered}");
         let again: Config = toml::from_str(&rendered).unwrap();

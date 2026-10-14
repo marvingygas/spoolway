@@ -634,8 +634,8 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
     let current = config.clone();
     let mut value = Value::try_from(config).context("rendering config")?;
 
-    // `[models]` is the one section that ships empty and is meant to be filled
-    // in: every other key exists before you can set it, but a price or a
+    // `[models]` is the one section whose rows are not all known in advance:
+    // every other key exists before you can set it, but a price or a
     // window for a model spoolway never named cannot. So a new glob is
     // created on first write rather than rejected as unknown.
     let parts = match models_key(config, key) {

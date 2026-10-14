@@ -781,15 +781,14 @@ fn not_local(local: &bool) -> bool {
 
 impl ModelPrice {
     /// The age past which a carried session under this model is refused, or
-    /// `None` for no limit. `price` is `None` for a model with no entry at all.
+    /// `None` for no limit. `lifetime` is [`crate::models::Resolved::lifetime`],
+    /// `None` for a model that sets none.
     ///
     /// A model that sets no `prompt_cache_ttl`, hosted or `local`, has no
     /// limit: spoolway does not guess one. An explicit `"0"` reads the same
     /// way.
-    pub fn cache_ttl_limit(price: Option<&Self>) -> Option<std::time::Duration> {
-        price
-            .and_then(|price| price.prompt_cache_ttl)
-            .filter(|limit| !limit.is_zero())
+    pub fn cache_ttl_limit(lifetime: Option<std::time::Duration>) -> Option<std::time::Duration> {
+        lifetime.filter(|limit| !limit.is_zero())
     }
 
     /// A value with every field present when serialised — nothing zero,

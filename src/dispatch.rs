@@ -7088,11 +7088,12 @@ fn prepare_boot(
     // cache-write price. A refused session opens fresh at this step with no
     // `note`, so nothing is added to RECENT. A blocked task's `## Blocker`
     // carries what the old lane knew; a park leaves its Handoff and commits.
-    let price = crate::models::resolve(&repo.config.models, &model).price;
+    let resolved = crate::models::resolve(&repo.config.models, &model);
+    let (price, lifetime) = (resolved.price, resolved.lifetime);
     let one_shot = (resuming && !restarting)
         .then(|| lane_session_in(repo, ledger, &name, &key))
         .flatten()
-        .filter(|(kind, session)| !session_is_cold(price.as_ref(), kind, session));
+        .filter(|(kind, session)| !session_is_cold(lifetime, kind, session));
     // `session:` is a different question from the one-shot flag, not a
     // fallback for it — a task coming back from `blocked` names an exact
     // session to continue, and a miss there says that lane's session is
@@ -7550,7 +7551,8 @@ fn carried_session(
         })
         .ok_or(SessionMiss::NotFound)?;
 
-    let price = crate::models::resolve(&repo.config.models, model).price;
+    let resolved = crate::models::resolve(&repo.config.models, model);
+    let (price, lifetime) = (resolved.price, resolved.lifetime);
     if profile.session_reuse_ctx != 0 {
         let window = price
             .map(|price| price.context_window)
@@ -7563,7 +7565,7 @@ fn carried_session(
         }
     }
 
-    if session_is_cold(price.as_ref(), &entry.kind, &entry.session) {
+    if session_is_cold(lifetime, &entry.kind, &entry.session) {
         return Err(SessionMiss::Stale);
     }
 
@@ -7579,8 +7581,8 @@ fn carried_session(
 /// Age is [`crate::usage::session_age`]'s — time since the last reply, not
 /// since the file last changed. A model with no limit (no
 /// `prompt_cache_ttl`, or `"0"`) and a session whose age cannot be read are never cold.
-fn session_is_cold(price: Option<&crate::usage::ModelPrice>, kind: &str, session: &str) -> bool {
-    let Some(limit) = crate::usage::ModelPrice::cache_ttl_limit(price) else {
+fn session_is_cold(lifetime: Option<std::time::Duration>, kind: &str, session: &str) -> bool {
+    let Some(limit) = crate::usage::ModelPrice::cache_ttl_limit(lifetime) else {
         return false;
     };
     crate::usage::session_age(kind, session).is_some_and(|(age, _)| age > limit)
@@ -18141,13 +18143,8 @@ mod tests {
         )
         .unwrap();
         // A five-minute limit written for the model: with none, nothing is cold.
-        let price = crate::usage::ModelPrice {
-            prompt_cache_ttl: Some(Duration::from_secs(300)),
-            ..Default::default()
-        };
-        let cold = with_home(&home, || {
-            session_is_cold(Some(&price), "claude", "cold-reply")
-        });
+        let lifetime = Some(Duration::from_secs(300));
+        let cold = with_home(&home, || session_is_cold(lifetime, "claude", "cold-reply"));
         std::fs::remove_dir_all(&home).ok();
         assert!(cold);
     }
