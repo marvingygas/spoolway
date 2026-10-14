@@ -328,3 +328,17 @@ skill pi/spoolway-tasks/SKILL.md 4e630ec0
 skill pi/spoolway-tasks/SKILL.md eea10b9c
 skill pi/spoolway-tasks/SKILL.md d2965463
 skill pi/spoolway-tasks/SKILL.md 3ee57b89
+skill claude/spoolway-plan/SKILL.md 01767ec2
+skill codex/spoolway-plan/SKILL.md bd9b1bfd
+skill pi/spoolway-plan/SKILL.md 30be166f
+skill claude/spoolway-plan/assets/template.html 3e25629d
+skill claude/spoolway-plan/assets/page.md a1e942fe
+skill claude/spoolway-tasks/SKILL.md 3057c9dc
+skill codex/spoolway-tasks/SKILL.md 12131156
+skill pi/spoolway-tasks/SKILL.md c49d25fd
+skill claude/spoolway-plan/SKILL.md 88e8b493
+skill codex/spoolway-plan/SKILL.md 4ff47f34
+skill pi/spoolway-plan/SKILL.md e0626dc1
+skill claude/spoolway-tasks/SKILL.md 0314e0f5
+skill codex/spoolway-tasks/SKILL.md 38729a5e
+skill pi/spoolway-tasks/SKILL.md bbd0cb8f
