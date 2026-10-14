@@ -1387,18 +1387,6 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
     if !crate::tracking::configured(repo) {
         return Ok(());
     }
-    // A hook whose declared tool floor this machine cannot meet never opens
-    // a ticket — [`tool_requirements_gate`] switches tracking off for the
-    // submission before [`open_tickets`] is reached — so demanding a
-    // `group_description:` here as well would refuse a submission over a
-    // description nothing is ever going to read. `queue add --from` needs
-    // this: it runs this check while validating, before `open_and_prefix`
-    // prints the gate, so without it the refusal fires first and the gate
-    // is never seen.
-    if !unmet_requirements(repo).is_empty() {
-        return Ok(());
-    }
-
     let existing = repo.tasks().unwrap_or_default();
     let mut seen: std::collections::BTreeSet<&str> = Default::default();
     for group in tasks.iter().filter_map(|t| t.front.group.as_deref()) {
@@ -1427,6 +1415,27 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
             bare == group && has_group_description(sibling)
         });
         if !(in_batch || in_queue) {
+            // A hook whose declared tool floor this machine cannot meet never
+            // opens a ticket — [`tool_requirements_gate`] switches tracking
+            // off for the submission before [`open_tickets`] is reached — so
+            // demanding a `group_description:` here as well would refuse a
+            // submission over a description nothing is ever going to read.
+            // `queue add --from` needs this: it runs this check while
+            // validating, before `open_and_prefix` prints the gate, so
+            // without it the refusal fires first and the gate is never
+            // seen.
+            //
+            // Only the tool rows are asked, never the login command. The
+            // gate runs the login itself, and a second run here could
+            // answer differently from the gate's: a login that failed here
+            // and passed there would open a ticket for a group with no
+            // description, the very thing this check refuses. So a group
+            // with no description is refused even when the login has
+            // lapsed, and the gate shows the lapse once the description is
+            // there.
+            if !unmet_requirements(repo, false).is_empty() {
+                return Ok(());
+            }
             bail!(
                 "group `{group}` sets no `group_description:` on any of its tasks, and \
                  `issue_tracking.hook` names `{}` — the group's issue would have nothing to \
@@ -2077,7 +2086,8 @@ impl std::fmt::Display for GateCancelled {
 impl std::error::Error for GateCancelled {}
 
 /// One `# spoolway-requires:` declaration the configured hook's own text
-/// carries that this machine cannot meet right now — what
+/// carries that this machine cannot meet right now, or its `# spoolway-login:`
+/// command failing (see `login`) — what
 /// [`tool_requirements_gate_with`] draws instead of letting [`open_tickets`]
 /// reach a hook call that can only fail.
 struct UnmetRequirement {
@@ -2095,6 +2105,19 @@ struct UnmetRequirement {
     /// softer outcome to fall back to: an answer it cannot parse is no more
     /// usable than no answer, so it is unmet either way.
     found: Option<(String, String)>,
+    /// Set instead of `floor` and `found` when this is the hook's
+    /// `# spoolway-login:` command failing rather than a tool that is
+    /// missing or too old: `tool` is then the command's program.
+    login: Option<FailedLogin>,
+}
+
+/// A hook's `# spoolway-login:` command that did not exit 0, as the gate
+/// draws it: the command, and what to show under it.
+struct FailedLogin {
+    command: String,
+    /// The first line the command wrote to stderr, or a sentence saying why
+    /// there is none: it timed out, could not be started, or said nothing.
+    detail: String,
 }
 
 /// Every [`UnmetRequirement`] the configured hook declares, checked the same
@@ -2106,6 +2129,17 @@ struct UnmetRequirement {
 /// check to leave that to, and a hook calling a tool that plain is not
 /// there fails exactly the way one calling it under-versioned does.
 ///
+/// After the tool rows, the hook's `# spoolway-login:` command is run
+/// through [`crate::tracking::run_login`] and a failure becomes one more
+/// entry, drawn in the same columns. It is not run when its own program is
+/// already unmet above: that tool has rows of its own, and a login probe
+/// against a missing or too-old tool would only repeat the failure.
+///
+/// `with_login` says whether to run the login command at all. Only the gate
+/// itself passes `true`: it is the one place that answers for a submission,
+/// and the login runs on the network, so asking it anywhere else risks a
+/// second answer that disagrees with the first.
+///
 /// Empty whenever `issue_tracking.hook` is blank or not a bare filename —
 /// the same no-op start [`open_tickets`] itself gives in each of those two
 /// cases, since [`crate::tracking::configured`] tests the same thing. A bare
@@ -2113,7 +2147,7 @@ struct UnmetRequirement {
 /// `open_ticket` still runs it and gets `OpenResult::Failed` back, since
 /// `configured` never stats the file — only this gate's own reading of it
 /// comes back empty here, with nothing to check a requirement against.
-fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
+fn unmet_requirements(repo: &Repo, with_login: bool) -> Vec<UnmetRequirement> {
     let mut unmet = Vec::new();
     let hook = repo.config.issue_tracking.hook.trim().to_string();
     let Some(path) = crate::tracking::hook_path_in(&repo.checkout, &hook) else {
@@ -2140,6 +2174,7 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
                 tool: required.tool,
                 floor: required.floor,
                 found: None,
+                login: None,
             });
             continue;
         };
@@ -2151,16 +2186,59 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
                 tool: required.tool,
                 floor: required.floor,
                 found: Some((doctor::format_version(&found), bin_path)),
+                login: None,
             }),
             None => unmet.push(UnmetRequirement {
                 hook: hook.clone(),
                 tool: required.tool,
                 floor: required.floor,
                 found: None,
+                login: None,
             }),
         }
     }
+
+    if with_login
+        && let Some(command) = crate::tracking::login_command(&script)
+        && !unmet.iter().any(|u| u.tool == command[0])
+        && let Some(detail) = failed_login_detail(&command)
+    {
+        unmet.push(UnmetRequirement {
+            hook,
+            tool: command[0].clone(),
+            floor: String::new(),
+            found: None,
+            login: Some(FailedLogin {
+                command: command.join(" "),
+                detail,
+            }),
+        });
+    }
     unmet
+}
+
+/// What to show under a login command that did not succeed, or `None` when
+/// it exited 0. Every other outcome is a failed login to the gate: a
+/// submit that cannot tell whether the login works has no better answer
+/// than the person's own.
+fn failed_login_detail(command: &[String]) -> Option<String> {
+    use crate::tracking::LoginOutcome;
+    match crate::tracking::run_login(command) {
+        LoginOutcome::LoggedIn => None,
+        LoginOutcome::Failed { stderr } => {
+            let first = crate::fmt::first_line(&stderr);
+            Some(if first.is_empty() {
+                "exited non-zero and wrote nothing to stderr".to_string()
+            } else {
+                first.to_string()
+            })
+        }
+        LoginOutcome::TimedOut => Some(format!(
+            "did not answer within {} seconds",
+            crate::tracking::LOGIN_TIMEOUT.as_secs()
+        )),
+        LoginOutcome::NotRun(why) => Some(format!("could not be run: {why}")),
+    }
 }
 
 /// The line under the gate's rows saying what they mean — the same words
@@ -2193,7 +2271,7 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 /// queue screen's [`Mode::ToolGate`] draws it, and answers
 /// [`open_and_prefix`] with [`ToolGate::Answered`].
 pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
-    let unmet = unmet_requirements(repo);
+    let unmet = unmet_requirements(repo, true);
     (!unmet.is_empty()).then(|| tool_gate_panel(&unmet))
 }
 
@@ -2208,7 +2286,9 @@ fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
 }
 
 /// One pair of rows per unmet requirement, unindented — see
-/// [`print_tool_gate_notice`] on how the columns are sized.
+/// [`print_tool_gate_notice`] on how the columns are sized. A failed login
+/// is a pair too: the hook, `login` and the command, then the program,
+/// `failed` and what it said.
 fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
     let col1 = unmet
         .iter()
@@ -2218,9 +2298,10 @@ fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
         + 3;
     let col2 = unmet
         .iter()
-        .map(|u| match &u.found {
-            Some((found, _)) => found.len(),
-            None => "not on PATH".len(),
+        .map(|u| match (&u.login, &u.found) {
+            (Some(_), _) => "failed".len(),
+            (None, Some((found, _))) => found.len(),
+            (None, None) => "not on PATH".len(),
         })
         .chain(std::iter::once("requires".len()))
         .max()
@@ -2229,6 +2310,17 @@ fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
 
     let mut rows = Vec::new();
     for u in unmet {
+        if let Some(login) = &u.login {
+            rows.push(format!(
+                "{:<col1$}{:<col2$}{}",
+                u.hook, "login", login.command
+            ));
+            rows.push(format!(
+                "{:<col1$}{:<col2$}{}",
+                u.tool, "failed", login.detail
+            ));
+            continue;
+        }
         rows.push(format!(
             "{:<col1$}{:<col2$}{} >= {}",
             u.hook, "requires", u.tool, u.floor
@@ -2242,9 +2334,10 @@ fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
 }
 
 /// Whether a batch's configured hook declares a tool requirement this
-/// machine does not meet, drawn before [`open_tickets`] is ever reached —
-/// `true` means the gate drew and issue tracking is switched off for this
-/// submission, `false` means every requirement is met (or none exist) and
+/// machine does not meet, or a `# spoolway-login:` command that fails, drawn
+/// before [`open_tickets`] is ever reached — `true` means the gate drew and
+/// issue tracking is switched off for this submission, `false` means every
+/// requirement is met and the login passes (or none exist) and
 /// [`open_and_prefix`] goes on exactly as it does today. The one `Err` this
 /// ever returns is [`GateCancelled`], `esc`'s own signal back up to the
 /// caller.
@@ -2286,7 +2379,7 @@ fn tool_requirements_gate_with(
     out: &mut impl std::io::Write,
     term: impl FnOnce() -> crate::platform::TermGuard,
 ) -> Result<bool> {
-    let unmet = unmet_requirements(repo);
+    let unmet = unmet_requirements(repo, true);
     if unmet.is_empty() {
         return Ok(false);
     }
@@ -3807,10 +3900,14 @@ enum Tracking {
 }
 
 /// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
-/// when it goes straight on: already answered, or every requirement met.
-/// `Open` has passed the gate on the way to the question.
-fn tool_gate(repo: &Repo, tracking: &Tracking, then: Resume) -> Option<Mode> {
-    if *tracking != Tracking::Ask {
+/// when it goes straight on: already answered, every requirement met, or a
+/// batch in which no task reaches the hook. That last case is the same rule
+/// [`open_and_prefix`] applies to the printed gate, and it matters more here:
+/// the check behind the popup runs the hook's login command, which a batch
+/// that never calls the hook must not run. `Open` has passed the gate on the
+/// way to the question.
+fn tool_gate(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
+    if *tracking != Tracking::Ask || tasks.iter().all(opts_out_of_open) {
         return None;
     }
     tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
@@ -7335,6 +7432,7 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
         tool: "gh".to_string(),
         floor: "2.40.0".to_string(),
         found: None,
+        login: None,
     };
     let routine = RoutineDelete {
         name: "nightly".to_string(),
@@ -7788,7 +7886,7 @@ fn begin_submission(
     if pending.is_empty() {
         return queued_panel(&[], false, &not_queued, dispatcher_line(repo), None);
     }
-    if let Some(gate) = tool_gate(repo, &tracking, Resume::Selection) {
+    if let Some(gate) = tool_gate(repo, &tracking, &pending, Resume::Selection) {
         return gate;
     }
     if let Some(question) = issue_question(repo, &tracking, &pending, Resume::Selection) {
@@ -7796,7 +7894,10 @@ fn begin_submission(
     }
     let mut pending = pending;
     untrack_groups(&mut pending, &tracking);
-    if let Err(err) = require_group_description(repo, &pending) {
+    // `Off` is the gate's answer: no ticket opens, so no description is read.
+    if tracking != Tracking::Off
+        && let Err(err) = require_group_description(repo, &pending)
+    {
         return outcome("submission refused", format!("{err:#}"));
     }
     let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
@@ -9032,7 +9133,7 @@ pub(crate) fn queue_routine_target(
     // when its own stdin and stdout happen to be a terminal (a dispatcher
     // in a pane). So this passes `ToolGate::Print { interactive: false }`
     // whatever `crate::ask` says: the gate prints its notice naming the
-    // unmet tool and goes on with tracking off. Asking would block the
+    // unmet tool or failed login and goes on with tracking off. Asking would block the
     // whole dispatcher pass on a key, and `esc` would leave the minute
     // unrecorded so the next pass asked again. Because the firing
     // returns `Ok`, `jobs::fire_due` marks the minute fired and the notice
@@ -9177,14 +9278,17 @@ fn finish_routine_mode(
         Focus::Groups => Resume::Routines(nav.clone()),
         Focus::Tasks => Resume::RoutineTask(nav.clone()),
     };
-    if let Some(gate) = tool_gate(repo, &tracking, then.clone()) {
+    if let Some(gate) = tool_gate(repo, &tracking, &tasks, then.clone()) {
         return gate;
     }
     if let Some(question) = issue_question(repo, &tracking, &tasks, then) {
         return question;
     }
     untrack_groups(&mut tasks, &tracking);
-    if let Err(err) = require_group_description(repo, &tasks) {
+    // `Off` is the gate's answer: no ticket opens, so no description is read.
+    if tracking != Tracking::Off
+        && let Err(err) = require_group_description(repo, &tasks)
+    {
         return outcome_over(Some(nav), "queue refused", format!("{err:#}"));
     }
     let names: Vec<String> = tasks
@@ -20164,7 +20268,7 @@ group_description: audit
         #[test]
         fn no_hook_configured_has_nothing_unmet() {
             let (repo, _root_guard) = fixture("tool-gate-no-hook");
-            assert!(unmet_requirements(&repo).is_empty());
+            assert!(unmet_requirements(&repo, true).is_empty());
         }
 
         /// A declared floor this machine's own `cargo` already clears —
@@ -20174,7 +20278,7 @@ group_description: audit
         fn a_met_requirement_draws_nothing() {
             let (mut repo, _root_guard) = fixture("tool-gate-met");
             with_versioned_hook(&mut repo, "0.0.1");
-            assert!(unmet_requirements(&repo).is_empty());
+            assert!(unmet_requirements(&repo, true).is_empty());
 
             let mut input = keys("");
             let mut out = Vec::new();
@@ -20371,7 +20475,7 @@ group_description: audit
             std::fs::set_permissions(&path, perms).unwrap();
             repo.config.issue_tracking.hook = "versioned.sh".to_string();
 
-            let unmet = unmet_requirements(&repo);
+            let unmet = unmet_requirements(&repo, true);
             assert_eq!(
                 unmet.len(),
                 1,
@@ -20384,6 +20488,221 @@ group_description: audit
             print_tool_gate_notice(&mut out, &unmet).unwrap();
             let printed = String::from_utf8(out).unwrap();
             assert!(printed.contains("not on PATH"), "{printed}");
+        }
+
+        /// Points `[issue_tracking].hook` at a script declaring `requires`
+        /// (the body of a `# spoolway-requires:` line, or empty for none) and
+        /// `login` as its login command. `PROBE` in `login` stands for a
+        /// script written beside the hook that appends a line to `login-ran`
+        /// in the checkout each time it runs, then runs `body`.
+        fn with_login_hook(repo: &mut Repo, requires: &str, login: &str, body: &str) {
+            let dir = repo.checkout.join(".spoolway/hooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = |name: &str, text: String| {
+                let path = dir.join(name);
+                std::fs::write(&path, text).unwrap();
+                let mut perms = std::fs::metadata(&path).unwrap().permissions();
+                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+                std::fs::set_permissions(&path, perms).unwrap();
+                path
+            };
+            let ran = repo.checkout.join("login-ran");
+            let probe = script(
+                "probe.sh",
+                format!("#!/bin/sh\necho ran >> '{}'\n{body}\n", ran.display()),
+            );
+            let command = login.replace("PROBE", &probe.display().to_string());
+            let requires = if requires.is_empty() {
+                String::new()
+            } else {
+                format!("# spoolway-requires: {requires}\n")
+            };
+            script(
+                "logged.sh",
+                format!("#!/bin/sh\n{requires}# spoolway-login: {command}\nexit 0\n"),
+            );
+            repo.config.issue_tracking.hook = "logged.sh".to_string();
+        }
+
+        /// A login command that exits non-zero is one more unmet entry, drawn
+        /// as the hook with `login` and the command, then the program with
+        /// `failed` and the first line of its stderr, in the tool rows'
+        /// columns. A login that exits 0 adds nothing.
+        #[test]
+        fn a_failed_login_is_unmet_and_drawn_in_the_tool_rows_columns() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-failed");
+            with_login_hook(
+                &mut repo,
+                "",
+                "PROBE status",
+                "echo 'unauthorized: log in first' >&2; echo second >&2; exit 1",
+            );
+
+            let unmet = unmet_requirements(&repo, true);
+            assert_eq!(unmet.len(), 1);
+            let mut out = Vec::new();
+            print_tool_gate_notice(&mut out, &unmet).unwrap();
+            let printed = String::from_utf8(out).unwrap();
+            let probe = repo.checkout.join(".spoolway/hooks/probe.sh");
+            let lines: Vec<&str> = printed.lines().filter(|l| l.starts_with("    ")).collect();
+            assert_eq!(lines.len(), 2, "{printed}");
+            assert!(lines[0].trim_start().starts_with("logged.sh "), "{printed}");
+            assert!(lines[0].contains(" login "), "{printed}");
+            assert!(
+                lines[0].ends_with(&format!("{} status", probe.display())),
+                "{printed}"
+            );
+            assert!(lines[1].contains(" failed "), "{printed}");
+            assert!(
+                lines[1].ends_with("unauthorized: log in first"),
+                "{printed}"
+            );
+            assert_eq!(
+                lines[0].find(" login ").unwrap(),
+                lines[1].find(" failed ").unwrap(),
+                "{printed}"
+            );
+            assert!(!printed.contains("second"), "{printed}");
+            assert!(printed.contains(TOOL_GATE_VERDICT), "{printed}");
+
+            with_login_hook(&mut repo, "", "PROBE status", "exit 0");
+            assert!(unmet_requirements(&repo, true).is_empty());
+        }
+
+        /// A login whose own program is already unmet gets no entry of its
+        /// own: the tool has rows already, and a probe that cannot start
+        /// would only be a second failure for the same cause.
+        #[test]
+        fn a_login_is_not_run_when_its_tool_is_already_unmet() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-skipped");
+            with_login_hook(
+                &mut repo,
+                "definitely-not-a-real-binary >= 1.0.0",
+                "definitely-not-a-real-binary auth status",
+                "exit 1",
+            );
+
+            let unmet = unmet_requirements(&repo, true);
+            assert_eq!(unmet.len(), 1);
+            assert!(unmet[0].login.is_none());
+        }
+
+        /// A batch where every task sets `tracking: off` never reaches the
+        /// hook, so the login command is never run either.
+        #[test]
+        fn open_and_prefix_never_runs_the_login_for_a_batch_that_opts_out() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-opted-out");
+            with_login_hook(&mut repo, "", "PROBE status", "exit 1");
+            let doc = task_text("solo", "group: solo\ntracking: off\n", BODY);
+            let mut tasks = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("solo.md".to_string(), doc)],
+            )
+            .unwrap();
+
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+
+            assert!(!repo.checkout.join("login-ran").exists());
+        }
+
+        /// The description check never runs the login command: the gate
+        /// does, once, and a second run could answer differently. A group
+        /// with no description is refused whatever the login says, and the
+        /// probe is not run to decide it.
+        #[test]
+        fn the_description_check_does_not_run_the_login() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-description");
+            with_login_hook(&mut repo, "", "PROBE status", "exit 1");
+            let tasks = validate_batch_undescribed(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[(
+                    "solo.md".to_string(),
+                    task_text("solo", "group: solo\n", BODY),
+                )],
+                &[],
+            )
+            .unwrap();
+
+            let err = require_group_description(&repo, &tasks).unwrap_err();
+            assert!(format!("{err:#}").contains("group_description"), "{err:#}");
+            assert!(!repo.checkout.join("login-ran").exists());
+        }
+
+        /// `enter` on the screen's gate after a failed login re-enters the
+        /// submit with `Tracking::Off`. No ticket opens then, so a group
+        /// with no description queues instead of being refused, and the
+        /// login is run once, by the gate, not again.
+        #[test]
+        fn enter_on_a_login_gate_queues_a_group_with_no_description() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-popup-enter");
+            with_login_hook(&mut repo, "", "PROBE status", "echo nope >&2; exit 1");
+            write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+            let (_, drawn) = screen_exit(&repo, listed(&repo), " \r\r");
+            let frame = last_frame(&drawn);
+            assert!(!frame.contains("refused"), "{frame}");
+            assert_eq!(queued(&repo, "wire").extra_str("tracking"), "off");
+            let runs = std::fs::read_to_string(repo.checkout.join("login-ran")).unwrap();
+            assert_eq!(runs.lines().count(), 1, "{runs}");
+        }
+
+        /// The queue screen asks the gate through `tool_gate`, which must
+        /// not run the login command for a batch where every task sets
+        /// `tracking: off`, and must draw the popup for one that does reach
+        /// the hook.
+        #[test]
+        fn the_screens_gate_never_runs_the_login_for_a_batch_that_opts_out() {
+            let (mut repo, _root_guard) = fixture("tool-gate-screen-opted-out");
+            with_login_hook(&mut repo, "", "PROBE status", "exit 1");
+            let batch = |extra: &str| {
+                validate_batch(
+                    &repo,
+                    &Pipelines::builtin(),
+                    Some("plan/demo"),
+                    &[("solo.md".to_string(), task_text("solo", extra, BODY))],
+                )
+                .unwrap()
+            };
+
+            let off = batch("group: solo\ntracking: off\n");
+            let gate = tool_gate(&repo, &Tracking::Ask, &off, Resume::Selection);
+            assert!(gate.is_none());
+            assert!(!repo.checkout.join("login-ran").exists());
+
+            let on = batch("group: solo\ngroup_description: a solo task\n");
+            let gate = tool_gate(&repo, &Tracking::Ask, &on, Resume::Selection);
+            assert!(matches!(gate, Some(Mode::ToolGate { .. })));
+            assert!(repo.checkout.join("login-ran").exists());
+        }
+
+        /// A batch that does reach the hook runs the login, and a failure
+        /// queues it with `tracking: off`, as for an unmet tool.
+        #[test]
+        fn open_and_prefix_stamps_tracking_off_when_the_login_fails() {
+            let (mut repo, _root_guard) = fixture("tool-gate-login-stamps-off");
+            with_login_hook(&mut repo, "", "PROBE status", "echo nope >&2; exit 1");
+            let doc = task_text(
+                "solo",
+                "group: solo\ngroup_description: a solo task\n",
+                BODY,
+            );
+            let mut tasks = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("solo.md".to_string(), doc)],
+            )
+            .unwrap();
+
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+
+            assert!(tasks[0].tracking_off());
+            assert!(repo.checkout.join("login-ran").exists());
         }
 
         /// `open_and_prefix` is the one call every submit route shares, and
