@@ -3886,26 +3886,18 @@ fn build_rows(
             .filter(|_| runs.state(&key) == crate::command_step::RunState::Running)
             .and(Some(&key));
 
-        // A `serial:` step this task has not started because another task's
-        // run of it is still going — the same question
+        // A serial step this task has not started because another task's run
+        // of it is still going — the same question
         // [`crate::dispatch::Dispatcher::run_command`]'s `Fresh` arm asks
-        // before it will start one, over the same peers: every other task on
-        // this pipeline, since a run's key names no pipeline of its own.
+        // before it will start one, over the same peers: every other task in
+        // the project, since a run's key names no pipeline of its own.
         let serial_holder = step
-            .filter(|step| step.serial && step.kind() == crate::pipeline::StepKind::Command)
+            .filter(|step| step.kind() == crate::pipeline::StepKind::Command)
             .filter(|_| runs.state(&key) == crate::command_step::RunState::Fresh)
             .and_then(|step| {
                 runs.serial_holder(
                     &step.id,
-                    tasks
-                        .iter()
-                        .filter(|peer| peer.id() != task.id())
-                        .filter(|peer| {
-                            pipelines
-                                .for_task(peer)
-                                .is_ok_and(|p| p.name == pipeline.name)
-                        })
-                        .map(|peer| peer.id()),
+                    pipelines.serial_peers(&step.id, task.id(), tasks.iter().map(|t| t.id())),
                 )
             });
 
@@ -7173,6 +7165,57 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let export = rows.iter().find(|r| r.id == "b-export").unwrap();
         assert!(matches!(export.state, State::Queued), "{}", export.next);
+    }
+
+    /// The hold is per step id across the project: a task on `other`, whose
+    /// own `handover` is not marked serial, reads as waiting on a run going
+    /// on `default`, where the step is marked.
+    #[test]
+    fn a_task_on_another_pipeline_reads_as_waiting_on_a_serial_run() {
+        let (repo, _root_guard) = fixture("command-step-serial-across");
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines.get_mut("default").unwrap();
+        default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap()
+            .serial = true;
+        let mut other = default.clone();
+        other.name = "other".to_string();
+        other
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap()
+            .serial = false;
+        pipelines.pipelines.insert("other".to_string(), other);
+        add_to(&repo, "a-login", &[], Some("handover"), Some("group-one"));
+        add_to(&repo, "b-export", &[], Some("handover"), Some("group-two"));
+
+        let mut tasks = repo.tasks().unwrap();
+        tasks
+            .iter_mut()
+            .find(|t| t.id() == "b-export")
+            .unwrap()
+            .front
+            .pipeline = Some("other".into());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "a-login");
+        let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{key}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let export = rows.iter().find(|r| r.id == "b-export").unwrap();
+        assert!(matches!(export.state, State::Waiting), "{}", export.next);
+        assert_eq!(export.next, "serial: after a-login");
     }
 
     /// A task fresh off a handoff, with no lane up for it yet, reads

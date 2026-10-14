@@ -654,10 +654,13 @@ pub struct Step {
     /// back rather than the script taking a lock of its own, since `flock`
     /// is not on macOS.
     ///
-    /// "One at a time" is one step id, in one pipeline, in one project: a
-    /// step of the same name in another pipeline does not hold this one. A
-    /// run ahead that is still going holds the step even once its task has
-    /// moved on, which is what a `background: true` run's task does — see
+    /// "One at a time" is one step id across the whole project: a command
+    /// step of the same id in another pipeline holds this one, and is held by
+    /// it. One pipeline marking the id is enough — see
+    /// [`Pipelines::is_serial_step`] — so the same step in a pipeline that
+    /// does not mark it waits its turn too. A run ahead that is still going
+    /// holds the step even once its task has moved on, which is what a
+    /// `background: true` run's task does — see
     /// [`crate::command_step::Runs::serial_holder`].
     ///
     /// A command step's key, like `last:` — [`Pipeline::validate`] refuses
@@ -2125,6 +2128,37 @@ pub struct Pipelines {
 }
 
 impl Pipelines {
+    /// Whether command steps of this id run one task at a time. True when
+    /// any pipeline marks a command step of that id `serial: true`, so one
+    /// pipeline marking it holds the step in every pipeline that has it.
+    pub fn is_serial_step(&self, step: &str) -> bool {
+        self.pipelines.values().any(|p| {
+            p.step(step)
+                .is_some_and(|s| s.serial && s.kind() == StepKind::Command)
+        })
+    }
+
+    /// The tasks whose run of `step` could hold it against `task`: every
+    /// other task in `tasks`, whatever its pipeline, and none at all unless
+    /// the step id is serial. Handed to
+    /// [`crate::command_step::Runs::serial_holder`] by the dispatcher and
+    /// the board alike, so they never disagree about who is held.
+    ///
+    /// No pipeline filter, because a run's key names no pipeline. A peer
+    /// whose pipeline has an agent step of that id has no command run, so it
+    /// is never found holding anything.
+    pub fn serial_peers<'a>(
+        &self,
+        step: &str,
+        task: &str,
+        tasks: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<&'a str> {
+        match self.is_serial_step(step) {
+            true => tasks.into_iter().filter(|peer| *peer != task).collect(),
+            false => Vec::new(),
+        }
+    }
+
     /// The directory holding one file per pipeline.
     pub fn dir_in(root: &Path) -> PathBuf {
         crate::config::setup_dir_in(root).join(PIPELINE_DIR)

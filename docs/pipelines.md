@@ -95,7 +95,7 @@ steps:
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
 | `last` | `false` | Command steps only. `true` runs it only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | Command steps only. `true` runs it only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
-| `serial` | `false` | Command steps only. `true` runs it for one task at a time. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
+| `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
 `# <<< spoolway <<<`. `spoolway sync` rewrites that block when it matches an older shipped copy.
@@ -449,8 +449,10 @@ unstarted: no pane, no run files, no timeout clock. Its own run starts on the fi
 the earlier run exits. `spoolway queue list` and the board show it as `○ waiting` with
 `serial: after <task>`.
 
-The hold is per pipeline: two pipelines with a step of the same id do not hold each other, and
-neither does another project's dispatcher. `serial:` is allowed on command steps only.
+The hold is per step id across the whole project: two pipelines with a command step of the same
+id hold each other. One pipeline marking the id `serial: true` is enough, so the same step in a
+pipeline that does not mark it waits its turn too. Another project's dispatcher holds nothing
+here, and an agent step that shares the id is never held. `serial:` is allowed on command steps only.
 `spoolway pipeline check` refuses it on any step with an `agent:`.
 
 ## `spoolway stack`
