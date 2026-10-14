@@ -190,7 +190,7 @@ the implementer working on `login`. A copy of a routine is named for its routine
 A lane takes one turn. When it reports an outcome, the task moves on. A lane that stops
 without reporting is usually asking a question. See [The dispatcher](dispatcher.md).
 
-A lane that has reported stays open, idle, in its own pane until the task is done. See
+A lane that has reported stays open, idle, in its own pane until the task is done or `dispatch.visible_lanes` closes it. See
 [Finished lanes keep their pane](dispatcher.md#finished-lanes-keep-their-pane).
 
 ## Worker slot

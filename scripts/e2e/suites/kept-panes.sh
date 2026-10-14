@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# A finished step's lane stays open until its task is done.
+# A finished step's lane stays open until its task is done, or until
+# `dispatch.visible_lanes` pushes it out.
 #
 # A two-step task is driven through `herdr-stub.sh`. While the second step
 # runs, `spoolway lane` must still list the first step's lane, and its pane
 # must still stand. Once the task is done, both are gone. A second task, run
-# with `keep_finished_lanes` off, shows the first step's lane gone while the
-# second runs.
+# with a limit of 1, shows the first step's lane gone while the second runs.
+# A four-step task then runs with a limit of 3, which closes the first lane
+# once the fourth starts and leaves the other three, and with `all`, which
+# closes none.
 #
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
@@ -69,6 +72,38 @@ steps:
     model: $MODEL
     on_pass: done
 YML
+cat > .spoolway/pipelines/fourstep.yml <<YML
+description: Four agent steps, so a task can run past a limit of three.
+
+steps:
+  - id: first
+    description: The first of four.
+    agent: pi
+    prompt: builder
+    model: $MODEL
+    on_pass: second
+
+  - id: second
+    description: The second of four.
+    agent: pi
+    prompt: judge
+    model: $MODEL
+    on_pass: third
+
+  - id: third
+    description: The third of four.
+    agent: pi
+    prompt: builder
+    model: $MODEL
+    on_pass: fourth
+
+  - id: fourth
+    description: The fourth of four.
+    agent: pi
+    prompt: judge
+    model: $MODEL
+    on_pass: done
+YML
 works "the two-step pipeline checks out" "$SPOOLWAY" pipeline check
 
 # The lane a task's agent would be, reporting for itself: a lane reports on the
@@ -123,21 +158,21 @@ else
   bad "and every pane it had is closed: $(cat "$HSTATE/panes")"
 fi
 
-# ------------------------------------------- with kept panes turned off
-# The same two-step task, with `keep_finished_lanes` off: the first step's lane
-# is closed behind the second, so only the second is left to list.
-must "kept panes turned off" "$SPOOLWAY" config set dispatch.keep_finished_lanes false
+# ------------------------------------------------------ with a limit of 1
+# The same two-step task, with a limit of 1: the first step's lane is closed
+# behind the second, so only the second is left to list.
+must "a limit of 1" "$SPOOLWAY" config set dispatch.visible_lanes 1
 task_doc "$LIVE/off.md" off "$BODY" "group: off" "pipeline: twostep"
-must "a task queued with kept panes off" "$SPOOLWAY" queue add --from "$LIVE/off.md"
+must "a task queued with a limit of 1" "$SPOOLWAY" queue add --from "$LIVE/off.md"
 
 if drive off first 60 && poll_until 60 lane_listed "off · first"; then
-  ok "with kept panes off, the first step's lane starts"
-else bad "with kept panes off, the first step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
+  ok "with a limit of 1, the first step's lane starts"
+else bad "with a limit of 1, the first step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
 
 must "the first step reports" report_as off first
 if drive off second 60 && poll_until 60 lane_listed "off · second"; then
-  ok "with kept panes off, the second step's lane starts"
-else bad "with kept panes off, the second step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
+  ok "with a limit of 1, the second step's lane starts"
+else bad "with a limit of 1, the second step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
 
 if poll_while 60 lane_listed "off · first"; then
   ok "the first step's lane is gone once the second is running"
@@ -148,13 +183,69 @@ fi
 says "and the second step's lane is the one left" "off · second" "$SPOOLWAY" lane
 
 must "the second step reports" report_as off second
-if drive off gone 60; then ok "the task with kept panes off is done and archived"
-else bad "the task with kept panes off is done and archived"; fi
-must "kept panes turned back on" "$SPOOLWAY" config set dispatch.keep_finished_lanes true
+if drive off gone 60; then ok "the task with a limit of 1 is done and archived"
+else bad "the task with a limit of 1 is done and archived"; fi
+
+# Run a task through `steps`, leaving the last one's lane running: each lane
+# starts, and every step but the last reports.
+start_steps() { # task step...
+  local task=$1 step n i=0; shift; n=$#
+  for step in "$@"; do
+    i=$((i + 1))
+    if drive "$task" "$step" 60 && poll_until 60 lane_listed "$task · $step"; then
+      ok "$task: the $step step's lane starts"
+    else bad "$task: the $step step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
+    if [ "$i" -lt "$n" ]; then must "$task: $step reports" report_as "$task" "$step"; fi
+  done
+}
+
+# ------------------------------------------------------ with a limit of 3
+# Four steps against a limit of 3: the fourth lane's start closes the oldest,
+# the first, and leaves the three newest.
+must "a limit of 3" "$SPOOLWAY" config set dispatch.visible_lanes 3
+task_doc "$LIVE/three.md" three "$BODY" "group: three" "pipeline: fourstep"
+must "a task queued with a limit of 3" "$SPOOLWAY" queue add --from "$LIVE/three.md"
+start_steps three first second third fourth
+
+if poll_while 60 lane_listed "three · first"; then
+  ok "with a limit of 3, the oldest lane is gone once the fourth runs"
+else
+  bad "with a limit of 3, the oldest lane is gone once the fourth runs"
+  "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'
+fi
+for step in second third fourth; do
+  says "and the $step step's lane is still listed" "three · $step" "$SPOOLWAY" lane
+done
+if [ "$(panes_standing)" -eq 3 ]; then
+  ok "three panes stand"
+else
+  bad "three panes stand: $(cat "$HSTATE/panes")"
+fi
+must "the fourth step reports" report_as three fourth
+if drive three gone 60; then ok "the task with a limit of 3 is done and archived"
+else bad "the task with a limit of 3 is done and archived"; fi
+
+# ------------------------------------------------------ with `all`
+must "every lane kept" "$SPOOLWAY" config set dispatch.visible_lanes all
+task_doc "$LIVE/every.md" every "$BODY" "group: every" "pipeline: fourstep"
+must "a task queued with every lane kept" "$SPOOLWAY" queue add --from "$LIVE/every.md"
+start_steps every first second third fourth
+for step in first second third fourth; do
+  says "with all, the $step step's lane is still listed" "every · $step" "$SPOOLWAY" lane
+done
+if [ "$(panes_standing)" -eq 4 ]; then
+  ok "four panes stand"
+else
+  bad "four panes stand: $(cat "$HSTATE/panes")"
+fi
+must "the fourth step reports" report_as every fourth
+if drive every gone 60; then ok "the task with every lane kept is done and archived"
+else bad "the task with every lane kept is done and archived"; fi
+must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 5
 
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
-rm -f .spoolway/pipelines/twostep.yml
+rm -f .spoolway/pipelines/twostep.yml .spoolway/pipelines/fourstep.yml
 
 finish

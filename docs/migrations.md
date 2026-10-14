@@ -334,7 +334,7 @@ dispatcher keeps routing on the pipelines it loaded when it started.
   nothing now, and `spoolway sync` drops it without a note.
 - Expect one idle agent process per agent step a task has run. Each step keeps its pane until the
   task is done. To have each new agent step close the last one's pane instead, run
-  `spoolway config set dispatch.keep_finished_lanes false`.
+  `spoolway config set dispatch.visible_lanes 1`.
 - Re-check `loop:` on steps a task reaches by a resume, a cleared block, a command step's exit or a
   walk-past. `loop:` now counts every move onto a step, not only a lane's report, so a task 0.7.1
   let return more often may now block with the step and the count named. Raise that `loop:` if it

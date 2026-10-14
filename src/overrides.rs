@@ -482,6 +482,16 @@ pub(crate) fn retired_config_patch_keys(overrides: &Path, tracked: &Config) -> R
         .filter(|entry| crate::config::is_retired_key(&entry.fields))
         .map(|entry| entry.fields)
         .collect();
+    // `apply_config_patch` reads this key as the limit it stood for when it
+    // holds a boolean, so it is then not reported as ignored. It still has to
+    // leave the layer, replaced by that limit: see [`config_patch_without`].
+    // Any other value was refused, so the key is already listed above.
+    if !retired.iter().any(|key| key == KEEP_FINISHED_LANES)
+        && config_patch_keys(overrides)?
+            .is_some_and(|keys| keys.iter().any(|key| key == KEEP_FINISHED_LANES))
+    {
+        retired.push(KEEP_FINISHED_LANES.to_string());
+    }
     retired.sort();
     Ok(retired)
 }
@@ -490,11 +500,18 @@ pub(crate) fn retired_config_patch_keys(overrides: &Path, tracked: &Config) -> R
 /// [`retired_config_patch_keys`] found them) is removed from it, leaving every
 /// other key in the layer untouched. Nothing on disk is touched: `sync` plans
 /// this write with the rest of its writes and makes it afterwards.
+///
+/// `dispatch.keep_finished_lanes` is the one key that is replaced rather than
+/// only removed: the limit it stood for is written as `dispatch.visible_lanes`
+/// first, so the layer sets the same thing before and after.
 pub(crate) fn config_patch_without(overrides: &Path, keys: &[String]) -> Result<String> {
     let path = config_patch_path(overrides);
     let mut doc =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     for key in keys {
+        if key == KEEP_FINISHED_LANES {
+            doc = visible_lanes_for_keep_finished(&doc)?;
+        }
         // The glob of a `models.<glob>.<field>` key may hold a dot, and
         // splitting on every one would look for a table that is not there and
         // leave the retired key in the layer.
@@ -503,6 +520,31 @@ pub(crate) fn config_patch_without(overrides: &Path, keys: &[String]) -> Result<
         doc = crate::confdoc::remove(&doc, &parts)?;
     }
     Ok(doc)
+}
+
+/// `doc` with the limit its `dispatch.keep_finished_lanes` stood for written
+/// as `dispatch.visible_lanes`, so that removing the retired key does not
+/// change what the layer sets. A layer that already holds a `visible_lanes`
+/// is returned as it is, since that one wins when the layer is applied.
+fn visible_lanes_for_keep_finished(doc: &str) -> Result<String> {
+    let parsed: toml::Value = toml::from_str(doc).context("parsing the override config")?;
+    let Some(dispatch) = parsed.get("dispatch") else {
+        return Ok(doc.to_string());
+    };
+    if dispatch.get("visible_lanes").is_some() {
+        return Ok(doc.to_string());
+    }
+    let limit = match dispatch.get("keep_finished_lanes") {
+        Some(toml::Value::Boolean(true)) => toml::Value::String("all".to_string()),
+        Some(toml::Value::Boolean(false)) => toml::Value::Integer(1),
+        _ => return Ok(doc.to_string()),
+    };
+    crate::confdoc::set(
+        doc,
+        &["dispatch", "visible_lanes"],
+        &limit,
+        &Config::default().render()?,
+    )
 }
 
 fn apply_config_table(
@@ -519,9 +561,10 @@ fn apply_config_table(
         prefix.push_str(key);
         config = match value {
             toml::Value::Table(nested) => apply_config_table(config, nested, prefix, ignored)?,
-            other => match render_config_leaf(other)
-                .and_then(|input| crate::confkv::set(&config, prefix, &input))
-            {
+            other => match render_config_leaf(other).and_then(|input| {
+                let (key, input) = current_spelling(prefix, input);
+                crate::confkv::set(&config, &key, &input)
+            }) {
                 Ok(updated) => updated,
                 Err(err) => {
                     ignored.push(Ignored {
@@ -559,6 +602,69 @@ fn render_config_leaf(value: &toml::Value) -> Result<String> {
         toml::Value::Table(_) => unreachable!("a table is matched before this is called"),
         other => other.to_string(),
     })
+}
+
+/// The note a private layer's `dispatch.keep_finished_lanes` earns at load:
+/// the one the tracked file's earns, so a person who has the key only in the
+/// layer is told to run `spoolway sync` as well. `None` when the layer holds
+/// no such key, or one that is not a boolean, which is already reported as an
+/// ignored override.
+///
+/// `loaded` is the config with the layer applied and `ignored` what applying
+/// it left out. A `visible_lanes` in the same layer wins over the key, unless
+/// it was itself refused.
+pub(crate) fn keep_finished_lanes_note(
+    overrides: &Path,
+    loaded: &Config,
+    ignored: &[Ignored],
+) -> Result<Option<String>> {
+    let path = config_patch_path(overrides);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let Some(dispatch) = parsed.get("dispatch") else {
+        return Ok(None);
+    };
+    let Some(keep) = dispatch
+        .get("keep_finished_lanes")
+        .and_then(toml::Value::as_bool)
+    else {
+        return Ok(None);
+    };
+    let beside = (dispatch.get("visible_lanes").is_some()
+        && !ignored
+            .iter()
+            .any(|entry| entry.fields == "dispatch.visible_lanes"))
+    .then_some(&loaded.dispatch.visible_lanes);
+    Ok(Some(crate::config::keep_finished_lanes_note(
+        &path, keep, beside,
+    )))
+}
+
+/// The retired layer key that `visible_lanes` replaced.
+const KEEP_FINISHED_LANES: &str = "dispatch.keep_finished_lanes";
+
+/// `key` and `input` as the config spells them today.
+///
+/// A private layer written for an older release may hold
+/// `dispatch.keep_finished_lanes`. The tracked file migrates that key when it
+/// loads, so the layer has to as well: left to `confkv::set`, which refuses a
+/// retired key, `false` would silently become the default limit of 5 instead
+/// of 1. `true` is `all` and `false` is 1. Every other key, and a value that
+/// is not a boolean, passes through unchanged and is refused as before.
+///
+/// A table is walked in key order, so a `visible_lanes` the same layer holds
+/// is applied after this and wins, as it does in the tracked file.
+fn current_spelling(key: &str, input: String) -> (String, String) {
+    match (key, input.as_str()) {
+        (KEEP_FINISHED_LANES, "true") => ("dispatch.visible_lanes".to_string(), "all".to_string()),
+        (KEEP_FINISHED_LANES, "false") => ("dispatch.visible_lanes".to_string(), "1".to_string()),
+        _ => (key.to_string(), input),
+    }
 }
 
 /// `overrides/prompts/<name>/PROMPT.md`, if it exists — the whole file,
@@ -1098,7 +1204,8 @@ fn for_each_config_leaf(
             toml::Value::Table(nested) => for_each_config_leaf(nested, prefix, apply)?,
             other => {
                 let input = render_config_leaf(other).with_context(|| format!("`{prefix}`"))?;
-                apply(prefix, &input)?;
+                let (key, input) = current_spelling(prefix, input);
+                apply(&key, &input)?;
             }
         }
         prefix.truncate(mark);
@@ -1597,6 +1704,129 @@ agent: pi
         assert!(!pipeline_patch_path(&overrides, "impl").is_file());
         assert!(pipeline_patch_path(&overrides, "bugfix").is_file());
         assert!(overrides.is_dir());
+    }
+
+    /// A private layer written for an older release may still hold
+    /// `dispatch.keep_finished_lanes`. It applies as the limit it stood for —
+    /// `true` is `all`, `false` is 1 — and is not reported as ignored, or
+    /// `false` would quietly become the default 5. A `visible_lanes` in the
+    /// same layer wins, as it does in the tracked file.
+    #[test]
+    fn a_layer_keep_finished_lanes_applies_as_a_visible_lanes_limit() {
+        use crate::config::VisibleLanes;
+        let overrides = crate::scratch::root("overrides-layer-keep-finished");
+        std::fs::create_dir_all(&overrides).unwrap();
+        for (layer, expected) in [
+            ("keep_finished_lanes = true\n", VisibleLanes::All),
+            ("keep_finished_lanes = false\n", VisibleLanes::Count(1)),
+            (
+                "keep_finished_lanes = false\nvisible_lanes = 3\n",
+                VisibleLanes::Count(3),
+            ),
+        ] {
+            std::fs::write(
+                config_patch_path(&overrides),
+                format!("[dispatch]\n{layer}"),
+            )
+            .unwrap();
+            let (config, ignored) = apply_config_patch(Config::default(), &overrides).unwrap();
+            assert_eq!(config.dispatch.visible_lanes, expected, "{layer}");
+            assert!(ignored.is_empty(), "{layer}: {ignored:?}");
+        }
+    }
+
+    /// A layer's `keep_finished_lanes` earns the same load note as the
+    /// tracked file's, so a person who has the key only in the layer is told
+    /// to run `spoolway sync`. A `visible_lanes` beside it is the limit the
+    /// note names, unless that one was refused; a key that is not a boolean
+    /// earns no note, since it is already reported as ignored.
+    #[test]
+    fn a_layer_keep_finished_lanes_earns_the_tracked_files_note() {
+        let overrides = crate::scratch::root("overrides-layer-keep-finished-note");
+        std::fs::create_dir_all(&overrides).unwrap();
+        for (layer, expected) in [
+            (
+                "keep_finished_lanes = true\n",
+                Some("it loads as dispatch.visible_lanes = all. Run `spoolway sync` to rewrite"),
+            ),
+            (
+                "keep_finished_lanes = false\n",
+                Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
+            ),
+            (
+                "keep_finished_lanes = false\nvisible_lanes = 3\n",
+                Some(
+                    "the dispatch.visible_lanes = 3 beside it is the limit that loads. Run `spoolway sync` to drop",
+                ),
+            ),
+            (
+                "keep_finished_lanes = false\nvisible_lanes = 0\n",
+                Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
+            ),
+            ("keep_finished_lanes = \"yes\"\n", None),
+            ("visible_lanes = 3\n", None),
+        ] {
+            std::fs::write(
+                config_patch_path(&overrides),
+                format!("[dispatch]\n{layer}"),
+            )
+            .unwrap();
+            let (config, ignored) = apply_config_patch(Config::default(), &overrides).unwrap();
+            let note = keep_finished_lanes_note(&overrides, &config, &ignored).unwrap();
+            match expected {
+                Some(expected) => {
+                    let note = note.unwrap_or_else(|| panic!("{layer}: no note"));
+                    assert!(note.contains(expected), "{layer}: {note}");
+                    assert!(
+                        note.contains(&config_patch_path(&overrides).display().to_string()),
+                        "{note}"
+                    );
+                }
+                None => assert_eq!(note, None, "{layer}"),
+            }
+        }
+    }
+
+    /// `spoolway sync` plans the retired layer key out, and what it leaves
+    /// must set the same limit: the key is replaced by `visible_lanes`, not
+    /// just deleted, unless the layer already holds one.
+    #[test]
+    fn sync_rewrites_a_layer_keep_finished_lanes_into_visible_lanes() {
+        let overrides = crate::scratch::root("overrides-layer-keep-finished-sync");
+        std::fs::create_dir_all(&overrides).unwrap();
+        for (layer, expected) in [
+            (
+                "keep_finished_lanes = true\n",
+                Some("visible_lanes = \"all\""),
+            ),
+            ("keep_finished_lanes = false\n", Some("visible_lanes = 1")),
+            (
+                "keep_finished_lanes = false\nvisible_lanes = 3\n",
+                Some("visible_lanes = 3"),
+            ),
+            // Not a boolean, so it stood for no limit: it is only dropped,
+            // and named once, though it is both refused and on the layer.
+            ("keep_finished_lanes = \"yes\"\n", None),
+        ] {
+            std::fs::write(
+                config_patch_path(&overrides),
+                format!("[dispatch]\nauto_commit = false\n{layer}"),
+            )
+            .unwrap();
+            let dropped = retired_config_patch_keys(&overrides, &Config::default()).unwrap();
+            assert_eq!(dropped, vec!["dispatch.keep_finished_lanes".to_string()]);
+
+            let rewritten = config_patch_without(&overrides, &dropped).unwrap();
+            assert!(!rewritten.contains("keep_finished_lanes"), "{rewritten}");
+            assert!(rewritten.contains("auto_commit = false"), "{rewritten}");
+            match expected {
+                Some(expected) => {
+                    assert!(rewritten.contains(expected), "{layer}: {rewritten}");
+                    assert_eq!(rewritten.matches("visible_lanes").count(), 1, "{rewritten}");
+                }
+                None => assert!(!rewritten.contains("visible_lanes"), "{rewritten}"),
+            }
+        }
     }
 
     /// `promote_config_patch` writes through `confkv::set`/`Config::edit_key`,

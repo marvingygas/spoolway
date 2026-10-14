@@ -313,10 +313,13 @@ auto_commit = true
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
-| `keep_finished_lanes` | `true` | Whether a step's pane, with its agent left running, is kept until its task is done. Set to `false` and each new agent step opens where the spiral puts it, then the task's most recent kept pane is closed, so a task shows one agent pane at a time. Panes already kept when you turn it off stay open until their task is done. Only the most recent one closes with each new step. |
+| `visible_lanes` | `5` | How many of a task's most recent lanes stay open in its tab, or `all`. Each new agent step first closes the task's oldest finished lanes until the tab, with the new lane in it, holds this many, then opens where the spiral puts it. The oldest lane keeps the biggest area and the newest the smallest. A running lane and a pane held for you on `blocked` or `paused` are never closed, so a tab can go over its limit until they end. A limit of `1` opens the new pane first and closes the old one after, so the tab is never empty. `0` is refused. Five is a new default: a task that used to keep every pane now keeps its five newest. Set `visible_lanes = "all"` to keep every pane until the task is done, as before. |
 
-`priority`, `lane_child_ceiling` and `keep_finished_lanes` are not written to a fresh
-`config.toml`. Add them by hand or with `config set`.
+`priority`, `lane_child_ceiling` and `visible_lanes` are not written to a fresh
+`config.toml` while they hold their default. Add them by hand or with `config set`. `all` is
+written as `visible_lanes = "all"`.
+
+`keep_finished_lanes` is retired. See [Retired keys](#retired-keys).
 
 Gates are not configured here. `gate:` is a step key in the pipeline.
 
@@ -783,7 +786,7 @@ such as `spoolway config set`, `spoolway init --tracker` and `spoolway override 
 leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
 `dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
 `dispatch.backend` set to `tmux` (which loads as `herdr` instead),
-`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode` and an `[agents.<profile>.env]` table. Only the notes for
+`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode`, `dispatch.keep_finished_lanes` and an `[agents.<profile>.env]` table. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
 rewritten or dropped on the next save. The rest of the table below load with no note.
@@ -801,6 +804,7 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
 | `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
+| `dispatch.keep_finished_lanes` | `dispatch.visible_lanes`. `true` loads as `"all"` and `false` as `1`. |
 | `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
 | `models.<glob>.exclusive` | Nothing. Serving one model at a time, and sizing `slots` and `concurrency` to match, is up to you. |

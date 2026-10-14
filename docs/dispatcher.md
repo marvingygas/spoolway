@@ -801,9 +801,10 @@ moved on its next step. Spoolway closes that pane and opens the task a workspace
 the checkout it already has.
 
 Under a multiplexer every lane is a real pane you can watch and type into. Each agent step of a
-task gets a pane of its own, and keeps it until the task is done. See [Finished lanes keep their
-pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by
-hand are never touched.
+task gets a pane of its own, and keeps it until the task is done or `dispatch.visible_lanes` closes
+it. See [Finished lanes keep their pane](#finished-lanes-keep-their-pane). A lane is named
+`<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by hand
+are never touched.
 
 The board itself stays in the pane you ran `spoolway dispatch` in.
 
@@ -828,9 +829,9 @@ headless](pipelines.md#background-and-headless).
 ### Finished lanes keep their pane
 
 When a step finishes, its agent is left running, idle, in its own pane. Nothing is typed into it
-and nothing is closed. The task's next step splits a new pane in the same tab, so every step the
-task has run stays on screen and you can still type into it. See [Leaving a pane without closing
-it](agents.md#leaving-a-pane-without-closing-it).
+and nothing is closed. The task's next step splits a new pane in the same tab, so the steps the
+task has run stay on screen, up to the limit below, and you can still type into them. See
+[Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it).
 
 A finished lane does not count as running. A profile's `concurrency` and a model's `slots`
 count only the lane on the step the task is on. A follow-up you type into a finished pane runs
@@ -839,16 +840,28 @@ finished lane is refused, because the task has left its step.
 
 A step that comes back replaces its own pane. A review that fails and sends the task round again
 splits the old review pane, and then closes it. The new pane takes the old one's whole area, so
-the tab looks the same. A tab therefore holds at most one pane per agent step. The old run's
-transcript stays on disk under its session id, and its report stays in the task file. If the old
-lane is still mid-turn, its spend is banked first.
+the tab looks the same. The old run's transcript stays on disk under its session id, and its
+report stays in the task file. If the old lane is still mid-turn, its spend is banked first.
 
-To show one agent pane per task, set `keep_finished_lanes = false` under `[dispatch]`, or
-run `spoolway config set dispatch.keep_finished_lanes false`. Each new agent step then opens where
-the spiral puts it, and the task's most recent kept pane is closed once the new one is ready. Its
-spend is banked first. Panes that were already kept when you turned it off stay open until the
-task is done, and only the most recent one closes with each new step. A parked task's pane is still
-held for you.
+A task's tab holds at most `dispatch.visible_lanes` lanes, five by default. Set it to a whole
+number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 3`. A `0` is
+refused.
+
+Each new agent step that would go over the limit first closes the task's oldest finished lanes,
+oldest by start time. It then opens the new pane where the spiral puts it. The spiral splits the
+smallest pane, so the oldest lane keeps the biggest area and the newest the smallest. Each lane
+closed this way has its spend banked first, even if it is still mid-turn.
+
+A limit of 1 works the other way round. The old pane is the tab's last, so the new pane opens
+first and the old one closes after, and the tab never empties.
+
+Some lanes are never closed by the limit. A lane that is still running stays, and so does a pane
+held for you on `paused` or on a `blocked` step. A tab can therefore sit over its limit until they
+end. A step that comes back still replaces its own pane in place.
+
+Five is a new default, so a task that kept every pane keeps its five newest. To keep every pane
+until the task is done, set `visible_lanes = "all"`. The `keep_finished_lanes` key is retired.
+`true` loads as `all` and `false` as `1`.
 
 A lane is banked when its step moves on, and again when the task is done. The second bank
 counts only what was added since the first, so rounds you ran in a finished pane are counted.
