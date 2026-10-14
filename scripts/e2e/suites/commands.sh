@@ -1300,10 +1300,10 @@ fi
 
 # ------------------------------------------------------ config follows the checkout
 # `config get`/`show`/`path` read `repo.checkout` now — the worktree actually
-# in front of a command — while `config set` still writes only `repo.root`,
-# the project's own copy, and refuses rather than land somewhere the
-# dispatcher will never read from. A worktree whose `config.toml` differs
-# from the project's is what proves reads really did follow the checkout.
+# in front of a command — and `config set` writes that worktree's own copy
+# too, leaving the project's alone until the branch merges. A worktree whose
+# `config.toml` differs from the project's is what proves both followed the
+# checkout.
 PROJECT=$(pwd -P)
 WT="$LIVE/worktrees/config-wt"
 must "cutting a worktree for a config of its own" \
@@ -1377,23 +1377,19 @@ queue add
 LIST
 
 BEFORE_ROOT=$(cat .spoolway/config.toml)
-BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
-OUT=$("$SPOOLWAY" -C "$WT" config set unattended.blocked_agent "should-not-land" 2>&1)
+OUT=$("$SPOOLWAY" -C "$WT" config set unattended.blocked_agent "set-in-the-worktree" 2>&1)
 STATUS=$?
-if [ "$STATUS" -ne 0 ]; then ok "config set in the worktree exits non-zero"
-else bad "config set in the worktree exits non-zero"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF "the dispatcher reads the project's config, not this worktree's." <<<"$OUT"; then
-  ok "and says why"
-else bad "and says why"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF -- "-C $PROJECT config set unattended.blocked_agent should-not-land" <<<"$OUT"; then
-  ok "and names the exact -C invocation that would write to the project"
-else bad "and names the exact -C invocation that would write to the project"; sed 's/^/        /' <<<"$OUT"; fi
+if [ "$STATUS" -eq 0 ]; then ok "config set in the worktree succeeds"
+else bad "config set in the worktree succeeds"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF "  the main checkout keeps its own copy until task/config-diff merges" <<<"$OUT"; then
+  ok "and says the main checkout keeps its own copy until the branch merges"
+else bad "and says the main checkout keeps its own copy until the branch merges"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF 'blocked_agent = "set-in-the-worktree"' "$WT/.spoolway/config.toml"; then
+  ok "and the worktree's own config carries the new value"
+else bad "and the worktree's own config carries the new value"; fi
 if [ "$(cat .spoolway/config.toml)" = "$BEFORE_ROOT" ]; then
   ok "and the project's own config is left untouched"
 else bad "and the project's own config is left untouched"; fi
-if [ "$(cat "$WT/.spoolway/config.toml")" = "$BEFORE_WT" ]; then
-  ok "and the worktree's own config is left untouched too"
-else bad "and the worktree's own config is left untouched too"; fi
 
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/config-diff

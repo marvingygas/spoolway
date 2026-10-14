@@ -54,6 +54,26 @@ pub struct Repo {
 /// matches [`crate::mux`]'s bound on the fetch of the same remote.
 const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Where a tracked write lands, as [`Repo::tracked_write_root`] decides it.
+#[derive(Debug)]
+pub struct TrackedWrite<'a> {
+    /// The checkout whose tracked files the command writes.
+    pub root: &'a Path,
+    /// The branch `root` is on when it is a worktree's own copy, `None` in
+    /// the main checkout, where the write is the copy the dispatcher reads.
+    pub branch: Option<String>,
+}
+
+impl TrackedWrite<'_> {
+    /// The line printed after a write that landed in a worktree's own copy,
+    /// or `None` in the main checkout, where there is nothing to add.
+    pub fn note(&self) -> Option<String> {
+        self.branch
+            .as_ref()
+            .map(|branch| format!("  the main checkout keeps its own copy until {branch} merges"))
+    }
+}
+
 impl Repo {
     /// Find the project a command is operating on.
     ///
@@ -908,10 +928,69 @@ impl Repo {
 
     /// Whether the command ran in a linked worktree, whether that worktree
     /// carries its own `.spoolway/` (`checkout` differs from `root`) or
-    /// borrows the main checkout's. The writers that must land in the file
-    /// the dispatcher reads refuse on it.
+    /// borrows the main checkout's. [`Repo::tracked_write_root`] decides
+    /// from it where a tracked write may go.
     pub fn in_linked_worktree(&self) -> bool {
         self.checkout != self.root || self.borrowed
+    }
+
+    /// Where a command that writes tracked setup files (`config.toml`, a
+    /// pipeline, a prompt) writes them, or the refusal naming where to run it
+    /// instead. `reads` finishes "the dispatcher reads the project's …" in
+    /// that refusal, and `typed` is the command as the person typed it, so
+    /// the `-C` line can be pasted as it stands.
+    ///
+    /// The main checkout writes itself. A worktree on its own branch with
+    /// its own `.spoolway/` (`checkout` differs from `root`, not
+    /// [`borrowed`](Repo::borrowed)) writes its own copy, so the change can
+    /// be committed on that branch and opened as a pull request. The
+    /// dispatcher keeps reading `root` until the branch merges.
+    ///
+    /// Three worktrees refuse. One on a detached HEAD has no branch for the
+    /// change to ride on. A borrowed one has no `.spoolway/` on its
+    /// branch, and one lone file there would leave half a setup. A worktree
+    /// under [`Repo::worktree_root`] is a dispatcher lane's, and a task must
+    /// not move a person's private files out of their home.
+    pub fn tracked_write_root(&self, reads: &str, typed: &str) -> Result<TrackedWrite<'_>> {
+        if !self.in_linked_worktree() {
+            return Ok(TrackedWrite {
+                root: &self.checkout,
+                branch: None,
+            });
+        }
+        let dash_c = format!("spoolway -C {} {typed}", self.root.display());
+        if self.in_lane_worktree() {
+            bail!("the dispatcher reads the project's {reads}, not this worktree's.\n  {dash_c}");
+        }
+        if self.borrowed {
+            bail!(
+                "this worktree's branch has no .spoolway/ of its own, so there is no setup \
+                 here to write.\n  {dash_c}"
+            );
+        }
+        // Resolved here, before anything is written, and handed back for
+        // the note printed after the write: asked after it, a detached HEAD
+        // or a failing git would end the command with the file written and a
+        // promoted override already cleared.
+        let branch = current_branch_at(&self.checkout).with_context(|| {
+            format!("cannot tell which branch {} is on", self.checkout.display())
+        })?;
+        let Some(branch) = branch else {
+            bail!(
+                "this worktree is on a detached HEAD, so a change written here would have no \
+                 branch to be committed on. Check a branch out here to write its setup, or \
+                 write the main checkout's:\n  {dash_c}"
+            );
+        };
+        Ok(TrackedWrite {
+            root: &self.checkout,
+            branch: Some(branch),
+        })
+    }
+
+    /// Whether `checkout` sits under [`Repo::worktree_root`].
+    fn in_lane_worktree(&self) -> bool {
+        crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
 
     /// The `checkout:` fact a command that reads the tracked control plane
@@ -3848,17 +3927,22 @@ fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, boo
 /// answers correctly on a repo with no commits yet, and returns empty on a
 /// detached HEAD instead of the literal string "HEAD".
 pub fn branch_at(dir: &Path) -> Result<String> {
-    let branch = run(dir, "git", &["branch", "--show-current"])?
-        .trim()
-        .to_string();
-    if branch.is_empty() {
-        bail!(
+    current_branch_at(dir)?.with_context(|| {
+        format!(
             "{} is not on a branch (detached HEAD). Work is based on the branch of the \
              checkout it is queued in, so check one out first.",
             dir.display()
-        );
-    }
-    Ok(branch)
+        )
+    })
+}
+
+/// The branch `dir` has out, `None` on a detached HEAD, and an error when git
+/// cannot say. A caller that treats a detached HEAD as its own case reads
+/// this, so a git that failed to run is not reported as one.
+fn current_branch_at(dir: &Path) -> Result<Option<String>> {
+    let branch = run(dir, "git", &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    Ok((!branch.is_empty()).then(|| branch.to_string()))
 }
 
 /// `~/.spoolway/` in the spelling `Repo::root`'s canonicalized `start`

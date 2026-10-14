@@ -250,15 +250,15 @@ fn run() -> Result<()> {
         //
         // Every read below is against `repo.checkout`, not `repo.root`: a
         // command answers about the file actually in front of it. `set` and
-        // `override promote` are the exceptions that write `repo.root`, and
-        // refuse first in a linked worktree, whether it has a setup of its
-        // own (`checkout` differs from `root`) or reads the main checkout's.
-        // `sync`, further down, writes too, but against `repo.checkout` —
-        // see its own module doc — so it stays in step with every read here
-        // rather than joining `set`'s exception, and refuses only in a
-        // worktree that reads the main checkout's setup. `update` writes no project
-        // file at all any more, and is handled above, before a project is
-        // even discovered.
+        // `override promote` write `repo.checkout` too, through
+        // `Repo::tracked_write_root`: in a worktree on its own branch that
+        // is the worktree's copy, which the dispatcher does not read until
+        // the branch merges. A borrowed, lane or detached-HEAD worktree is
+        // refused.
+        // `sync`, further down, writes against `repo.checkout` as well — see
+        // its own module doc — and refuses only in a worktree that reads the
+        // main checkout's setup. `update` writes no project file at all any
+        // more, and is handled above, before a project is even discovered.
         Command::Config(ConfigCommand::Contract) => {
             commands::refuse_json("config contract", cli.json)?;
             commands::config_contract(&Repo::discover(&cwd)?)

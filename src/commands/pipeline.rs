@@ -1874,11 +1874,10 @@ fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
 /// private skeleton into the tracked control plane, then deletes the
 /// private files — the reverse of `pipeline copy`.
 ///
-/// Refused inside a linked worktree for the same reason `override promote`
-/// refuses there: the dispatcher reads `repo.root`'s tracked files, never a
-/// linked worktree's own copy, and `repo.checkout == repo.root` is what
-/// lets every path below be built from [`Repo`]'s own tracked accessors
-/// rather than a second, root-only copy of each. Refused outright in home
+/// Refused inside a linked worktree: the dispatcher reads `repo.root`'s
+/// tracked files, never a linked worktree's own copy, and `repo.checkout ==
+/// repo.root` is what lets every path below be built from [`Repo`]'s own
+/// tracked accessors rather than a second, root-only copy of each. Refused outright in home
 /// mode, where [`crate::local::is_repo_mode`] is false because the whole
 /// setup is already private and there is nothing to promote into.
 pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
@@ -3406,9 +3405,8 @@ mod tests {
         });
     }
 
-    /// The same refusal `override promote` gives from a linked worktree,
-    /// for the identical reason: the dispatcher reads `repo.root`'s tracked
-    /// files, never a worktree's own copy.
+    /// A linked worktree is refused: the dispatcher reads `repo.root`'s
+    /// tracked files, never a worktree's own copy.
     #[test]
     fn pipeline_promote_refuses_from_a_linked_worktree() {
         let (repo, _root_guard) = repo_for("promote-worktree");

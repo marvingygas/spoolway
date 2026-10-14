@@ -76,24 +76,18 @@ pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write one key into the project's own config.
+/// Write one key into the setup's own config.
 ///
-/// Refuses inside a linked worktree, including one that carries no
-/// `.spoolway/` and reads the main checkout's. The dispatcher only ever reads
-/// `repo.root`'s `config.toml`, never a worktree's own copy — so a write here
-/// would sit in a file nothing reads until the branch merges, silently. `-C`
-/// is the way around it, already built in, so the refusal names the exact
-/// invocation that lands in the file the dispatcher actually reads. In the
-/// main checkout `checkout` and `root` are the same directory, so nothing
-/// here changes for it.
+/// [`Repo::tracked_write_root`] decides where. The main checkout writes its
+/// own file. A worktree on its own branch writes the worktree's copy, so the
+/// change can ride that branch into a pull request; the dispatcher keeps
+/// reading the main checkout's until the branch merges. A worktree that
+/// borrows the main checkout's setup, that is a dispatcher lane's, or that
+/// is on a detached HEAD is refused with the `-C` invocation that lands in
+/// the file the dispatcher reads.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
-    if repo.in_linked_worktree() {
-        bail!(
-            "the dispatcher reads the project's config, not this worktree's.\n  spoolway -C {} \
-             config set {key} {value}",
-            repo.root.display()
-        );
-    }
+    let write = repo.tracked_write_root("config", &format!("config set {key} {value}"))?;
+    let write_root = write.root;
     crate::confkv::check_typed(key, value)?;
     // Held from the load to the save: a config loaded before the lock was
     // taken is the one a parallel `config set` has since changed, and saving
@@ -103,18 +97,21 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
     // layer merged in, so saving a key out of it checks the tracked text
     // against values it never held and refuses every key but the overridden
     // one — or writes the layer's value into the tracked file.
-    let tracked = Config::load_tracked(&repo.root)?;
+    let tracked = Config::load_tracked(write_root)?;
     let updated = crate::confkv::set(&tracked, key, value)?;
-    updated.save_key(&repo.root, key)?;
+    updated.save_key(write_root, key)?;
     println!("{key} = {}", crate::confkv::get(&updated, key)?);
-    for line in follow_up_lines(repo, key, &updated)? {
+    if let Some(note) = write.note() {
+        println!("{note}");
+    }
+    for line in follow_up_lines(repo, write_root, key, &updated)? {
         eprintln!("{line}");
     }
     Ok(())
 }
 
 /// Every line `config set` prints on stderr after the save, read from the
-/// config the project now runs on rather than from `updated`.
+/// config `write_root` now runs on rather than from `updated`.
 ///
 /// `doctor` and the dispatcher judge the override-merged config, so the
 /// warnings and file checks must too: judged on the tracked file alone, a set
@@ -123,10 +120,18 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
 /// `doctor` never raises. The checks are warnings, never refusals: a script
 /// sets keys in sequence, and the next command may be the one that makes a
 /// check pass.
-fn follow_up_lines(repo: &Repo, key: &str, updated: &Config) -> Result<Vec<String>> {
-    let merged = Config::load(&repo.root)?;
+fn follow_up_lines(
+    repo: &Repo,
+    write_root: &Path,
+    key: &str,
+    updated: &Config,
+) -> Result<Vec<String>> {
+    // The file just written, not `repo.root`'s: in a worktree of its own the
+    // value was saved there, and the main checkout's copy would read as the
+    // layer shadowing it.
+    let merged = Config::load(write_root)?;
     let mut lines = Vec::new();
-    lines.extend(shadow_note(&repo.root, key, updated, &merged)?);
+    lines.extend(shadow_note(write_root, key, updated, &merged)?);
     for warning in crate::confkv::warnings(&merged, key) {
         lines.push(format!("warning: {warning}"));
     }
@@ -704,40 +709,118 @@ mod tests {
         std::fs::remove_dir_all(&fake_home).ok();
     }
 
+    /// In a worktree of its own, `config set` loads, saves and checks the
+    /// worktree's `config.toml` and leaves the main checkout's alone.
     #[test]
-    fn config_set_refuses_inside_a_linked_worktree_and_writes_nothing() {
-        let (repo, root, _base_guard) = worktree_fixture("set");
+    fn config_set_in_a_worktree_of_its_own_writes_the_worktrees_file() {
+        let (repo, root, _base_guard) = worktree_fixture("set-own");
         let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
-        let before_wt = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
 
-        let err = config_set(&repo, "unattended.blocked_agent", "changed")
-            .expect_err("config set must refuse inside a linked worktree");
-        let message = format!("{err:#}");
-        assert!(
-            message.starts_with("the dispatcher reads the project's config, not this worktree's."),
-            "unexpected message: {message}"
-        );
-        // `repo.root`'s own spelling, not the fixture's: on Windows the
-        // discovery reads the root out of git, which prints forward slashes,
-        // while the fixture built `root` with the platform's own — the same
-        // directory as a `Path`, but not the same string.
-        assert!(
-            message.contains(&format!(
-                "spoolway -C {} config set unattended.blocked_agent changed",
-                repo.root.display()
-            )),
-            "message did not name the -C invocation: {message}"
-        );
+        config_set(&repo, "unattended.blocked_agent", "changed").unwrap();
 
+        let wt = Config::load(&repo.checkout).unwrap();
+        assert_eq!(wt.unattended.blocked_agent, "changed");
         assert_eq!(
             std::fs::read_to_string(Config::path_in(&root)).unwrap(),
             before_root,
-            "the project's config must be untouched by a refused set"
+            "the main checkout's file must be byte-identical"
+        );
+        assert_eq!(
+            repo.tracked_write_root("config", "config set k v")
+                .unwrap()
+                .note()
+                .as_deref(),
+            Some("  the main checkout keeps its own copy until task/x merges")
+        );
+    }
+
+    /// A borrowed worktree is refused for having no setup of its own, and
+    /// neither config file is touched.
+    #[test]
+    fn config_set_refuses_a_borrowed_worktree_and_writes_nothing() {
+        let (repo, root, _base_guard) = worktree_fixture("set-borrowed");
+        let mut borrowed = repo.clone();
+        borrowed.checkout = repo.root.clone();
+        borrowed.borrowed = true;
+        let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
+        let before_wt = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
+
+        let err = config_set(&borrowed, "unattended.blocked_agent", "changed").unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "this worktree's branch has no .spoolway/ of its own, so there is no setup \
+                 here to write.\n  spoolway -C {} config set unattended.blocked_agent changed",
+                repo.root.display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(Config::path_in(&root)).unwrap(),
+            before_root
         );
         assert_eq!(
             std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap(),
-            before_wt,
-            "the worktree's own config must be untouched too — set refuses, it does not redirect"
+            before_wt
+        );
+    }
+
+    /// A worktree on a detached HEAD is refused before the save, so the
+    /// value is not written and then reported as a failure.
+    #[test]
+    fn config_set_refuses_a_detached_worktree_and_writes_nothing() {
+        let (repo, _root, _base_guard) = worktree_fixture("set-detached");
+        git(&repo.checkout, &["checkout", "-q", "--detach"]);
+        let before = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
+
+        let err = config_set(&repo, "unattended.blocked_agent", "changed").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("detached HEAD"),
+            "unexpected message: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap(),
+            before
+        );
+    }
+
+    /// A dispatcher lane's worktree keeps the old refusal, and no config
+    /// file is touched — not the lane's own, not the main checkout's.
+    #[test]
+    fn config_set_refuses_a_lane_worktree_and_writes_nothing() {
+        let (repo, root, _base_guard) = worktree_fixture("set-lane");
+        let lane_dir = repo.worktree_root().join("lane");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/lane",
+                lane_dir.to_str().unwrap(),
+            ],
+        );
+        let mut lane = repo.clone();
+        lane.checkout = lane_dir;
+        let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
+        let before_lane = std::fs::read_to_string(Config::path_in(&lane.checkout)).unwrap();
+
+        let err = config_set(&lane, "unattended.blocked_agent", "changed").unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the dispatcher reads the project's config, not this worktree's.\n  spoolway \
+                 -C {} config set unattended.blocked_agent changed",
+                repo.root.display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(Config::path_in(&root)).unwrap(),
+            before_root
+        );
+        assert_eq!(
+            std::fs::read_to_string(Config::path_in(&lane.checkout)).unwrap(),
+            before_lane
         );
     }
 
@@ -1148,7 +1231,9 @@ mod tests {
                     config: Config::load(root).unwrap(),
                     home: root.join(".home"),
                 };
-                let lines = follow_up_lines(&repo, "unattended.blocked_model", &updated).unwrap();
+                let lines =
+                    follow_up_lines(&repo, &repo.root, "unattended.blocked_model", &updated)
+                        .unwrap();
                 assert!(
                     lines.iter().any(|l| l.contains("blocked_model is blank")),
                     "{lines:?}"
