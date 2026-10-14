@@ -845,7 +845,7 @@ fi
 # it, and the starter shows the line to uncomment.
 if jq -e '
     (.keys.step | index("first")) != null
-    and (.fields.first | test("Command steps only"))
+    and (.fields.first | test("declared root"))
     and (.template | test("# first: true"))
   ' <<<"$PIPELINE_JSON" >/dev/null 2>&1; then
   ok "the step keys carry first, with its effect and a starter line"

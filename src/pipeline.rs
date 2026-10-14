@@ -605,15 +605,16 @@ pub struct Step {
     ///   is the answer, not the defect it was under `when: last`.
     /// - A task with **no plan** runs it. There is no chain to be last in.
     ///
-    /// A command step's key. [`Pipeline::validate`] refuses it on an agent
-    /// step: a lane walked past is a prompt that never reports, and the whole
-    /// point here is work nobody has to judge.
+    /// Any step kind may carry it. A task walked past the step never starts
+    /// a lane or a command there, and a task whose lane or command is already
+    /// working on the step is not walked past it, so nothing is left
+    /// unreported.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last: bool,
 
     /// Run this step only on a chain's declared root: a task whose own
     /// `depends_on` is empty. Every dependent task walks past it to
-    /// `on_pass` without starting the command.
+    /// `on_pass` without the step running.
     ///
     /// `last:` asks whether anything is still open above a task, through the
     /// live graph, because an archived task's dependents have to keep
@@ -634,11 +635,9 @@ pub struct Step {
     /// - A task with **no declared dependency at all** runs it. There is no
     ///   chain above it to have already run this for.
     ///
-    /// A command step's key, exactly as `last:` is — [`Pipeline::validate`]
-    /// refuses it on an agent step for the same reason: a lane walked past
-    /// is a prompt that never reports. It also refuses a command step that
-    /// declares both `first:` and `last:`, since a step naming both has no
-    /// single command left to be, root or not.
+    /// Any step kind may carry it, exactly as `last:`. [`Pipeline::validate`]
+    /// refuses a step that declares both `first:` and `last:`, since a step
+    /// naming both asks opposite questions about the same chain.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first: bool,
 
@@ -660,9 +659,9 @@ pub struct Step {
     /// moved on, which is what a `background: true` run's task does — see
     /// [`crate::command_step::Runs::serial_holder`].
     ///
-    /// A command step's key, like `last:` — [`Pipeline::validate`] refuses
-    /// it on an agent step, whose lane is not a run the dispatcher can hold
-    /// back for its turn.
+    /// A command step's key — [`Pipeline::validate`] refuses it on an agent
+    /// step, whose lane is not a run the dispatcher can hold back for its
+    /// turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub serial: bool,
 
@@ -1492,27 +1491,6 @@ impl Pipeline {
                         step.id
                     );
                 }
-                // A lane walked past is a prompt that never reports, and
-                // whatever the step was for goes unjudged rather than undone.
-                // `last:` is for work an exit code answers.
-                if step.last {
-                    bail!(
-                        "step `{}` declares `last:` but runs no command — a step every task \
-                         but one walks past has to be a `run:`, since a lane nobody started \
-                         reports nothing",
-                        step.id
-                    );
-                }
-                // Same reasoning as `last:` above, for the opposite end of a
-                // chain.
-                if step.first {
-                    bail!(
-                        "step `{}` declares `first:` but runs no command — a step every task \
-                         but the root walks past has to be a `run:`, since a lane nobody \
-                         started reports nothing",
-                        step.id
-                    );
-                }
             }
             // Only a command step's run is something a pass starts and can
             // therefore hold back; an agent step's lane has no such turn to
@@ -1525,13 +1503,13 @@ impl Pipeline {
                     step.id
                 );
             }
-            // `first:` and `last:` ask opposite questions about a chain, so a
-            // command step naming both has no single command left to be, root
-            // or not.
+            // `first:` and `last:` ask opposite questions about a chain. A
+            // step naming both runs only for a lone task, so the pair is a
+            // mistake rather than a rule.
             if step.first && step.last {
                 bail!(
-                    "step `{}` declares both `first:` and `last:` — a command step can be the \
-                     one a chain's root runs or the one only its top runs, not both",
+                    "step `{}` declares both `first:` and `last:` — a step can be the one a \
+                     chain's root runs or the one only its top runs, not both; delete one",
                     step.id
                 );
             }
@@ -3657,40 +3635,46 @@ mod tests {
         }
     }
 
-    /// `last:` walks every task but one past the step, and a lane nobody
-    /// started is a prompt that never reports — so whatever the step was for
-    /// goes unjudged rather than undone. It is a command step's key, and every
-    /// other kind is refused it.
+    /// `last:` walks every task but one past the step without starting
+    /// anything there, so an agent step may carry it as a command step does.
     #[test]
-    fn rejects_last_on_a_step_that_runs_no_command() {
-        let err = parse(
+    fn accepts_last_on_an_agent_step() {
+        let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    model: m\n    last: true\n    \
              on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("`last:`"), "{message}");
-        assert!(message.contains("runs no command"), "{message}");
+        .unwrap();
+        assert!(pipeline.step("a").unwrap().last);
     }
 
-    /// `first:` runs a command step for a chain's declared root and walks
-    /// every other task past it — the same shape as `last:`, so it is
-    /// refused wherever `last:` is: a lane nobody started reports nothing.
+    /// `first:` walks every task but a chain's root past the step, so an
+    /// agent step may carry it as a command step does.
     #[test]
-    fn rejects_first_on_a_step_that_runs_no_command() {
-        let err = parse(
+    fn accepts_first_on_an_agent_step() {
+        let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    model: m\n    first: true\n    \
              on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        assert!(pipeline.step("a").unwrap().first);
+    }
+
+    /// An agent step declaring both keys is refused the same way a command
+    /// step is.
+    #[test]
+    fn rejects_an_agent_step_that_declares_both_first_and_last() {
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    first: true\n    \
+             last: true\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("`first:`"), "{message}");
-        assert!(message.contains("runs no command"), "{message}");
+        assert!(message.contains("`last:`"), "{message}");
     }
 
     /// `first:` and `last:` ask opposite questions about the same chain, so a
-    /// command step declaring both has no single command left to be, root or
-    /// not.
+    /// command step declaring both is refused.
     #[test]
     fn rejects_a_command_step_that_declares_both_first_and_last() {
         let err = parse(
