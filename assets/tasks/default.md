@@ -34,6 +34,15 @@ Out of scope. Doing any of these is a review failure, not a bonus.
 - [[the adjacent thing this task must not do]]
 - anything not required by the acceptance criteria below
 
+## Risks
+
+What could go wrong with this change, and what
+this task does about each. Drop this heading if
+the task carries none.
+
+- [[what could go wrong]]
+  Mitigation: [[what this task does about it]]
+
 ## Acceptance criteria
 
 - [[a statement that is checkably true or false the moment the task is done]]
