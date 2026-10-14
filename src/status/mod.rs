@@ -199,8 +199,15 @@ pub struct Row {
     /// board's band reads the first `Some` any row of a group carries, the
     /// same way it already does for [`Self::issue_url`]'s `group_urls`.
     pub after: Option<String>,
+    /// The step the STEP column names: the task's own stage, the step a boot
+    /// mark names, or — on a row stopped on `paused` or an unstaffed
+    /// `blocked` — the step the stop came from, read by [`origin_step`].
+    /// STATE already says the row is paused or blocked, so this repeats it
+    /// only where nothing records the step the stop came from: a task
+    /// paused from the board before it started, or an old or hand-edited
+    /// file.
     pub stage: String,
-    /// How many times this task has arrived at the step it is on now —
+    /// How many times this task has arrived at the step [`Self::stage`] names —
     /// [`crate::task::Frontmatter::arrivals`]'s own entry for it,
     /// [`crate::task::Task::rounds_at`]'s own answer. Whichever route
     /// carried it there each time, and with no budget behind it: a step
@@ -270,13 +277,13 @@ pub struct Row {
     /// banked. A [`State::Finished`] row holds the figure it read when the
     /// board first saw it finish instead — see [`finish_settled`].
     ///
-    /// A paused row reads the ledger at [`ledger_stage`] rather than
-    /// `task.stage()`: `paused` itself is not a step any pipeline declares
-    /// and so never has a line of its own — the lane that paused it banked
-    /// under the step it actually ran, named by `parked_from` or
-    /// `paused_at`. Idle, parked and permission-prompt time bank nothing, so
-    /// this is why a paused row's own figures stop moving the moment it
-    /// lands there — see gh-378 / issue #380.
+    /// A stopped row reads the ledger at [`origin_step`] rather than
+    /// `task.stage()`: `paused` is not a step any pipeline declares and so
+    /// never has a line of its own, and no lane ran at an unstaffed
+    /// `blocked` — the lane that stopped it banked under the step it actually
+    /// ran. Idle, parked and permission-prompt time bank nothing, so this is
+    /// why a paused row's own figures stop moving the moment it lands there
+    /// — see gh-378 / issue #380.
     pub lane_time: Option<i64>,
     /// What happens to this task next: the step it goes to, or — when it is
     /// stuck — what has to happen before it goes anywhere.
@@ -3754,27 +3761,47 @@ fn paused_arrow(task: &crate::task::Task) -> Option<String> {
     }
 }
 
-/// The step whose ledger lines answer OUT, COST and TIME for `task` — its
-/// own `stage()` for every state but `paused`, which names no step any
-/// pipeline declares and so matches no ledger line at all: `spent_at`,
-/// `cost_at` and `lane_time_at` all filter on `entry.step`, and a lane is
-/// banked under the real step it ran, never under `paused` itself.
+/// The step a row names in its STEP column, and the step whose ledger lines
+/// answer its OUT, COST and TIME: `task.stage()` itself, except on a row
+/// that is stopped, where it is the step the stop came from.
 ///
-/// Told apart the same two ways [`paused_next`] already reads: `paused_at`
-/// for a gate, `parked_from` for a person's own keypress, an aborted
-/// Escape, or a lane `escalate_clock` gave up on. `None` of either — a task
-/// hand-edited onto `paused` — falls back to `stage()` unchanged, same as
-/// every other state, which answers no lines and so no figures rather than
-/// a wrong step's.
-fn ledger_stage(task: &crate::task::Task) -> &str {
-    if task.stage() != crate::pipeline::PAUSED {
-        return task.stage();
-    }
-    task.front
-        .paused_at
-        .as_deref()
-        .or(task.front.parked_from.as_deref())
-        .unwrap_or_else(|| task.stage())
+/// A stopped task sits on `paused` or `blocked`, and the row's STATE already
+/// says which, so a STEP repeating it would leave the step the stop came
+/// from off the row entirely. `paused` is never a step a lane banks under,
+/// and at an unstaffed `blocked` no lane ran for this stop: `spent_at`,
+/// `cost_at` and `lane_time_at` all filter on `entry.step`, and the lane
+/// that stopped banked under the step it ran.
+///
+/// `paused` reads `parked_from` first: a board park moves the task with
+/// `set_stage_unbanked`, which leaves `arrived_from` naming the step before
+/// the one it was parked on. Then `arrived_from`, which `set_stage` writes
+/// on a gate's own move and on an unblocker's `--pause` alike — the latter
+/// reads `blocked` there, the step that paused it, where its `paused_at`
+/// still names the step that first blocked. `paused_at` comes last, for a
+/// file with no `arrived_from` at all.
+///
+/// `blocked` reads `blocked_from`, then `arrived_from`, only when
+/// `parked_on_blocked` says nobody staffs it: a staffed `blocked` runs an
+/// unblocker lane, so `blocked` is the step at work and the row says so.
+///
+/// None of them set — a task paused from the board before it ever started,
+/// or an old or hand-edited file — answers the stage itself, so such a row
+/// draws exactly as it did before any of this was read.
+fn origin_step(task: &crate::task::Task, parked_on_blocked: bool) -> &str {
+    let front = &task.front;
+    let origin = match task.stage() {
+        crate::pipeline::PAUSED => front
+            .parked_from
+            .as_deref()
+            .or(front.arrived_from.as_deref())
+            .or(front.paused_at.as_deref()),
+        crate::pipeline::BLOCKED if parked_on_blocked => front
+            .blocked_from
+            .as_deref()
+            .or(front.arrived_from.as_deref()),
+        _ => None,
+    };
+    origin.unwrap_or_else(|| task.stage())
 }
 
 /// The rows themselves, from state already read. Split out so the board can
@@ -3854,8 +3881,17 @@ fn build_rows(
         // on disk until its boot has returned, and the row should name the
         // step being booted rather than the queue it is leaving.
         let claimed = claims.get(task.id()).map(String::as_str);
-        let shown_stage = claimed.unwrap_or(task.stage());
-        // How many times the task has reached the step it is on, whichever
+        // Parked in front of a person, rather than a lane spoolway is about to
+        // start there — the one question that decides whether a task on
+        // `blocked` reads as a row like any other running step or as a wait.
+        let parked_on_blocked = task.stage() == crate::pipeline::BLOCKED
+            && !pipeline.blocked_is_staffed(repo.unattended());
+        // The step a stopped row came from, and the stage itself on every
+        // other row. STEP, the arrival count and the ledger's figures all
+        // read it, so a stopped row describes one step throughout.
+        let origin = origin_step(task, parked_on_blocked);
+        let shown_stage = claimed.unwrap_or(origin);
+        // How many times the task has reached the step STEP names, whichever
         // route carried it there each time. Computed once, ahead of the
         // match below, because it is a fact about the step a task sits on
         // and not about any one of the states that match branches out into.
@@ -3908,12 +3944,6 @@ fn build_rows(
                         .map(|peer| peer.id()),
                 )
             });
-
-        // Parked in front of a person, rather than a lane spoolway is about to
-        // start there — the one question that decides whether a task on
-        // `blocked` reads as a row like any other running step or as a wait.
-        let parked_on_blocked = task.stage() == crate::pipeline::BLOCKED
-            && !pipeline.blocked_is_staffed(repo.unattended());
 
         // What happens to this task next. For one that is moving that is the
         // step it goes to; for one that is stuck it is whatever has to happen
@@ -4130,14 +4160,14 @@ fn build_rows(
             // it settles, by which time the task has moved on to the next one.
             out: match &session {
                 Some(session) => Some(session.output),
-                None => spent_at(ledger, task.id(), ledger_stage(task)),
+                None => spent_at(ledger, task.id(), origin),
             },
             // Same two sources as OUT, in the same order and for the same
             // reason: a running step is banked only once it settles, by which
             // time the task has moved on.
             cost: match &session {
                 Some(session) => session.cost,
-                None => cost_at(ledger, task.id(), ledger_stage(task)),
+                None => cost_at(ledger, task.id(), origin),
             },
             // Live goes by whether the lane itself is open, not by whether a
             // transcript could be read from it — a lane that has just
@@ -4149,7 +4179,7 @@ fn build_rows(
             lane_time: match (command_run, live) {
                 (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
                 (None, true) => elapsed,
-                (None, false) => lane_time_at(ledger, task.id(), ledger_stage(task)),
+                (None, false) => lane_time_at(ledger, task.id(), origin),
             },
             next,
             resumable,
@@ -7297,6 +7327,130 @@ mod tests {
             row2.lane_time, row.lane_time,
             "TIME never moves while paused"
         );
+    }
+
+    /// A stopped row names the step the stop came from in STEP, where STATE
+    /// already says `paused` or `blocked`. Each task here reaches its stop
+    /// the way the real move does, so `arrived_from` holds what `set_stage`
+    /// and `set_stage_unbanked` leave there rather than a value set by hand.
+    #[test]
+    fn a_stopped_rows_step_names_the_step_the_stop_came_from() {
+        use crate::pipeline::{BLOCKED, PAUSED};
+        let (repo, _root_guard) = fixture("stopped-row-origin");
+        let pipelines = Pipelines::builtin();
+        let stop = |id: &str, then: &dyn Fn(&mut crate::task::Task)| {
+            add_to(&repo, id, &[], Some("implement"), Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.set_stage("review", None);
+            then(&mut task);
+            task.save().unwrap();
+        };
+
+        // Attended, review blocked: nobody staffs `blocked` here.
+        stop("add-api", &|task| {
+            task.front.blocked_from = Some("review".into());
+            task.set_stage(BLOCKED, None);
+        });
+        // The unblocker paused it: `paused_at` still names the step that
+        // first blocked, and `arrived_from` names `blocked`.
+        stop("ship-ui", &|task| {
+            task.front.blocked_from = Some("review".into());
+            task.set_stage(BLOCKED, None);
+            task.front.paused_at = Some("review".into());
+            task.set_stage(PAUSED, None);
+        });
+        // Review's gate held its pass.
+        stop("gate-it", &|task| {
+            task.front.paused_at = Some("review".into());
+            task.set_stage(PAUSED, None);
+        });
+        // A blocked row parked from the board: `parked_from: blocked`.
+        stop("park-wall", &|task| {
+            task.front.blocked_from = Some("review".into());
+            task.set_stage(BLOCKED, None);
+            park(task, "paused from the board", false);
+        });
+        // A running step parked from the board: `arrived_from` still names
+        // `implement`, the step before, so `parked_from` has to win.
+        stop("park-run", &|task| {
+            park(task, "paused from the board", false)
+        });
+        // A hand-edited file naming nothing draws as it always did.
+        stop("bare", &|task| {
+            task.set_stage(PAUSED, None);
+            task.front.arrived_from = None;
+        });
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+
+        assert_eq!(row("add-api").stage, "review");
+        assert!(matches!(row("add-api").state, State::Blocked));
+        assert_eq!(row("ship-ui").stage, BLOCKED);
+        assert!(matches!(row("ship-ui").state, State::Paused));
+        assert_eq!(row("gate-it").stage, "review");
+        assert!(matches!(row("gate-it").state, State::Paused));
+        assert_eq!(row("park-wall").stage, BLOCKED);
+        assert!(matches!(row("park-wall").state, State::Paused));
+        assert_eq!(row("park-run").stage, "review");
+        assert_eq!(row("bare").stage, PAUSED);
+        // The arrival count is the origin step's, not the stage's: `review`
+        // was reached once, `paused` never by `set_stage_unbanked`.
+        assert_eq!(row("park-run").arrivals, 1);
+    }
+
+    /// A `blocked` an unblocker lane staffs is the step at work, so a running
+    /// row on it keeps STEP `blocked` even with `blocked_from` on file.
+    #[test]
+    fn a_staffed_blocked_row_with_a_live_lane_keeps_its_step() {
+        let (mut repo, _root_guard) = fixture("staffed-blocked-step");
+        repo.config.unattended.enabled = true;
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "fix-auth", &[], Some("review"), Some("fix-auth"));
+        let mut task = repo.task("fix-auth").unwrap();
+        task.front.blocked_from = Some("review".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let live = lane(
+            &crate::mux::lane_name(crate::pipeline::BLOCKED, &task),
+            &repo.root,
+        );
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[live], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "fix-auth").unwrap();
+        assert!(matches!(row.state, State::Running), "{}", row.next);
+        assert_eq!(row.stage, crate::pipeline::BLOCKED);
+    }
+
+    /// An attended block reads OUT, COST and TIME at the step it blocked
+    /// from, the same step STEP names: no lane banks under `blocked` there.
+    #[test]
+    fn an_attended_blocked_rows_figures_read_the_step_it_blocked_from() {
+        let (repo, _root_guard) = fixture("blocked-row-reads-its-own-step");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "add-api", &[], Some("review"), Some("add-api"));
+        let mut task = repo.task("add-api").unwrap();
+        task.front.blocked_from = Some("review".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let mut held = banked("add-api", "review", "s1", Some(0.07));
+        held.wall_s = 41;
+        held.tokens.output = 900;
+        let ledger = vec![held];
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &ledger, None).unwrap();
+        let row = rows.iter().find(|r| r.id == "add-api").unwrap();
+        assert_eq!(row.stage, "review");
+        assert_eq!(row.lane_time, Some(41));
+        assert_eq!(row.out, Some(900));
+        assert_eq!(row.cost, Some(0.07));
     }
 
     /// An archived task is only worth a row while its group still has
