@@ -28,22 +28,25 @@
 #
 # **Real waits.** Age is never faked. The suite never edits a transcript at
 # all: every byte stays as Claude Code wrote it, and a session is old because
-# the suite waited. That is why a run takes about ten minutes:
+# the suite waited. That is why a run takes about sixteen minutes:
 #
 #     0:00  a real lane runs one turn and holds at the first gate
 #     2:00  resume → the same session, and its first turn reads the cache
 #           the lane settles at a second gate
-#     8:00  resume → a fresh session, because the default five minutes have
+#     8:00  resume → the same session again: no `prompt_cache_ttl` is set,
+#           so no age refuses it, however long it has sat
+#           the project then sets `prompt_cache_ttl = "5m"`
+#    14:00  resume → a fresh session, because the set five minutes have
 #           passed since the last reply
 #
-# The suite checks spoolway's call at eight minutes and does not assert the
-# cache is cold then: Claude Code often writes to the one-hour cache, which is
-# still warm. What the two-minute check adds is Anthropic's own
+# The suite checks spoolway's call at eight and fourteen minutes and does not
+# assert the cache is cold then: Claude Code often writes to the one-hour
+# cache, which is still warm. What the two-minute check adds is Anthropic's own
 # `cache_read_input_tokens`, so a pass shows a warm resume really hit the
 # cache. A failure prints the turn's usage, which tells an early eviction on
 # Anthropic's side from a bug here.
 #
-# **Cost.** Five turns of `claude-haiku-4-5` — three through the pipeline
+# **Cost.** Six turns of `claude-haiku-4-5` — four through the pipeline
 # scenario, two more through `agent verify --live` at the end — each a few
 # thousand tokens against a fixture repo of two files. Fractions of a cent, and
 # it is opt-in either way: nothing here runs unless `SPOOLWAY_E2E_CLOUD=1` is
@@ -55,7 +58,7 @@
 # scratch tree — the same thing running `claude` in a new directory does. It
 # edits nothing of yours, and nothing of its own either.
 #
-# covers: models.<glob>.prompt_cache_ttl — against a real claude session, aged by waiting: unset, a resume inside the 5m default continues the session and reads the cache, and one past it is refused
+# covers: models.<glob>.prompt_cache_ttl — against a real claude session, aged by waiting: unset, a resume continues the session at any age, and reads the cache while it is warm; once a limit is set, a resume past it is refused
 # covers: agent.verify.live — every transcript reading, off a real turn and a resumed one, named one by one
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -164,7 +167,7 @@ must "one cloud lane at a time"  "$SPOOLWAY" config set agents.claude.concurrenc
 must "the model's window"        "$SPOOLWAY" config set "models.$MODEL.context_window" 200000
 must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_reuse_ctx 90
 
-# Three visits by one prompt, with a gate after each of the first two.
+# Four visits by one prompt, with a gate after each of the first three.
 #
 # The gate is the sequencing, and it is the only way to get one: the decision
 # under test is taken when the next lane starts, in the same pass that banks the
@@ -173,7 +176,7 @@ must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_re
 # `paused` with the lane's spend banked, the suite waits a real while, and
 # `spoolway resume` starts the next lane.
 cat > .spoolway/pipelines/warmth.yml <<YAML
-# Written by scripts/e2e/suites/warmth.sh. Three steps, one prompt, two gates.
+# Written by scripts/e2e/suites/warmth.sh. Four steps, one prompt, three gates.
 steps:
   - id: first
     description: Write the note, and stop for a person.
@@ -193,7 +196,16 @@ steps:
     on_pass: third
 
   - id: third
-    description: Come back after the five minutes have passed — and open fresh.
+    description: Come back after eight minutes with no limit set, and stop again.
+    agent: claude
+    prompt: builder
+    model: $MODEL
+    session: true
+    gate: true
+    on_pass: fourth
+
+  - id: fourth
+    description: Come back after the limit the suite set has passed — and open fresh.
     agent: claude
     prompt: builder
     model: $MODEL
@@ -380,10 +392,11 @@ PY
   return 0
 }
 
-# --------------------------------------------------- one task, gated twice
+# --------------------------------------------------- one task, gated three times
 #
-# No `prompt_cache_ttl` is set on this model — every model ships that way, so
-# the five-minute default applies, and nothing in the project names the limit.
+# No `prompt_cache_ttl` is set on this model to begin with, so nothing in the
+# project names a limit and no age refuses a session. The suite writes one
+# only after the unset resume has been checked.
 task_doc "$LIVE/waits.md" waits "$BODY" "group: waits" "pipeline: warmth"
 must "a task for waits" "$SPOOLWAY" queue add --from "$LIVE/waits.md"
 if reach_gate waits first; then
@@ -394,7 +407,7 @@ if reach_gate waits first; then
   # first turn the resumed lane added.
   FIRST_LINES=$(wc -l < "$(transcript_of "$first_sid")" 2>/dev/null || echo 0)
 
-  # About two minutes on, well inside the default horizon, so the conversation
+  # About two minutes on, so the cache is certainly warm and the conversation
   # is carried. The resumed lane's first turn must read Anthropic's cache. A
   # failure prints that turn's usage: zero cache read with a healthy shape is
   # an eviction on Anthropic's side, and a missing usage block is a bug here.
@@ -433,26 +446,47 @@ PY
       printf '        first turn usage after the resume: %s\n' "${usage:-none found}"
     fi
 
-    # More than five minutes after the second lane's last reply, with the
-    # default still in force: the store is refused and the ledger names a new
-    # session. Nothing here says the cache is cold — Claude Code often writes
-    # to the one-hour cache. The check is spoolway's call.
+    # More than five minutes after the second lane's last reply, with no limit
+    # set: the session is still carried. Before the default was removed this
+    # resume was refused, so the same session id here is what shows the limit
+    # is gone.
     age 360
     must "resume waits again" "$SPOOLWAY" resume waits
-    if drive waits gone 600; then
+    if reach_gate waits third; then
       third_sid=$(session_of waits third)
-      if [ -n "$third_sid" ] && [ "$third_sid" != "$second_sid" ]; then
-        ok "a resume at 8m opened a fresh session"
+      if [ -n "$second_sid" ] && [ "$second_sid" = "$third_sid" ]; then
+        ok "a resume at 8m with no limit set continued the same session"
       else
-        bad "a resume at 8m opened a fresh session (second \`$second_sid\`, third \`$third_sid\`)"
+        bad "a resume at 8m with no limit set continued the same session (second \`$second_sid\`, third \`$third_sid\`)"
         grep '"task":"waits"' "$SPOOLWAY_PROJECT_HOME/usage.jsonl" | sed 's/^/        /'
       fi
-      opened_fresh waits third "and the task file says the third step opened fresh"
-      has "and which bound refused it" \
-        "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/waits.md"
-    else
-      bad "a resume at 8m opened a fresh session (the task stopped at \`$(stage_of waits)\`)"
-      tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/waits · third.log" 2>/dev/null | sed 's/^/        /'
+      if grep -qE '`third`.*opened fresh' "$SPOOLWAY_PROJECT_HOME/queue/waits.md" 2>/dev/null; then
+        bad "and the task file says the third step did not open fresh"
+      else
+        ok "and the task file says nothing about the third step opening fresh"
+      fi
+
+      # Now the project writes a limit, and the same wait is refused. Nothing
+      # says the cache is cold — Claude Code often writes to the one-hour
+      # cache. The check is spoolway's call.
+      must "a five-minute limit" "$SPOOLWAY" config set "models.$MODEL.prompt_cache_ttl" 5m
+      age 360
+      must "resume waits a last time" "$SPOOLWAY" resume waits
+      if drive waits gone 600; then
+        fourth_sid=$(session_of waits fourth)
+        if [ -n "$fourth_sid" ] && [ "$fourth_sid" != "$third_sid" ]; then
+          ok "a resume past the set 5m limit opened a fresh session"
+        else
+          bad "a resume past the set 5m limit opened a fresh session (third \`$third_sid\`, fourth \`$fourth_sid\`)"
+          grep '"task":"waits"' "$SPOOLWAY_PROJECT_HOME/usage.jsonl" | sed 's/^/        /'
+        fi
+        opened_fresh waits fourth "and the task file says the fourth step opened fresh"
+        has "and which bound refused it" \
+          "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/waits.md"
+      else
+        bad "a resume past the set 5m limit opened a fresh session (the task stopped at \`$(stage_of waits)\`)"
+        tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/waits · fourth.log" 2>/dev/null | sed 's/^/        /'
+      fi
     fi
   fi
 fi

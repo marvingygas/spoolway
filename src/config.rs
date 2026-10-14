@@ -1118,10 +1118,10 @@ pub struct AgentProfile {
     /// prompt cache had gone cold. Two settings governed one decision, and
     /// the second was inert unless some model declared a lifetime — that
     /// lifetime is now the whole of it, as `models.<glob>.prompt_cache_ttl`.
-    /// That key now defaults to five minutes on a hosted model, so what this
-    /// saying `true` used to do (resume however cold) is `"0"` there. Kept only so an
-    /// existing config still parses; dropped unconditionally on the next
-    /// save.
+    /// That key sets no limit until a project writes one, so what this
+    /// saying `true` used to do (resume however cold) is the key left unset,
+    /// or `"0"`. Kept only so an existing config still parses; dropped
+    /// unconditionally on the next save.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     session_reuse_uncached: bool,
@@ -2356,9 +2356,11 @@ pub(crate) mod human_duration {
     ///
     /// For a fact a project may leave unstated —
     /// [`crate::usage::ModelPrice::prompt_cache_ttl`] is the one. Absent and
-    /// zero have to stay distinct there: absent means "nobody has said", so
-    /// the default limit applies, and zero means "no limit", which a bare `"0"`
-    /// spells.
+    /// zero stay distinct there: absent means "nobody has said", and zero is a
+    /// statement that there is no limit, which a bare `"0"` spells. Neither
+    /// has a limit today, but only the second is something a person wrote.
+    /// A blank string is not accepted here; `ModelPrice`'s own reader
+    /// takes it out first.
     pub mod optional {
         use super::*;
 
@@ -3943,8 +3945,8 @@ mod tests {
     /// `session_reuse_uncached` retires the way `model`/`context_window` did:
     /// an existing config still parses, and it is gone on the next save
     /// because nothing reads it any more — the horizon it argued about is
-    /// `models.<glob>.prompt_cache_ttl` now, where `"0"` says what this
-    /// saying `true` used to.
+    /// `models.<glob>.prompt_cache_ttl` now, where leaving it unset says what
+    /// this saying `true` used to.
     #[test]
     fn a_profiles_retired_session_reuse_uncached_parses_and_drops() {
         let raw = "[agents.claude]\n\
@@ -4009,6 +4011,37 @@ mod tests {
         assert_eq!(
             again.models["claude-*"].prompt_cache_ttl,
             Some(Duration::ZERO)
+        );
+    }
+
+    /// A blank `prompt_cache_ttl` is "not chosen yet": it loads as unset, and
+    /// it is written back as a blank so `spoolway sync` does not drop it. The
+    /// shared duration parser still refuses a blank for any other key.
+    #[test]
+    fn a_blank_prompt_cache_ttl_loads_as_unset_and_round_trips() {
+        let raw = "[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n";
+        let config: Config = toml::from_str(raw).expect("a blank must parse");
+        let price = &config.models["claude-*"];
+        assert_eq!(price.prompt_cache_ttl, None);
+        assert_eq!(crate::usage::ModelPrice::cache_ttl_limit(Some(price)), None);
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(rendered.contains("prompt_cache_ttl = \"\""), "{rendered}");
+        let again: Config = toml::from_str(&rendered).unwrap();
+        assert!(again.models["claude-*"].prompt_cache_ttl_blank);
+
+        let other = toml::from_str::<Config>("[dispatch]\nlane_quiet = \"\"\n");
+        assert!(other.is_err(), "a blank must stay refused on other keys");
+    }
+
+    /// A model with no `prompt_cache_ttl` at all writes none back, so a
+    /// blank is only ever written when a person wrote one.
+    #[test]
+    fn an_absent_prompt_cache_ttl_is_not_written_back_as_a_blank() {
+        let config: Config = toml::from_str("[models.\"claude-*\"]\nslots = 2\n").unwrap();
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("prompt_cache_ttl")
         );
     }
 

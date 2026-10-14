@@ -4742,6 +4742,17 @@ mod tests {
         assert!(why.contains(crate::assets::PIPELINE_KEYS_END), "{why}");
     }
 
+    /// A blank `prompt_cache_ttl` is a value the project wrote, so the rewrite
+    /// `sync` does keeps it rather than dropping the key with the other
+    /// unset ones.
+    #[test]
+    fn a_rewritten_config_keeps_a_blank_prompt_cache_ttl() {
+        let text = "[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n";
+        let current: crate::config::Config = toml::from_str(text).unwrap();
+        let (rewritten, _) = rewritten_config(&current, text).unwrap().unwrap();
+        assert!(rewritten.contains("prompt_cache_ttl = \"\""), "{rewritten}");
+    }
+
     /// For `config.toml` `--replace` rewrites the file as `sync` does, so a
     /// table `sync` refused is replaced, every value is kept, and the old
     /// file is saved as a `.bak`.

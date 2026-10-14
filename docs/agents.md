@@ -83,9 +83,11 @@ Lines that never reach the model do not count. A transcript with no such timesta
 file's modified time instead.
 `spoolway agent verify <kind> --live` prints which of the two the kind gave.
 
-The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model. It is
-five minutes unless you set it, on every model that is not marked `local = true`. That
-includes a model with no `[models]` entry at all.
+The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model.
+There is no default. A model that sets none has no limit, whether or not it is marked
+`local = true`, and that includes a model with no `[models]` entry at all. Writing
+`prompt_cache_ttl = ""` means the same as leaving it out. It records that you have not chosen
+yet, and `spoolway sync` keeps it in the file.
 
 ```toml
 [models."claude-*"]
@@ -95,11 +97,11 @@ prompt_cache_ttl = "1h"
 prompt_cache_ttl = "10m"
 ```
 
-Five minutes is the shortest cache lifetime Anthropic uses. A Claude lane that writes to the
-one-hour cache is still refused at five minutes, so set `"1h"` on `claude-*` if you want the
-hour. A model marked `local = true` has no limit unless you set one, because a llama.cpp
-cache has no timer. `"0"` turns the limit off on any model. The older names
-`session_reuse_idle` and `cache_ttl` still parse and are rewritten on the next save.
+Five minutes is the shortest cache lifetime Anthropic uses. A project whose Claude lanes write to
+the one-hour cache can set `"1h"` on `claude-*`, and one that wants to match the short cache can
+set `"5m"`. A llama.cpp cache has no timer, so a local model needs no limit. `"0"` says outright
+that there is none. The older names `session_reuse_idle` and `cache_ttl` still parse and are
+rewritten on the next save.
 
 ```mermaid
 flowchart TD
@@ -107,7 +109,7 @@ flowchart TD
   B -- no --> F[start fresh]
   B -- yes --> C{session_reuse_ctx set and last turn over it?}
   C -- yes --> F
-  C -- no --> D{last reply older than prompt_cache_ttl?}
+  C -- no --> D{prompt_cache_ttl set and last reply older than it?}
   D -- yes --> F
   D -- no --> R[resume the session]
   R --> E{session_blocked_ctx set and a running turn over it?}

@@ -723,9 +723,9 @@ local model. An unpriced model is reported as unpriced, not counted as free. See
 | `cache_read` | table entry, else `0` | USD per million cached input tokens read. |
 | `cache_write_5m` | table entry, else `0` | USD per million tokens written to a five-minute cache. |
 | `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
-| `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
+| `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
-| `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
+| `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it. |
 | `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a

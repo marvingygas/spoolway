@@ -2063,9 +2063,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     }
 
     // `slots` describes one card's worth of hardware, so a model carrying it
-    // is almost certainly local. Setting `local` lifts the 5m
-    // `prompt_cache_ttl` default from it, so a carried session is not refused
-    // for age, and it quiets this note.
+    // is almost certainly local. Setting `local` quiets this note.
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
     // at it yet. `local` itself is never a failure, so this is a note.
@@ -2533,7 +2531,7 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                 continue;
             }
             // The age limit that applies, not the raw field: a model that sets
-            // nothing is held to the 5m default, and `"0"` lifts the limit.
+            // nothing has none, and neither does `"0"`.
             let limited = pipelines
                 .pipelines
                 .values()

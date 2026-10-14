@@ -7525,10 +7525,9 @@ impl SessionMiss {
 ///
 /// Age is checked after size, and only refuses a session that is otherwise
 /// carried: a session whose age ([`session_is_cold`]) cannot be read, or whose
-/// model has no limit (`local = true` with none set, or `"0"`), refuses
-/// nothing. A model that sets no `prompt_cache_ttl`, with or without a
-/// `[models]` entry, is limited to five minutes. There is no per-profile
-/// override left, only the model's own horizon.
+/// model has no limit (no `prompt_cache_ttl`, blank or absent, or `"0"`),
+/// refuses nothing. There is no per-profile override left, only the model's
+/// own horizon.
 fn carried_session(
     repo: &Repo,
     pipeline: &Pipeline,
@@ -7578,8 +7577,8 @@ fn carried_session(
 /// The one check both roads into an old session pass: the `session: true`
 /// carry in [`carried_session`] and the one-shot resume in `prepare_boot`.
 /// Age is [`crate::usage::session_age`]'s — time since the last reply, not
-/// since the file last changed. A model with no limit (`local = true` with
-/// none set, or `"0"`) and a session whose age cannot be read are never cold.
+/// since the file last changed. A model with no limit (no
+/// `prompt_cache_ttl`, or `"0"`) and a session whose age cannot be read are never cold.
 fn session_is_cold(price: Option<&crate::usage::ModelPrice>, kind: &str, session: &str) -> bool {
     let Some(limit) = crate::usage::ModelPrice::cache_ttl_limit(price) else {
         return false;
@@ -18141,8 +18140,14 @@ mod tests {
             ),
         )
         .unwrap();
-        // No price at all: the hosted default of five minutes applies.
-        let cold = with_home(&home, || session_is_cold(None, "claude", "cold-reply"));
+        // A five-minute limit written for the model: with none, nothing is cold.
+        let price = crate::usage::ModelPrice {
+            prompt_cache_ttl: Some(Duration::from_secs(300)),
+            ..Default::default()
+        };
+        let cold = with_home(&home, || {
+            session_is_cold(Some(&price), "claude", "cold-reply")
+        });
         std::fs::remove_dir_all(&home).ok();
         assert!(cold);
     }
@@ -18157,7 +18162,14 @@ mod tests {
             ("session-resume-warm", 120, true),
             ("session-resume-cold", 600, false),
         ] {
-            let (repo, _root_guard) = fixture(name);
+            let (mut repo, _root_guard) = fixture(name);
+            repo.config.models.insert(
+                "test-model".into(),
+                crate::usage::ModelPrice {
+                    prompt_cache_ttl: Some(Duration::from_secs(300)),
+                    ..Default::default()
+                },
+            );
             let path = add_task_with(&repo, "demo", "fix", |f| {
                 f.resume = Some("fix".into());
             });
@@ -18189,7 +18201,7 @@ mod tests {
             assert_eq!(
                 load_lane_records(&repo)["demo · fix"].session == "old-session",
                 continued,
-                "a reply {reply_age_secs}s old against the default five-minute limit"
+                "a reply {reply_age_secs}s old against a five-minute limit"
             );
             assert_eq!(reload(&path).front.resume, None, "spent either way");
         }
@@ -18713,28 +18725,30 @@ mod tests {
         assert_eq!(resumed.1, "stale-session");
     }
 
-    /// The default horizon, reached the three ways it can be: a hosted model
-    /// with a `[models]` entry that sets none, a hosted model with no entry at
-    /// all, and a `local = true` model that sets none. The same 400-second-old
-    /// store is refused by the first two and resumed by the third.
+    /// No limit is guessed: a model that writes none resumes a 400-second-old
+    /// store whether it is hosted, `local`, blank or has no entry at all, and
+    /// the same store is refused once the model writes a five-minute limit.
     #[test]
-    fn carried_session_defaults_to_five_minutes_unless_the_model_is_local() {
-        let (mut repo, _root_guard) = fixture("session-default-ttl");
-        repo.config.models.insert(
-            "hosted-model".into(),
-            crate::usage::ModelPrice {
-                context_window: 1000,
-                ..Default::default()
-            },
-        );
-        repo.config.models.insert(
-            "local-model".into(),
-            crate::usage::ModelPrice {
-                context_window: 1000,
-                local: true,
-                ..Default::default()
-            },
-        );
+    fn carried_session_has_no_age_limit_unless_the_model_writes_one() {
+        let (mut repo, _root_guard) = fixture("session-no-default-ttl");
+        let priced = |ttl: Option<Duration>, local: bool, blank: bool| crate::usage::ModelPrice {
+            context_window: 1000,
+            prompt_cache_ttl: ttl,
+            prompt_cache_ttl_blank: blank,
+            local,
+            ..Default::default()
+        };
+        for (name, price) in [
+            ("hosted-model", priced(None, false, false)),
+            ("local-model", priced(None, true, false)),
+            ("blank-model", priced(None, false, true)),
+            (
+                "limited-model",
+                priced(Some(Duration::from_secs(300)), false, false),
+            ),
+        ] {
+            repo.config.models.insert(name.into(), price);
+        }
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -18743,9 +18757,11 @@ mod tests {
         profile.session_reuse_ctx = 0; // size is not what this checks
 
         for (model, expected) in [
-            ("hosted-model", Err(SessionMiss::Stale)),
-            ("unlisted-model", Err(SessionMiss::Stale)),
+            ("hosted-model", Ok(())),
+            ("unlisted-model", Ok(())),
             ("local-model", Ok(())),
+            ("blank-model", Ok(())),
+            ("limited-model", Err(SessionMiss::Stale)),
         ] {
             write_entry(&repo, "demo", "implement", "claude", model, "old-session");
             let home = claude_home_with("old-session", 400, 10);

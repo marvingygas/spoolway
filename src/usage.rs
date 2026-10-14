@@ -427,7 +427,8 @@ impl Entry {
 /// Serialised by hand around a derived core — see the `Serialize` and
 /// `Deserialize` impls below — because one key is not a field: a tier
 /// sub-table carries its threshold in its own name, which no derive can
-/// spell.
+/// spell. A blank `prompt_cache_ttl` is the second reason: it reads as unset
+/// but has to be written back as a blank, which no derive can do either.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 #[serde(default, deny_unknown_fields)]
@@ -472,7 +473,7 @@ pub struct ModelPrice {
     /// session whose last reply is older is refused, whether
     /// `dispatch::carried_session` or a one-shot resume would continue it,
     /// and opens fresh. Age is [`session_age`]'s. Read it through
-    /// [`Self::cache_ttl_limit`], which applies the default.
+    /// [`Self::cache_ttl_limit`].
     ///
     /// **Why this is a model's fact and not an agent kind's.** A cache belongs
     /// to whoever serves the model, and pi and codex are *harnesses*
@@ -482,10 +483,10 @@ pub struct ModelPrice {
     /// the model is where its lifetime is declared — beside the prices, which
     /// are the same kind of fact and are already matched by the same glob.
     ///
-    /// `None` means nobody has said, and the default applies: five minutes,
-    /// or no limit on a model marked `local`. An explicit zero (`"0"`) is a
-    /// statement, not an absence, and turns the limit off on any model — which
-    /// is why this is an `Option` and not a bare duration. Renamed from
+    /// `None` means nobody has said, and there is no limit: spoolway does not
+    /// guess a cache lifetime for a provider it cannot ask. An explicit zero
+    /// (`"0"`) is a statement that reads the same way today, which is why this
+    /// is still an `Option` and not a bare duration. Renamed from
     /// `session_reuse_idle`, itself renamed from `cache_ttl`; both old
     /// spellings stay as aliases so an existing config keeps parsing.
     #[serde(
@@ -496,6 +497,19 @@ pub struct ModelPrice {
         with = "crate::config::human_duration::optional"
     )]
     pub prompt_cache_ttl: Option<std::time::Duration>,
+
+    /// The file wrote `prompt_cache_ttl = ""`: "not chosen yet", which reads
+    /// as `None` but has to be written back as a blank.
+    ///
+    /// `spoolway sync` rewrites `config.toml` whole from the loaded config, and
+    /// a `None` is skipped on write, so without this flag the next sync would
+    /// delete the blank a person was shown and asked to fill in. Set only by
+    /// the hand-written `Deserialize` below, which takes the blank out of the
+    /// table before the shared duration parser, so no other duration key ever
+    /// accepts an empty string. Written only while `prompt_cache_ttl` is
+    /// `None`.
+    #[serde(skip)]
+    pub(crate) prompt_cache_ttl_blank: bool,
 
     /// How many lanes may run this model at once, in place of its profile's
     /// `agents.<profile>.concurrency` when set.
@@ -533,12 +547,10 @@ pub struct ModelPrice {
     /// This model runs on hardware you own rather than a metered API.
     ///
     /// It sizes nothing, caps nothing and never reaches the scheduler. It has
-    /// two effects. A model marked `local` has no `prompt_cache_ttl` default,
-    /// so a carried session under it is never refused for its age unless the
-    /// project sets one; see [`ModelPrice::cache_ttl_limit`]. And it puts a
-    /// standing line on the dispatcher's board when a queued task routes through a step naming this model,
-    /// asking a person not to open their own sessions against the same server
-    /// while the run lasts. spoolway never infers it: a model carrying
+    /// one effect: it puts a standing line on the dispatcher's board when a
+    /// queued task routes through a step naming this model, asking a person
+    /// not to open their own sessions against the same server while the run
+    /// lasts. spoolway never infers it: a model carrying
     /// `slots` is describing the same kind of hardware, but so is a local
     /// model nobody has sized, and a mistyped hosted model name reads as
     /// unpriced the way a free local one does — so `spoolway doctor` notes a
@@ -688,16 +700,32 @@ impl<'de> Deserialize<'de> for ModelPrice {
                 Rates::deserialize(value).map_err(|e| D::Error::custom(format!("`{key}`: {e}")))?;
             tier = Some(PriceTier { above_k, rates });
         }
+        // A blank `prompt_cache_ttl` is taken out here, ahead of the shared
+        // duration parser, which must keep refusing an empty string for every
+        // other key. Any of the three spellings counts.
+        let mut blank = false;
+        for key in ["prompt_cache_ttl", "session_reuse_idle", "cache_ttl"] {
+            if table
+                .get(key)
+                .and_then(toml::Value::as_str)
+                .is_some_and(|raw| raw.trim().is_empty())
+            {
+                table.remove(key);
+                blank = true;
+            }
+        }
         let mut price =
             ModelPrice::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)?;
         price.tier = tier;
+        price.prompt_cache_ttl_blank = blank;
         Ok(price)
     }
 }
 
-/// The derived fields, then the tier under its own name. Flattened so the
-/// tier is a sibling of the rates, and last so a TOML writer can put the
-/// sub-table after the entry's own keys.
+/// The derived fields, then a blank `prompt_cache_ttl` if the file wrote one,
+/// then the tier under its own name. Flattened so the tier is a sibling of the
+/// rates, and last so a TOML writer can put the sub-table after the entry's
+/// own keys.
 impl Serialize for ModelPrice {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -705,10 +733,17 @@ impl Serialize for ModelPrice {
             #[serde(flatten, with = "ModelPrice")]
             fields: ModelPrice,
             #[serde(flatten)]
+            blank: BTreeMap<&'static str, &'static str>,
+            #[serde(flatten)]
             tier: BTreeMap<String, Rates>,
         }
         Written {
             fields: *self,
+            // The blank is a scalar, so it goes before the tier sub-table.
+            blank: (self.prompt_cache_ttl_blank && self.prompt_cache_ttl.is_none())
+                .then_some(("prompt_cache_ttl", ""))
+                .into_iter()
+                .collect(),
             tier: self
                 .tier
                 .iter()
@@ -744,23 +779,17 @@ fn not_local(local: &bool) -> bool {
     !*local
 }
 
-/// How long a session's prompt cache is trusted when a model sets no
-/// `prompt_cache_ttl`. Five minutes is the shortest cache lifetime Anthropic
-/// uses, so a resume inside it is warm on Anthropic's models. Other providers
-/// are held to the same figure for consistency, and a project can change it.
-pub const DEFAULT_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
-
 impl ModelPrice {
     /// The age past which a carried session under this model is refused, or
-    /// `None` for no limit. `price` is `None` for a model with no entry at all,
-    /// which still gets the default: it is hosted until someone says `local`.
+    /// `None` for no limit. `price` is `None` for a model with no entry at all.
+    ///
+    /// A model that sets no `prompt_cache_ttl`, hosted or `local`, has no
+    /// limit: spoolway does not guess one. An explicit `"0"` reads the same
+    /// way.
     pub fn cache_ttl_limit(price: Option<&Self>) -> Option<std::time::Duration> {
-        let limit = match price.and_then(|price| price.prompt_cache_ttl) {
-            Some(set) => set,
-            None if price.is_some_and(|price| price.local) => return None,
-            None => DEFAULT_PROMPT_CACHE_TTL,
-        };
-        (!limit.is_zero()).then_some(limit)
+        price
+            .and_then(|price| price.prompt_cache_ttl)
+            .filter(|limit| !limit.is_zero())
     }
 
     /// A value with every field present when serialised — nothing zero,
@@ -783,6 +812,7 @@ impl ModelPrice {
             cache_write_5m: 1.0,
             cache_write_1h: 1.0,
             prompt_cache_ttl: Some(std::time::Duration::from_secs(1)),
+            prompt_cache_ttl_blank: false,
             slots: 1,
             compact_ctx: 1,
             retired_exclusive: None,
@@ -4549,6 +4579,7 @@ mod tests {
                     cache_write_5m: 3.75,
                     cache_write_1h: 6.0,
                     prompt_cache_ttl: None,
+                    prompt_cache_ttl_blank: false,
                     slots: 0,
                     compact_ctx: 0,
                     retired_exclusive: None,
@@ -4566,6 +4597,7 @@ mod tests {
                     cache_write_5m: 6.25,
                     cache_write_1h: 10.0,
                     prompt_cache_ttl: None,
+                    prompt_cache_ttl_blank: false,
                     slots: 0,
                     compact_ctx: 0,
                     retired_exclusive: None,
@@ -4677,6 +4709,7 @@ mod tests {
                 cache_write_5m: 6.25,
                 cache_write_1h: 0.0,
                 prompt_cache_ttl: None,
+                prompt_cache_ttl_blank: false,
                 slots: 0,
                 compact_ctx: 0,
                 retired_exclusive: None,
