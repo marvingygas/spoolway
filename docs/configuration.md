@@ -757,6 +757,19 @@ the server yourself.
 row that still names `cache_ttl` or `session_reuse_idle`. It does not note an unused row that
 sets only `prompt_cache_ttl`.
 
+`spoolway doctor` also notes each row that leaves a hosted model without a `prompt_cache_ttl`:
+
+```
+  note  models.'claude-*'.prompt_cache_ttl is not set; set it to your provider's cache TTL (highly recommended)
+```
+
+The note appears once per row, however many models the row matches. A hosted model that no row
+covers is named by its own name. Any value ends the note, including `"0"`. A model with
+`local = true` is never named. The models checked are those that agent steps name in any
+pipeline, and `unattended.blocked_model` while `unattended.enabled` is on. The "before
+dispatching" popup shows the same note under `settings`, and `hide until these change` hides it
+like any other note.
+
 ## Unknown keys
 
 A key this spoolway does not know never stops the file loading. That covers a typo, a key a

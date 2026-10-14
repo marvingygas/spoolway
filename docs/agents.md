@@ -91,6 +91,11 @@ yet. `spoolway init` and `spoolway sync` write that blank row for `claude-*` whe
 has a `claude` profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that
 is already there, with its value.
 
+While a hosted model has no value, `spoolway doctor` and the "before dispatching" popup show
+`models.'<row>'.prompt_cache_ttl is not set; set it to your provider's cache TTL (highly
+recommended)`. Set any value, `"0"` included, and the note goes away. See
+[`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
+
 ```toml
 [models."claude-*"]
 prompt_cache_ttl = "1h"
