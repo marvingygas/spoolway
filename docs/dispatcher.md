@@ -571,7 +571,7 @@ it.
 | `enter` on `restart` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The options menu lists `restart` only for a task that `spoolway restart` accepts. A queued, done or hook-held row does not list it, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
+The options menu lists `restart` only for a task that `spoolway restart` accepts. A queued, done or hook-held row does not list it. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Footer
 

@@ -87,6 +87,19 @@ pub struct Runs {
     files: crate::runfiles::RunFiles,
 }
 
+/// A run being stopped in place, which reads as running until this is
+/// dropped — see [`Runs::stop_in_place`].
+#[must_use = "the run reads as stopped the moment this is dropped"]
+pub struct Stopping {
+    path: PathBuf,
+}
+
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl Runs {
     /// `dir` is where a run's pid, exit code and log live —
     /// [`crate::repo::Repo::commands_dir`] for every real caller.
@@ -169,6 +182,21 @@ impl Runs {
         self.dir.join(format!("{key}.pane"))
     }
 
+    /// Where the process stopping a run in place says so, for as long as it
+    /// lives — see [`Runs::stop_in_place`].
+    fn stopping_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.stopping"))
+    }
+
+    /// Whether a live process is stopping this run in place. The record names
+    /// that process by pid and start time, as a pid file does, so one left
+    /// behind by a process that died reads as nothing.
+    fn being_stopped(&self, key: &str) -> bool {
+        crate::runfiles::read_run_at(&self.stopping_path(key)).is_some_and(|(pid, recorded)| {
+            crate::headless::alive(pid) && crate::lock::is_same_process(pid, &recorded)
+        })
+    }
+
     /// Written by the wrapper as its last act, so its presence means the run is
     /// over however the command ended. It is also what makes liveness safe
     /// against pid reuse: a recycled pid would read as alive, but a finished run
@@ -178,6 +206,9 @@ impl Runs {
     }
 
     pub fn state(&self, key: &str) -> RunState {
+        if self.being_stopped(key) {
+            return RunState::Running;
+        }
         if let Some(code) = self.files.read_exit_code(key) {
             return RunState::Exited(code);
         }
@@ -352,10 +383,10 @@ impl Runs {
         // every builtin there leaves `0`, and the step would route on_pass
         // for a command that never ran.
         //
-        // A stop never takes the exception, because `stop` removes the pid
-        // file before it signals, so a run being stopped finds no file to
-        // read the mark from — whatever status a command that caught `TERM`
-        // itself exits with.
+        // A stop never takes the exception: `stop` removes the pid file
+        // before it signals, and `stop_in_place` rewrites it without the
+        // mark, so a run being stopped finds no mark to read — whatever
+        // status a command that caught `TERM` itself exits with.
         // The wrapper cannot tell a stop from any other `TERM`, though. A
         // `TERM` sent to the whole group from outside — a machine shutdown,
         // a container stop, `kill -TERM -<pgid>` — reaches a command that
@@ -409,7 +440,7 @@ impl Runs {
         // The child's first act is to append `started` to the pid file, which
         // is what the `TERM` trap above looks for. It is the child that writes it,
         // so the mark exists only once the command has really been forked. It
-        // appends only to a pid file that is still there, because a stop
+        // appends only to a pid file that is still there, because `stop`
         // removes the file and a late append would put a pid file back for a
         // run that is already over. An `if` rather than `&&`, so the line
         // leaves `$?` at `0` for the `run:` line that follows it.
@@ -553,6 +584,63 @@ impl Runs {
         let _ = self.end(key);
     }
 
+    /// Stop a running run's process group and leave its files where they are,
+    /// with the run reading as running until the returned [`Stopping`] is
+    /// dropped. Whoever calls this clears the files afterwards, as the write
+    /// that moves a task onto the step does — see [`Runs::begin_visit`].
+    ///
+    /// [`Runs::stop`] removes the pid file *before* it signals, and waits up
+    /// to six seconds for a group that ignores `TERM`. For that long the run
+    /// reads as [`RunState::Fresh`], and a dispatcher pass looking at a task
+    /// still standing on the step starts the next run beside the dying one.
+    /// The new wrapper then writes the same pid file, so the old wrapper's
+    /// `TERM` trap finds the `started` mark of the *new* run and keeps the
+    /// `0` of a command that caught `TERM`: the old run's code lands on the
+    /// new one. Here the pid file stays, and the `started` line is dropped
+    /// from it instead, which is all `stop`'s removal was for: without the
+    /// mark the `TERM` trap exits `143` and writes no code. The first two
+    /// lines, the pid and its start time, are rewritten as they were, so
+    /// [`Runs::signal_the_group`] still reaches the same group and still
+    /// refuses a recycled pid.
+    ///
+    /// The pid file alone keeps the run reading as running only while the
+    /// wrapper lives. The wrapper exits as soon as its own command does, while
+    /// other members of the group may live on until `SIGKILL`, and the files
+    /// stay until the caller's write. In both gaps a pass would read
+    /// [`RunState::Interrupted`], count a kill and run the command again. So a
+    /// `<key>.stopping` record naming this process is written first, and
+    /// [`Runs::state`] answers `Running` while that process is alive and the
+    /// record is there. The record goes when the [`Stopping`] is dropped, or
+    /// earlier with the run's files, and a stopper that dies leaves one that
+    /// reads as nothing.
+    pub fn stop_in_place(&self, key: &str) -> Stopping {
+        let stopping = Stopping {
+            path: self.stopping_path(key),
+        };
+        let me = std::process::id();
+        let started = crate::lock::started_at(me).unwrap_or_default();
+        // A record that cannot be written leaves the gap open, not the run
+        // running: the stop below still happens.
+        let _ = std::fs::create_dir_all(&self.dir);
+        let _ = std::fs::write(&stopping.path, format!("{me}\n{started}\n"));
+        let group = crate::runfiles::read_run_at(&self.group_path(key));
+        if let Some((pid, recorded)) = self.files.read_run(key) {
+            // Written beside the pid file and renamed over it, so a reader
+            // never sees a half-written file. A failure is not worth
+            // stopping for: the signal below is what matters, and the
+            // clearing that follows removes the file either way.
+            let tmp = self.dir.join(format!("{key}.pid.tmp"));
+            if std::fs::write(&tmp, format!("{pid}\n{recorded}\n")).is_ok() {
+                let _ = std::fs::rename(&tmp, self.pid_path(key));
+            }
+            Self::signal_the_group((pid, recorded));
+        }
+        if let Some(record) = group {
+            Self::signal_the_group(record);
+        }
+        stopping
+    }
+
     /// Forget a finished run's bookkeeping, keeping its log.
     ///
     /// Called once the exit code has been routed on. A task arriving at the
@@ -627,6 +715,7 @@ impl Runs {
         let group = crate::runfiles::read_run_at(&self.group_path(key));
         let cleared = self.files.clear(key);
         let _ = std::fs::remove_file(self.group_path(key));
+        let _ = std::fs::remove_file(self.stopping_path(key));
         for record in [run, group].into_iter().flatten() {
             Self::signal_the_group(record);
         }
@@ -1012,6 +1101,56 @@ mod tests {
         assert_eq!(f.settle("build-demo"), RunState::Exited(0));
         let log = std::fs::read_to_string(f.runs.log_path("build-demo")).unwrap();
         assert!(log.contains("built"), "the run's output is its log: {log}");
+    }
+
+    /// A run stopped in place reads as running for the whole stop and after
+    /// it, until the [`Stopping`] is dropped, and only then as interrupted.
+    /// A dispatcher pass that read it as interrupted in between would count
+    /// a kill against the command and start it again. The run here leaves a
+    /// member of its group that ignores `TERM`, so its wrapper is gone a
+    /// second before the group is, and a watcher reads the state throughout.
+    #[test]
+    fn a_run_stopped_in_place_reads_as_running_until_the_stop_is_dropped() {
+        let f = Fixture::new("stop-in-place");
+        let ready = f.root.join("ready");
+        f.start(
+            "build-demo",
+            &format!(
+                "sh -c \"trap '' TERM; touch '{}'; sleep 30\" & sleep 30",
+                ready.display()
+            ),
+        );
+        let started = std::time::Instant::now();
+        while !ready.exists() && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "the member that ignores TERM never started");
+        let (wrapper, _) = f.runs.files.read_run("build-demo").unwrap();
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = {
+            let (runs, done) = (f.runs.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    seen.push(runs.state("build-demo"));
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                seen
+            })
+        };
+        let stopping = f.runs.stop_in_place("build-demo");
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let seen = watcher.join().unwrap();
+
+        assert!(
+            seen.iter().all(|state| *state == RunState::Running),
+            "the run read as something else while it was stopped: {seen:?}"
+        );
+        assert!(!crate::headless::group_alive(wrapper), "the group is gone");
+        assert_eq!(f.runs.state("build-demo"), RunState::Running);
+        drop(stopping);
+        assert_eq!(f.runs.state("build-demo"), RunState::Interrupted);
     }
 
     /// `await_started`'s own error names `log_path` as a file that exists —

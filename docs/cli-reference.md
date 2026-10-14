@@ -798,9 +798,9 @@ See [Gates](pipelines.md#gates).
 
 ### `spoolway restart <task>`
 
-Start the step a task is on over. The step's conversation is discarded, and the step is briefed from scratch even where it declares `session: true`. Nothing in the worktree is touched.
+Start the step a task is on over. On an agent step, the step's conversation is discarded, and the step is briefed from scratch even where it declares `session: true`. On a step that runs a command, a running command is stopped with everything it started, and the step runs again from the start. Nothing in the worktree is touched.
 
-The command writes the task first, then ends the lane on the step it restarts. A blocked task owns its unblocker lane, so that lane is ended too. A lane that is working or waiting on a prompt is interrupted first, and each is stopped, whichever terminal backend runs it. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. The task goes back to the same step with `attempts` at zero and `restart: <step>` set. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
+The command writes the task first, then ends the lane on the step it restarts. A blocked task owns its unblocker lane, so that lane is ended too. A lane that is working or waiting on a prompt is interrupted first, and each is stopped, whichever terminal backend runs it. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. The task goes back to the same step with `attempts` at zero. An agent step also gets `restart: <step>` set. A command step gets no `restart:` key. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
 
 A `paused` task restarts the step it was parked or gated on. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
 
@@ -810,7 +810,6 @@ A `paused` task restarts the step it was parked or gated on. The command accepts
 | Paused by an issue-tracking hook | Run `spoolway resume <task>` |
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
-| On a step that runs a command | Run `spoolway resume <task>`, because a command holds no conversation |
 
 The command is refused when run from inside a lane. It is also refused when a `spoolway report` changed the task file first. In that case it touches no lane and asks you to run it again.
 
@@ -827,11 +826,18 @@ The output names each lane it tore down, the session it abandoned and the step i
 <task>: -> <step> (fresh session)
 ```
 
+On a command step, the output names the run it stopped and its elapsed time. The `stopped command` line is left out when no run is going:
+
+```
+  stopped command `build` (4m 12s)
+<task>: -> build (fresh run)
+```
+
 The session line reads `abandoned, already banked` when the usage ledger already holds that session, and `abandoned` otherwise. If a lane will not stop, the task is already restarted. Run the command again to retry the stop.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-m`, `--message <TEXT>` | `restarted by hand — fresh session` | Note for the status log |
+| `-m`, `--message <TEXT>` | `restarted by hand — fresh session`, or `restarted by hand — fresh run` on a command step | Note for the status log |
 
 `restart` in the board's options menu does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
 

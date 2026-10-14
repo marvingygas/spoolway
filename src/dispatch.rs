@@ -5943,6 +5943,28 @@ pub(crate) fn file_fingerprint(task: &Task) -> u64 {
     hash_of(&task.render().unwrap_or_default())
 }
 
+/// Whether [`persist_task`] would drop a write of `task` because the file
+/// changed since `file_seen` recorded it, or is gone.
+///
+/// Split out so a caller about to do something irreversible for the write,
+/// such as `spoolway restart` stopping a command, can ask first. The answer
+/// can go stale before the write, so [`persist_task`] still asks again under
+/// the task lock.
+pub(crate) fn write_is_stale(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
+    let Some(seen) = file_seen.get(task.id()) else {
+        return false;
+    };
+    // A file this pass read earlier and that is now absent was moved
+    // away by `spoolway queue unqueue` (or deleted) mid-pass. Saving
+    // would recreate `queue/<id>.md` beside the copy in `pending/`, so
+    // the task would run on after being unqueued and run again once
+    // re-sent. The write is dropped like any other stale one.
+    if task_file_moved_away(task, file_seen) {
+        return true;
+    }
+    Task::load(&task.path).is_ok_and(|disk| file_fingerprint(&disk) != *seen)
+}
+
 /// [`Dispatcher::persist`] for the free functions in the launch path, which
 /// have no `self` to reach the pass's `file_seen` through. Same rule: take
 /// the task's per-task lock, and skip the write when the file on disk no
@@ -5988,20 +6010,8 @@ pub(crate) fn persist_task(
     // (built from the very tasks it is about to route, in `run_pass`), so
     // this only ever fires for a test calling `persist_task` or
     // `ensure_workspace` directly, beneath no `Dispatcher::pass` at all.
-    if let Some(seen) = file_seen.get(task.id()) {
-        // A file this pass read earlier and that is now absent was moved
-        // away by `spoolway queue unqueue` (or deleted) mid-pass. Saving
-        // would recreate `queue/<id>.md` beside the copy in `pending/`, so
-        // the task would run on after being unqueued and run again once
-        // re-sent. The write is dropped like any other stale one.
-        if task_file_moved_away(task, file_seen) {
-            return Ok(false);
-        }
-        if let Ok(disk) = Task::load(&task.path)
-            && file_fingerprint(&disk) != *seen
-        {
-            return Ok(false);
-        }
+    if write_is_stale(task, file_seen) {
+        return Ok(false);
     }
     task.save()?;
     file_seen.insert(task.id().to_string(), file_fingerprint(task));

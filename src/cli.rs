@@ -142,9 +142,13 @@ pub enum Command {
     /// worktree is touched. Use it when a conversation cannot do the work —
     /// `resume` would walk back into it.
     ///
+    /// On a step that runs a command there is no conversation. A command
+    /// still running is stopped, with everything it started, and the step
+    /// runs again from the start.
+    ///
     /// Accepts a task that is running, paused or blocked. A task that is
-    /// still queued, finished, or standing on a step that runs a command is
-    /// refused, with what to do instead.
+    /// still queued, finished or held by a hook is refused, with what to do
+    /// instead.
     Restart(RestartArgs),
 
     /// Read what a lane has been doing, answer it, or open its session.

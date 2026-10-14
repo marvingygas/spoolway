@@ -1127,7 +1127,7 @@ impl Board {
     ///
     /// A no-op on a task the queue and the archive no longer have, or one
     /// `spoolway restart` itself would refuse — one that never started, one
-    /// that is done, one held by a hook or one on a command step.
+    /// that is done or one held by a hook.
     /// [`crate::commands::restart_step`] is asked rather than the row's
     /// state, so the panel only ever offers a restart the command carries
     /// out.
