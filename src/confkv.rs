@@ -88,7 +88,15 @@ pub const REFERENCE: &[Reference] = &[
         values: "<count>, all",
         default: "5",
         sentence: "How many of a task's most recent lanes stay open; each new agent step \
-                    closes the oldest finished ones. Older versions kept every lane.",
+                    or shown command closes the oldest finished ones. Older versions kept \
+                    every lane.",
+    },
+    Reference {
+        key: "dispatch.hide_commands",
+        values: "true, false",
+        default: "true",
+        sentence: "Whether a command step runs without a pane. Set to `false` and its pane \
+                    stays open after it exits, counting toward `visible_lanes`.",
     },
     Reference {
         key: "unattended.enabled",
@@ -416,6 +424,7 @@ pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
     "dispatch.lane_child_ceiling",
     "dispatch.priority",
     "dispatch.visible_lanes",
+    "dispatch.hide_commands",
 ];
 
 /// Every scalar setting `config get`/`set` resolves for a key that already
@@ -613,6 +622,9 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
     }
     if key == "dispatch.visible_lanes" {
         return Some(config.dispatch.visible_lanes.spelled());
+    }
+    if key == "dispatch.hide_commands" {
+        return Some(config.dispatch.hide_commands.to_string());
     }
     let Some(parts) = models_key(config, key) else {
         concurrency_key(config, key)?;
@@ -1163,6 +1175,7 @@ fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
         // back. A string because `VisibleLanes` reads a digit string as a
         // count as well as `all`.
         "visible_lanes" => Value::String(config.dispatch.visible_lanes.spelled()),
+        "hide_commands" => Value::Boolean(config.dispatch.hide_commands),
         _ => return,
     };
     if let Some(table) = value.get_mut("dispatch").and_then(Value::as_table_mut) {
@@ -1501,6 +1514,28 @@ mod tests {
             "{err}"
         );
         assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
+    }
+
+    /// The same read/write-while-absent mechanism, for `hide_commands`: a
+    /// bool that is absent from the file while it is `true`.
+    #[test]
+    fn hide_commands_is_readable_and_writable_while_absent() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "true");
+
+        let shown = set(&config, "dispatch.hide_commands", "false").unwrap();
+        assert!(!shown.dispatch.hide_commands);
+        assert_eq!(get(&shown, "dispatch.hide_commands").unwrap(), "false");
+        assert!(
+            toml::to_string(&shown)
+                .unwrap()
+                .contains("hide_commands = false")
+        );
+
+        let back = set(&shown, "dispatch.hide_commands", "true").unwrap();
+        assert!(back.dispatch.hide_commands);
+        assert!(!toml::to_string(&back).unwrap().contains("hide_commands"));
+        assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
     }
 
     /// The retired key is no longer a setting: a person who still types it is

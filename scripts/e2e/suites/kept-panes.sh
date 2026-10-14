@@ -243,9 +243,70 @@ if drive every gone 60; then ok "the task with every lane kept is done and archi
 else bad "the task with every lane kept is done and archived"; fi
 must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 5
 
+# ------------------------------------------------------ command steps
+# A command step opens no pane by default, and opens one with
+# `dispatch.hide_commands` set to `false`. Every `pane run` the double is asked
+# for is one line in `typed.index`, and a command pane is typed its script, so
+# the number of lines before and after a task is whether a pane was opened.
+# The agent steps above type into their panes too, but none runs here.
+cat > .spoolway/pipelines/gated.yml <<YML
+description: One command step, for whether it opens a pane.
+
+steps:
+  - id: gate
+    description: Waits for the suite to read its log, then passes.
+    run: 'echo gate-marker; while [ ! -e "\$GATE_RELEASE" ]; do sleep 0.1; done'
+    on_pass: done
+    on_fail: blocked
+YML
+works "the command pipeline checks out" "$SPOOLWAY" pipeline check
+typed_lines() { wc -l < "$HSTATE/typed.index" | tr -d ' '; }
+
+export GATE_RELEASE="$LIVE/gate.release"
+rm -f "$GATE_RELEASE"
+BEFORE=$(typed_lines)
+task_doc "$LIVE/hidden.md" hidden "$BODY" "group: hidden" "pipeline: gated"
+must "a task queued with commands hidden" "$SPOOLWAY" queue add --from "$LIVE/hidden.md"
+records "a hidden command's output is in the same log" "gate-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/hidden · gate.log" hidden
+touch "$GATE_RELEASE"
+if drive hidden gone 60; then ok "a hidden command still routes on its exit code"
+else bad "a hidden command still routes on its exit code (at \`$(stage_of hidden)\`)"; fi
+if [ "$(typed_lines)" -eq "$BEFORE" ]; then
+  ok "by default a command step opens no pane"
+else
+  bad "by default a command step opens no pane: $(cat "$HSTATE/typed.index")"
+fi
+
+must "commands shown" "$SPOOLWAY" config set dispatch.hide_commands false
+rm -f "$GATE_RELEASE"
+BEFORE=$(typed_lines)
+task_doc "$LIVE/shown.md" shown "$BODY" "group: shown" "pipeline: gated"
+must "a task queued with commands shown" "$SPOOLWAY" queue add --from "$LIVE/shown.md"
+records "a shown command's output is in the same log" "gate-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/shown · gate.log" shown
+if [ "$(typed_lines)" -gt "$BEFORE" ]; then
+  ok "with hide_commands = false a command step opens a pane"
+else
+  bad "with hide_commands = false a command step opens a pane"
+fi
+touch "$GATE_RELEASE"
+if drive shown gone 60; then ok "a shown command still routes on its exit code"
+else bad "a shown command still routes on its exit code (at \`$(stage_of shown)\`)"; fi
+# The workspace's own first pane is not the command's, and stands: a command
+# step leaves it empty, which is not what this checks.
+if ! awk -F'\t' '$4 == "gate" {found = 1} END {exit !found}' "$HSTATE/panes"; then
+  ok "and its pane is closed once the task is done"
+else
+  bad "and its pane is closed once the task is done: $(cat "$HSTATE/panes")"
+fi
+must "commands hidden again" "$SPOOLWAY" config set dispatch.hide_commands true
+unset GATE_RELEASE
+
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
-rm -f .spoolway/pipelines/twostep.yml .spoolway/pipelines/fourstep.yml
+rm -f .spoolway/pipelines/twostep.yml .spoolway/pipelines/fourstep.yml \
+  .spoolway/pipelines/gated.yml
 
 finish

@@ -833,12 +833,13 @@ else bad "a command step is not confined to its worktree (at \`$(stage_of unconf
 works "and it really did write where no lane could" test -f "$OUTSIDE"
 
 # ------------------------------------------------------------------ a pane, or none
-# The default now: a command step with no `headless:` runs in a pane of its
-# own, under a real multiplexer. `headless: true` is the escape hatch back to
-# today's silent, detached run. Neither half is provable against the headless
-# backend the rest of this suite runs on — a pane is the one thing only a real
-# pane can be asked whether it opened — so this switches to `herdr`, against
-# `scripts/e2e/herdr-stub.sh`, for as long as the case needs. Against the
+# With `dispatch.hide_commands` set to `false`, a command step with no
+# `headless:` runs in a pane of its own, under a real multiplexer. By default,
+# and with `headless: true`, it runs silent and detached. Neither half is
+# provable against the headless backend the rest of this suite runs on — a
+# pane is the one thing only a real pane can be asked whether it opened — so
+# this switches to `herdr`, against `scripts/e2e/herdr-stub.sh`, for as long
+# as the case needs. Against the
 # double rather than a real server: its header says why there is no isolated
 # herdr to run this on.
 HSTATE="$LIVE/herdr-stub-pane"
@@ -850,6 +851,9 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+# Commands are hidden by default, which opens no pane; the cases below are
+# about the pane a shown one gets.
+must "commands shown" "$SPOOLWAY" config set dispatch.hide_commands false
 
 # The pane gate itself, proven end to end rather than only by the unit tests
 # in src/commands/dispatch.rs — those already know the answer they are
@@ -1085,9 +1089,9 @@ if drive paned gone 180; then ok "the task carries on once the command has passe
 else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
 unset SPOOLWAY_E2E_PANE_ENV_MARKER
 if [ -n "$RESUME_RECORDED" ] && grep -q "^$RESUME_RECORDED	" "$HSTATE/panes"; then
-  bad "a passing command's pane closes behind it"
+  bad "a shown command's pane is closed once its task is done"
 else
-  ok "a passing command's pane closes behind it"
+  ok "a shown command's pane is closed once its task is done"
 fi
 
 # The hidden half: the same shape, with `headless: true` added — today's
@@ -1136,10 +1140,10 @@ else
   ok "headless: true never opened a pane at all"
 fi
 
-# A failing, paned command closes its pane the moment the task leaves the
-# step for `blocked` — nothing is left standing on the chance of a retry.
+# A failing, shown command keeps its pane when the task leaves the step for
+# `blocked`, so the output of the failure is still on screen.
 cat > .spoolway/pipelines/paneflaky.yml <<'YML'
-description: One failing paned command step, for whether its pane closes.
+description: One failing paned command step, for whether its pane stays.
 
 steps:
   - id: flaky
@@ -1159,9 +1163,9 @@ if drive panedfail blocked 120; then ok "a failing paned command still routes on
 else bad "a failing paned command still routes on its exit code (at \`$(stage_of panedfail)\`)"; fi
 FLAKY_RECORDED=$(cat "$SPOOLWAY_PROJECT_HOME/commands/panedfail · flaky.pane" 2>/dev/null || true)
 if [ -n "$FLAKY_RECORDED" ] && grep -q "^$FLAKY_RECORDED	" "$HSTATE/panes"; then
-  bad "and its pane closes behind the failure rather than standing"
+  ok "and its pane stays after the failure, with the output on screen"
 else
-  ok "and its pane closes behind the failure rather than standing"
+  bad "and its pane stays after the failure, with the output on screen"
 fi
 
 # `panedfail` landed on `blocked` and that was the point of it — but

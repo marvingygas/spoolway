@@ -444,11 +444,19 @@ pub trait Mux: Sync {
     /// to, which is the step alone, since the task's own tab already carries
     /// the task.
     ///
+    /// `beside` is the pane of this command's own earlier run, when it left
+    /// one standing: the new pane is split off it as [`Mux::split_beside`]
+    /// does, so that closing the old one hands the new one its area. A pane
+    /// the multiplexer no longer has is not an error, and the pane is split as
+    /// without one.
+    ///
     /// The default declines outright rather than half-answering. headless
     /// inherits it unchanged — its panes are not real, so there is nothing to split.
+    #[allow(clippy::too_many_arguments)]
     fn run_in_pane(
         &self,
         _tab_id: &str,
+        _beside: Option<&str>,
         _cwd: &Path,
         _key: &str,
         _label: &str,
@@ -1909,6 +1917,7 @@ impl Mux for Herdr {
     fn run_in_pane(
         &self,
         tab_id: &str,
+        beside: Option<&str>,
         cwd: &Path,
         key: &str,
         label: &str,
@@ -1919,7 +1928,17 @@ impl Mux for Herdr {
         // that runs the step's wrapper file, as one shell command — the same `pane run` route
         // [`Herdr::open_command`] takes for the board's own `o`, just against
         // an existing tab instead of a fresh pane of its own.
-        let pane = self.split_pane(tab_id, cwd)?;
+        //
+        // Beside the run's own earlier pane when it left one, and in the
+        // tab's smallest pane when that pane is gone: a person may have closed
+        // it, and a command that cannot start because its old pane is missing
+        // would only be retried into the same refusal.
+        let pane = match beside {
+            Some(old) => self
+                .split_beside(tab_id, old, cwd)
+                .or_else(|_| self.split_pane(tab_id, cwd))?,
+            None => self.split_pane(tab_id, cwd)?,
+        };
         self.rename_pane(&pane, label)?;
         // Written to a file and sourced, rather than typed ahead of the
         // script as one `export` line — see [`hand_environment`]'s own doc

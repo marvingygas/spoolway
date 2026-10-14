@@ -1425,13 +1425,23 @@ impl<'a> Dispatcher<'a> {
             .into_iter()
             .filter(|(_, _, lane)| !finished.contains(&lane.name))
             .collect();
-        let kept_panes: HashMap<String, String> = kept
+        // One map for the whole pass: a shown command that closes a kept
+        // pane while candidates are collected drops it here, so `start_lanes`
+        // never picks the same gone pane again.
+        let mut kept_panes: HashMap<String, String> = kept
             .iter()
             .map(|(_, _, lane)| (lane.name.clone(), lane.pane_id.clone()))
             .collect();
 
-        let (candidates, archived) =
-            self.collect_candidates(&mut tasks, &owned, &kept, &graph, &mut report, tick)?;
+        let (candidates, archived) = self.collect_candidates(
+            &mut tasks,
+            &owned,
+            &kept,
+            &mut kept_panes,
+            &graph,
+            &mut report,
+            tick,
+        )?;
         let candidates = self.rank_candidates(candidates, &tasks, &archived, &graph);
 
         // The two things that end an unattended run short of an empty queue —
@@ -1579,6 +1589,7 @@ impl<'a> Dispatcher<'a> {
         tasks: &mut [Task],
         owned: &[(String, String, &Lane)],
         kept: &[(String, String, &Lane)],
+        kept_panes: &mut HashMap<String, String>,
         graph: &Graph,
         report: &mut Report,
         tick: &mut dyn FnMut(),
@@ -1764,8 +1775,14 @@ impl<'a> Dispatcher<'a> {
                             .collect(),
                         false => Vec::new(),
                     };
-                    let Some((destination, outcome)) =
-                        self.run_command(&mut tasks[index], &step, &serial_peers, report)?
+                    let Some((destination, outcome)) = self.run_command(
+                        &mut tasks[index],
+                        &step,
+                        &serial_peers,
+                        owned,
+                        kept_panes,
+                        report,
+                    )?
                     else {
                         continue;
                     };
@@ -4189,7 +4206,7 @@ impl<'a> Dispatcher<'a> {
     /// back finds its own old pane there, and its new lane is split off that
     /// pane, which is then closed — see [`prepare_boot`]. Past
     /// `dispatch.visible_lanes`, the task's oldest kept panes are closed as
-    /// well, see [`lanes_over_limit`].
+    /// well, and so are those of its shown commands, see [`lanes_over_limit`].
     #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
@@ -4506,30 +4523,13 @@ impl<'a> Dispatcher<'a> {
             // above, so closing it is safe even if that lane is still
             // mid-turn. Only a kept lane is ever a candidate: a running lane
             // and a pane held for a person are not in `kept_panes`.
-            let step_ids = self.pipelines.all_step_ids();
-            let close = lanes_to_close(
-                self.repo.config.dispatch.visible_lanes,
-                task,
-                &lane,
-                kept_panes,
-                &self.lanes,
-                owned,
-            );
-            let mut taken_over: Vec<(String, LaneRecord)> = Vec::new();
-            let mut panes: Vec<String> = Vec::new();
-            for name in close {
-                // Its record goes with the pane: a record with no pane would
-                // read as a live lane.
-                if let Some(old) = self.lanes.remove(&name) {
-                    if let Some((old_step, _)) = parse_lane_name(&name, &step_ids) {
-                        self.record_usage(&old, task.id(), old_step, Some(task), &pipeline.name);
-                    }
-                    taken_over.push((name.clone(), old));
-                }
-                if let Some(pane) = kept_panes.get(&name) {
-                    panes.push(pane.clone());
-                }
-            }
+            let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+            let commands = self.command_panes_of(&runs, task);
+            let Taken {
+                taken_over,
+                panes,
+                commands: command_closes,
+            } = self.take_for_limit(task, &lane, &pipeline.name, kept_panes, owned, &commands);
             // With a limit of 1 the old pane is the tab's last. Closing it
             // before the split would empty the tab, and herdr closes a
             // workspace with its last tab's last pane.
@@ -4603,6 +4603,7 @@ impl<'a> Dispatcher<'a> {
                     put_back_lanes(&mut self.lanes, taken_over, kept_panes, |pane| {
                         !early.closed.iter().any(|closed| closed == pane)
                     });
+                    forget_closed_command_panes(&runs, &command_closes, &early.closed);
                     pending.push(PendingLane {
                         candidate,
                         step,
@@ -4641,6 +4642,7 @@ impl<'a> Dispatcher<'a> {
                     put_back_lanes(&mut self.lanes, taken_over, kept_panes, |pane| {
                         !early.closed.iter().any(|closed| closed == pane)
                     });
+                    forget_closed_command_panes(&runs, &command_closes, &early.closed);
                     self.handle_boot_failure(
                         task,
                         &step,
@@ -5056,6 +5058,8 @@ impl<'a> Dispatcher<'a> {
         task: &mut Task,
         step: &Step,
         serial_peers: &[String],
+        owned: &[(String, String, &Lane)],
+        kept_panes: &mut HashMap<String, String>,
         report: &mut Report,
     ) -> Result<Option<(String, crate::pipeline::Outcome)>> {
         use crate::pipeline::Outcome;
@@ -5145,18 +5149,14 @@ impl<'a> Dispatcher<'a> {
                 self.pending_command_forget = Some(key.clone());
                 self.pending_command_result = Some(FinishedCommand::exited(&runs, &key, code));
                 //
-                // A command's pane has nothing left to show the instant its
-                // exit code is judged, pass or fail alike — closed here rather
-                // than left standing for whatever later arrival happens to
-                // land on this step next, which might be a long wait behind
-                // `blocked` or might never come at all. The `Fresh` arm below
-                // still replaces a pane it finds recorded, for a run the
-                // `Running` arm's own timeout stopped without touching its
-                // pane.
-                if let Some(pane) = runs.pane(&key) {
-                    let _ = self.mux.close_pane(&pane);
-                    runs.forget_pane(&key);
-                }
+                // A hidden command has no pane. One a shown run left behind
+                // stays: it holds the output of a failed gate on screen, and
+                // counts toward `visible_lanes` until the limit closes it.
+                // With commands hidden it is closed here, for a pane an
+                // earlier setting left. The `Fresh` arm below replaces a pane
+                // it finds recorded, for a run the `Running` arm's own
+                // timeout stopped without touching its pane.
+                self.close_hidden_command_pane(&runs, &key);
                 let (destination, outcome) = match code {
                     0 => (step.on_pass.clone(), Outcome::Pass),
                     _ => (
@@ -5293,6 +5293,9 @@ impl<'a> Dispatcher<'a> {
                 // ended the whole pass, so every other task waited behind
                 // it; counted as a failed launch it is retried and then
                 // routed like any other command that never got going.
+                // Read before `ensure_workspace`, which can cut the task a new
+                // workspace: see the same read in `prepare_boot`.
+                let placement = task.front.workspace_id.clone();
                 let worktree =
                     match ensure_workspace(self.repo, self.mux, task, &mut self.file_seen) {
                         Ok((worktree, _)) => worktree,
@@ -5325,21 +5328,30 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
+                // A command runs in a pane only when commands are shown and the
+                // step is not `headless:`. Otherwise it is detached, as the
+                // headless backend runs every command: the same log, and the
+                // same named environment, with the dispatcher's own inherited
+                // directly. Counted as no lane, since it has no pane.
+                let shown = !step.headless && !self.repo.config.dispatch.hide_commands;
                 // A pane an earlier arrival left standing — a run the
                 // `Running` arm's own timeout stopped without touching its
-                // pane, most often — is replaced rather than piled onto,
-                // whether or not this arrival still wants one: a step edited
-                // to `headless: true` after that must not leave the old pane
-                // standing forever either.
-                if let Some(old_pane) = runs.pane(&key) {
+                // pane, most often — is replaced rather than piled onto. A
+                // shown run replaces it in place, below. One that will not
+                // run in a pane is closed here, whether or not it did before:
+                // a step edited to `headless: true`, or commands hidden, must
+                // not leave the old pane standing forever.
+                if !shown && let Some(old_pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&old_pane);
                     runs.forget_pane(&key);
                 }
 
-                let started = if step.headless {
-                    runs.start(&key, &run, &worktree, &env)
-                } else {
-                    self.start_command_in_pane(task, step, &run, &worktree, &env, &runs)
+                let started = match shown {
+                    false => runs.start(&key, &run, &worktree, &env),
+                    true => self.start_shown_command(
+                        task, step, &run, &worktree, &env, &runs, &placement, owned, kept_panes,
+                        report,
+                    ),
                 };
                 match started {
                     Ok(_) => {
@@ -5424,10 +5436,180 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
+    /// Close the pane of a command run that has ended, when commands are
+    /// hidden: a shown run's pane stays until the limit or the end of the
+    /// task closes it. A run with no recorded pane is left alone.
+    fn close_hidden_command_pane(&self, runs: &crate::command_step::Runs, key: &str) {
+        if !self.repo.config.dispatch.hide_commands {
+            return;
+        }
+        if let Some(pane) = runs.pane(key) {
+            let _ = self.mux.close_pane(&pane);
+            runs.forget_pane(key);
+        }
+    }
+
+    /// Start a shown command in a pane of the task's tab, making room for it
+    /// as a new agent lane does: the task's oldest finished lanes close until
+    /// the tab, with the new pane in it, holds `visible_lanes` at most.
+    ///
+    /// A pane its own earlier run left standing is where the new one is split
+    /// from, and is closed once the new one stands, so a step that comes back
+    /// takes the same place. A limit of 1 closes the other panes after the
+    /// split too, since the tab's last pane would take the tab with it.
+    ///
+    /// Nothing is closed when the task has moved to another workspace since
+    /// its panes were kept: they are in a tab that is no longer its own.
+    #[allow(clippy::too_many_arguments)]
+    fn start_shown_command(
+        &mut self,
+        task: &Task,
+        step: &Step,
+        run: &str,
+        worktree: &Path,
+        env: &BTreeMap<String, String>,
+        runs: &crate::command_step::Runs,
+        placement: &Option<String>,
+        owned: &[(String, String, &Lane)],
+        kept_panes: &mut HashMap<String, String>,
+        report: &mut Report,
+    ) -> Result<u32> {
+        let key = crate::command_step::Runs::key(&step.id, task.id());
+        let placed_as_kept = placement.is_some() && *placement == task.front.workspace_id;
+        let own = runs.pane(&key);
+        let commands = self.command_panes_of(runs, task);
+        let pipeline = self
+            .pipelines
+            .for_task(task)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let taken = match placed_as_kept {
+            true => self.take_for_limit(task, &key, &pipeline, kept_panes, owned, &commands),
+            false => Taken {
+                taken_over: Vec::new(),
+                panes: Vec::new(),
+                commands: Vec::new(),
+            },
+        };
+        let beside = own.clone().filter(|_| placed_as_kept);
+        // The task has moved to another workspace, so its old pane is in a
+        // tab that is no longer its own: closed here, as a hidden run's is,
+        // since `record_pane` overwrites the record and nothing could find
+        // the pane afterwards.
+        if !placed_as_kept && let Some(old) = &own {
+            let _ = self.mux.close_pane(old);
+            runs.forget_pane(&key);
+        }
+        // With a limit of 1 the old pane is the tab's last. Closing it
+        // before the split would empty the tab, and herdr closes a
+        // workspace with its last tab's last pane.
+        let (before, after) = match self.repo.config.dispatch.visible_lanes.limit() == Some(1) {
+            true => (Vec::new(), taken.panes.clone()),
+            false => (taken.panes.clone(), Vec::new()),
+        };
+        let mut closed: Vec<String> = Vec::new();
+        // Closed ahead of the split, so the spiral places the new pane in the
+        // room they left, as for an agent lane.
+        for old in &before {
+            match self.mux.close_pane(old) {
+                Ok(()) => closed.push(old.clone()),
+                Err(err) => report.problems.push(format!("{}: {err:#}", step.id)),
+            }
+        }
+        let started =
+            self.start_command_in_pane(task, step, run, worktree, env, runs, beside.as_deref());
+        if started.is_ok() {
+            for old in after.iter().chain(beside.as_ref()) {
+                match self.mux.close_pane(old) {
+                    Ok(()) => closed.push(old.clone()),
+                    Err(err) => report.problems.push(format!("{}: {err:#}", step.id)),
+                }
+            }
+        }
+        // A pane that did not close, or was never tried, may still be open,
+        // so its lane keeps its record: see the same call in `start_lanes`.
+        put_back_lanes(&mut self.lanes, taken.taken_over, kept_panes, |pane| {
+            !closed.iter().any(|c| c == pane)
+        });
+        forget_closed_command_panes(runs, &taken.commands, &closed);
+        // The pass hands this same map to `start_lanes` once candidates are
+        // collected. A pane closed here must not be a kept lane there, or
+        // the limit would pick it again and close one real lane too few.
+        kept_panes.retain(|_, pane| !closed.contains(pane));
+        started
+    }
+
+    /// The panes of `task`'s command runs that count toward its lane limit.
+    /// None while commands are hidden: a hidden run has no pane, and one a
+    /// shown run left before the setting was turned on is closed by
+    /// `reap_stale_runs` once its task has left the step, or where its exit
+    /// is read.
+    fn command_panes_of(&self, runs: &crate::command_step::Runs, task: &Task) -> Vec<CommandPane> {
+        match self.repo.config.dispatch.hide_commands {
+            true => Vec::new(),
+            false => command_panes(runs, task),
+        }
+    }
+
+    /// Choose the lanes of `task` that close to make room for `lane`, a new
+    /// agent lane or a command's run key, and take them out of the
+    /// dispatcher: see [`lanes_to_close`] for the choice.
+    ///
+    /// Each agent lane's record goes with its pane, since a record with no
+    /// pane would read as a live lane. Its spend is banked here, so closing
+    /// the pane is safe even if the lane is still mid-turn. Only a kept lane
+    /// is ever a candidate: a running lane and a pane held for a person are
+    /// not in `kept_panes`.
+    fn take_for_limit(
+        &mut self,
+        task: &Task,
+        lane: &str,
+        pipeline: &str,
+        kept_panes: &HashMap<String, String>,
+        owned: &[(String, String, &Lane)],
+        commands: &[CommandPane],
+    ) -> Taken {
+        let step_ids = self.pipelines.all_step_ids();
+        let close = lanes_to_close(
+            self.repo.config.dispatch.visible_lanes,
+            task,
+            lane,
+            kept_panes,
+            &self.lanes,
+            owned,
+            commands,
+        );
+        let mut taken = Taken {
+            taken_over: Vec::new(),
+            panes: Vec::new(),
+            commands: Vec::new(),
+        };
+        for name in close {
+            if let Some(old) = self.lanes.remove(&name) {
+                if let Some((old_step, _)) = parse_lane_name(&name, &step_ids) {
+                    self.record_usage(&old, task.id(), old_step, Some(task), pipeline);
+                }
+                taken.taken_over.push((name.clone(), old));
+            }
+            if let Some(pane) = kept_panes.get(&name) {
+                taken.panes.push(pane.clone());
+            } else if let Some(command) = commands.iter().find(|c| c.key == name) {
+                taken.panes.push(command.pane.clone());
+                taken
+                    .commands
+                    .push((command.key.clone(), command.pane.clone()));
+            }
+        }
+        taken
+    }
+
     /// Start a command step's run where a person can watch it: a pane split
     /// off the task's own tab, the same one `prepare_boot` splits an agent
     /// lane's pane from — `task.front.tab_id`, falling back to
-    /// `task.front.pane_id` for a backend with no tabs.
+    /// `task.front.pane_id` for a backend with no tabs. `beside` is the pane
+    /// the step's own earlier run left, which the new one is split from.
+    /// Only reached while commands are shown: see
+    /// [`Dispatcher::start_shown_command`].
     ///
     /// Falls back to the old detached run whenever the backend has none to
     /// offer: [`crate::mux::Mux::run_in_pane`] answers `None` for headless,
@@ -5448,6 +5630,7 @@ impl<'a> Dispatcher<'a> {
     /// built from `env` alone: what the wrapper writes into the script text
     /// is the small, named contract a step actually declares, not everything
     /// this process happens to be carrying.
+    #[allow(clippy::too_many_arguments)]
     fn start_command_in_pane(
         &self,
         task: &Task,
@@ -5456,6 +5639,7 @@ impl<'a> Dispatcher<'a> {
         worktree: &Path,
         env: &BTreeMap<String, String>,
         runs: &crate::command_step::Runs,
+        beside: Option<&str>,
     ) -> Result<u32> {
         // The run's own identity — never touched by the visible-label split
         // below, so a command step's log file and pane lookup stay keyed on
@@ -5508,7 +5692,7 @@ impl<'a> Dispatcher<'a> {
         pane_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
         match self
             .mux
-            .run_in_pane(&tab, worktree, &key, &label, &script, &pane_env)?
+            .run_in_pane(&tab, beside, worktree, &key, &label, &script, &pane_env)?
         {
             Some(pane) => {
                 runs.record_pane(&key, &pane)?;
@@ -5527,8 +5711,9 @@ impl<'a> Dispatcher<'a> {
     /// the moment it started, and this is the only place left that ever looks
     /// again. Two things are found in one: a run that has outstayed its
     /// step's `timeout:`, which is stopped because nothing else would; and a
-    /// finished run, whose pane is closed and whose run is banked to the
-    /// ledger once, because nothing else will ever come back to either.
+    /// finished run, whose run is banked to the ledger once, and whose pane
+    /// is closed when commands are hidden, because nothing else will ever
+    /// come back to either.
     ///
     /// A sidecar that exits non-zero, or is stopped at its timeout, leaves one
     /// line in the task's `## Status Log` and the task stays where it is.
@@ -5574,11 +5759,14 @@ impl<'a> Dispatcher<'a> {
             // this a late non-zero exit would drag the task off a later
             // step, even one an agent is mid-turn on.
             if !step.background {
-                if let Some(pane) = runs.pane(key) {
-                    let _ = self.mux.close_pane(&pane);
-                    runs.forget_pane(key);
+                self.close_hidden_command_pane(&runs, key);
+                // A shown run's pane outlives its routed exit, so the key is
+                // listed for its `.pane` alone once the run is forgotten.
+                // Stopping it then would kill the `.group` a `run:` line left
+                // running on purpose for the steps after it.
+                if runs.state(key) != crate::command_step::RunState::Fresh {
+                    runs.stop(key);
                 }
-                runs.stop(key);
                 continue;
             }
             match runs.state(key) {
@@ -5625,12 +5813,9 @@ impl<'a> Dispatcher<'a> {
                     ));
                 }
                 crate::command_step::RunState::Exited(code) => {
-                    // A background run's pane has nothing left to show the
-                    // moment its exit code is read here, whatever the code is.
-                    if let Some(pane) = runs.pane(key) {
-                        let _ = self.mux.close_pane(&pane);
-                        runs.forget_pane(key);
-                    }
+                    // A shown background run's pane stays, like a foreground
+                    // one's: see the `Exited` arm of `run_command`.
+                    self.close_hidden_command_pane(&runs, key);
                     // Banked on the first read, and then skipped on every
                     // later one: the code stays on disk and is read again
                     // each pass, and the run's own id keeps it to one line.
@@ -6958,6 +7143,7 @@ fn lanes_to_close(
     kept_panes: &HashMap<String, String>,
     records: &HashMap<String, LaneRecord>,
     owned: &[(String, String, &Lane)],
+    commands: &[CommandPane],
 ) -> Vec<String> {
     let mut older: Vec<(i64, String)> = kept_panes
         .keys()
@@ -6967,12 +7153,83 @@ fn lanes_to_close(
             (started, name.clone())
         })
         .collect();
+    // A command whose pane is still open takes its place among the lanes by
+    // when it started, under its run key, which no lane is called. One that
+    // is still running is a lane that is never closed, like a running agent.
+    older.extend(
+        commands
+            .iter()
+            .filter(|c| !c.running && c.key != lane && crate::mux::lane_of_task(&c.key, task))
+            .map(|c| (c.started_at, c.key.clone())),
+    );
     older.sort();
     let standing = owned
         .iter()
         .filter(|(_, task_id, owned_lane)| task_id == task.id() && owned_lane.name != lane)
-        .count();
+        .count()
+        + commands
+            .iter()
+            .filter(|c| c.running && c.key != lane && crate::mux::lane_of_task(&c.key, task))
+            .count();
     lanes_over_limit(limit, standing, &older)
+}
+
+/// A command step's pane that is still open, as the lane limit sees it. Only
+/// a run that was started in a pane has one: see
+/// [`DispatchConfig::hide_commands`](crate::config::DispatchConfig::hide_commands).
+struct CommandPane {
+    /// The run's key, which stands for it among the lane names.
+    key: String,
+    pane: String,
+    /// When the run started, in seconds — see
+    /// [`crate::command_step::Runs::pane_started`].
+    started_at: i64,
+    /// Whether its command has not exited. The limit never closes such a pane.
+    running: bool,
+}
+
+/// Every command pane of `task` that is still open, finished or not.
+fn command_panes(runs: &crate::command_step::Runs, task: &Task) -> Vec<CommandPane> {
+    runs.keys_for_task(task.id())
+        .into_iter()
+        .filter_map(|key| {
+            let pane = runs.pane(&key)?;
+            Some(CommandPane {
+                started_at: runs.pane_started(&key).unwrap_or_default(),
+                running: runs.state(&key) == crate::command_step::RunState::Running,
+                pane,
+                key,
+            })
+        })
+        .collect()
+}
+
+/// Drop the record of each command pane in `closes` that `closed` names, so
+/// that the next pass does not count, or try to close, a pane that is gone. A
+/// pane that did not close keeps its record and is still counted.
+fn forget_closed_command_panes(
+    runs: &crate::command_step::Runs,
+    closes: &[(String, String)],
+    closed: &[String],
+) {
+    for (key, pane) in closes {
+        if closed.contains(pane) {
+            runs.forget_pane(key);
+        }
+    }
+}
+
+/// What closing a task's oldest lanes to make room for a new one took from
+/// the dispatcher: see [`Dispatcher::take_for_limit`].
+struct Taken {
+    /// The records of the agent lanes among them, removed and banked. They
+    /// go back, with nothing left to bank, for a pane that stays open — see
+    /// [`put_back_lanes`].
+    taken_over: Vec<(String, LaneRecord)>,
+    /// Every pane to close, oldest lane first.
+    panes: Vec<String>,
+    /// The command runs among them, as (run key, pane).
+    commands: Vec<(String, String)>,
 }
 
 /// The oldest of `older` that must close so the tab, with one new lane added,
@@ -8501,6 +8758,7 @@ mod tests {
         fn run_in_pane(
             &self,
             tab_id: &str,
+            beside: Option<&str>,
             cwd: &Path,
             key: &str,
             label: &str,
@@ -8514,6 +8772,9 @@ mod tests {
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
             self.log(format!("run_in_pane {tab_id} -> {pane} ({key}) ({label})"));
+            if let Some(old) = beside {
+                self.log(format!("run_in_pane beside {pane} {old}"));
+            }
             // The names in its environment, the same way `start_lane` logs a
             // lane's own — so a test can assert this backend was handed one at
             // all, without depending on the wrapper file `script_for_pane` also
@@ -13543,6 +13804,7 @@ mod tests {
                 &kept_panes,
                 &records,
                 owned,
+                &[],
             )
         };
 
@@ -13560,6 +13822,172 @@ mod tests {
             ])
             .is_empty()
         );
+    }
+
+    /// A command pane takes its place among the lanes by when it started. A
+    /// finished one closes oldest first with the agent lanes, a running one
+    /// takes a slot without ever being closed, and another task's is not
+    /// counted.
+    #[test]
+    fn command_panes_count_toward_the_limit_and_a_running_one_is_never_closed() {
+        use crate::config::VisibleLanes;
+        let (repo, _root_guard) = fixture("limit-commands");
+        let path = add_task_with(&repo, "demo", "s4", |_| {});
+        let task = reload(&path);
+        let kept_panes: HashMap<String, String> =
+            [("demo · s1".to_string(), "w1:p11".to_string())].into();
+        let records: HashMap<String, LaneRecord> =
+            [("demo · s1".to_string(), kept_record("s-1", 10))].into();
+        let command = |key: &str, pane: &str, started_at: i64, running: bool| CommandPane {
+            key: key.to_string(),
+            pane: pane.to_string(),
+            started_at,
+            running,
+        };
+        let close = |limit: u32, commands: &[CommandPane]| {
+            lanes_to_close(
+                VisibleLanes::Count(limit),
+                &task,
+                "demo · s4",
+                &kept_panes,
+                &records,
+                &[],
+                commands,
+            )
+        };
+
+        // Older than the agent lane, so it closes first.
+        let finished = [command("demo · gate", "w1:p12", 5, false)];
+        assert_eq!(close(2, &finished), ["demo · gate"]);
+        assert_eq!(close(1, &finished), ["demo · gate", "demo · s1"]);
+        // Newer than the agent lane, so the agent lane closes first.
+        let newer = [command("demo · gate", "w1:p12", 20, false)];
+        assert_eq!(close(2, &newer), ["demo · s1"]);
+        // Running: it takes a slot and stays, so the agent lane goes instead.
+        let running = [command("demo · gate", "w1:p12", 5, true)];
+        assert_eq!(close(2, &running), ["demo · s1"]);
+        assert_eq!(close(1, &running), ["demo · s1"]);
+        // The returning step's own pane is replaced in place, not counted.
+        let own = [command("demo · s4", "w1:p12", 5, false)];
+        assert!(close(2, &own).is_empty());
+        // Another task's command is not this task's lane.
+        let other = [command("other · gate", "w2:p12", 5, false)];
+        assert!(close(2, &other).is_empty());
+    }
+
+    /// Walks the mockup's flow with a limit of 1: a shown command that
+    /// starts while an agent lane is kept splits first and closes the agent
+    /// pane after, so the tab is never left empty.
+    ///
+    /// Fails before commands counted as lanes: nothing closed the agent pane.
+    #[test]
+    fn a_shown_command_closes_the_oldest_finished_lane_once_its_pane_stands() {
+        let (mut repo, _root_guard) = fixture("limit-shown-command");
+        repo.config.dispatch.hide_commands = false;
+        repo.config.dispatch.visible_lanes = crate::config::VisibleLanes::Count(1);
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · review",
+            LaneStatus::Done,
+            "w1:p7",
+        )])
+        .offering_panes();
+        let mut records = HashMap::new();
+        records.insert("demo · review".to_string(), kept_record("s-review", 1));
+        save_lane_records(&repo, &records).unwrap();
+        let pipelines = pipelines_running("true", false);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let order: Vec<String> = mux
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                (call.starts_with("run_in_pane ") && !call.starts_with("run_in_pane env"))
+                    || call.starts_with("close_pane")
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "run_in_pane w1:t1 -> w1:t1.s1 (demo · implement) (implement)",
+                "close_pane w1:p7"
+            ],
+            "the pane stands before the old lane closes: {:?}",
+            mux.calls()
+        );
+        assert!(
+            !load_lane_records(&repo).contains_key("demo · review"),
+            "the closed lane's record goes with its pane"
+        );
+    }
+
+    /// The other direction: an agent step that starts closes an exited
+    /// command's pane once the limit pushes it out, and forgets its record so
+    /// that the next pass does not count a pane that is gone.
+    ///
+    /// Fails before commands counted as lanes: the pane stayed open.
+    #[test]
+    fn a_new_agent_lane_closes_an_exited_commands_pane_the_limit_pushes_out() {
+        let (mut repo, _root_guard) = fixture("limit-command-pane-closed");
+        repo.config.dispatch.hide_commands = false;
+        repo.config.dispatch.visible_lanes = crate::config::VisibleLanes::Count(1);
+        add_task_with_worktree(&repo, "demo", "review");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("test", "demo");
+        runs.record_pane(&key, "w1:p9").unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(mux.did("close_pane"), ["close_pane w1:p9"]);
+        assert!(runs.pane(&key).is_none(), "its record goes with the pane");
+    }
+
+    /// A shown background command that closes a kept pane, and whose task
+    /// moves on to an agent step in the same pass, leaves that agent lane a
+    /// limit that no longer counts the closed pane. Each pane closes once.
+    ///
+    /// Fails while the pass kept two copies of its kept panes: the agent
+    /// lane picked the pane the command had closed, and closed it again.
+    #[test]
+    fn a_pane_a_shown_command_closed_is_not_closed_again_in_the_same_pass() {
+        let (mut repo, _root_guard) = fixture("limit-shared-kept-panes");
+        repo.config.dispatch.hide_commands = false;
+        repo.config.dispatch.visible_lanes = crate::config::VisibleLanes::Count(2);
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![
+            lane_in(&repo, "demo · document", LaneStatus::Done, "w1:p7"),
+            lane_in(&repo, "demo · review", LaneStatus::Done, "w1:p8"),
+        ])
+        .offering_panes();
+        let mut records = HashMap::new();
+        records.insert("demo · document".to_string(), kept_record("s-doc", 1));
+        records.insert("demo · review".to_string(), kept_record("s-review", 2));
+        save_lane_records(&repo, &records).unwrap();
+        let pipelines = pipelines_running("sleep 30", true);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let closes = mux.did("close_pane");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        runs.stop(&crate::command_step::Runs::key("implement", "demo"));
+        assert_eq!(reload(&path).stage(), "review", "{:?}", mux.calls());
+        assert_eq!(
+            closes.iter().filter(|c| *c == "close_pane w1:p7").count(),
+            1,
+            "the oldest kept pane closes once: {:?}",
+            mux.calls()
+        );
+        let mut unique = closes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), closes.len(), "{closes:?}");
     }
 
     /// Another task's kept pane is never the one taken over.
@@ -22507,7 +22935,7 @@ mod tests {
             let mut task = reload(&path);
             let mut report = Report::default();
             let routed = dispatcher
-                .run_command(&mut task, &step, &[], &mut report)
+                .run_command(&mut task, &step, &[], &[], &mut HashMap::new(), &mut report)
                 .unwrap();
             assert_eq!(
                 routed.map(|(to, _)| to).as_deref(),
@@ -22573,12 +23001,13 @@ mod tests {
         );
     }
 
-    /// The default now: a command step with no `headless:` key runs in a
-    /// pane of its own, split off the task's own tab, and a passing exit
-    /// closes it behind it.
+    /// With `hide_commands = false`, a command step with no `headless:` key
+    /// runs in a pane of its own, split off the task's own tab, and the pane
+    /// stays after the command exits.
     #[test]
-    fn a_command_step_with_no_headless_key_runs_in_a_pane_and_closes_it() {
-        let (repo, _root_guard) = fixture("command-pane-pass");
+    fn a_shown_command_runs_in_a_pane_and_the_pane_stays_after_it_exits() {
+        let (mut repo, _root_guard) = fixture("command-pane-pass");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -22593,11 +23022,43 @@ mod tests {
             mux.calls()
         );
         assert!(
-            mux.did("close_pane")
-                .iter()
-                .any(|call| call.contains("w1:t1.s1")),
-            "a passing command's pane closes behind it: {:?}",
+            mux.did("close_pane").is_empty(),
+            "a passing command's pane stays open: {:?}",
             mux.calls()
+        );
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert!(runs.pane(&key).is_some(), "its pane is still recorded");
+    }
+
+    /// The default: a command step opens no pane, and still logs to the same
+    /// file with the same named environment a shown run gets.
+    ///
+    /// Fails before `hide_commands` existed, when a command step on a backend
+    /// that offers panes always opened one.
+    #[test]
+    fn a_hidden_command_opens_no_pane_and_logs_to_the_same_file() {
+        let (repo, _root_guard) = fixture("command-hidden");
+        assert!(repo.config.dispatch.hide_commands);
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let pipelines = pipelines_running("echo hidden; echo \"task=$SPOOLWAY_TASK\"", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert!(
+            mux.did("run_in_pane").is_empty(),
+            "a hidden command must not open a pane: {:?}",
+            mux.calls()
+        );
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert!(runs.pane(&key).is_none());
+        let log = std::fs::read_to_string(runs.log_path(&key)).unwrap();
+        assert!(log.contains("hidden"), "{log}");
+        assert!(
+            log.contains("task=demo"),
+            "a hidden run sees the step's named environment: {log}"
         );
     }
 
@@ -22608,7 +23069,8 @@ mod tests {
     /// logged here as `run_in_pane`'s own `key`.
     #[test]
     fn a_split_command_panes_label_is_only_its_step_not_the_task() {
-        let (repo, _root_guard) = fixture("command-pane-split-label");
+        let (mut repo, _root_guard) = fixture("command-pane-split-label");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -22652,7 +23114,8 @@ mod tests {
     /// ordinary process inheritance.
     #[test]
     fn a_paned_commands_environment_carries_what_the_dispatcher_process_has() {
-        let (repo, _root_guard) = fixture("command-pane-env");
+        let (mut repo, _root_guard) = fixture("command-pane-env");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -22686,7 +23149,8 @@ mod tests {
     /// worktree, run against the main checkout's stale binary.
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_directory() {
-        let (repo, _root_guard) = fixture("command-pane-pwd");
+        let (mut repo, _root_guard) = fixture("command-pane-pwd");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -22718,7 +23182,8 @@ mod tests {
     /// dispatcher's pane rather than its own.
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_pane_identity() {
-        let (repo, _root_guard) = fixture("command-pane-mux-identity");
+        let (mut repo, _root_guard) = fixture("command-pane-mux-identity");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -22773,12 +23238,14 @@ mod tests {
         );
     }
 
-    /// A failing command's pane closes the instant the task leaves the step,
-    /// the same as a passing one — not left standing on the chance the step
-    /// is retried later.
+    /// A failing shown command's pane stays after the task leaves the step,
+    /// so its output is still on screen. A step sent back to it replaces that
+    /// pane in place: the new pane is split off the old one, which is then
+    /// closed.
     #[test]
-    fn a_failing_paned_commands_pane_closes_on_departure() {
-        let (repo, _root_guard) = fixture("command-pane-fail");
+    fn a_failing_shown_commands_pane_stays_and_a_retry_replaces_it_in_place() {
+        let (mut repo, _root_guard) = fixture("command-pane-fail");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("exit 1", false);
@@ -22789,22 +23256,19 @@ mod tests {
 
         let key = crate::command_step::Runs::key("implement", "demo");
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        assert!(
-            runs.pane(&key).is_none(),
-            "a failing command's pane record must be cleared the moment the task leaves"
+        assert_eq!(
+            runs.pane(&key).as_deref(),
+            Some("w1:t1.s1"),
+            "a failing command's pane is still recorded once the task has left"
         );
         assert!(
-            mux.did("close_pane")
-                .iter()
-                .any(|call| call.contains("w1:t1.s1")),
-            "a failing command's pane closes behind it, same as a passing one: {:?}",
+            mux.did("close_pane").is_empty(),
+            "nothing closes a failed gate's output: {:?}",
             mux.calls()
         );
 
         // Sent back to `implement` by hand, the way a person clearing
-        // `blocked` would — the retry proves a fresh arrival still gets a
-        // pane of its own, with nothing left over from the last one to
-        // replace.
+        // `blocked` would.
         let mut reloaded = reload(&path);
         reloaded.set_stage("implement", None);
         reloaded.save().unwrap();
@@ -22815,16 +23279,22 @@ mod tests {
             .unwrap();
 
         assert!(
-            mux.did("close_pane").is_empty(),
-            "there was nothing left standing to close on this arrival: {:?}",
+            mux.did("run_in_pane beside")
+                .iter()
+                .any(|call| call.ends_with("w1:t1.s1")),
+            "the new pane is split off the old one: {:?}",
             mux.calls()
         );
-        assert!(
-            mux.did("run_in_pane")
-                .iter()
-                .any(|call| call.contains("w1:t1")),
-            "a fresh arrival still gets a pane of its own: {:?}",
+        assert_eq!(
+            mux.did("close_pane"),
+            vec!["close_pane w1:t1.s1".to_string()],
+            "the old pane closes once the new one stands: {:?}",
             mux.calls()
+        );
+        assert_ne!(
+            runs.pane(&key).as_deref(),
+            Some("w1:t1.s1"),
+            "the run is recorded in the new pane"
         );
     }
 
@@ -23483,7 +23953,8 @@ mod tests {
     /// isolates one behaviour from the other.
     #[test]
     fn a_background_commands_failure_never_moves_its_task() {
-        let (repo, _root_guard) = fixture("command-background-fail");
+        let (mut repo, _root_guard) = fixture("command-background-fail");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let mut pipelines = pipelines_running("exit 1", true);
@@ -23528,6 +23999,9 @@ mod tests {
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let keys = runs.keys_for_task(task.id());
         let arrivals = task.front.arrivals.clone();
+        // Hidden from here on, so the reap closes the pane the shown run
+        // opened: a shown run's pane would stay.
+        repo.config.dispatch.hide_commands = true;
         for _ in 0..3 {
             let mut report = Report::default();
             Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
@@ -23822,12 +24296,15 @@ mod tests {
     }
 
     /// A foreground command that is still running when its task leaves the
-    /// step is stopped, not just ignored: its process is killed, its run files
-    /// are forgotten and its pane is closed. Otherwise a long command would
-    /// run on after the task had gone, and could still exit non-zero later.
+    /// step is stopped, not just ignored: its process is killed and its run
+    /// files are forgotten. Otherwise a long command would run on after the
+    /// task had gone, and could still exit non-zero later. Its pane stays
+    /// when commands are shown, since it counts as a lane that has ended, and
+    /// is closed when they are hidden.
     #[test]
-    fn a_foreground_run_still_going_when_its_task_leaves_is_stopped_and_its_pane_closed() {
-        let (repo, _root_guard) = fixture("command-foreground-left-running");
+    fn a_foreground_run_still_going_when_its_task_leaves_is_stopped_and_its_pane_kept_or_closed() {
+        let (mut repo, _root_guard) = fixture("command-foreground-left-running");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let release = repo.root.join("release-fg-running");
@@ -23864,6 +24341,21 @@ mod tests {
             "the leftover run must be stopped"
         );
         assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert_eq!(
+            runs.pane(&key).as_deref(),
+            Some(pane.as_str()),
+            "a shown run's pane stays"
+        );
+        assert!(mux.did("close_pane").is_empty(), "{:?}", mux.calls());
+
+        // Commands hidden since: the pane the earlier setting left is closed.
+        repo.config.dispatch.hide_commands = true;
+        Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
         assert!(runs.pane(&key).is_none(), "the pane record must be gone");
         assert!(
             mux.did("close_pane")
@@ -23872,6 +24364,93 @@ mod tests {
             "{:?}",
             mux.calls()
         );
+    }
+
+    /// A shown foreground command whose `run:` line backgrounded a process
+    /// keeps its pane record after its exit is routed. That record must not
+    /// make a later pass stop the process: it was left running on purpose
+    /// for the steps after this one, and only cleanup stops it.
+    ///
+    /// The fake backend runs a pane's script without job control, so its
+    /// wrapper never leads a group and `forget` keeps no `.group` for it. A
+    /// real pane does, so the record is planted here from a detached run.
+    ///
+    /// Fails while the reap stopped every listed foreground key: the pane
+    /// record listed it, and the stop killed the kept group.
+    #[test]
+    fn a_shown_commands_kept_pane_does_not_get_its_backgrounded_child_stopped() {
+        let (mut repo, _root_guard) = fixture("command-shown-keeps-group");
+        repo.config.dispatch.hide_commands = false;
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert!(runs.pane(&key).is_some(), "the shown run's pane is kept");
+
+        let server = "elsewhere · server";
+        let pid = runs
+            .start(server, "sleep 60", &repo.root, &BTreeMap::new())
+            .unwrap();
+        std::fs::copy(
+            repo.commands_dir().join(format!("{server}.pid")),
+            repo.commands_dir().join(format!("{key}.group")),
+        )
+        .unwrap();
+
+        let mut task = reload(&path);
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let mut report = Report::default();
+        let keys = runs.keys_by_task().remove("demo").unwrap_or_default();
+        assert_eq!(keys, vec![key.clone()], "listed for its pane record");
+        Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+
+        let alive = crate::headless::alive(pid);
+        runs.stop(&key);
+        runs.stop(server);
+        assert!(alive, "the reap stopped a process the step left running");
+    }
+
+    /// A shown command's own earlier pane is closed, not orphaned, when the
+    /// task has been given a new workspace since that pane was recorded.
+    /// The new run overwrites the record, so nothing else could find it.
+    #[test]
+    fn a_shown_commands_old_pane_closes_when_its_task_was_placed_anew() {
+        let (mut repo, _root_guard) = fixture("command-shown-replaced");
+        repo.config.dispatch.hide_commands = false;
+        let worktree = repo.root.join("wt-demo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        add_task_with(&repo, "demo", "implement", |front| {
+            front.branch = Some("task/demo".into());
+            front.base = Some("work".into());
+            front.worktree_path = Some(worktree);
+        });
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        runs.record_pane(&key, "w0:p3").unwrap();
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let pipelines = pipelines_running("sleep 30", false);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let recorded = runs.pane(&key);
+        runs.stop(&key);
+        assert!(
+            mux.did("close_pane")
+                .contains(&"close_pane w0:p3".to_string()),
+            "{:?}",
+            mux.calls()
+        );
+        assert_ne!(recorded.as_deref(), Some("w0:p3"), "{:?}", mux.calls());
     }
 
     /// The other half: a background command that passes, or one still going,
@@ -23956,12 +24535,14 @@ mod tests {
     /// The pane a background run landed in is nobody's to close but
     /// `reap_stale_runs` — the step that started it walked away the moment it
     /// started, and this is the only place left that ever reads its exit
-    /// code. Closed here whether or not the step declares `on_fail`, and
-    /// whether or not the code is zero: the run is over either way, and the
-    /// tab has no more live work in that pane to show.
+    /// code. A shown run's pane stays after it exits, whether or not the step
+    /// declares `on_fail` and whether or not the code is zero, and counts as
+    /// a finished lane. A pane left by an earlier setting is closed here once
+    /// commands are hidden.
     #[test]
-    fn a_background_commands_pane_closes_at_reap() {
-        let (repo, _root_guard) = fixture("command-background-pane");
+    fn a_shown_background_commands_pane_stays_at_reap_and_a_hidden_ones_closes() {
+        let (mut repo, _root_guard) = fixture("command-background-pane");
+        repo.config.dispatch.hide_commands = false;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         // No `on_fail`: proves the pane closes even though nothing routes on
@@ -23992,6 +24573,16 @@ mod tests {
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let mut report = Report::default();
         let keys = runs.keys_for_task(task.id());
+        Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+        assert!(runs.pane(&key).is_some(), "a shown run's pane stays");
+        assert!(mux.did("close_pane").is_empty(), "{:?}", mux.calls());
+
+        repo.config.dispatch.hide_commands = true;
         Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
             &mut task,
             pipeline,

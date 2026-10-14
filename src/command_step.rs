@@ -517,6 +517,22 @@ impl Runs {
         (!pane.is_empty()).then(|| pane.to_string())
     }
 
+    /// When the pane a run landed in was recorded, as seconds since the epoch:
+    /// the moment the run started, since [`Runs::record_pane`] writes the
+    /// record once and nothing rewrites it. `None` without a record.
+    ///
+    /// A command pane has no lane record to carry a start time, and the
+    /// dispatcher closes a task's oldest panes first, so the age of the record
+    /// is the only start time there is to order a command pane by.
+    pub fn pane_started(&self, key: &str) -> Option<i64> {
+        let modified = std::fs::metadata(self.pane_path(key))
+            .ok()?
+            .modified()
+            .ok()?;
+        let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(since.as_secs() as i64)
+    }
+
     /// Record which pane a run landed in, so a later pass — or cleanup — can
     /// find it again without asking the multiplexer to list everything.
     pub fn record_pane(&self, key: &str, pane_id: &str) -> Result<()> {
@@ -559,8 +575,8 @@ impl Runs {
     /// step again starts clean anyway — see [`Runs::begin_visit`] — so this is
     /// not what keeps a revisit from routing on an old code. A background
     /// step's leftover code is never routed, so it is not forgotten here: the
-    /// dispatcher rereads it on every pass to close the pane and bank the run,
-    /// and cleanup clears it with the task.
+    /// dispatcher rereads it on every pass to bank the run, and to close its
+    /// pane when commands are hidden, and cleanup clears it with the task.
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.

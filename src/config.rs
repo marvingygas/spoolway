@@ -637,6 +637,21 @@ pub struct DispatchConfig {
     #[serde(skip_serializing_if = "VisibleLanes::is_default")]
     pub visible_lanes: VisibleLanes,
 
+    /// Whether a command step runs detached, with no pane, so it never takes
+    /// a place in its task's tab. On by default: a gate's pane used to close
+    /// the moment its exit code was read, so it only ever cost the lanes
+    /// beside it their room. Its output is in the run's log either way.
+    ///
+    /// Off, a command opens a pane like an agent step's and keeps it after
+    /// the command exits. It then counts toward [`Self::visible_lanes`] and
+    /// closes oldest first like a finished agent lane. A pane whose command is
+    /// still running is never closed for the limit.
+    ///
+    /// Not written to `config.toml` while it is `true`, for the same reason as
+    /// [`Self::lane_child_ceiling`] above.
+    #[serde(skip_serializing_if = "is_true")]
+    pub hide_commands: bool,
+
     /// Retired: whether a finished step's agent stayed open in its own pane.
     /// [`Self::visible_lanes`] replaces it, and [`Config::migrate`] reads this
     /// one only to carry it over — `true` kept every pane, which is `all`,
@@ -671,6 +686,12 @@ pub struct DispatchConfig {
     pub(crate) herdr_mode: Option<toml::Value>,
 }
 
+/// Skips a `true` on the way out — see [`DispatchConfig::hide_commands`] for
+/// why a key that holds its default is better off absent here.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
 /// for why a key that holds its default is better off absent here.
 fn is_default_lane_child_ceiling(value: &Duration) -> bool {
@@ -703,6 +724,7 @@ impl Default for DispatchConfig {
             auto_commit: true,
             priority: Priority::default(),
             visible_lanes: VisibleLanes::default(),
+            hide_commands: true,
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
             herdr_mode: None,
@@ -935,9 +957,11 @@ impl Backend {
 /// every one of them.
 ///
 /// The limit counts all of a task's lanes, kept and running, in whichever tab
-/// they stand. Only a finished lane ever closes for it. A lane that is still
-/// running, and a pane held for a person on `blocked` or `paused`, stay
-/// whatever the count says, so a tab can sit over its limit until they end.
+/// they stand. A command's pane is a lane while commands are shown, see
+/// [`DispatchConfig::hide_commands`]. Only a finished lane ever closes for
+/// it. A lane that is still running, and a pane held for a person on
+/// `blocked` or `paused`, stay whatever the count says, so a tab can sit over
+/// its limit until they end.
 /// Zero is refused rather than read as "none": a limit that closed every lane
 /// would close the one the step is starting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3789,6 +3813,29 @@ mod tests {
             toml::to_string(&custom)
                 .unwrap()
                 .contains("lane_child_ceiling = \"30m\"")
+        );
+    }
+
+    /// `hide_commands` stays out of a defaulted config for the same reason,
+    /// and is written once a person turns it off.
+    #[test]
+    fn hide_commands_stays_out_of_a_defaulted_config() {
+        let config = Config::default();
+        assert!(config.dispatch.hide_commands);
+        assert!(!toml::to_string(&config).unwrap().contains("hide_commands"));
+
+        let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
+        assert!(absent.dispatch.hide_commands);
+
+        let on: Config = toml::from_str("[dispatch]\nhide_commands = true\n").unwrap();
+        assert!(!toml::to_string(&on).unwrap().contains("hide_commands"));
+
+        let off: Config = toml::from_str("[dispatch]\nhide_commands = false\n").unwrap();
+        assert!(!off.dispatch.hide_commands);
+        assert!(
+            toml::to_string(&off)
+                .unwrap()
+                .contains("hide_commands = false")
         );
     }
 

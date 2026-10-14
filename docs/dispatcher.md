@@ -822,8 +822,8 @@ A task's tab is renamed to the task's id, or to the routine's name for a copy of
 panes then show only the step.
 
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with
-an error naming the pane and the byte count, and nothing is typed. A paned command step's pane
-is typed one short line that runs the step's script file. See [Background and
+an error naming the pane and the byte count, and nothing is typed. A command step's pane, when
+`dispatch.hide_commands` is `false`, is typed one short line that runs the step's script file. See [Background and
 headless](pipelines.md#background-and-headless).
 
 ### Finished lanes keep their pane
@@ -847,8 +847,8 @@ A task's tab holds at most `dispatch.visible_lanes` lanes, five by default. Set 
 number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 3`. A `0` is
 refused.
 
-Each new agent step that would go over the limit first closes the task's oldest finished lanes,
-oldest by start time. It then opens the new pane where the spiral puts it. The spiral splits the
+Each new agent step, and each shown command step, that would go over the limit first closes the
+task's oldest finished lanes, oldest by start time. It then opens the new pane where the spiral puts it. The spiral splits the
 smallest pane, so the oldest lane keeps the biggest area and the newest the smallest. Each lane
 closed this way has its spend banked first, even if it is still mid-turn.
 
@@ -871,8 +871,21 @@ focused once. Its pane stays open when the task moves on. `spoolway resume` clos
 settled lane on the step it sends the task to. Every pane closes with the task's workspace when
 the task is done.
 
-Command steps open no pane of their own beyond what they always have. The headless backend has
-no panes, so none are kept there.
+The headless backend has no panes, so none are kept there.
+
+### Commands are hidden by default
+
+A command step opens no pane. It runs detached, and its output goes to the same log file, which
+is `commands/<task> · <step>.log` under the project's home. It sees the same named environment
+as a run in a pane. A hidden command is never a lane, so it takes no part in `visible_lanes`.
+
+To watch commands run, set `hide_commands = false` with `spoolway config set
+dispatch.hide_commands false`. A command then opens a pane like an agent step and the pane stays
+open after the command exits, so the output of a failed gate is still on screen. A shown command
+counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose
+command is still running is never closed by the limit, and that includes a `background: true`
+step. A command step that comes back replaces its own pane in place. Every shown command pane
+closes when the task is done. A step with `headless: true` stays detached whatever this key says.
 
 ## Looking into a lane
 
