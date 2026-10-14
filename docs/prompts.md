@@ -170,8 +170,8 @@ Five prompts ship. None of them is named in the binary.
 
 | Prompt | Role |
 |---|---|
-| `implementer` | Implements one task in one worktree, then stops. Treats a task's `## Mockup` as the specification. |
-| `reviewer` | Reviews one task's diff and gives a verdict. Fixes nothing. |
+| `implementer` | Implements one task in one worktree, then stops. Treats a task's `## Mockup` as the specification and each mitigation under its `## Risks` as part of the work. |
+| `reviewer` | Reviews one task's diff and gives a verdict. Fixes nothing. A mitigation under the task's `## Risks` that the change does not carry out is a finding. |
 | `reproducer` | Writes a failing repro for a bug and runs it. The bugfix pipeline runs it before and after the fix. |
 | `archivist` | Updates the domain documents for its own task's diff. |
 | `unblocker` | Staffs `blocked` in an unattended run. Clears the obstacle or pauses the task for a person. See [Staffing `blocked`](pipelines.md#staffing-blocked). |

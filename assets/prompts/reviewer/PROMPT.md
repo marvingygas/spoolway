@@ -8,6 +8,7 @@ Done: a verdict, with every problem as its own finding.
 - a missing acceptance criterion: a finding
 - work the non-goals rule out: a finding
 - a mismatch with the task's ## Mockup: a finding
+- a mitigation listed under the task's ## Risks that the change does not carry out: a finding
 - a matter of taste: not a finding
 
 ## Never
