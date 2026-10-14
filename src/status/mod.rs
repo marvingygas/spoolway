@@ -3130,10 +3130,10 @@ fn paint_at(
     // can act on: when the next pass is due changes nothing they would do,
     // and how long the run has been up only ever said the board was alive —
     // which is not worth the room the version now takes. The spool beside
-    // the wordmark turns while a lane is running or starting — with no
-    // dispatcher up, while a step is still working; with nothing running the
-    // board holds still, and a still board over a still queue is the truth
-    // rather than something to animate over.
+    // the wordmark turns while a dispatcher holds the lock, whether or not
+    // it has anything to run, so a turning mark says the dispatcher is up.
+    // With none up it turns while a step is still finishing, the count the
+    // header gives, and holds still the moment none is.
     let installed = crate::release::installed_newer();
     let published = published_newer(
         repo.config.housekeeping.update_check,
@@ -3158,6 +3158,7 @@ fn paint_at(
             phase,
             name,
             jobs,
+            spool_frame(snapshot.holder.is_some()),
         );
     }
     // One blank row before the lockup, so its ascenders have a margin to sit
@@ -3170,20 +3171,7 @@ fn paint_at(
     if crate::screen::shell::hosted().is_none() {
         frame.push('\n');
     }
-    // The spool only turns while something on the board reads `Running` — a
-    // lane, a command step, or a row still inside its own handoff grace
-    // window — or `Starting`, a lane the dispatcher is booting, so a queue
-    // with nothing to do, and nothing about to, prints the still mark
-    // instead. A mid-handoff row turning the spool with
-    // neither a lane nor a command step behind it is that third case working
-    // as the mockup intends, not an animation with nothing behind it.
-    //
-    // With no dispatcher up it turns on the steps still working instead, the
-    // same count the header gives, so it stops once the last of them does.
-    let running = match snapshot.finishing {
-        Some(n) => n > 0,
-        None => logo_turns(&snapshot.rows),
-    };
+    let running = spool_turns(snapshot.holder, snapshot.finishing);
     frame.push_str(&tint_available(
         &board_masthead(&header.join(" · "), pane, spool_frame(running)),
         available.as_deref(),
@@ -3364,7 +3352,10 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// act on. RECENT goes as well, whether or not a dispatcher holds the lock:
 /// the board still remembers it, and draws it again once a row is back.
 ///
-/// The lockup holds frame 0: nothing on an empty board is running.
+/// The lockup is drawn on `lockup_frame`: the caller passes
+/// [`view::spool_frame`] of whether a dispatcher holds the lock, the test the
+/// busy board's masthead uses, so it turns under a dispatcher and holds
+/// frame 0 otherwise.
 fn paint_empty(
     header: &str,
     available: Option<&str>,
@@ -3372,6 +3363,7 @@ fn paint_empty(
     phase: Phase,
     name: Option<&str>,
     jobs: &[crate::jobs::ActiveJob],
+    lockup_frame: usize,
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
     let (keys, height) = hosted_keys(
@@ -3403,6 +3395,7 @@ fn paint_empty(
         pane,
         region,
         &ledger,
+        lockup_frame,
     ));
     if hosted {
         return boxed(&frame, &keys, pane, height);
@@ -3555,12 +3548,14 @@ struct SlotsUsed<'a> {
     agent_model: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
-/// Whether the masthead's spool turns this frame: while any row reads
-/// `Running`, or `Starting` — the dispatcher is working that task too, only
-/// its agent is not up yet.
-fn logo_turns(rows: &[Row]) -> bool {
-    rows.iter()
-        .any(|row| matches!(row.state, State::Running | State::Starting))
+/// Whether the busy board's spool turns this frame.
+///
+/// Always while a dispatcher holds the lock (`holder`), working or idle.
+/// With none, `finishing` is `Some` — the board sets it whenever no
+/// dispatcher holds the lock — and the spool turns until the last step it
+/// counts stops.
+fn spool_turns(holder: Option<u32>, finishing: Option<usize>) -> bool {
+    holder.is_some() || finishing.is_some_and(|n| n > 0)
 }
 
 /// Where `task` goes once `step_id` passes, for the NEXT column of a row
@@ -6992,7 +6987,7 @@ mod tests {
 
     /// A task the dispatcher is booting reads `◌ starting` on the step its
     /// boot mark names, with that step's next hop in NEXT — though the task
-    /// file still says `queued` — and the logo turns for it.
+    /// file still says `queued`.
     #[test]
     fn a_claimed_task_reads_starting_on_its_claimed_step() {
         let (repo, _root_guard) = fixture("claimed-starting");
@@ -7028,8 +7023,6 @@ mod tests {
         assert_eq!(row.next, format!("→ {hop}"));
         let other = rows.iter().find(|r| r.id == "profile").unwrap();
         assert!(matches!(other.state, State::Queued), "{}", other.next);
-        assert!(logo_turns(&rows));
-        assert!(!logo_turns(std::slice::from_ref(other)));
 
         // The boot returned: the mark is gone and the row reads as before.
         claims.release("login");
@@ -7037,6 +7030,40 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.stage, crate::pipeline::QUEUED);
+    }
+
+    /// A dispatcher holding the lock turns the spool even when every row is
+    /// queued; with none up it turns only while steps are still finishing.
+    #[test]
+    fn the_spool_turns_whenever_a_dispatcher_holds_the_lock() {
+        let (repo, _root_guard) = fixture("spool-idle-holder");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        assert!(matches!(rows[0].state, State::Queued));
+
+        assert!(spool_turns(Some(42), None));
+        assert!(!spool_turns(None, Some(0)));
+        assert!(spool_turns(None, Some(2)));
+    }
+
+    /// An empty board draws the lockup frame `paint` hands it, so a turned
+    /// frame reaches the screen and a held one stays on frame 0.
+    #[test]
+    fn an_empty_board_draws_the_frame_it_is_handed() {
+        let watching = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+        let board = |frame| paint_empty("", None, 96, watching, None, &[], frame);
+        let held = board(0);
+        assert!(held.contains(view::LOCKUP[0][1]), "{held}");
+        assert!(!held.contains(view::LOCKUP[1][1]), "{held}");
+        let turned = board(1);
+        assert!(turned.contains(view::LOCKUP[1][1]), "{turned}");
+        assert!(!turned.contains(view::LOCKUP[0][1]), "{turned}");
     }
 
     /// A mark with no live dispatcher behind the lock is one a killed
@@ -7055,7 +7082,6 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.stage, crate::pipeline::QUEUED);
-        assert!(!logo_turns(&rows));
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the

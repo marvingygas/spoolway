@@ -67,9 +67,9 @@ const NO_CURSOR: &str = "  ";
 /// Two frames because the mark has two hand-drawn ones, thread on opposite
 /// phases — see `docs/logo/mark.py`. `masthead` and `board_masthead` take
 /// which frame to draw: the board picks between them off the wall clock while
-/// at least one row is running or starting, and holds frame 0 — the logo
-/// exactly as it ships — the moment nothing is, the same as `banner` always
-/// does.
+/// a dispatcher holds the lock or a lane is working, and holds frame 0 — the
+/// logo exactly as it ships — the moment neither is, the same as `banner`
+/// always does.
 ///
 /// A half-block splits the cell 1x2, which makes each pixel square, because a
 /// character cell is about twice as tall as it is wide. That is the whole
@@ -90,7 +90,7 @@ const NO_CURSOR: &str = "  ";
 /// right on a light terminal and a dark one. Colouring the halves separately
 /// would buy antialiasing, but antialiasing is partial coverage of a known
 /// ground, and the board does not know the terminal's background.
-const LOCKUP: [[&str; 5]; 2] = [
+pub(super) const LOCKUP: [[&str; 5]; 2] = [
     [
         "                            █",
         "▀█▀██▀   ▄▄▄ ▄▄▄   ▄▄   ▄▄  █  ▄   ▄  ▄▄  ▄  ▄",
@@ -1875,9 +1875,9 @@ pub(super) fn masthead(header: &str, pane: usize, frame: usize) -> String {
 /// margin as [`masthead`] leaves it, since at that width the words are the
 /// part still carrying information.
 ///
-/// `frame` picks which of `LOCKUP`'s two rows sets is drawn: `0` on an idle
-/// board, [`spool_frame`] on a live one, so the mark turns while the run is
-/// moving.
+/// `frame` picks which of `LOCKUP`'s two rows sets is drawn: `0` with no
+/// dispatcher up and nothing working, [`spool_frame`] otherwise, so the mark
+/// turns while a dispatcher is up.
 pub(super) fn board_masthead(header: &str, pane: usize, frame: usize) -> String {
     let lockup = &LOCKUP[frame];
     let lockup_width = lockup.iter().map(|l| l.chars().count()).max().unwrap_or(0);
@@ -1975,7 +1975,7 @@ pub(super) fn first_name(user_name: &str) -> Option<String> {
 /// that — the least an empty board's centred block takes with its art.
 const GREETING_BLOCK_ROWS: usize = 5 + 1 + 2;
 
-/// The empty board under its header: the lockup on frame 0, a blank row,
+/// The empty board under its header: the lockup on `frame`, a blank row,
 /// `greeting` in bold and `Nothing queued` dim, each centred across a pane
 /// `pane` columns wide. Then, when `ledger` has lines, a blank row and the
 /// ledger — [`jobs_ledger`]'s lines, which the caller passes only while a
@@ -1996,8 +1996,9 @@ pub(super) fn greeting_screen(
     pane: usize,
     region: Option<usize>,
     ledger: &[String],
+    frame: usize,
 ) -> String {
-    let lockup = &LOCKUP[0];
+    let lockup = &LOCKUP[frame];
     let lockup_width = lockup.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let room = region.unwrap_or(usize::MAX);
     // The margin included, as in `masthead`: a lockup flush against the
@@ -2075,8 +2076,9 @@ pub fn banner(header: &str) -> String {
     }
 }
 
-/// Which of `LOCKUP`'s two frames a live board draws, while `running` is
-/// true; frame 0, held, the moment nothing is.
+/// Which of `LOCKUP`'s two frames a board draws, while `running` is true —
+/// a dispatcher holds the lock, or a lane is working; frame 0, held, the
+/// moment neither is.
 ///
 /// A function of the wall clock alone, not a counter this call increments —
 /// the same instant lands on the same frame whichever redraw reads it.
@@ -3800,12 +3802,24 @@ mod tests {
             .collect()
     }
 
+    /// The empty board draws whichever lockup frame it is handed: frame 1 is
+    /// the other hand-drawn set, and frame 0 is the one that ships.
+    #[test]
+    fn an_empty_board_draws_the_lockup_frame_it_is_given() {
+        let held = greeting_screen("Good morning.", 96, Some(19), &[], 0);
+        let turned = greeting_screen("Good morning.", 96, Some(19), &[], 1);
+        assert!(held.contains(LOCKUP[0][1]), "{held}");
+        assert!(!held.contains(LOCKUP[1][1]), "{held}");
+        assert!(turned.contains(LOCKUP[1][1]), "{turned}");
+        assert!(!turned.contains(LOCKUP[0][1]), "{turned}");
+    }
+
     /// The empty board inside the dispatch tab's 96-column box, 19 rows under
     /// the header: the lockup, a blank row, the greeting and `Nothing
     /// queued`, centred both ways, row for row as the mockup draws it.
     #[test]
     fn an_empty_board_centres_its_greeting_as_drawn() {
-        let block = greeting_screen("Good afternoon, Marvin.", 96, Some(19), &[]);
+        let block = greeting_screen("Good afternoon, Marvin.", 96, Some(19), &[], 0);
         let mut expected = vec![String::new(); 5];
         expected.extend(
             [
@@ -3833,7 +3847,7 @@ mod tests {
     #[test]
     fn a_short_pane_gives_up_the_lockup() {
         for (region, top) in [(13, 2), (10, 1), (8, 0)] {
-            let block = greeting_screen("Good morning.", 96, Some(region), &[]);
+            let block = greeting_screen("Good morning.", 96, Some(region), &[], 0);
             let rows = trimmed(&block);
             assert_eq!(rows.len(), region, "{block}");
             assert_eq!(rows[top].trim(), "█", "{block}");
@@ -3843,7 +3857,7 @@ mod tests {
 
         // One row short of the block: the art goes and the two lines stay.
         for region in [6, 7] {
-            let block = greeting_screen("Good morning.", 96, Some(region), &[]);
+            let block = greeting_screen("Good morning.", 96, Some(region), &[], 0);
             let rows = trimmed(&block);
             assert!(!block.contains(LOCKUP[0][1]), "{block}");
             assert_eq!(rows.len(), region, "{block}");
@@ -3879,7 +3893,7 @@ mod tests {
     fn an_idle_dispatchers_board_draws_the_ledger_as_drawn() {
         let jobs = two_jobs();
         let ledger = jobs_ledger(&jobs, 0);
-        let block = greeting_screen("Good evening, Marvin.", 70, Some(14), &ledger);
+        let block = greeting_screen("Good evening, Marvin.", 70, Some(14), &ledger, 0);
         let at = |i: usize| jobs[i].next.unwrap().format("%a %-d %b %H:%M");
         // The block's margin follows its widest line, and that line holds a
         // date whose day of the month is one digit or two, depending on when
@@ -3924,7 +3938,7 @@ mod tests {
         let mut dropped_at = None;
         let mut lockup_gone_at = None;
         for region in (0..=30).rev() {
-            let block = greeting_screen("Good morning.", 96, Some(region), &ledger);
+            let block = greeting_screen("Good morning.", 96, Some(region), &ledger, 0);
             let rows: Vec<String> = trimmed(&block)
                 .iter()
                 .map(|r| r.trim().to_string())
@@ -3966,7 +3980,7 @@ mod tests {
     /// the header and one blank row closes it.
     #[test]
     fn with_no_height_the_greeting_starts_one_row_down() {
-        let block = greeting_screen("Working late.", 120, None, &[]);
+        let block = greeting_screen("Working late.", 120, None, &[], 0);
         let rows = trimmed(&block);
         assert_eq!(rows.len(), 10, "{block}");
         assert_eq!(rows[0], "", "{block}");
@@ -3980,7 +3994,7 @@ mod tests {
     /// too long for the pane is clipped with `…` rather than wrapped.
     #[test]
     fn a_narrow_pane_drops_the_lockup_and_clips_the_greeting() {
-        let block = greeting_screen("Good morning, Bartholomew.", 20, None, &[]);
+        let block = greeting_screen("Good morning, Bartholomew.", 20, None, &[], 0);
         assert!(!block.contains(LOCKUP[0][1]), "{block}");
         let rows = trimmed(&block);
         assert_eq!(rows[1], " Good morning, Bar…", "{block}");
@@ -3995,7 +4009,7 @@ mod tests {
         let ledger = jobs_ledger(&two_jobs(), 0);
         let lockup_width = LOCKUP[0].iter().map(|l| l.chars().count()).max().unwrap();
         let pane = lockup_width - 1;
-        let block = greeting_screen("Good morning.", pane, Some(30), &ledger);
+        let block = greeting_screen("Good morning.", pane, Some(30), &ledger, 0);
         assert!(!block.contains(LOCKUP[0][1]), "{block}");
         let rows: Vec<String> = trimmed(&block)
             .iter()
