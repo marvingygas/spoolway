@@ -1056,14 +1056,25 @@ Refused when `<name>` names no private pipeline. If `<name>` is already a tracke
 name, the message says so plainly and names the tracked file, rather than the generic "no
 private pipeline named" message a name that is missing outright gets.
 
-Refused inside a linked worktree, naming the command to run in the main checkout instead — the
-dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
-against a clash with any tracked file, naming it. Refused if a step names a prompt, or the
-pipeline names a `task_template:`, that is not one plain name, or if a private prompt's folder
-holds a symlinked directory, before anything is moved. Refused if another private pipeline
-names the same skeleton, naming it — promoting one must not pull the file out from under the
-other. Refused in home mode, where the whole setup is already private and there is nothing to
-promote into. Nothing is committed.
+Run in a linked worktree on its own branch that has its own `.spoolway/`, it moves the files
+into that worktree's `.spoolway/`, ready to commit on its branch. The main checkout's files are
+not touched. After the `moved` lines it prints which branch carries the files:
+
+```
+  the main checkout runs without these files until feature/strict merges
+```
+
+The main checkout runs without the pipeline until that branch merges.
+
+Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a
+detached HEAD. The message names the command to run in the main checkout instead, where it
+applies. Refused against a clash with any tracked file, naming it. In a worktree, the check
+covers the worktree's tracked files and the main checkout's. Refused if a step names a prompt,
+or the pipeline names a `task_template:`, that is not one plain name, or if a private prompt's
+folder holds a symlinked directory, before anything is moved. Refused if another private
+pipeline names the same skeleton, naming it, so promoting one does not pull the file out from
+under the other. Refused in home mode, where the whole setup is already private and there is
+nothing to promote into. Nothing is committed.
 
 A promote that fails partway through puts every file back where it was. Nothing is left tracked
 or deleted halfway, and the same `spoolway pipeline promote <name>` can be run again.
@@ -1076,9 +1087,11 @@ once the move starts it applying:
   ~/.spoolway/proj-ab12cd34/overrides/pipelines/impl-strict.yml already exists and will start applying now that it is tracked
 ```
 
+From a worktree the line ends `will start applying once <branch> merges`.
+
 `--json` prints `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and
-`to` relative to the checkout, matching the two columns above. It carries no line for a
-waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
+`to` relative to the checkout written into, matching the two columns above. It carries no line
+for the branch or for a waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
 

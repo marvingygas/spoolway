@@ -1454,11 +1454,14 @@ pub enum PipelineCommand {
     /// private skeleton included — into `.spoolway/`, then delete the
     /// private files. The reverse of `pipeline copy`.
     ///
-    /// Refused inside a linked worktree, for the same reason `override
-    /// promote` refuses there: the dispatcher reads the project's tracked
-    /// files, never a worktree's own copy. Refused against any clash with a
-    /// tracked file, and refused outright in home mode, where the setup is
-    /// already private and there is nothing to promote into.
+    /// Run in a worktree on its own branch, it writes that worktree's
+    /// `.spoolway/`, to be committed on its branch; the main checkout runs
+    /// without the pipeline until the branch merges. A worktree that
+    /// borrows the main checkout's setup, that is a dispatcher lane's, or
+    /// that is on a detached HEAD is refused. So is any clash with a file
+    /// tracked in the worktree or the main checkout, and so is home mode,
+    /// where the setup is already private and there is nothing to promote
+    /// into.
     Promote(PipelinePromoteArgs),
 }
 

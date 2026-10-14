@@ -219,10 +219,11 @@ rm -rf "$SPOOLWAY_PROJECT_HOME/local"
 # ------------------------------------------------------ copy, then promote
 # `pipeline copy` and `prompt copy` run from a lane's worktree have to write
 # into the project's home, the one `local/` both sides read — and `pipeline
-# promote` has to tell a real linked worktree from the main checkout, which a
-# unit test only fakes by hand-setting `Repo::checkout`. The whole loop the
-# task promised: copy both, point the copy at the private prompt, promote,
-# and find the files tracked and `local/` empty.
+# promote` has to write a real linked worktree's own `.spoolway/` rather than
+# the main checkout's, which a unit test only fakes by hand-setting
+# `Repo::checkout`. The whole loop the task promised: copy both, point the
+# copy at the private prompt, promote, and find the files tracked and
+# `local/` empty.
 LOCAL="$SPOOLWAY_PROJECT_HOME/local"
 present() { if [ -e "$2" ]; then ok "$1"; else bad "$1 (no $2)"; fi; }
 says "pipeline copy in a worktree writes the private pipeline" \
@@ -246,10 +247,27 @@ sed -i 's/^\([[:space:]]*prompt:[[:space:]]*\)implementer[[:space:]]*$/\1impleme
 has "the private pipeline now names the private prompt" \
   "prompt: implementer-strict" "$LOCAL/pipelines/default-strict.yml"
 
-refuses "pipeline promote refuses from a linked worktree" "not this worktree's" \
+# $WT is a worktree on its own branch with its own `.spoolway/`, so promote
+# writes its copy there, leaves the main checkout alone, and says so.
+says "pipeline promote in a worktree says the main checkout runs without the files" \
+  "the main checkout runs without these files until task/pipeline-set merges" \
   "$SPOOLWAY" -C "$WT" pipeline promote default-strict
-has "and the refusal left the private pipeline where it was" \
-  "prompt: implementer-strict" "$LOCAL/pipelines/default-strict.yml"
+present "the promoted pipeline lands in the worktree's own .spoolway/" \
+  "$WT/.spoolway/pipelines/default-strict.yml"
+present "and so does the private prompt it names" \
+  "$WT/.spoolway/prompts/implementer-strict/PROMPT.md"
+if [ -e .spoolway/pipelines/default-strict.yml ]; then
+  bad "the main checkout's pipelines are untouched by a worktree promote"
+else ok "the main checkout's pipelines are untouched by a worktree promote"; fi
+# Put the private copy back for the main-checkout promote below.
+rm -rf "$WT/.spoolway/pipelines/default-strict.yml" "$WT/.spoolway/prompts/implementer-strict" \
+  "$WT/.spoolway/templates/tasks/default-strict.md"
+must "copying the pipeline private again" \
+  "$SPOOLWAY" -C "$WT" pipeline copy default default-strict
+must "copying the prompt private again" \
+  "$SPOOLWAY" -C "$WT" prompt copy implementer implementer-strict
+sed -i 's/^\([[:space:]]*prompt:[[:space:]]*\)implementer[[:space:]]*$/\1implementer-strict/' \
+  "$LOCAL/pipelines/default-strict.yml"
 
 says "pipeline promote in the main checkout moves the pipeline" \
   "moved" \

@@ -703,9 +703,12 @@ because a home-mode project's whole setup is already private to the machine it r
   there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
   names and the skeleton its `task_template:` names (the pipeline's own name when it sets
   none) into `.spoolway/`, then
-  deletes the private files. It refuses inside a linked worktree, refuses any clash with a
-  tracked file, refuses a step's prompt name or the pipeline's `task_template:` that is not one
-  plain name, refuses when another private pipeline names the same skeleton, and is refused
+  deletes the private files. Run in a linked worktree on its own branch, it writes that
+  worktree's `.spoolway/` and leaves the main checkout alone, so the main checkout runs without
+  the pipeline until the branch merges. It refuses a borrowed worktree, a dispatcher lane's
+  worktree and a detached HEAD, refuses any clash with a tracked file in the worktree or the
+  main checkout, refuses a step's prompt name or the pipeline's `task_template:` that is not
+  one plain name, refuses when another private pipeline names the same skeleton, and is refused
   outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
   [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).

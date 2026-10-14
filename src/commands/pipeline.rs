@@ -1830,18 +1830,18 @@ fn restore_missing(from: &Path, to: &Path) -> Result<()> {
 /// The `moved    <from>  ->  <to>` lines `pipeline promote` prints.
 ///
 /// `from` is shown relative to `repo.home` — `local/pipelines/impl-strict.yml`,
-/// the mockup's own spelling — and `to` relative to `repo.root` —
+/// the mockup's own spelling — and `to` relative to `write_root` —
 /// `.spoolway/pipelines/impl-strict.yml`. The two sides never share a root
 /// to be relative to together: the private layer lives under a project's
 /// home ([`crate::local::dir_for`]), the tracked control plane under the
-/// checkout, and `pipeline_promote` already refuses to run anywhere but the
-/// main checkout, so `repo.root` is exactly the tracked side's own root.
-fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
+/// checkout `pipeline_promote` wrote into, which is a worktree's own when
+/// it ran in one.
+fn print_moved(repo: &Repo, write_root: &Path, json: bool, moved: &[Moved]) -> Result<()> {
     if json {
         let payload = serde_json::json!({
             "moved": moved.iter().map(|m| serde_json::json!({
                 "from": crate::fmt::relative(&repo.home, &m.from),
-                "to": crate::fmt::relative(&repo.root, &m.to),
+                "to": crate::fmt::relative(write_root, &m.to),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1853,7 +1853,7 @@ fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
             let suffix = if m.dir { "/" } else { "" };
             (
                 format!("{}{suffix}", crate::fmt::relative(&repo.home, &m.from)),
-                format!("{}{suffix}", crate::fmt::relative(&repo.root, &m.to)),
+                format!("{}{suffix}", crate::fmt::relative(write_root, &m.to)),
             )
         })
         .collect();
@@ -1868,26 +1868,46 @@ fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
     Ok(())
 }
 
+/// The line `pipeline promote` prints after the `moved` lines when it wrote a
+/// worktree's own setup. It does not reuse [`crate::repo::TrackedWrite::note`]:
+/// that one says the main checkout "keeps its own copy", true of a setting
+/// written in two places, but promote deletes the private files, so the main
+/// checkout has no copy of the pipeline at all until the branch merges.
+fn promoted_note(branch: &str) -> String {
+    format!("  the main checkout runs without these files until {branch} merges")
+}
+
+/// The line naming an override file that waited on a private pipeline or
+/// prompt. In the main checkout it applies from the next load; from a
+/// worktree the dispatcher still reads a checkout without the pipeline, so it
+/// applies only once `branch` merges.
+fn applying_note(path: &str, branch: Option<&str>) -> String {
+    match branch {
+        None => format!("  {path} already exists and will start applying now that it is tracked"),
+        Some(branch) => {
+            format!("  {path} already exists and will start applying once {branch} merges")
+        }
+    }
+}
+
 /// `spoolway pipeline promote <name>`.
 ///
 /// Moves the private pipeline, every private prompt it names, and its own
 /// private skeleton into the tracked control plane, then deletes the
 /// private files — the reverse of `pipeline copy`.
 ///
-/// Refused inside a linked worktree: the dispatcher reads `repo.root`'s
-/// tracked files, never a linked worktree's own copy, and `repo.checkout ==
-/// repo.root` is what lets every path below be built from [`Repo`]'s own
-/// tracked accessors rather than a second, root-only copy of each. Refused outright in home
-/// mode, where [`crate::local::is_repo_mode`] is false because the whole
+/// [`Repo::tracked_write_root`] decides where the files land. In a worktree
+/// on its own branch that is the worktree's `.spoolway/`, so the move can be
+/// committed and opened as a pull request; the dispatcher keeps reading the
+/// main checkout, which runs without the pipeline until the branch merges.
+/// Names are checked against the main checkout's tracked files too, since a
+/// private pipeline clashing with one of those is refused at load. A borrowed
+/// or lane worktree is refused by that function. Home mode is refused
+/// outright, where [`crate::local::is_repo_mode`] is false because the whole
 /// setup is already private and there is nothing to promote into.
 pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
-    if repo.in_linked_worktree() {
-        bail!(
-            "the dispatcher reads the project's tracked files, not this worktree's.\n  spoolway \
-             -C {} pipeline promote {name}",
-            repo.root.display()
-        );
-    }
+    let write = repo.tracked_write_root("pipelines", &format!("pipeline promote {name}"))?;
+    let write_root = write.root;
     if !crate::local::is_repo_mode(&repo.checkout) {
         bail!(
             "this setup is already private — there is nothing for `pipeline promote` to move \
@@ -1904,7 +1924,9 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
             // the two read very differently to the person typing the
             // command, so the generic "no private pipeline" message is
             // wrong for the second one.
-            if let Some(tracked) = pipeline_file_in(&Pipelines::dir_in(&repo.root), name) {
+            if let Some(tracked) = pipeline_file_in(&Pipelines::dir_in(write_root), name)
+                .or_else(|| pipeline_file_in(&Pipelines::dir_in(&repo.root), name))
+            {
                 bail!(
                     "`{name}` is already tracked — {} — nothing to promote",
                     tracked.display()
@@ -1913,7 +1935,12 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
             bail!("no private pipeline named `{name}` — see `spoolway pipeline list`");
         }
     };
-    if let Some(clash) = pipeline_file_in(&Pipelines::dir_in(&repo.root), name) {
+    // Both checkouts: a worktree's own tracked files can lack a commit the
+    // main checkout has, and a private pipeline named like a tracked one in
+    // the main checkout is refused at load there.
+    if let Some(clash) = pipeline_file_in(&Pipelines::dir_in(write_root), name)
+        .or_else(|| pipeline_file_in(&Pipelines::dir_in(&repo.root), name))
+    {
         bail!(
             "`{name}` already exists in the tracked pipelines — {} — rename one of the two",
             clash.display()
@@ -1947,7 +1974,7 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
     let mut plan = Vec::new();
 
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("yml");
-    let pipeline_dest = Pipelines::dir_in(&repo.root).join(format!("{name}.{ext}"));
+    let pipeline_dest = Pipelines::dir_in(write_root).join(format!("{name}.{ext}"));
     plan.push(Moved {
         from: source,
         to: pipeline_dest,
@@ -1985,11 +2012,12 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
             continue;
         }
         promoted_prompt_names.push(prompt_name);
-        // `directory_form`'s own parent, not `repo.prompts_dir().join(…)` —
+        // `directory_form_in`'s own parent, read from `write_root`, not
+        // `repo.prompts_dir().join(…)` —
         // `commands::tests::nothing_builds_a_prompt_path_except_the_one_function_that_should`
         // refuses that shape outright, `crate::prompt::path_for` being the
         // one function meant to join a prompt's directory onto its name.
-        let tracked_dir = crate::prompt::directory_form(repo, prompt_name)
+        let tracked_dir = crate::prompt::directory_form_in(write_root, prompt_name)
             .parent()
             .expect("directory_form always nests PROMPT_FILE under a name directory")
             .to_path_buf();
@@ -1998,6 +2026,16 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
                 "`{prompt_name}` already exists in the tracked prompts — {} — rename the \
                  private one first",
                 tracked_dir.display()
+            );
+        }
+        // The main checkout's prompt, nested or the legacy flat file: in a
+        // worktree, the same clash seen from the other checkout.
+        let root_tracked = tracked_prompt_path_in(&repo.root, prompt_name);
+        if root_tracked.is_file() {
+            bail!(
+                "`{prompt_name}` already exists in the tracked prompts — {} — rename the \
+                 private one first",
+                root_tracked.display()
             );
         }
         // Refused here, before anything is moved — `copy_dir_all` cannot
@@ -2056,12 +2094,16 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
                 sharer.name
             );
         }
-        let skeleton_dest = repo.task_templates_dir().join(format!("{skel_name}.md"));
-        if skeleton_dest.is_file() {
+        let skeleton_dest = tracked_skeleton_path_in(write_root, skel_name);
+        let root_skeleton = tracked_skeleton_path_in(&repo.root, skel_name);
+        if let Some(clash) = [&skeleton_dest, &root_skeleton]
+            .into_iter()
+            .find(|p| p.is_file())
+        {
             bail!(
                 "`{skel_name}` already has a tracked skeleton — {} — rename the private one \
                  first",
-                skeleton_dest.display()
+                clash.display()
             );
         }
         plan.push(Moved {
@@ -2133,17 +2175,23 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         }
     }
 
-    print_moved(repo, json, &plan)?;
+    print_moved(repo, write_root, json, &plan)?;
+    if !json && let Some(branch) = &write.branch {
+        println!("{}", promoted_note(branch));
+    }
 
     // Only a tracked pipeline or prompt is ever patched by the override
     // layer — see `merge_private`'s own comment. A patch or fork written
     // while `name` (or one of its prompts) was still private was already
     // named as such — `Ignored::private_pipeline`/`private_prompt`, not
     // silence — by every `override list` and every load since it was
-    // written. Promoting is the moment it stops being merely named and
-    // starts actually applying, which is worth a line of its own, here,
-    // rather than left for the next load to notice as a quiet behaviour
-    // change. `json` output stays exactly what `print_moved` wrote above —
+    // written. Promoting in the main checkout is the moment it stops being
+    // merely named and starts actually applying, which is worth a line of
+    // its own, here, rather than left for the next load to notice as a quiet
+    // behaviour change. From a worktree the dispatcher still reads the main
+    // checkout, which does not have the pipeline yet, so the patch keeps
+    // being named as ignored there until the branch merges; the line says so
+    // rather than promise an effect that has not happened. `json` output stays exactly what `print_moved` wrote above —
     // a second, differently-shaped line appended after it would not parse
     // as the same document.
     if !json {
@@ -2167,7 +2215,7 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         if !starting.is_empty() {
             println!();
             for path in &starting {
-                println!("  {path} already exists and will start applying now that it is tracked");
+                println!("{}", applying_note(path, write.branch.as_deref()));
             }
         }
     }
@@ -3405,18 +3453,205 @@ mod tests {
         });
     }
 
-    /// A linked worktree is refused: the dispatcher reads `repo.root`'s
-    /// tracked files, never a worktree's own copy.
-    #[test]
-    fn pipeline_promote_refuses_from_a_linked_worktree() {
-        let (repo, _root_guard) = repo_for("promote-worktree");
-        pipeline_copy(&repo, "default", "default-strict", false).unwrap();
-
+    /// A main checkout with a private `default-strict` pipeline, its prompt
+    /// and its skeleton, plus a second [`Repo`] for a self-made linked
+    /// worktree of it on `task/x` — returned as `(main, worktree, home,
+    /// guard)`. Both share one project home, so the private layer is the
+    /// same one a person would see from either checkout.
+    fn promote_worktree_fixture(name: &str) -> (Repo, Repo, PathBuf, crate::scratch::ScratchRoot) {
+        let (repo, home, guard) = repo_for_home_aware(name);
+        let git = |dir: &Path, args: &[&str]| {
+            crate::repo::run(dir, "git", args)
+                .unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e:#}"))
+        };
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap();
+            let path = crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: implementer-strict");
+            assert!(raw.contains("implementer-strict"), "{raw}");
+            std::fs::write(&path, raw).unwrap();
+        });
+        git(&repo.root, &["config", "user.email", "t@example.com"]);
+        git(&repo.root, &["config", "user.name", "t"]);
+        git(&repo.root, &["add", "-A"]);
+        git(&repo.root, &["commit", "-q", "-m", "init"]);
+        let wt = repo.root.parent().unwrap().join(format!(
+            "{}-wt",
+            repo.root.file_name().unwrap().to_string_lossy()
+        ));
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/x",
+                wt.to_str().unwrap(),
+            ],
+        );
         let mut worktree = repo.clone();
-        worktree.checkout = repo.root.join("elsewhere");
+        worktree.checkout = crate::platform::PathExt::canonical(&wt).unwrap();
+        (repo, worktree, home, guard)
+    }
 
-        let err = pipeline_promote(&worktree, "default-strict", false).unwrap_err();
-        assert!(err.to_string().contains("this worktree's"), "{err}");
+    /// In a self-made worktree every destination is the worktree's own
+    /// `.spoolway/`, the private files are gone, and the main checkout's
+    /// tracked files are untouched.
+    #[test]
+    fn pipeline_promote_in_a_worktree_writes_the_worktrees_own_setup() {
+        let (repo, worktree, home, _guard) = promote_worktree_fixture("promote-wt");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_promote(&worktree, "default-strict", false).expect("promote")
+        });
+
+        assert!(Pipelines::file_in(&worktree.checkout, "default-strict").is_file());
+        assert!(
+            crate::prompt::directory_form_in(&worktree.checkout, "implementer-strict").is_file()
+        );
+        assert!(
+            tracked_skeleton_path_in(&worktree.checkout, "default-strict").is_file(),
+            "the skeleton must land in the worktree"
+        );
+        assert!(
+            !Pipelines::file_in(&repo.root, "default-strict").exists()
+                && !crate::prompt::directory_form_in(&repo.root, "implementer-strict").exists()
+                && !tracked_skeleton_path_in(&repo.root, "default-strict").exists(),
+            "the main checkout's tracked files must not change"
+        );
+        assert!(
+            !crate::local::pipelines_dir(&repo.local_dir())
+                .join("default-strict.yml")
+                .exists(),
+            "the private pipeline must be gone"
+        );
+        assert!(
+            !crate::local::prompts_dir(&repo.local_dir())
+                .join("implementer-strict")
+                .exists(),
+            "the private prompt must be gone"
+        );
+    }
+
+    /// A name only the main checkout tracks is refused before anything
+    /// moves — the worktree's own branch may not have that commit — and the
+    /// refusal names the clashing file.
+    #[test]
+    fn pipeline_promote_in_a_worktree_refuses_what_only_the_main_checkout_tracks() {
+        let (repo, worktree, home, _guard) = promote_worktree_fixture("promote-wt-clash");
+        let root_pipeline = Pipelines::file_in(&repo.root, "default-strict");
+        let root_prompt = crate::prompt::directory_form_in(&repo.root, "implementer-strict");
+        let root_skeleton = tracked_skeleton_path_in(&repo.root, "default-strict");
+        let write = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        };
+
+        for clash in [&root_skeleton, &root_prompt, &root_pipeline] {
+            write(clash);
+            let err = crate::platform::test_home::with_home(&home, || {
+                pipeline_promote(&worktree, "default-strict", false)
+            })
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&clash.display().to_string()),
+                "{err:#}"
+            );
+            assert!(
+                !Pipelines::file_in(&worktree.checkout, "default-strict").exists()
+                    && !tracked_skeleton_path_in(&worktree.checkout, "default-strict").exists()
+                    && !crate::prompt::directory_form_in(&worktree.checkout, "implementer-strict")
+                        .exists(),
+                "a refusal must move nothing"
+            );
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file(),
+                "the private pipeline must stay"
+            );
+            std::fs::remove_file(clash).unwrap();
+        }
+    }
+
+    /// A worktree promote tells the reader the main checkout has no copy of
+    /// the pipeline until the branch merges, in the words the shared
+    /// `TrackedWrite::note` does not use.
+    #[test]
+    fn promoted_note_says_the_main_checkout_runs_without_the_files() {
+        assert_eq!(
+            promoted_note("task/x"),
+            "  the main checkout runs without these files until task/x merges"
+        );
+    }
+
+    /// The override line promises an effect only when the main checkout, the
+    /// one the dispatcher reads, now has the pipeline.
+    #[test]
+    fn applying_note_waits_for_the_merge_from_a_worktree() {
+        assert_eq!(
+            applying_note("p.yml", None),
+            "  p.yml already exists and will start applying now that it is tracked"
+        );
+        assert_eq!(
+            applying_note("p.yml", Some("task/x")),
+            "  p.yml already exists and will start applying once task/x merges"
+        );
+    }
+
+    /// A borrowed worktree and a lane worktree are refused with the shared
+    /// function's messages, and nothing moves.
+    #[test]
+    fn pipeline_promote_refuses_a_borrowed_and_a_lane_worktree() {
+        let (repo, worktree, _home, _guard) = promote_worktree_fixture("promote-wt-refuse");
+
+        let mut borrowed = worktree.clone();
+        borrowed.checkout = repo.root.clone();
+        borrowed.borrowed = true;
+        let err = pipeline_promote(&borrowed, "default-strict", false).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "this worktree's branch has no .spoolway/ of its own, so there is no setup \
+                 here to write.\n  spoolway -C {} pipeline promote default-strict",
+                repo.root.display()
+            )
+        );
+
+        let lane_dir = repo.worktree_root().join("lane");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/lane",
+                lane_dir.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut lane = repo.clone();
+        lane.checkout = lane_dir;
+        let err = pipeline_promote(&lane, "default-strict", false).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the dispatcher reads the project's pipelines, not this worktree's.\n  \
+                 spoolway -C {} pipeline promote default-strict",
+                repo.root.display()
+            )
+        );
+        assert!(
+            crate::local::pipelines_dir(&repo.local_dir())
+                .join("default-strict.yml")
+                .is_file(),
+            "a refusal must leave the private pipeline in place"
+        );
     }
 
     /// Home mode has no private layer of its own: `pipeline copy` writes
