@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
-use crate::config::{Config, Priority};
+use crate::config::{Config, LaneLayout, Priority};
 
 /// One editable setting.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +97,13 @@ pub const REFERENCE: &[Reference] = &[
         default: "true",
         sentence: "Whether a command step runs without a pane. Set to `false` and its pane \
                     stays open after it exits, counting toward `visible_lanes`.",
+    },
+    Reference {
+        key: "dispatch.lane_layout",
+        values: "panes, tabs",
+        default: "panes",
+        sentence: "Whether a task's steps are panes of one tab, or each step opens in a tab \
+                    of its own, named after the step.",
     },
     Reference {
         key: "unattended.enabled",
@@ -425,6 +432,7 @@ pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
     "dispatch.priority",
     "dispatch.visible_lanes",
     "dispatch.hide_commands",
+    "dispatch.lane_layout",
 ];
 
 /// Every scalar setting `config get`/`set` resolves for a key that already
@@ -625,6 +633,12 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
     }
     if key == "dispatch.hide_commands" {
         return Some(config.dispatch.hide_commands.to_string());
+    }
+    if key == "dispatch.lane_layout" {
+        return Some(match config.dispatch.lane_layout {
+            LaneLayout::Panes => "panes".to_string(),
+            LaneLayout::Tabs => "tabs".to_string(),
+        });
     }
     let Some(parts) = models_key(config, key) else {
         concurrency_key(config, key)?;
@@ -1176,6 +1190,8 @@ fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
         // count as well as `all`.
         "visible_lanes" => Value::String(config.dispatch.visible_lanes.spelled()),
         "hide_commands" => Value::Boolean(config.dispatch.hide_commands),
+        "lane_layout" => Value::try_from(config.dispatch.lane_layout)
+            .expect("LaneLayout always serialises to a string"),
         _ => return,
     };
     if let Some(table) = value.get_mut("dispatch").and_then(Value::as_table_mut) {
@@ -1536,6 +1552,28 @@ mod tests {
         assert!(back.dispatch.hide_commands);
         assert!(!toml::to_string(&back).unwrap().contains("hide_commands"));
         assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
+    }
+
+    /// The same read/write-while-absent mechanism, for `lane_layout`.
+    #[test]
+    fn lane_layout_is_readable_and_writable_while_absent() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.lane_layout").unwrap(), "panes");
+        assert!(!toml::to_string(&config).unwrap().contains("lane_layout"));
+
+        let tabs = set(&config, "dispatch.lane_layout", "tabs").unwrap();
+        assert_eq!(tabs.dispatch.lane_layout, LaneLayout::Tabs);
+        assert_eq!(get(&tabs, "dispatch.lane_layout").unwrap(), "tabs");
+        assert!(
+            toml::to_string(&tabs)
+                .unwrap()
+                .contains("lane_layout = \"tabs\"")
+        );
+
+        let panes = set(&tabs, "dispatch.lane_layout", "panes").unwrap();
+        assert_eq!(panes.dispatch.lane_layout, LaneLayout::Panes);
+        assert!(!toml::to_string(&panes).unwrap().contains("lane_layout"));
+        assert!(set(&config, "dispatch.lane_layout", "windows").is_err());
     }
 
     /// The retired key is no longer a setting: a person who still types it is

@@ -652,6 +652,14 @@ pub struct DispatchConfig {
     #[serde(skip_serializing_if = "is_true")]
     pub hide_commands: bool,
 
+    /// Where a task's lanes are placed in its workspace: as panes of one tab,
+    /// or one tab to a step. See [`LaneLayout`].
+    ///
+    /// Not written to `config.toml` while it is `panes`, for the same reason
+    /// as [`Self::lane_child_ceiling`] above.
+    #[serde(skip_serializing_if = "LaneLayout::is_panes")]
+    pub lane_layout: LaneLayout,
+
     /// Retired: whether a finished step's agent stayed open in its own pane.
     /// [`Self::visible_lanes`] replaces it, and [`Config::migrate`] reads this
     /// one only to carry it over — `true` kept every pane, which is `all`,
@@ -725,6 +733,7 @@ impl Default for DispatchConfig {
             priority: Priority::default(),
             visible_lanes: VisibleLanes::default(),
             hide_commands: true,
+            lane_layout: LaneLayout::default(),
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
             herdr_mode: None,
@@ -1085,6 +1094,37 @@ impl Priority {
     /// why a key that holds its default is better off absent from the file.
     fn is_group(&self) -> bool {
         matches!(self, Priority::Group)
+    }
+}
+
+/// Where a task's lanes are placed in its workspace.
+///
+/// `panes` is the shipped default: every step is a pane of the task's one
+/// tab, labelled with the step, and the tab carries the task's name. `tabs`
+/// gives each step a tab of its own, named after the step, with one
+/// unlabelled pane in it. The workspace keeps its `spoolway/<task>` label
+/// either way, so the task's name is still on screen. A tab gives a lane the
+/// whole screen at the cost of seeing one lane at a time.
+/// [`DispatchConfig::visible_lanes`] limits tabs as it limits panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaneLayout {
+    #[default]
+    Panes,
+    Tabs,
+}
+
+impl LaneLayout {
+    /// Skips a `panes` on the way out — see [`DispatchConfig::lane_layout`]
+    /// for why a key that holds its default is better off absent from the
+    /// file.
+    fn is_panes(&self) -> bool {
+        matches!(self, LaneLayout::Panes)
+    }
+
+    /// Whether each step gets a tab of its own.
+    pub fn is_tabs(self) -> bool {
+        matches!(self, LaneLayout::Tabs)
     }
 }
 

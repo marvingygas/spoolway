@@ -880,6 +880,33 @@ the task is done.
 
 The headless backend has no panes, so none are kept there.
 
+### One tab to a step
+
+By default every step of a task is a pane of the task's one tab. To give each step a tab of its own,
+run `spoolway config set dispatch.lane_layout tabs`. The workspace keeps its `spoolway/<task>` label,
+so the task's name is still on screen. Each tab is named after its step, and the one pane in it has
+no label of its own.
+
+The workspace's first tab becomes the first step's tab. Every step after it opens a new tab in the
+background, and never takes focus from the tab you are looking at. That is an agent step, or a
+command step when `dispatch.hide_commands` is `false`. The dispatcher names every step's tab again
+on each pass, because herdr forgets a tab's name when it restarts.
+
+A step that comes back reuses its own tab. Its new pane replaces the old one inside that tab, so
+the tabs stay in the order the steps first ran.
+
+`dispatch.visible_lanes` limits tabs as it limits panes. A new step that would go over the limit
+first closes the tab of the task's oldest finished lane, oldest by start time. At a limit of 1 the
+new tab opens first and the old one closes after, because closing a workspace's last tab closes the
+workspace. A lane that is still running, and a pane held for you on `blocked` or `paused`, keep their
+tab.
+
+When a task blocks, its lane's tab is brought forward, as its pane is in `panes` mode.
+
+A task switched from `panes` while it runs has all its earlier panes in its first tab. Each counts as
+a finished lane, and the limit closes them one pane at a time. That tab keeps the task's name while
+it holds more than one step. The headless backend has no tabs, so it ignores the setting.
+
 ### Commands are hidden by default
 
 A command step opens no pane. It runs detached, and its output goes to the same log file, which

@@ -315,9 +315,10 @@ auto_commit = true
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
 | `visible_lanes` | `5` | How many of a task's most recent lanes stay open in its tab, or `all`. Each new agent step, and each shown command step, first closes the task's oldest finished lanes until the tab, with the new lane in it, holds this many, then opens where the spiral puts it. The oldest lane keeps the biggest area and the newest the smallest. A running lane and a pane held for you on `blocked` or `paused` are never closed, so a tab can go over its limit until they end. A limit of `1` opens the new pane first and closes the old one after, so the tab is never empty. `0` is refused. Five is a new default: a task that used to keep every pane now keeps its five newest. Set `visible_lanes = "all"` to keep every pane until the task is done, as before. |
 | `hide_commands` | `true` | Whether a command step runs detached with no pane, so it never takes a place in its task's tab. Its output still goes to the same log file. Set to `false` and a command opens a pane that stays open after the command exits. It then counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose command is still running is never closed by the limit. |
+| `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
 
-`priority`, `lane_child_ceiling`, `visible_lanes` and `hide_commands` are not written to a fresh
-`config.toml` while they hold their default. Add them by hand or with `config set`. `all` is
+`priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` are not written
+to a fresh `config.toml` while they hold their default. Add them by hand or with `config set`. `all` is
 written as `visible_lanes = "all"`.
 
 `keep_finished_lanes` is retired. See [Retired keys](#retired-keys).

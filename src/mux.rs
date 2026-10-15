@@ -113,6 +113,14 @@ pub struct Workspace {
     pub checkout_path: PathBuf,
 }
 
+/// The tab a pane sits in, and how many panes share it: what
+/// [`Mux::pane_tab`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTab {
+    pub tab_id: String,
+    pub panes: usize,
+}
+
 /// One tab [`Mux::tabs_for_sweep`] found, with the four facts
 /// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions.
 /// Raw material for that policy, not a verdict — see [`Mux::tabs_for_sweep`]'s
@@ -148,7 +156,8 @@ pub struct LaneSpec<'a> {
     /// lane's identity is [`LaneSpec::name`], which is the multiplexer's own
     /// session name and is what [`Mux::list_lanes`] reads back. The task's
     /// own tab already carries the task — see [`Mux::rename_tab`] — so this
-    /// carries the step alone.
+    /// carries the step alone. Empty under `lane_layout = "tabs"`, where the
+    /// tab carries the step and the pane is left unlabelled.
     pub label: &'a str,
     /// herdr agent kind: `pi`, `claude`, `codex`, …
     pub kind: &'a str,
@@ -356,6 +365,32 @@ pub trait Mux: Sync {
     fn close_workspace(&self, workspace_id: &str) -> Result<()>;
     /// Close one tab, leaving the workspace it lived in alone.
     fn close_tab(&self, tab_id: &str) -> Result<()>;
+    /// Open a tab in `workspace_id` with `label`, and answer it with the
+    /// bare shell pane it opens with. The person's focus stays where it was:
+    /// a lane that starts in the background must not pull them out of
+    /// whatever they are reading.
+    ///
+    /// For `dispatch.lane_layout = "tabs"`, where each step gets a tab of its
+    /// own. `None` from a backend with no tabs, which is headless: the
+    /// caller falls back to splitting a pane as the `panes` layout does.
+    fn create_tab(
+        &self,
+        _workspace_id: &str,
+        _cwd: &Path,
+        _label: &str,
+    ) -> Result<Option<Workspace>> {
+        Ok(None)
+    }
+    /// The tab `pane_id` sits in and how many panes that tab holds, or `None`
+    /// when the multiplexer no longer has the pane or has no tabs to say.
+    ///
+    /// A tab is closed with [`Mux::close_tab`] only when its one pane is the
+    /// lane being closed: under the `panes` layout, or after a switch from it,
+    /// a tab can hold the panes of several lanes, and closing it would take
+    /// the running ones with it.
+    fn pane_tab(&self, _pane_id: &str) -> Result<Option<PaneTab>> {
+        Ok(None)
+    }
     /// A bare pane in an existing checkout, for a lane that needs no worktree
     /// of its own.
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace>;
@@ -442,7 +477,8 @@ pub trait Mux: Sync {
     /// handover file this writes so two tasks running the same step at once
     /// never collide over it; `label` is what the pane is actually renamed
     /// to, which is the step alone, since the task's own tab already carries
-    /// the task.
+    /// the task. Empty leaves the pane unlabelled, for a tab named after the
+    /// step.
     ///
     /// `beside` is the pane of this command's own earlier run, when it left
     /// one standing: the new pane is split off it as [`Mux::split_beside`]
@@ -557,13 +593,15 @@ pub trait Mux: Sync {
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
     /// Rename a tab in place, by id.
     ///
-    /// Only ever called on the tab a task cut for itself. Called both the
+    /// Only ever called on a tab a task cut for itself. Called both the
     /// moment such a tab is opened, whose default label is unhelpfully
     /// numeric, and again on every later pass that finds the task still
     /// sitting on it — a resumed dispatcher rediscovers the tab id from the
     /// task file, never from a rename that outlived the process that made it,
     /// so re-asserting the label costs nothing and is the only way a resumed
-    /// task's tab reliably shows its slug too.
+    /// task's tab reliably shows its slug too. Under `lane_layout = "tabs"`
+    /// the same holds for each step's tab, which is named after the step
+    /// instead of the task.
     ///
     /// The default does nothing and never fails: headless records no tab to
     /// rename, and a test double with no visible tab has nothing to assert
@@ -1271,6 +1309,15 @@ impl Herdr {
         Ok(tab_in(tabs))
     }
 
+    /// Rename `pane` to `label`, unless there is none: a pane that is alone
+    /// in a tab named after its step stays unlabelled.
+    fn label_pane(&self, pane: &str, label: &str) -> Result<()> {
+        match label.is_empty() {
+            true => Ok(()),
+            false => self.rename_pane(pane, label),
+        }
+    }
+
     /// Type a command step's environment and script into `pane`, as
     /// [`Mux::run_in_pane`] and [`Mux::run_in_open_pane`] both do. What a
     /// failure leaves behind is the caller's to clean up: a pane it split
@@ -1448,6 +1495,21 @@ fn pane_ids_in_tab(list: &PaneList, tab_id: &str) -> HashSet<String> {
         .filter(|p| p.tab_id.as_deref() == Some(tab_id))
         .map(|p| p.pane_id.clone())
         .collect()
+}
+
+/// The tab `pane_id` sits in and the panes that tab holds, read off one `pane
+/// list` reply. `None` for a pane the reply does not name, or names without
+/// a tab. Its own function, like [`pane_ids_in_tab`], so the rule can be read
+/// against a captured payload.
+fn pane_tab_in(list: &PaneList, pane_id: &str) -> Option<PaneTab> {
+    let tab_id = list
+        .panes
+        .iter()
+        .find(|p| p.pane_id == pane_id)?
+        .tab_id
+        .clone()?;
+    let panes = pane_ids_in_tab(list, &tab_id).len();
+    Some(PaneTab { tab_id, panes })
 }
 
 /// Which pane a split actually made, confirmed against the multiplexer's
@@ -1671,6 +1733,13 @@ struct RawPane {
 #[derive(Debug, Deserialize)]
 struct WorkspaceCreated {
     workspace: RawWorkspace,
+    root_pane: RawPane,
+}
+
+/// What `tab create` answers: the tab, and the bare pane it opened with.
+/// Only the pane is read, since its row carries the tab's id too.
+#[derive(Debug, Deserialize)]
+struct TabCreated {
     root_pane: RawPane,
 }
 
@@ -1901,6 +1970,23 @@ impl Mux for Herdr {
         self.call_ignoring_result(&["tab", "close", tab_id])
     }
 
+    fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<Option<Workspace>> {
+        let argv = tab_create_argv(workspace_id, &cwd.display().to_string(), label);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let created: TabCreated = self.call(&args)?;
+        Ok(Some(Workspace {
+            workspace_id: workspace_id.to_string(),
+            pane_id: created.root_pane.pane_id,
+            tab_id: created.root_pane.tab_id,
+            checkout_path: cwd.to_path_buf(),
+        }))
+    }
+
+    fn pane_tab(&self, pane_id: &str) -> Result<Option<PaneTab>> {
+        let list: PaneList = self.call(&["pane", "list"])?;
+        Ok(pane_tab_in(&list, pane_id))
+    }
+
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
         let path = cwd.display().to_string();
 
@@ -2007,7 +2093,7 @@ impl Mux for Herdr {
                 .or_else(|_| self.split_pane(tab_id, cwd))?,
             None => self.split_pane(tab_id, cwd)?,
         };
-        self.rename_pane(&pane, label)?;
+        self.label_pane(&pane, label)?;
         // A refusal leaves the split pane standing and unrecorded, and the
         // caller closes only a pane it was told about: closed here, or each
         // retry of a line that is too long for this task would add another
@@ -2045,7 +2131,7 @@ impl Mux for Herdr {
         // this one was open before the step came, and closing the task's
         // only pane would take its tab and workspace with it.
         self.change_dir(pane_id, cwd)?;
-        self.rename_pane(pane_id, label)?;
+        self.label_pane(pane_id, label)?;
         self.type_script(pane_id, key, script, env)?;
         Ok(Some(pane_id.to_string()))
     }
@@ -2131,8 +2217,10 @@ impl Mux for Herdr {
         self.start_agent(&args, spec.pane_id, tick)?;
 
         // The label is cosmetic — `list_lanes` finds a lane by the session name
-        // `agent start` was given above, never by what the pane is called.
-        self.rename_pane(spec.pane_id, spec.label)
+        // `agent start` was given above, never by what the pane is called. An
+        // empty one is a pane in a tab named after its step, which has
+        // nothing to add.
+        self.label_pane(spec.pane_id, spec.label)
     }
 
     fn prompt(&self, lane: &str, text: &str) -> Result<()> {
@@ -2554,6 +2642,28 @@ fn worktree_open_argv(root: &str, path: &str, label: &str) -> Vec<String> {
         "--label".to_string(),
         label.to_string(),
         "--no-focus".to_string(),
+    ]
+}
+
+/// The argv of the `herdr tab create` call that opens a step's tab.
+///
+/// Without `--focus`: herdr leaves focus where it was unless asked, and a lane
+/// that starts while a person is reading another tab must not move them. The
+/// label is passed here rather than renamed afterwards so the tab never shows
+/// herdr's numeric one.
+///
+/// Pulled out on its own, like [`worktree_open_argv`], so the shape of the call
+/// is checkable without a real herdr to send it to.
+fn tab_create_argv(workspace_id: &str, cwd: &str, label: &str) -> Vec<String> {
+    vec![
+        "tab".to_string(),
+        "create".to_string(),
+        "--workspace".to_string(),
+        workspace_id.to_string(),
+        "--cwd".to_string(),
+        cwd.to_string(),
+        "--label".to_string(),
+        label.to_string(),
     ]
 }
 
@@ -3711,6 +3821,71 @@ mod tests {
             .find(|p| p.tab_id.as_deref() == Some("w65:t2"))
             .expect("the tab has a pane");
         assert_eq!(found.pane_id, "w65:p2");
+    }
+
+    /// A pane's tab and the number of panes beside it come from one `pane
+    /// list` reply, which is what tells a tab holding only the pane being
+    /// closed from one that holds other lanes too.
+    #[test]
+    fn a_panes_tab_and_its_neighbours_are_read_from_one_pane_list() {
+        let payload = r#"{"panes": [
+          {"pane_id": "w5S:p19", "tab_id": "w5S:t6", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p20", "tab_id": "w5S:t6", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p21", "tab_id": "w5S:t7", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p22", "workspace_id": "w5S"}
+        ]}"#;
+        let list: PaneList = serde_json::from_str(payload).expect("a live pane list parses");
+
+        assert_eq!(
+            pane_tab_in(&list, "w5S:p19"),
+            Some(PaneTab {
+                tab_id: "w5S:t6".into(),
+                panes: 2
+            })
+        );
+        assert_eq!(
+            pane_tab_in(&list, "w5S:p21"),
+            Some(PaneTab {
+                tab_id: "w5S:t7".into(),
+                panes: 1
+            })
+        );
+        assert_eq!(pane_tab_in(&list, "w5S:p22"), None, "no tab to name");
+        assert_eq!(pane_tab_in(&list, "w5S:p99"), None, "no such pane");
+    }
+
+    /// A step's tab is opened in the background: `tab create` is never asked
+    /// to focus it, and carries the step's name from the start.
+    #[test]
+    fn a_step_tab_is_opened_labelled_and_without_focus() {
+        let argv = tab_create_argv("w5S", "/work/demo", "review");
+        assert_eq!(
+            argv,
+            [
+                "tab",
+                "create",
+                "--workspace",
+                "w5S",
+                "--cwd",
+                "/work/demo",
+                "--label",
+                "review"
+            ]
+        );
+        assert!(!argv.iter().any(|arg| arg.contains("focus")));
+    }
+
+    /// `tab create` answers the tab and the bare pane it opened with; the
+    /// pane's row carries the tab id the lane's records need.
+    #[test]
+    fn a_created_tab_answers_its_root_pane_and_tab() {
+        let created: TabCreated = serde_json::from_str(
+            r#"{"tab": {"tab_id": "w5S:t9", "label": "review"},
+                "root_pane": {"pane_id": "w5S:p31", "tab_id": "w5S:t9"}}"#,
+        )
+        .expect("a live tab create reply parses");
+        assert_eq!(created.root_pane.pane_id, "w5S:p31");
+        assert_eq!(created.root_pane.tab_id.as_deref(), Some("w5S:t9"));
     }
 
     /// The ordinary case: a workspace opened with exactly one tab, which
