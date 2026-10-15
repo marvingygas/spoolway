@@ -274,6 +274,11 @@ reading the file whole.
    project home, so a file anywhere else is first copied into
    `<home>/plans/<group>/` and linked there.
 
+   **Write the task's `## Risks` yourself.** Work out each task's risks from what its own
+   change could break. The plan page lists none. List each risk with what the task does about
+   it. A risk with no mitigation is not finished. Drop the heading when the task carries no
+   risk.
+
    The body's `## Mockup`, only when the task changes something a person opens, starts on
    this line, word for word:
 

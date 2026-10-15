@@ -116,9 +116,6 @@ the page that buys nothing.
 - The decision's figure — drawn or mocked, per "The record's figure" below.
 - The paragraph after the figure — what it does not show: the name, the default, the thing a
   reader would otherwise get wrong.
-- The `.risks` table — a `<tr>` per risk this decision carries, its risk `<td>` beside its
-  mitigation `<td>`. At least one row; a record with no risk to name was not a decision. A row
-  with an empty Mitigation cell is unfinished.
 - `.change` — the record's last line, painted highlighted: one plain sentence stating the
   change that will now happen. The slot takes the sentence alone; a CSS `::before` rule paints
   "After implementation: " ahead of it — never type the prefix yourself.
@@ -186,9 +183,8 @@ a browser — `spoolway-tasks` reads it by name and learns nothing about the mar
 **Fill it last, in one pass once the rest of the page is done** — never mirrored slot by slot as
 each section above it is written; the block is prose written once, not markup kept in step with
 markup. It carries every heading, every paragraph, every mock panel and every decision's
-`forces`, risks and `change` line, from Context through Mockup, in the page's own order. The
-risks are written as a Markdown table, and the change line starts with "After implementation: "
-written out in full. A figure that has no Markdown form of its own appears as `[figure] `
+`forces` and `change` line, from Context through Mockup, in the page's own order. The
+change line starts with "After implementation: " written out in full. A figure that has no Markdown form of its own appears as `[figure] `
 followed by that figure's `aria-label`. A revision rewrites the whole block, the same pass it
 rewrites the prose and figures it followed.
 

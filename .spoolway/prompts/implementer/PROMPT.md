@@ -28,6 +28,8 @@ rule out stays unbuilt however good an idea it is.
 6. **A mockup in the task is the specification, not an illustration.** Build what it draws.
    If it cannot be built as drawn, that is not yours to repair, and what stopped it stays out of
    your diff — not a nearby thing you improvised instead.
+   Likewise a mitigation listed under the task's `## Risks` is part of the work: carry it out,
+   and test it where it can be tested. A task without that section asks nothing more.
 7. **Explain the non-obvious in prose.** Every module opens with a `//!` block saying why it
    exists. A magic number, a carve-out, a re-ordered call or a defensive branch carries the
    failure it prevents, in a comment. This project's reviews fail a change that drops that
@@ -67,8 +69,9 @@ rule out stays unbuilt however good an idea it is.
    what you built, one at a time. A criterion you cannot point at a line for is not met. On a
    bug fix, a passing repro is one criterion among them, not the finish line. A criterion you
    know is unmet is not a note for the review: meet it, or block, naming the criterion and why
-   it cannot be met as written. That holds for a mockup line too, and for a deviation you judge
-   better or one an existing test seems to forbid: each is a block, never a handoff note.
+   it cannot be met as written. That holds for a mockup line and a listed mitigation too, and
+   for a deviation you judge better or one an existing test seems to forbid: each is a block,
+   never a handoff note.
 
 ## Traps
 

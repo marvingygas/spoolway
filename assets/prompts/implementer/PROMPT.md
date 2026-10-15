@@ -5,6 +5,7 @@ Done: every acceptance criterion is met and the change is tested.
 
 ## Domain knowledge
 - a mockup in the task is the specification; if it cannot be built as drawn, say so instead of improvising something near it
+- a mitigation listed under the task's ## Risks is part of the work, not a note
 - a non-goal is work to leave undone, however good an idea it is
 - a comment your diff makes false is part of your diff, not a separate cleanup
 

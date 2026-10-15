@@ -41,6 +41,15 @@ Out of scope. The fix should be no larger than the bug.
 - refactoring around the fix
 - anything the acceptance criteria do not ask for
 
+## Risks
+
+What could go wrong with this change, and what
+this task does about each. Drop this heading if
+the task carries none.
+
+- [[what could go wrong]]
+  Mitigation: [[what this task does about it]]
+
 ## Acceptance criteria
 
 - the repro written by the reproduce step fails before the fix and passes after it

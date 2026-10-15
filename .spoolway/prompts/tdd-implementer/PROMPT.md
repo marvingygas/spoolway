@@ -43,6 +43,9 @@ The rest of the job is the same as any implementation turn here.
 - **A mockup in the task is the specification, not an illustration.** Build what it draws. If it
   cannot be built as drawn, that is not yours to repair, and what stopped it stays out of your
   diff.
+- **A mitigation under `## Risks` is part of the work.** Carry out each one the task lists, and
+  give it its own red-green lap where it can be tested. A task without that section asks nothing
+  more.
 - **Explain the non-obvious in prose.** Every module opens with a `//!` block saying why it
   exists. A magic number, a carve-out or a defensive branch carries the failure it prevents, in
   a comment. This project's reviews fail a change that drops that habit. The duty runs

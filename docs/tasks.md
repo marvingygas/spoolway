@@ -157,6 +157,7 @@ spoolway never reads the body. It is written once, from the skeleton in
 | `## Intend` | What the task achieves, in one or two sentences. |
 | `## Mockup` | What the result looks like, linked to the plan step or file that draws it, never redrawn. Delete the heading when nothing a person opens changes. The reviewer checks the change against it. |
 | `## Non-goals` | What the task must not do. |
+| `## Risks` | What could go wrong with the change, and the mitigation the task applies to each. The heading is dropped when the task carries no risk. |
 | `## Acceptance criteria` | Statements that are true or false when the task is done. |
 | `## End-to-end coverage` | The end-to-end test the change adds or updates, or "none" and why. |
 | `## References` | Paths to read before starting. |
