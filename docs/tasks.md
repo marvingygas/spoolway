@@ -67,6 +67,7 @@ as JSON.
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
+| `spare_pane` | the dispatcher | The workspace's first pane, until a step runs in it. See [Herdr](dispatcher.md#herdr). |
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back onto each command step. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
@@ -112,11 +113,13 @@ and `spoolway task contract --from` refuse any other value, naming the task and 
 may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
-digits and hyphens, starting with a letter. A task id may be at most 100 characters and a
-step id at most 64, because spoolway builds file names from the pair and a name past 255 bytes
-fails. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
-refuse a longer id, naming it and the limit. A lane whose name would outgrow the
-multiplexer's own limit gets a short internal alias instead of a refusal.
+digits and hyphens, starting with a letter. A task id may be at most 100 characters, because
+spoolway builds file names from it and a name past 255 bytes fails. A step id may be at most 26,
+because a lane's herdr name is its step plus a short task tag and herdr refuses a name past 32
+characters. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
+refuse a longer id, naming it and the limit. A task id's length does not matter to herdr, since
+its lanes are named by step and a three-character tag of the task id. See [How a lane is named in
+herdr](dispatcher.md#how-a-lane-is-named-in-herdr).
 
 ### What only holds across a set
 

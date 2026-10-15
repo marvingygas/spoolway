@@ -823,9 +823,10 @@ moved on its next step. Spoolway closes that pane and opens the task a workspace
 the checkout it already has.
 
 Under a multiplexer every lane is a real pane you can watch and type into. Each agent step of a
-task gets a pane of its own, and keeps it until the task is done. See [Finished lanes keep their
-pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by
-hand are never touched.
+task gets a pane of its own, and keeps it until the task is done or `dispatch.visible_lanes` closes
+it. See [Finished lanes keep their pane](#finished-lanes-keep-their-pane). A lane is named
+`<task> · <step>`. A copy of a routine is named `<routine> · <step>`. Sessions you start by hand
+are never touched.
 
 The board itself stays in the pane you ran `spoolway dispatch` in.
 
@@ -839,20 +840,48 @@ grows as a spiral. A step that comes back is the exception. See [Finished lanes 
 pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
 unless it is its workspace's only tab.
 
+A new workspace opens with one pane. The first step that shows a pane runs in that pane. That is an
+agent step, or a command step when `dispatch.hide_commands` is `false`. A hidden command step
+runs before it and leaves the pane alone, so the next agent step still uses it. The dispatcher
+records the pane as `spare_pane` in the task file until a step takes it. A pane with a command still running in
+it is left alone, and the step splits beside it. An idle pane is moved to the task's worktree
+before the step runs in it.
+
 A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 
+#### How a lane is named in herdr
+
+Herdr's sidebar shows one name per agent, at most 32 characters, and no two live agents share
+one. Every agent lane starts in herdr as `<step>-<tag>`, such as `review-spec-5f2`. The tag is the
+first three hex characters of a hash of the task id, so all of a task's lanes share it. The hash
+never changes, so a task keeps its tag across passes, restarts and releases. A copy of a routine
+uses the routine's name.
+
+Two tasks can have the same tag. A name is taken only when herdr lists it as a live agent right
+now. The later lane then gets a four-character tag, and a five-character one if that is taken too.
+A step that runs again first takes its name away from its own old agent with `herdr agent rename
+<old> --clear`, then starts with its task's three-character tag.
+
+Each lane has a record in `lane_aliases.json` in the project's home. The record maps the herdr
+name back to `<task> · <step>`, and the dispatcher reads it after a restart. Archiving a task
+removes its records, and so does discarding a trial. If the file cannot be read or does not
+parse, spoolway reports it and leaves it as it is.
+
+A `<task>__<step>` name reads back directly, and an `l…` name reads back through its record. The
+name spoolway shows in files, messages and commands is `<task> · <step>`.
+
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with
-an error naming the pane and the byte count, and nothing is typed. A paned command step's pane
-is typed one short line that runs the step's script file. See [Background and
+an error naming the pane and the byte count, and nothing is typed. A command step's pane, when
+`dispatch.hide_commands` is `false`, is typed one short line that runs the step's script file. See [Background and
 headless](pipelines.md#background-and-headless).
 
 ### Finished lanes keep their pane
 
 When a step finishes, its agent is left running, idle, in its own pane. Nothing is typed into it
-and nothing is closed. The task's next step splits a new pane in the same tab, so every step the
-task has run stays on screen and you can still type into it. See [Leaving a pane without closing
-it](agents.md#leaving-a-pane-without-closing-it).
+and nothing is closed. The task's next step splits a new pane in the same tab, so the steps the
+task has run stay on screen, up to the limit below, and you can still type into them. See
+[Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it).
 
 A finished lane does not count as running. A profile's `concurrency` and a model's `slots`
 count only the lane on the step the task is on. A follow-up you type into a finished pane runs
@@ -861,16 +890,28 @@ finished lane is refused, because the task has left its step.
 
 A step that comes back replaces its own pane. A review that fails and sends the task round again
 splits the old review pane, and then closes it. The new pane takes the old one's whole area, so
-the tab looks the same. A tab therefore holds at most one pane per agent step. The old run's
-transcript stays on disk under its session id, and its report stays in the task file. If the old
-lane is still mid-turn, its spend is banked first.
+the tab looks the same. The old run's transcript stays on disk under its session id, and its
+report stays in the task file. If the old lane is still mid-turn, its spend is banked first.
 
-To show one agent pane per task, set `keep_finished_lanes = false` under `[dispatch]`, or
-run `spoolway config set dispatch.keep_finished_lanes false`. Each new agent step then opens where
-the spiral puts it, and the task's most recent kept pane is closed once the new one is ready. Its
-spend is banked first. Panes that were already kept when you turned it off stay open until the
-task is done, and only the most recent one closes with each new step. A parked task's pane is still
-held for you.
+A task's tab holds at most `dispatch.visible_lanes` lanes, five by default. Set it to a whole
+number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 3`. A `0` is
+refused.
+
+Each new agent step, and each shown command step, that would go over the limit first closes the
+task's oldest finished lanes, oldest by start time. It then opens the new pane where the spiral puts it. The spiral splits the
+smallest pane, so the oldest lane keeps the biggest area and the newest the smallest. Each lane
+closed this way has its spend banked first, even if it is still mid-turn.
+
+A limit of 1 works the other way round. The old pane is the tab's last, so the new pane opens
+first and the old one closes after, and the tab never empties.
+
+Some lanes are never closed by the limit. A lane that is still running stays, and so does a pane
+held for you on `paused` or on a `blocked` step. A tab can therefore sit over its limit until they
+end. A step that comes back still replaces its own pane in place.
+
+Five is a new default, so a task that kept every pane keeps its five newest. To keep every pane
+until the task is done, set `visible_lanes = "all"`. The `keep_finished_lanes` key is retired.
+`true` loads as `all` and `false` as `1`.
 
 A lane is banked when its step moves on, and again when the task is done. The second bank
 counts only what was added since the first, so rounds you ran in a finished pane are counted.
@@ -880,8 +921,48 @@ focused once. Its pane stays open when the task moves on. `spoolway resume` clos
 settled lane on the step it sends the task to. Every pane closes with the task's workspace when
 the task is done.
 
-Command steps open no pane of their own beyond what they always have. The headless backend has
-no panes, so none are kept there.
+The headless backend has no panes, so none are kept there.
+
+### One tab to a step
+
+By default every step of a task is a pane of the task's one tab. To give each step a tab of its own,
+run `spoolway config set dispatch.lane_layout tabs`. The workspace keeps its `spoolway/<task>` label,
+so the task's name is still on screen. Each tab is named after its step, and the one pane in it has
+no label of its own.
+
+The workspace's first tab becomes the first step's tab. Every step after it opens a new tab in the
+background, and never takes focus from the tab you are looking at. That is an agent step, or a
+command step when `dispatch.hide_commands` is `false`. The dispatcher names every step's tab again
+on each pass, because herdr forgets a tab's name when it restarts.
+
+A step that comes back reuses its own tab. Its new pane replaces the old one inside that tab, so
+the tabs stay in the order the steps first ran.
+
+`dispatch.visible_lanes` limits tabs as it limits panes. A new step that would go over the limit
+first closes the tab of the task's oldest finished lane, oldest by start time. At a limit of 1 the
+new tab opens first and the old one closes after, because closing a workspace's last tab closes the
+workspace. A lane that is still running, and a pane held for you on `blocked` or `paused`, keep their
+tab.
+
+When a task blocks, its lane's tab is brought forward, as its pane is in `panes` mode.
+
+A task switched from `panes` while it runs has all its earlier panes in its first tab. Each counts as
+a finished lane, and the limit closes them one pane at a time. That tab keeps the task's name while
+it holds more than one step. The headless backend has no tabs, so it ignores the setting.
+
+### Commands are hidden by default
+
+A command step opens no pane. It runs detached, and its output goes to the same log file, which
+is `commands/<task> · <step>.log` under the project's home. It sees the same named environment
+as a run in a pane. A hidden command is never a lane, so it takes no part in `visible_lanes`.
+
+To watch commands run, set `hide_commands = false` with `spoolway config set
+dispatch.hide_commands false`. A command then opens a pane like an agent step and the pane stays
+open after the command exits, so the output of a failed gate is still on screen. A shown command
+counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose
+command is still running is never closed by the limit, and that includes a `background: true`
+step. A command step that comes back replaces its own pane in place. Every shown command pane
+closes when the task is done. A step with `headless: true` stays detached whatever this key says.
 
 ## Looking into a lane
 

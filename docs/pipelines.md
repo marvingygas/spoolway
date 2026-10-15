@@ -76,7 +76,7 @@ steps:
 
 | Key | Default | What it does |
 |---|---|---|
-| `id` | required | The step name, at most 64 characters. Written to the task's `stage:`. |
+| `id` | required | The step name, at most 26 characters, because herdr refuses an agent name past 32 characters and a lane's name is its step plus a short task tag. Written to the task's `stage:`. |
 | `description` | none | One line, shown by `spoolway pipeline show`. |
 | `agent` | none | A profile from `config.toml`. Makes this an agent step. |
 | `run` | none | A shell command line. Makes this a command step. |
@@ -92,7 +92,7 @@ steps:
 | `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
-| `headless` | `false` | Command steps only. `true` runs the command with no pane. |
+| `headless` | `false` | Command steps only. `true` runs the command with no pane, whatever `dispatch.hide_commands` says. |
 | `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
@@ -349,7 +349,7 @@ A build, a test suite, a formatter or a deploy script is a command step.
   stops it before the worktree is deleted. `spoolway queue unqueue --force` stops it too.
 - A blocking command whose task leaves the step by another road, such as a `spoolway report`
   typed by hand or a `last:` walk-past, is stopped on the dispatcher's next pass. Its run files
-  are deleted and its exit code never moves the task. Its pane closes.
+  are deleted and its exit code never moves the task. Its pane, if it has one, closes.
 - The exit code stays on disk until the pass that read it has written the task's move to the
   destination step. A pass that cannot place that destination, for want of a free slot, leaves
   the task on the command step and routes on the same code next time, instead of running the
@@ -367,7 +367,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
 A background step is a sidecar with no verdict. Its run never moves the task, however it ends:
 a non-zero exit, a timeout and a pass all leave the task where it is. A task that reaches `done`
 is archived without waiting for the run, and a run still going is stopped when the task is
-cleaned up. A run that ends has its pane closed and is counted once in the ledger.
+cleaned up. A run that ends is counted once in the ledger. If it has a pane, the pane closes
+unless `dispatch.hide_commands` is `false`.
 
 A run that exits non-zero, or is stopped at its `timeout:`, leaves one line in the task's
 `## Status Log`. The line is saved even though the task does not move. A run that exits 0 leaves
@@ -382,10 +383,13 @@ A pipeline that gives a background step an `on_fail` does not load. The message 
 fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:
 the task then waits for the command, and its exit picks `on_pass` or `on_fail`.
 
-A command step runs in its own pane. `headless: true` runs that command with no pane; this
-step option is separate from the internal test-only dispatcher backend. A pane closes the
-moment its exit code is judged, on a pass and on a failure alike. Only a timed-out run's pane
-stands, until the task reaches the step again or is cleaned up.
+A command step runs detached with no pane. Its output goes to the log file under `commands/`.
+Set `dispatch.hide_commands = false` and the step runs in its own pane instead. The pane stays
+open after the command exits, counts toward `dispatch.visible_lanes`, and closes with the task or
+when the limit pushes it out. See [Commands are hidden by
+default](dispatcher.md#commands-are-hidden-by-default). `headless: true` runs the command with
+no pane under either setting. This step option is separate from the internal test-only
+dispatcher backend.
 
 A paned step's script is written to `<task> · <step>.sh` beside the log, readable by you alone,
 because it holds the step's environment. The pane is typed one short line that runs that file.

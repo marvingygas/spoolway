@@ -180,6 +180,20 @@ works "a command that does not route survives the same file" \
 
 rm -f "$BROKEN"
 
+# A step id past 26 characters is refused on load: a lane's herdr name is its
+# step plus a task tag, and herdr refuses a name past 32 characters. 26 loads;
+# 27 does not, and the refusal names the id, its length and the fix.
+LONG_STEP="$LIVE/proj/.spoolway/pipelines/long-step.yml"
+STEP26="$(printf 's%.0s' $(seq 1 26))"
+STEP27="${STEP26}s"
+printf 'steps:\n  - id: %s\n    run: x\n    on_pass: done\n' "$STEP26" > "$LONG_STEP"
+works "pipeline check loads a 26-character step id" "$SPOOLWAY" pipeline check
+printf 'steps:\n  - id: %s\n    run: x\n    on_pass: done\n' "$STEP27" > "$LONG_STEP"
+refuses "pipeline check refuses a 27-character step id, naming the herdr limit" \
+  "is 27 characters long, and the limit is 26 — a lane's herdr name is its step plus a short task tag, and herdr refuses a name past 32 characters. Shorten it to 26 characters or fewer." \
+  "$SPOOLWAY" pipeline check
+rm -f "$LONG_STEP"
+
 # ------------------------------------------------------------ the private layer
 # A private pipeline lives under the project's home, not in any checkout, so a
 # lane's worktree has to find the very same `local/` the main checkout does —

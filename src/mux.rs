@@ -113,6 +113,14 @@ pub struct Workspace {
     pub checkout_path: PathBuf,
 }
 
+/// The tab a pane sits in, and how many panes share it: what
+/// [`Mux::pane_tab`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTab {
+    pub tab_id: String,
+    pub panes: usize,
+}
+
 /// One tab [`Mux::tabs_for_sweep`] found, with the four facts
 /// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions.
 /// Raw material for that policy, not a verdict — see [`Mux::tabs_for_sweep`]'s
@@ -148,7 +156,8 @@ pub struct LaneSpec<'a> {
     /// lane's identity is [`LaneSpec::name`], which is the multiplexer's own
     /// session name and is what [`Mux::list_lanes`] reads back. The task's
     /// own tab already carries the task — see [`Mux::rename_tab`] — so this
-    /// carries the step alone.
+    /// carries the step alone. Empty under `lane_layout = "tabs"`, where the
+    /// tab carries the step and the pane is left unlabelled.
     pub label: &'a str,
     /// herdr agent kind: `pi`, `claude`, `codex`, …
     pub kind: &'a str,
@@ -356,6 +365,32 @@ pub trait Mux: Sync {
     fn close_workspace(&self, workspace_id: &str) -> Result<()>;
     /// Close one tab, leaving the workspace it lived in alone.
     fn close_tab(&self, tab_id: &str) -> Result<()>;
+    /// Open a tab in `workspace_id` with `label`, and answer it with the
+    /// bare shell pane it opens with. The person's focus stays where it was:
+    /// a lane that starts in the background must not pull them out of
+    /// whatever they are reading.
+    ///
+    /// For `dispatch.lane_layout = "tabs"`, where each step gets a tab of its
+    /// own. `None` from a backend with no tabs, which is headless: the
+    /// caller falls back to splitting a pane as the `panes` layout does.
+    fn create_tab(
+        &self,
+        _workspace_id: &str,
+        _cwd: &Path,
+        _label: &str,
+    ) -> Result<Option<Workspace>> {
+        Ok(None)
+    }
+    /// The tab `pane_id` sits in and how many panes that tab holds, or `None`
+    /// when the multiplexer no longer has the pane or has no tabs to say.
+    ///
+    /// A tab is closed with [`Mux::close_tab`] only when its one pane is the
+    /// lane being closed: under the `panes` layout, or after a switch from it,
+    /// a tab can hold the panes of several lanes, and closing it would take
+    /// the running ones with it.
+    fn pane_tab(&self, _pane_id: &str) -> Result<Option<PaneTab>> {
+        Ok(None)
+    }
     /// A bare pane in an existing checkout, for a lane that needs no worktree
     /// of its own.
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace>;
@@ -442,13 +477,63 @@ pub trait Mux: Sync {
     /// handover file this writes so two tasks running the same step at once
     /// never collide over it; `label` is what the pane is actually renamed
     /// to, which is the step alone, since the task's own tab already carries
-    /// the task.
+    /// the task. Empty leaves the pane unlabelled, for a tab named after the
+    /// step.
+    ///
+    /// `beside` is the pane of this command's own earlier run, when it left
+    /// one standing: the new pane is split off it as [`Mux::split_beside`]
+    /// does, so that closing the old one hands the new one its area. A pane
+    /// the multiplexer no longer has is not an error, and the pane is split as
+    /// without one.
     ///
     /// The default declines outright rather than half-answering. headless
     /// inherits it unchanged — its panes are not real, so there is nothing to split.
+    #[allow(clippy::too_many_arguments)]
     fn run_in_pane(
         &self,
         _tab_id: &str,
+        _beside: Option<&str>,
+        _cwd: &Path,
+        _key: &str,
+        _label: &str,
+        _script: &str,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Whether `pane_id` holds nothing but its own shell, so a step may take
+    /// it over. Answers `false` when it cannot tell, and for a backend with
+    /// no real panes: a pane that might be in use is never handed away.
+    ///
+    /// Asked of a workspace's first pane before a later step takes it — see
+    /// [`crate::task::Frontmatter::spare_pane`]. A person may have typed into it
+    /// since the workspace opened.
+    fn pane_is_idle(&self, _pane_id: &str) -> bool {
+        false
+    }
+
+    /// Move the shell of `pane_id`, an idle pane that was open before this
+    /// step came for it, to `cwd`. A person may have changed directory in it
+    /// while it sat unused, and a lane started there would run outside the
+    /// worktree. The default does nothing, for a backend with no such panes.
+    fn change_dir(&self, _pane_id: &str, _cwd: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Run a shell script in `pane_id`, a pane that is already open and
+    /// idle, instead of splitting a new one. Answers like
+    /// [`Mux::run_in_pane`], including `None` from a backend with no pane to
+    /// run it in. `pane_id` itself is answered back as the pane it landed in.
+    ///
+    /// The arguments mean what they do for [`Mux::run_in_pane`], except that
+    /// nothing is split and `beside` does not exist. The pane is relabelled,
+    /// so it reads as the step that now runs in it, and moved to `cwd`, since
+    /// a person may have left it elsewhere while it sat idle.
+    #[allow(clippy::too_many_arguments)]
+    fn run_in_open_pane(
+        &self,
+        _pane_id: &str,
         _cwd: &Path,
         _key: &str,
         _label: &str,
@@ -508,13 +593,15 @@ pub trait Mux: Sync {
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
     /// Rename a tab in place, by id.
     ///
-    /// Only ever called on the tab a task cut for itself. Called both the
+    /// Only ever called on a tab a task cut for itself. Called both the
     /// moment such a tab is opened, whose default label is unhelpfully
     /// numeric, and again on every later pass that finds the task still
     /// sitting on it — a resumed dispatcher rediscovers the tab id from the
     /// task file, never from a rename that outlived the process that made it,
     /// so re-asserting the label costs nothing and is the only way a resumed
-    /// task's tab reliably shows its slug too.
+    /// task's tab reliably shows its slug too. Under `lane_layout = "tabs"`
+    /// the same holds for each step's tab, which is named after the step
+    /// instead of the task.
     ///
     /// The default does nothing and never fails: headless records no tab to
     /// rename, and a test double with no visible tab has nothing to assert
@@ -771,30 +858,34 @@ pub struct Herdr {
     /// Where this run's checkouts are cut — see [`crate::repo::Repo::worktree_root`].
     worktree_root: PathBuf,
 
-    /// Where this project's [`crate::lane_alias`] records live — read and
-    /// written whenever a lane's full name outgrows herdr's own 32-character
-    /// rule. Resolved leniently ([`project_home_lenient`]) rather than
-    /// propagating a resolution failure out of every constructor: a project
-    /// this cannot be resolved for has bigger problems than a missing alias
-    /// file, and every lane whose name already fits never touches this path
-    /// at all.
+    /// Where this project's [`crate::lane_alias`] records live — written for
+    /// every lane [`Herdr::start_lane`] starts and read by every call that
+    /// reaches a lane by name. Resolved leniently ([`project_home_lenient`])
+    /// rather than propagating a resolution failure out of every constructor:
+    /// a project this cannot be resolved for has bigger problems than a
+    /// missing alias file, and such a backend fails at the first lane it is
+    /// asked to start.
     project_home: PathBuf,
 
     /// Held across [`Herdr::live_wire_names`] and [`crate::lane_alias::
     /// reserve`] in [`Herdr::start_lane`] — the one stretch of a lane's boot
     /// that is not safe on the several threads
     /// [`crate::dispatch::Dispatcher::start_lanes`] now calls `start_lane`
-    /// from at once. `reserve` is an unlocked load-modify-save over the same
-    /// alias file (see its own doc), and `live_wire_names` is what decides
-    /// the candidate it picks: two lanes with a long name booting together
-    /// would otherwise both read the file — and the same `agent list` —
-    /// before either had written its own record, so both could pick the same
-    /// short alias, and whichever saved last would silently drop the other's
-    /// record. Only the two calls together are guarded, never the rest of
-    /// `start_lane`: nothing else in it touches this file, and serialising
-    /// the whole boot would put back exactly the wait this task exists to
-    /// remove.
-    alias_reservation: Mutex<()>,
+    /// from at once. `live_wire_names` is what decides the name `reserve`
+    /// picks: two lanes of the same step and tag booting together would
+    /// otherwise both read the same `agent list` before either agent had
+    /// started, and both would pick the same name. The records file is
+    /// guarded separately, inside `reserve`.
+    ///
+    /// Holds the names reserved whose `agent start` has not returned yet. A
+    /// record on file no longer makes a name taken, and herdr does not list
+    /// the name until its agent starts, so without this the second of two
+    /// such lanes would find the first's name free. [`Herdr::start_lane`]
+    /// removes the name once `agent start` has answered either way, from then
+    /// on `agent list` is the truth. Only the reservation is guarded, never
+    /// the rest of `start_lane`: serialising the whole boot would put back
+    /// exactly the wait this task exists to remove.
+    alias_reservation: Mutex<HashSet<String>>,
 }
 
 impl Herdr {
@@ -812,7 +903,7 @@ impl Herdr {
             anchor: checkout.to_path_buf(),
             worktree_root: home.join(WORKTREES_DIR),
             project_home: home.to_path_buf(),
-            alias_reservation: Mutex::new(()),
+            alias_reservation: Mutex::new(HashSet::new()),
         }
     }
 
@@ -930,9 +1021,7 @@ impl Herdr {
     fn wait_for_pane_shell(&self, pane_id: &str, tick: &mut dyn FnMut()) {
         let deadline = Instant::now() + PANE_SHELL_TIMEOUT;
         loop {
-            let ready = self
-                .call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
-                .is_ok_and(|info| info.foreground.is_shell);
+            let ready = self.pane_is_idle(pane_id);
             if ready || Instant::now() >= deadline {
                 return;
             }
@@ -1004,47 +1093,82 @@ impl Herdr {
         self.call::<serde_json::Value>(&["pane", "current"]).is_ok()
     }
 
-    /// The name herdr knows `lane` by: its own readable wire spelling,
-    /// [`to_agent_name`], when that already fits herdr's 32-character rule —
-    /// exactly what every lane crossed the wire as before this — or the short
-    /// alias [`Herdr::start_lane`] reserved for it in [`crate::lane_alias`]
-    /// when it does not.
+    /// The name herdr knows `lane` by: the alias [`Herdr::start_lane`]
+    /// reserved for it in [`crate::lane_alias`], or, for a lane started before
+    /// every lane had one, its readable spelling [`to_agent_name`] when that
+    /// fits herdr's 32-character rule.
     ///
-    /// `Err` only for a lane whose name has never fit and was never started
-    /// through this backend either — there is no alias on record and no
-    /// readable spelling to fall back to. Every caller past a real
-    /// `start_lane` reaches a lane that is at least one of the two.
+    /// `Err` for a lane that has no alias on record and whose readable
+    /// spelling does not fit either: it was never started through this
+    /// backend. Every caller past a real `start_lane` reaches a lane that is
+    /// at least one of the two. `Err` too when the records file does not
+    /// parse.
     fn wire_name(&self, lane: &str) -> Result<String> {
-        let alias = crate::lane_alias::alias_for(&self.project_home, lane);
+        let alias = crate::lane_alias::alias_for(&self.project_home, lane)?;
         resolve_wire_name(lane, alias.as_deref()).with_context(|| {
             format!(
-                "no herdr alias is on record for lane `{lane}`, and its full name is too long \
+                "no herdr name is on record for lane `{lane}`, and its full name is too long \
                  for herdr's own wire spelling — has this lane actually been started?"
             )
         })
     }
 
     /// Every wire name a live `agent list` answers with right now — read
-    /// fresh immediately before [`crate::lane_alias::reserve`] mints a new
-    /// alias, so a collision with a session this project's own records know
-    /// nothing about (a human's own scratch session, or another project's
-    /// lane sharing the same multiplexer) is refused before it is ever asked
-    /// for, rather than only noticed once herdr itself refuses the launch.
+    /// fresh immediately before [`crate::lane_alias::reserve`] picks a name,
+    /// so a clash with a session this project's own records know nothing
+    /// about (a human's own scratch session, or another project's lane
+    /// sharing the same multiplexer) is refused before it is ever asked for,
+    /// rather than only noticed once herdr itself refuses the launch.
     fn live_wire_names(&self) -> Result<HashSet<String>> {
         let list: AgentList = self.call(&["agent", "list"])?;
         Ok(list.agents.into_iter().filter_map(|raw| raw.name).collect())
     }
 
-    /// A lane's short opaque alias for a name too long for herdr's own wire
-    /// rule — [`Self::live_wire_names`] plus [`crate::lane_alias::reserve`],
-    /// under [`Self::alias_reservation`].
+    /// A lane's herdr name, `<step>-<tag>` — [`Self::live_wire_names`] plus
+    /// [`crate::lane_alias::reserve`], under [`Self::alias_reservation`], after
+    /// [`Self::release_old_name`].
     fn reserve_alias(&self, lane: &str, pane_id: &str) -> Result<String> {
+        self.release_old_name(lane)?;
         self.reserve_alias_with(lane, pane_id, || self.live_wire_names())
     }
 
-    /// [`Self::reserve_alias`] with the `agent list` call handed in, so a
-    /// test with no `herdr` can drive the same locked path `start_lane`
-    /// takes — `live_wire_names` shells out to a real `herdr`.
+    /// Take `lane`'s name away from its own old agent, if that agent is still
+    /// live: a step that runs again gets the same `<step>-<tag>` as before,
+    /// and herdr refuses a name a live agent holds. `agent rename --clear`
+    /// leaves the old agent running, unnamed, so its pane is not closed.
+    ///
+    /// Only an agent that is the lane's own is stripped, see
+    /// [`names_held_by_lane`]. A name held by anyone else is another task's
+    /// lane or a person's session, and stays taken, so the tag grows instead.
+    ///
+    /// An agent that exits between the `agent list` here and the rename is
+    /// not a failure: the name is free, which is what this wanted. The rename
+    /// then answers `no_such_agent`, and a second `agent list` that no longer
+    /// shows the name tells that apart from a rename that really failed.
+    fn release_old_name(&self, lane: &str) -> Result<()> {
+        let list: AgentList = self.call(&["agent", "list"])?;
+        let live: Vec<(String, String)> = list
+            .agents
+            .into_iter()
+            .filter_map(|raw| Some((raw.name?, raw.pane_id)))
+            .collect();
+        let own = names_held_by_lane(lane, &live, |name, pane| {
+            crate::lane_alias::lane_for(&self.project_home, name, pane)
+        })?;
+        for name in own {
+            if let Err(err) = self.call_ignoring_result(&["agent", "rename", &name, "--clear"])
+                && self.live_wire_names()?.contains(&name)
+            {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::reserve_alias`] without [`Self::release_old_name`], and with
+    /// the `agent list` call handed in, so a test with no `herdr` can drive
+    /// the same locked path `start_lane` takes — `live_wire_names` shells out
+    /// to a real `herdr`.
     fn reserve_alias_with(
         &self,
         lane: &str,
@@ -1053,10 +1177,13 @@ impl Herdr {
     ) -> Result<String> {
         // Held across both calls — see [`Self::alias_reservation`]'s own
         // doc — so two lanes booting on their own threads never read the
-        // same "taken" picture and reserve the same short alias.
-        let _reserving = self.alias_reservation.lock().unwrap();
-        let taken = taken()?;
-        crate::lane_alias::reserve(&self.project_home, lane, pane_id, &taken)
+        // same "taken" picture and reserve the same name.
+        let mut pending = self.alias_reservation.lock().unwrap();
+        let mut taken = taken()?;
+        taken.extend(pending.iter().cloned());
+        let alias = crate::lane_alias::reserve(&self.project_home, lane, pane_id, &taken)?;
+        pending.insert(alias.clone());
+        Ok(alias)
     }
 
     /// The workspace already open on this checkout, if one is.
@@ -1224,6 +1351,44 @@ impl Herdr {
         Ok(tab_in(tabs))
     }
 
+    /// Rename `pane` to `label`, unless there is none: a pane that is alone
+    /// in a tab named after its step stays unlabelled.
+    fn label_pane(&self, pane: &str, label: &str) -> Result<()> {
+        match label.is_empty() {
+            true => Ok(()),
+            false => self.rename_pane(pane, label),
+        }
+    }
+
+    /// Type a command step's environment and script into `pane`, as
+    /// [`Mux::run_in_pane`] and [`Mux::run_in_open_pane`] both do. What a
+    /// failure leaves behind is the caller's to clean up: a pane it split
+    /// itself is closed, one that was already open is left standing.
+    fn type_script(
+        &self,
+        pane: &str,
+        key: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        // Written to a file and sourced, rather than typed ahead of the
+        // script as one `export` line — see [`hand_environment`]'s own doc
+        // for why: this map is the dispatcher's whole inherited environment,
+        // large enough that a herdr pane has cut it mid-value before, and a
+        // shell left waiting on the unterminated quote that leaves behind
+        // never gets as far as the script line below it.
+        //
+        // Named off `key`, never `label`: `label` is the step alone, and two
+        // tasks running the same step at once would otherwise hand each
+        // other's environment file the same name.
+        if !env.is_empty() {
+            let handover_key = format!("{} · handover", lane_task(key));
+            let source = self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
+            self.pane_run(pane, &source)?;
+        }
+        self.pane_run(pane, script)
+    }
+
     /// Write `env` to `<project home>/<dir_name>/<key>.<ext>` and answer the
     /// one `.` command that sources it — the file [`Mux::run_in_pane`] and
     /// [`Herdr::start_lane`] hand a pane instead of typing the environment in
@@ -1372,6 +1537,21 @@ fn pane_ids_in_tab(list: &PaneList, tab_id: &str) -> HashSet<String> {
         .filter(|p| p.tab_id.as_deref() == Some(tab_id))
         .map(|p| p.pane_id.clone())
         .collect()
+}
+
+/// The tab `pane_id` sits in and the panes that tab holds, read off one `pane
+/// list` reply. `None` for a pane the reply does not name, or names without
+/// a tab. Its own function, like [`pane_ids_in_tab`], so the rule can be read
+/// against a captured payload.
+fn pane_tab_in(list: &PaneList, pane_id: &str) -> Option<PaneTab> {
+    let tab_id = list
+        .panes
+        .iter()
+        .find(|p| p.pane_id == pane_id)?
+        .tab_id
+        .clone()?;
+    let panes = pane_ids_in_tab(list, &tab_id).len();
+    Some(PaneTab { tab_id, panes })
 }
 
 /// Which pane a split actually made, confirmed against the multiplexer's
@@ -1598,6 +1778,13 @@ struct WorkspaceCreated {
     root_pane: RawPane,
 }
 
+/// What `tab create` answers: the tab, and the bare pane it opened with.
+/// Only the pane is read, since its row carries the tab's id too.
+#[derive(Debug, Deserialize)]
+struct TabCreated {
+    root_pane: RawPane,
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkspaceList {
     workspaces: Vec<RawWorkspaceEntry>,
@@ -1741,33 +1928,33 @@ impl Mux for Herdr {
     fn list_lanes(&self) -> Result<Vec<Lane>> {
         let list: AgentList = self.call(&["agent", "list"])?;
 
-        Ok(list
-            .agents
-            .into_iter()
-            .filter_map(|raw| {
-                // A pane with no agent in it is not a lane, and an unnamed
-                // session is someone else's — a human's own pi or claude
-                // window in the same multiplexer. Never count it, never
-                // prompt it, and above all never close its pane.
-                let kind = raw.agent?;
-                let wire = raw.name?;
-                let alias_lane =
-                    crate::lane_alias::lane_for(&self.project_home, &wire, &raw.pane_id);
-                let name = resolve_lane_name(&wire, alias_lane.as_deref());
+        let mut lanes = Vec::new();
+        for raw in list.agents {
+            // A pane with no agent in it is not a lane, and an unnamed
+            // session is someone else's — a human's own pi or claude
+            // window in the same multiplexer. Never count it, never
+            // prompt it, and above all never close its pane.
+            let (Some(kind), Some(wire)) = (raw.agent, raw.name) else {
+                continue;
+            };
+            // An unreadable records file fails the listing: carrying on would
+            // report every lane under its herdr name, as a lane nobody knows.
+            let alias_lane = crate::lane_alias::lane_for(&self.project_home, &wire, &raw.pane_id)?;
+            let name = resolve_lane_name(&wire, alias_lane.as_deref());
 
-                Some(Lane {
-                    name,
-                    kind,
-                    status: raw.agent_status,
-                    pane_id: raw.pane_id,
-                    tab_id: raw.tab_id,
-                    workspace_id: raw.workspace_id,
-                    cwd: raw.cwd,
-                    launch_pending: raw.launch_pending,
-                    interactive_ready: raw.interactive_ready,
-                })
-            })
-            .collect())
+            lanes.push(Lane {
+                name,
+                kind,
+                status: raw.agent_status,
+                pane_id: raw.pane_id,
+                tab_id: raw.tab_id,
+                workspace_id: raw.workspace_id,
+                cwd: raw.cwd,
+                launch_pending: raw.launch_pending,
+                interactive_ready: raw.interactive_ready,
+            });
+        }
+        Ok(lanes)
     }
 
     /// Asked of herdr's own listings rather than tried-and-caught: a call
@@ -1823,6 +2010,23 @@ impl Mux for Herdr {
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
         self.call_ignoring_result(&["tab", "close", tab_id])
+    }
+
+    fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<Option<Workspace>> {
+        let argv = tab_create_argv(workspace_id, &cwd.display().to_string(), label);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let created: TabCreated = self.call(&args)?;
+        Ok(Some(Workspace {
+            workspace_id: workspace_id.to_string(),
+            pane_id: created.root_pane.pane_id,
+            tab_id: created.root_pane.tab_id,
+            checkout_path: cwd.to_path_buf(),
+        }))
+    }
+
+    fn pane_tab(&self, pane_id: &str) -> Result<Option<PaneTab>> {
+        let list: PaneList = self.call(&["pane", "list"])?;
+        Ok(pane_tab_in(&list, pane_id))
     }
 
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
@@ -1909,6 +2113,7 @@ impl Mux for Herdr {
     fn run_in_pane(
         &self,
         tab_id: &str,
+        beside: Option<&str>,
         cwd: &Path,
         key: &str,
         label: &str,
@@ -1919,37 +2124,58 @@ impl Mux for Herdr {
         // that runs the step's wrapper file, as one shell command — the same `pane run` route
         // [`Herdr::open_command`] takes for the board's own `o`, just against
         // an existing tab instead of a fresh pane of its own.
-        let pane = self.split_pane(tab_id, cwd)?;
-        self.rename_pane(&pane, label)?;
-        // Written to a file and sourced, rather than typed ahead of the
-        // script as one `export` line — see [`hand_environment`]'s own doc
-        // for why: this map is the dispatcher's whole inherited environment,
-        // large enough that a herdr pane has cut it mid-value before, and a
-        // shell left waiting on the unterminated quote that leaves behind
-        // never gets as far as the script line below it.
         //
-        // Named off `key`, never `label`: `label` is
-        // the step alone, and two tasks running the same step at once would
-        // otherwise hand each other's environment file the same name.
-        //
+        // Beside the run's own earlier pane when it left one, and in the
+        // tab's smallest pane when that pane is gone: a person may have closed
+        // it, and a command that cannot start because its old pane is missing
+        // would only be retried into the same refusal.
+        let pane = match beside {
+            Some(old) => self
+                .split_beside(tab_id, old, cwd)
+                .or_else(|_| self.split_pane(tab_id, cwd))?,
+            None => self.split_pane(tab_id, cwd)?,
+        };
+        self.label_pane(&pane, label)?;
         // A refusal leaves the split pane standing and unrecorded, and the
         // caller closes only a pane it was told about: closed here, or each
         // retry of a line that is too long for this task would add another
         // empty pane to its tab.
-        let typed = (|| {
-            if !env.is_empty() {
-                let handover_key = format!("{} · handover", lane_task(key));
-                let source =
-                    self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
-                self.pane_run(&pane, &source)?;
-            }
-            self.pane_run(&pane, script)
-        })();
+        let typed = self.type_script(&pane, key, script, env);
         if let Err(err) = typed {
             let _ = self.close_pane(&pane);
             return Err(err);
         }
         Ok(Some(pane))
+    }
+
+    fn pane_is_idle(&self, pane_id: &str) -> bool {
+        self.call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
+            .is_ok_and(|info| info.foreground.is_shell)
+    }
+
+    fn change_dir(&self, pane_id: &str, cwd: &Path) -> Result<()> {
+        self.pane_run(
+            pane_id,
+            &format!("cd {}", crate::platform::quote(&cwd.display().to_string())),
+        )
+    }
+
+    fn run_in_open_pane(
+        &self,
+        pane_id: &str,
+        cwd: &Path,
+        key: &str,
+        label: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        // Not closed on a refusal, unlike a pane `run_in_pane` split itself:
+        // this one was open before the step came, and closing the task's
+        // only pane would take its tab and workspace with it.
+        self.change_dir(pane_id, cwd)?;
+        self.label_pane(pane_id, label)?;
+        self.type_script(pane_id, key, script, env)?;
+        Ok(Some(pane_id.to_string()))
     }
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
@@ -1959,8 +2185,9 @@ impl Mux for Herdr {
     fn start_lane(&self, spec: &LaneSpec<'_>, tick: &mut dyn FnMut()) -> Result<()> {
         // Everything below is typed at a shell prompt, and lands in an agent's
         // chat input instead if anything is running in the pane. Nothing checks
-        // for that here, because every pane the dispatcher hands in is one it
-        // has just split, with no previous occupant.
+        // for that here: the dispatcher hands in a pane it has just split or
+        // opened, or a first pane an earlier pass opened, after asking
+        // `pane_is_idle`.
         //
         // A PATH prefix goes on first, because everything after it — including
         // the agent `agent start` is about to launch — is resolved through this
@@ -1995,20 +2222,14 @@ impl Mux for Herdr {
         // rather than leaving it to `PaneBusy` below on every occurrence.
         self.wait_for_pane_shell(spec.pane_id, tick);
 
-        // A lane's own readable wire spelling when it still fits herdr's
-        // 32-character rule; a short opaque alias, reserved and recorded
-        // *before* `agent start` is ever called below, when it does not (see
+        // The lane's name in herdr, `<step>-<tag>`, reserved and recorded
+        // *before* `agent start` is ever called below (see
         // `crate::lane_alias`). The record has to land first: a crash right
         // after this point still leaves a durable pane→lane mapping for the
         // next restart's `list_lanes` to recover, and a crash before it
         // leaves nothing for that restart to misread as a lane that never
         // actually launched.
-        let readable = to_agent_name(spec.name);
-        let handle = if readable.chars().count() <= AGENT_NAME_MAX {
-            readable
-        } else {
-            self.reserve_alias(spec.name, spec.pane_id)?
-        };
+        let handle = self.reserve_alias(spec.name, spec.pane_id)?;
         let mut args: Vec<&str> = vec![
             "agent",
             "start",
@@ -2029,11 +2250,17 @@ impl Mux for Herdr {
             "--",
         ];
         args.extend(spec.args.iter().map(String::as_str));
-        self.start_agent(&args, spec.pane_id, tick)?;
+        let started = self.start_agent(&args, spec.pane_id, tick);
+        // Herdr lists the name from here on if the agent started, and the name
+        // is free again if it did not; either way `agent list` is the truth.
+        self.alias_reservation.lock().unwrap().remove(&handle);
+        started?;
 
         // The label is cosmetic — `list_lanes` finds a lane by the session name
-        // `agent start` was given above, never by what the pane is called.
-        self.rename_pane(spec.pane_id, spec.label)
+        // `agent start` was given above, never by what the pane is called. An
+        // empty one is a pane in a tab named after its step, which has
+        // nothing to add.
+        self.label_pane(spec.pane_id, spec.label)
     }
 
     fn prompt(&self, lane: &str, text: &str) -> Result<()> {
@@ -2458,6 +2685,28 @@ fn worktree_open_argv(root: &str, path: &str, label: &str) -> Vec<String> {
     ]
 }
 
+/// The argv of the `herdr tab create` call that opens a step's tab.
+///
+/// Without `--focus`: herdr leaves focus where it was unless asked, and a lane
+/// that starts while a person is reading another tab must not move them. The
+/// label is passed here rather than renamed afterwards so the tab never shows
+/// herdr's numeric one.
+///
+/// Pulled out on its own, like [`worktree_open_argv`], so the shape of the call
+/// is checkable without a real herdr to send it to.
+fn tab_create_argv(workspace_id: &str, cwd: &str, label: &str) -> Vec<String> {
+    vec![
+        "tab".to_string(),
+        "create".to_string(),
+        "--workspace".to_string(),
+        workspace_id.to_string(),
+        "--cwd".to_string(),
+        cwd.to_string(),
+        "--label".to_string(),
+        label.to_string(),
+    ]
+}
+
 /// A branch name reduced to one directory component: `task/add-endpoint`
 /// becomes `task-add-endpoint`. Every backend names a task's worktree
 /// directory this way, so herdr and headless agree — and a slug the
@@ -2817,13 +3066,12 @@ fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
 /// `agent start` with `invalid_agent_name` (herdr 0.8.2). It is not spoolway's
-/// choice and cannot be argued with — but unlike before gh-359, it no longer
-/// bounds how long a task id may be either: [`Herdr::start_lane`] spells a
-/// lane's wire name out reversibly, [`to_agent_name`], only while that still
-/// fits this; past it, [`crate::lane_alias`] hands out a short opaque alias
-/// instead, recorded durably so every other wire call and a restart's own
-/// [`Mux::list_lanes`] can still resolve the lane's full name back from it.
-const AGENT_NAME_MAX: usize = 32;
+/// choice and cannot be argued with. It does not bound a task id: a lane
+/// starts as `<step>-<tag>` ([`crate::lane_alias::reserve`]), so only the step
+/// id is held to it, by [`crate::config::STEP_ID_MAX`]. The name is recorded
+/// durably, so every other wire call and a restart's own [`Mux::list_lanes`]
+/// can still resolve the lane's full name back from it.
+pub(crate) const AGENT_NAME_MAX: usize = 32;
 
 /// Is `id` usable as a task id? Herdr's own 32-character name limit no longer
 /// gates it — see [`AGENT_NAME_MAX`]'s own doc for why a task id no longer has
@@ -2872,7 +3120,7 @@ pub fn lane_task(name: &str) -> &str {
 ///
 /// Named rather than spelled out at each use, so every place that measures or
 /// strips it says so rather than repeating a literal nobody could check.
-const LANE_NAME_SEPARATOR: &str = " · ";
+pub(crate) const LANE_NAME_SEPARATOR: &str = " · ";
 
 /// The label a lane's own name is built from: task first, since the name is
 /// what addresses the lane across every task, where the task is what tells one
@@ -2895,9 +3143,9 @@ pub fn tab_label(task: &str, step: &str) -> String {
 /// hold hyphens, and neither can hold an underscore — [`crate::config::check_id`]
 /// allows lowercase letters, digits and hyphens and nothing else — so this is
 /// the one spelling that maps both ways without knowing the pipeline's steps.
-/// It is also shorter than what it replaces, which is exactly what lets a lane
-/// name a little past [`AGENT_NAME_MAX`] still cross the wire this way rather
-/// than needing an alias.
+/// Lanes are no longer started under this spelling — see
+/// [`crate::lane_alias`] — but a session started before that is still read
+/// back, and found again, through it.
 const AGENT_NAME_SEPARATOR: &str = "__";
 
 /// A lane's name as herdr will accept it — see [`AGENT_NAME_SEPARATOR`].
@@ -2912,21 +3160,52 @@ fn from_agent_name(name: &str) -> String {
     name.replace(AGENT_NAME_SEPARATOR, LANE_NAME_SEPARATOR)
 }
 
-/// The wire name `lane` should cross herdr's socket as: its own readable
-/// spelling when that already fits [`AGENT_NAME_MAX`], or `alias` — whatever
-/// [`crate::lane_alias::alias_for`] found on record for it — when it does
-/// not. `None` only when the name does not fit and no alias was found either.
+/// The names in `live` — `(name, pane_id)` pairs from `agent list` — that
+/// are `lane`'s own old agent: those whose record, found by `recorded` for
+/// the name and pane, names this lane.
+///
+/// A record is matched on its pane as well as its name, because a step that
+/// came back finds its name free once the old pane has closed, and another
+/// task with the same tag may have taken it since. That agent's pane is not
+/// the one on this lane's record, and stripping its name would send the other
+/// task's prompts to this lane.
+///
+/// A lane started before every lane had a record has a readable
+/// `<task>__<step>` name, and that is deliberately not stripped. It can never
+/// equal a `<step>-<tag>` name, so it does not stand in the way of the name
+/// this lane is about to take. Herdr names are shared by every project, so
+/// another project's still-running lane may hold the same readable name, and
+/// nothing here could tell it from this lane's own.
+fn names_held_by_lane(
+    lane: &str,
+    live: &[(String, String)],
+    recorded: impl Fn(&str, &str) -> Result<Option<String>>,
+) -> Result<Vec<String>> {
+    let mut own = Vec::new();
+    for (name, pane) in live {
+        if recorded(name, pane)?.as_deref() == Some(lane) {
+            own.push(name.clone());
+        }
+    }
+    Ok(own)
+}
+
+/// The wire name `lane` should cross herdr's socket as: `alias` — whatever
+/// [`crate::lane_alias::alias_for`] found on record for it — or, for a lane
+/// started before every lane had a record, its own readable spelling when that
+/// fits [`AGENT_NAME_MAX`]. `None` only when there is no alias and the
+/// readable spelling does not fit either.
 ///
 /// Pulled out of [`Herdr::wire_name`] as a pure function of its inputs, so the
-/// one decision that matters — readable spelling first, alias only past
-/// [`AGENT_NAME_MAX`] — is checkable on its own, without a live `Herdr` or a
-/// project's own home directory to read an alias record out of.
+/// one decision that matters — record first, readable spelling only without
+/// one — is checkable on its own, without a live `Herdr` or a project's own
+/// home directory to read an alias record out of.
 fn resolve_wire_name(lane: &str, alias: Option<&str>) -> Option<String> {
-    let wire = to_agent_name(lane);
-    if wire.chars().count() <= AGENT_NAME_MAX {
-        return Some(wire);
+    if let Some(alias) = alias {
+        return Some(alias.to_string());
     }
-    alias.map(str::to_string)
+    let wire = to_agent_name(lane);
+    (wire.chars().count() <= AGENT_NAME_MAX).then_some(wire)
 }
 
 /// The lane name `wire` should be reported as, in [`Mux::list_lanes`]:
@@ -3614,6 +3893,71 @@ mod tests {
         assert_eq!(found.pane_id, "w65:p2");
     }
 
+    /// A pane's tab and the number of panes beside it come from one `pane
+    /// list` reply, which is what tells a tab holding only the pane being
+    /// closed from one that holds other lanes too.
+    #[test]
+    fn a_panes_tab_and_its_neighbours_are_read_from_one_pane_list() {
+        let payload = r#"{"panes": [
+          {"pane_id": "w5S:p19", "tab_id": "w5S:t6", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p20", "tab_id": "w5S:t6", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p21", "tab_id": "w5S:t7", "workspace_id": "w5S"},
+          {"pane_id": "w5S:p22", "workspace_id": "w5S"}
+        ]}"#;
+        let list: PaneList = serde_json::from_str(payload).expect("a live pane list parses");
+
+        assert_eq!(
+            pane_tab_in(&list, "w5S:p19"),
+            Some(PaneTab {
+                tab_id: "w5S:t6".into(),
+                panes: 2
+            })
+        );
+        assert_eq!(
+            pane_tab_in(&list, "w5S:p21"),
+            Some(PaneTab {
+                tab_id: "w5S:t7".into(),
+                panes: 1
+            })
+        );
+        assert_eq!(pane_tab_in(&list, "w5S:p22"), None, "no tab to name");
+        assert_eq!(pane_tab_in(&list, "w5S:p99"), None, "no such pane");
+    }
+
+    /// A step's tab is opened in the background: `tab create` is never asked
+    /// to focus it, and carries the step's name from the start.
+    #[test]
+    fn a_step_tab_is_opened_labelled_and_without_focus() {
+        let argv = tab_create_argv("w5S", "/work/demo", "review");
+        assert_eq!(
+            argv,
+            [
+                "tab",
+                "create",
+                "--workspace",
+                "w5S",
+                "--cwd",
+                "/work/demo",
+                "--label",
+                "review"
+            ]
+        );
+        assert!(!argv.iter().any(|arg| arg.contains("focus")));
+    }
+
+    /// `tab create` answers the tab and the bare pane it opened with; the
+    /// pane's row carries the tab id the lane's records need.
+    #[test]
+    fn a_created_tab_answers_its_root_pane_and_tab() {
+        let created: TabCreated = serde_json::from_str(
+            r#"{"tab": {"tab_id": "w5S:t9", "label": "review"},
+                "root_pane": {"pane_id": "w5S:p31", "tab_id": "w5S:t9"}}"#,
+        )
+        .expect("a live tab create reply parses");
+        assert_eq!(created.root_pane.pane_id, "w5S:p31");
+        assert_eq!(created.root_pane.tab_id.as_deref(), Some("w5S:t9"));
+    }
+
     /// The ordinary case: a workspace opened with exactly one tab, which
     /// `create_pane` must reuse rather than open a second one beside.
     #[test]
@@ -3837,10 +4181,11 @@ mod tests {
     /// The release pipeline's `merge-released-repair` step is long enough
     /// that a perfectly ordinary task id — `release-spoolway-2`, the one
     /// gh-359 reports — used to be refused before it ever queued, because the
-    /// queue measured the id against the full, unaliased lane name. Once
-    /// herdr gets a short internal alias instead, nothing about a lane's
-    /// length is this function's business at all, so this id must queue on
-    /// every pipeline whatever its longest step is.
+    /// queue measured the id against the full, unaliased lane name. Every
+    /// lane now starts in herdr as `<step>-<tag>`, so the task id never
+    /// reaches the herdr name and nothing about a lane's length is this
+    /// function's business at all. This id must queue on every pipeline
+    /// whatever its longest step is.
     #[test]
     fn a_task_based_on_a_long_release_step_is_not_refused_for_its_lane_name() {
         assert!(
@@ -3850,11 +4195,11 @@ mod tests {
         );
     }
 
-    /// A lane whose own reversible spelling already fits herdr's 32-character
-    /// rule keeps crossing the wire exactly as it always has — no alias, no
-    /// dependence on a project's own record.
+    /// A lane started before every lane had a record, whose own reversible
+    /// spelling fits herdr's 32-character rule, keeps being reached by that
+    /// spelling — no dependence on a project's own record.
     #[test]
-    fn a_short_lane_resolves_to_its_readable_wire_name_with_no_alias_needed() {
+    fn a_short_lane_without_a_record_resolves_to_its_readable_wire_name() {
         let lane = run_key("pr-review", "add-health-endpoint");
         assert_eq!(
             resolve_wire_name(&lane, None),
@@ -3864,8 +4209,7 @@ mod tests {
 
     /// A lane whose reversible spelling overruns herdr's own rule has no wire
     /// name of its own to fall back to: it is only ever reached through
-    /// whatever alias a record already carries for it — gh-359's own case,
-    /// once herdr gets a short internal alias instead of a refusal.
+    /// whatever alias a record already carries for it.
     #[test]
     fn a_long_lane_resolves_only_through_its_alias() {
         let lane = run_key("merge-released-repair", "release-spoolway-2");
@@ -3874,6 +4218,66 @@ mod tests {
         assert_eq!(
             resolve_wire_name(&lane, Some("lalias123")),
             Some("lalias123".to_string())
+        );
+    }
+
+    /// A step that runs again strips the name only from its own old agent.
+    /// Another task with the same tag may hold the same name on a pane the
+    /// record does not name, and that agent keeps it.
+    #[test]
+    fn a_name_is_stripped_only_from_the_lanes_own_old_agent() {
+        let lane = "names-a0 · first";
+        let record = |name: &str, pane: &str| {
+            Ok((name == "first-c9e" && pane == "w1:p2").then(|| lane.to_string()))
+        };
+        let own = vec![("first-c9e".to_string(), "w1:p2".to_string())];
+        assert_eq!(
+            names_held_by_lane(lane, &own, record).unwrap(),
+            vec!["first-c9e"]
+        );
+        let foreign = vec![("first-c9e".to_string(), "w4:p5".to_string())];
+        assert!(
+            names_held_by_lane(lane, &foreign, record)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A lane started before every lane had a record has a `<task>__<step>`
+    /// name. It is never stripped: nothing tells it from another project's
+    /// lane of the same task id and step, and it cannot clash with the
+    /// `<step>-<tag>` name the lane is about to take anyway.
+    #[test]
+    fn a_legacy_readable_name_is_never_stripped() {
+        let live = vec![("names-a0__first".to_string(), "w1:p2".to_string())];
+        assert!(
+            names_held_by_lane("names-a0 · first", &live, |_, _| Ok(None))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// An unreadable records file stops the strip rather than reading as a
+    /// lane with no old agent.
+    #[test]
+    fn an_unreadable_record_file_stops_the_strip() {
+        let live = vec![("first-c9e".to_string(), "w1:p2".to_string())];
+        assert!(
+            names_held_by_lane("names-a0 · first", &live, |_, _| anyhow::bail!(
+                "unreadable"
+            ))
+            .is_err()
+        );
+    }
+
+    /// Every lane started now has a record, and the record is what herdr
+    /// knows it by even when the readable spelling would also have fit.
+    #[test]
+    fn a_recorded_alias_wins_over_a_readable_spelling_that_also_fits() {
+        let lane = run_key("pr-review", "add-health-endpoint");
+        assert_eq!(
+            resolve_wire_name(&lane, Some("pr-review-5f2")),
+            Some("pr-review-5f2".to_string())
         );
     }
 
@@ -4368,18 +4772,19 @@ mod tests {
         );
     }
 
-    /// Two lanes with names too long for herdr's own wire rule, booting on
-    /// their own threads under [`crate::dispatch::Dispatcher::start_lanes`],
-    /// both reach [`Herdr::reserve_alias`] — a load-modify-save over the
-    /// same alias file with no lock of its own, see [`crate::lane_alias::
-    /// reserve`]'s doc. This drives [`Herdr::reserve_alias_with`], the path
-    /// `start_lane` takes, from two threads lined up on a
+    /// Two lanes of the same step whose task ids share a tag (`names-a0` and
+    /// `names-a1` both hash to `c9e…`), booting on their own threads under
+    /// [`crate::dispatch::Dispatcher::start_lanes`], both reach
+    /// [`Herdr::reserve_alias`]. This drives [`Herdr::reserve_alias_with`],
+    /// the path `start_lane` takes, from two threads lined up on a
     /// [`std::sync::Barrier`]. The stand-in `agent list` waits for the other
     /// thread to arrive too, and counts how many are ever inside at once:
     /// with `alias_reservation` held that is one, and the wait times out;
-    /// without it both are inside together and the test fails.
+    /// without it both are inside together and the test fails. The stand-in
+    /// list is empty for both, as herdr's is before either agent has started,
+    /// so the two names differ only because the first is held as pending.
     #[test]
-    fn alias_reservation_serialises_two_long_names_booting_at_once() {
+    fn two_lanes_sharing_a_tag_booting_at_once_get_different_names() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let root = crate::scratch::root("mux-alias-reservation-race");
@@ -4390,8 +4795,8 @@ mod tests {
         let herdr = Herdr::new(&root, &root, &root);
 
         let lanes = [
-            ("task-a · a-step-name-longer-than-herdrs-own-rule", "pane-a"),
-            ("task-b · a-step-name-longer-than-herdrs-own-rule", "pane-b"),
+            ("names-a0 · implement", "pane-a"),
+            ("names-a1 · implement", "pane-b"),
         ];
         let barrier = std::sync::Barrier::new(lanes.len());
         let arrived = AtomicUsize::new(0);
@@ -4439,12 +4844,12 @@ mod tests {
         );
         for (&(lane, pane), alias) in lanes.iter().zip(&aliases) {
             assert_eq!(
-                crate::lane_alias::alias_for(&herdr.project_home, lane),
+                crate::lane_alias::alias_for(&herdr.project_home, lane).unwrap(),
                 Some(alias.clone()),
                 "`{lane}`'s own record still resolves — the other lane's save did not clobber it"
             );
             assert_eq!(
-                crate::lane_alias::lane_for(&herdr.project_home, alias, pane),
+                crate::lane_alias::lane_for(&herdr.project_home, alias, pane).unwrap(),
                 Some(lane.to_string())
             );
         }

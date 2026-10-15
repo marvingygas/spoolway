@@ -103,12 +103,16 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               of nothing but a real pane: the paned-command-step case,
 #               which needs to watch a real pane open, carry an environment,
 #               and close, the environment-handover case, which needs to
-#               watch an 8KB value actually reach one, and `kept-panes`, which
+#               watch an 8KB value actually reach one, `kept-panes`, which
 #               needs to see a finished step's pane still standing beside the
-#               next step's. All run against `scripts/e2e/herdr-stub.sh` —
-#               herdr, the one backend left, chosen over a real server because
-#               it has no isolated instance a suite can spin up of its own;
-#               the double's own header says why. `disaster.sh` used to carry
+#               next step's, and `lane-tabs`, which needs to see each step
+#               open a tab of its own and the oldest one close, and
+#               `lane-names`, which needs herdr's rules on an agent name
+#               enforced against the names spoolway picks. All run
+#               against `scripts/e2e/herdr-stub.sh` — herdr, the one backend
+#               left, chosen over a real server because it has no isolated
+#               instance a suite can spin up of its own; the double's own
+#               header says why. `disaster.sh` used to carry
 #               a case here, killing a real tmux server under a live agent
 #               lane to prove the heal path that follows; the double's agents
 #               are registrations rather than processes, so it can host a
@@ -143,8 +147,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-orphans)
-nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-orphans faults)
+pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-tabs lane-names lane-orphans)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-tabs lane-names lane-orphans faults)
 cloud_suites=(warmth)
 live_suites=(live)
 

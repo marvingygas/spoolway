@@ -168,10 +168,10 @@ path as the shared `.git`.
 ### Leaving a pane without closing it
 
 No kind is asked to leave its pane. When a step finishes, its agent stays running, idle, in its
-own pane until the task is done, whichever kind it is. The next step splits a new pane. See
+own pane until the task is done or `dispatch.visible_lanes` closes it, whichever kind it is. The next step splits a new pane. See
 [Finished lanes keep their pane](dispatcher.md#finished-lanes-keep-their-pane). Each kept
-session holds the memory an idle agent holds, so a task keeps one idle process for every agent
-step it has run.
+session holds the memory an idle agent holds, so a task keeps one idle process for each of its
+`dispatch.visible_lanes` newest agent steps.
 
 ## The argument template
 

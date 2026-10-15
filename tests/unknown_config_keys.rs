@@ -112,7 +112,7 @@ fn unknown_keys_load_are_named_and_survive_set_and_sync() {
 
     // `config set` edits in place and keeps every one of them, a profile
     // with an unknown kind included.
-    project.run(&["config", "set", "dispatch.keep_finished_lanes", "false"]);
+    project.run(&["config", "set", "dispatch.visible_lanes", "2"]);
     let after_set = std::fs::read_to_string(project.config_path()).expect("read config");
     assert!(
         after_set.contains("[agents.typo]\nkind = \"Claude\""),

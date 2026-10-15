@@ -205,23 +205,34 @@ pub fn check_id(kind: &str, id: &str) -> Result<()> {
 /// `queue add` with and without `--dry-run`, and a task file read from disk
 /// all refuse the same ids in the same words.
 pub fn check_task_id(id: &str) -> Result<()> {
-    check_id_within("task id", id, TASK_ID_MAX)
+    check_id_within(
+        "task id",
+        id,
+        TASK_ID_MAX,
+        "spoolway builds file names from it, and most file systems refuse a name past 255 bytes",
+    )
 }
 
-/// [`check_id`] for a step id, plus the length limit [`STEP_ID_MAX`].
+/// [`check_id`] for a step id, plus the length limit [`STEP_ID_MAX`]. The
+/// reason given is herdr's name limit, which is tighter than any file name's.
 pub fn check_step_id(id: &str) -> Result<()> {
-    check_id_within("step id", id, STEP_ID_MAX)
+    check_id_within(
+        "step id",
+        id,
+        STEP_ID_MAX,
+        "a lane's herdr name is its step plus a short task tag, and herdr refuses a name past \
+         32 characters",
+    )
 }
 
-/// [`check_id`], then refuse an id past `max` bytes. The id is ASCII by then,
-/// so bytes and characters are the same count.
-fn check_id_within(kind: &str, id: &str, max: usize) -> Result<()> {
+/// [`check_id`], then refuse an id past `max` bytes, giving `reason` for the
+/// limit. The id is ASCII by then, so bytes and characters are the same count.
+fn check_id_within(kind: &str, id: &str, max: usize, reason: &str) -> Result<()> {
     check_id(kind, id)?;
     if id.len() > max {
         bail!(
-            "{kind} `{id}` is {} characters long, and the limit is {max} — spoolway builds file \
-             names from it, and most file systems refuse a name past 255 bytes. Shorten it to \
-             {max} characters or fewer.",
+            "{kind} `{id}` is {} characters long, and the limit is {max} — {reason}. Shorten it \
+             to {max} characters or fewer.",
             id.len()
         );
     }
@@ -233,13 +244,17 @@ fn check_id_within(kind: &str, id: &str, max: usize) -> Result<()> {
 /// The longest file name built from a task and a step is the hidden temp file
 /// `write_atomic` makes beside `<task> · <step>.json`:
 /// `.<task> · <step>.json.<pid>-<call>.tmp`. With this limit and
-/// [`STEP_ID_MAX`] that is 1 + 100 + 4 + 64 + 5 + 36 bytes at most, 210 in
-/// all, which leaves 45 bytes under the 255 a file system allows. The 36 is a
+/// [`STEP_ID_MAX`] that is 1 + 100 + 4 + 26 + 5 + 36 bytes at most, 172 in
+/// all, which leaves 83 bytes under the 255 a file system allows. The 36 is a
 /// pid of ten digits, a call counter of twenty and the separators.
 pub const TASK_ID_MAX: usize = 100;
 
-/// The longest step id [`check_step_id`] accepts. See [`TASK_ID_MAX`].
-pub const STEP_ID_MAX: usize = 64;
+/// The longest step id [`check_step_id`] accepts.
+///
+/// A lane's herdr name is its step id, a hyphen and a task tag of up to five
+/// characters, and herdr refuses an agent name past 32 characters. 32 less
+/// that six leaves 26. See also [`TASK_ID_MAX`] for the file-name budget.
+pub const STEP_ID_MAX: usize = 26;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -621,20 +636,51 @@ pub struct DispatchConfig {
     #[serde(skip_serializing_if = "Priority::is_group")]
     pub priority: Priority,
 
-    /// Whether a finished step's agent stays open in its own pane until its
-    /// task is done. On by default. Off, each new agent step is placed by the
-    /// same spiral split as ever, and the task's most recent kept pane is
-    /// closed once that step's boot is prepared, so a task shows one agent
-    /// pane at a time. Panes already kept when it is turned off stay until
-    /// their task is done: only the most recent one goes with each new step.
+    /// How many of a task's lanes stay open in its tab, or `all`. Five by
+    /// default. Each new agent step closes the task's oldest finished lanes
+    /// until the tab, with the new lane in it, holds this many. It closes them
+    /// before placing the new pane by the spiral split, so the oldest lane
+    /// keeps the biggest area and the newest the smallest. A limit of 1 splits
+    /// first and closes the old lane after, so the tab is never empty. See
+    /// [`VisibleLanes`] for what is never closed.
     ///
     /// Not written to `config.toml` while it holds its default, for the same
     /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
     /// runs a binary built from a branch behind main, and a binary before
     /// unknown keys were tolerated (0.8.0 and earlier) refuses one with a hard
     /// parse error rather than ignoring it.
+    #[serde(skip_serializing_if = "VisibleLanes::is_default")]
+    pub visible_lanes: VisibleLanes,
+
+    /// Whether a command step runs detached, with no pane, so it never takes
+    /// a place in its task's tab. On by default: a gate's pane used to close
+    /// the moment its exit code was read, so it only ever cost the lanes
+    /// beside it their room. Its output is in the run's log either way.
+    ///
+    /// Off, a command opens a pane like an agent step's and keeps it after
+    /// the command exits. It then counts toward [`Self::visible_lanes`] and
+    /// closes oldest first like a finished agent lane. A pane whose command is
+    /// still running is never closed for the limit.
+    ///
+    /// Not written to `config.toml` while it is `true`, for the same reason as
+    /// [`Self::lane_child_ceiling`] above.
     #[serde(skip_serializing_if = "is_true")]
-    pub keep_finished_lanes: bool,
+    pub hide_commands: bool,
+
+    /// Where a task's lanes are placed in its workspace: as panes of one tab,
+    /// or one tab to a step. See [`LaneLayout`].
+    ///
+    /// Not written to `config.toml` while it is `panes`, for the same reason
+    /// as [`Self::lane_child_ceiling`] above.
+    #[serde(skip_serializing_if = "LaneLayout::is_panes")]
+    pub lane_layout: LaneLayout,
+
+    /// Retired: whether a finished step's agent stayed open in its own pane.
+    /// [`Self::visible_lanes`] replaces it, and [`Config::migrate`] reads this
+    /// one only to carry it over — `true` kept every pane, which is `all`,
+    /// and `false` kept one. Dropped unconditionally on the next save.
+    #[serde(default, skip_serializing)]
+    pub(crate) keep_finished_lanes: Option<bool>,
 
     /// Retired: whether stopping the dispatcher ended the run's live lanes
     /// and took their worktrees with it. Stopping never does that any more —
@@ -663,16 +709,16 @@ pub struct DispatchConfig {
     pub(crate) herdr_mode: Option<toml::Value>,
 }
 
+/// Skips a `true` on the way out — see [`DispatchConfig::hide_commands`] for
+/// why a key that holds its default is better off absent here.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
 /// for why a key that holds its default is better off absent here.
 fn is_default_lane_child_ceiling(value: &Duration) -> bool {
     *value == Duration::from_secs(3600)
-}
-
-/// Skips a `true` on the way out — see [`DispatchConfig::keep_finished_lanes`]
-/// for why a key that holds its default is better off absent here.
-fn is_true(value: &bool) -> bool {
-    *value
 }
 
 impl Default for DispatchConfig {
@@ -700,7 +746,10 @@ impl Default for DispatchConfig {
             worktree_root: String::new(),
             auto_commit: true,
             priority: Priority::default(),
-            keep_finished_lanes: true,
+            visible_lanes: VisibleLanes::default(),
+            hide_commands: true,
+            lane_layout: LaneLayout::default(),
+            keep_finished_lanes: None,
             tear_lanes_on_stop: None,
             herdr_mode: None,
         }
@@ -928,6 +977,117 @@ impl Backend {
     }
 }
 
+/// How many of a task's lanes its tab keeps open: a count of 1 or more, or
+/// every one of them.
+///
+/// The limit counts all of a task's lanes, kept and running, in whichever tab
+/// they stand. A command's pane is a lane while commands are shown, see
+/// [`DispatchConfig::hide_commands`]. Only a finished lane ever closes for
+/// it. A lane that is still running, and a pane held for a person on
+/// `blocked` or `paused`, stay whatever the count says, so a tab can sit over
+/// its limit until they end.
+/// Zero is refused rather than read as "none": a limit that closed every lane
+/// would close the one the step is starting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibleLanes {
+    Count(u32),
+    All,
+}
+
+impl VisibleLanes {
+    /// The count a key that is never set holds.
+    pub const DEFAULT_COUNT: u32 = 5;
+
+    /// Whether this is the default, which the file leaves unwritten — see
+    /// [`DispatchConfig::visible_lanes`].
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The most lanes a tab keeps, or `None` for `all`.
+    pub fn limit(self) -> Option<usize> {
+        match self {
+            Self::Count(count) => Some(count as usize),
+            Self::All => None,
+        }
+    }
+
+    /// The words that name this value, as `config get` prints it and a
+    /// load note quotes it.
+    pub fn spelled(self) -> String {
+        match self {
+            Self::Count(count) => count.to_string(),
+            Self::All => "all".to_string(),
+        }
+    }
+
+    /// The refusal for a value that is not a count of 1 or more, or `all`.
+    pub(crate) const REFUSAL: &'static str =
+        "a task shows at least one lane; give a count of 1 or more, or `all` to keep every lane";
+}
+
+impl Default for VisibleLanes {
+    fn default() -> Self {
+        Self::Count(Self::DEFAULT_COUNT)
+    }
+}
+
+impl Serialize for VisibleLanes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Count(count) => serializer.serialize_u32(*count),
+            Self::All => serializer.serialize_str("all"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VisibleLanes {
+    /// A whole number, or the string `all`. A digit string is taken as the
+    /// number it spells, because `config set` hands the key over as text when
+    /// the file does not hold it yet.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = VisibleLanes;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(VisibleLanes::REFUSAL)
+            }
+
+            fn visit_i64<E: serde::de::Error>(
+                self,
+                value: i64,
+            ) -> std::result::Result<VisibleLanes, E> {
+                match u32::try_from(value) {
+                    Ok(count) if count >= 1 => Ok(VisibleLanes::Count(count)),
+                    _ => Err(E::custom(VisibleLanes::REFUSAL)),
+                }
+            }
+
+            fn visit_u64<E: serde::de::Error>(
+                self,
+                value: u64,
+            ) -> std::result::Result<VisibleLanes, E> {
+                self.visit_i64(i64::try_from(value).unwrap_or(i64::MAX))
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<VisibleLanes, E> {
+                match value.trim() {
+                    "all" => Ok(VisibleLanes::All),
+                    digits => match digits.parse::<i64>() {
+                        Ok(count) => self.visit_i64(count),
+                        Err(_) => Err(E::custom(VisibleLanes::REFUSAL)),
+                    },
+                }
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Whether a free slot is filled from every ready task, or from the group
 /// already landing first.
 ///
@@ -949,6 +1109,37 @@ impl Priority {
     /// why a key that holds its default is better off absent from the file.
     fn is_group(&self) -> bool {
         matches!(self, Priority::Group)
+    }
+}
+
+/// Where a task's lanes are placed in its workspace.
+///
+/// `panes` is the shipped default: every step is a pane of the task's one
+/// tab, labelled with the step, and the tab carries the task's name. `tabs`
+/// gives each step a tab of its own, named after the step, with one
+/// unlabelled pane in it. The workspace keeps its `spoolway/<task>` label
+/// either way, so the task's name is still on screen. A tab gives a lane the
+/// whole screen at the cost of seeing one lane at a time.
+/// [`DispatchConfig::visible_lanes`] limits tabs as it limits panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaneLayout {
+    #[default]
+    Panes,
+    Tabs,
+}
+
+impl LaneLayout {
+    /// Skips a `panes` on the way out — see [`DispatchConfig::lane_layout`]
+    /// for why a key that holds its default is better off absent from the
+    /// file.
+    fn is_panes(&self) -> bool {
+        matches!(self, LaneLayout::Panes)
+    }
+
+    /// Whether each step gets a tab of its own.
+    pub fn is_tabs(self) -> bool {
+        matches!(self, LaneLayout::Tabs)
     }
 }
 
@@ -1454,6 +1645,7 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
     ("dispatch", "interval"),
     ("dispatch", "tmux_mode"),
     ("dispatch", "herdr_mode"),
+    ("dispatch", "keep_finished_lanes"),
     ("dispatch", "protected_branches"),
     ("dispatch", "notify"),
     ("dispatch", "open_on_escalation"),
@@ -1528,6 +1720,45 @@ pub(crate) fn is_retired_key(dotted: &str) -> bool {
                 .zip(&parts)
                 .all(|(want, got)| *want == "*" || want == got)
     })
+}
+
+/// The note a `dispatch.keep_finished_lanes` in the file at `path` earns at
+/// load, whether that file is the tracked `config.toml` or the private
+/// override layer. `beside` is the `dispatch.visible_lanes` the same file sets,
+/// when there is one that wins over the retired key; without one the key
+/// loads as the limit it stood for.
+pub(crate) fn keep_finished_lanes_note(
+    path: &Path,
+    keep: bool,
+    beside: Option<&VisibleLanes>,
+) -> String {
+    let (outcome, then) = match beside {
+        None => {
+            let loads_as = match keep {
+                true => VisibleLanes::All,
+                false => VisibleLanes::Count(1),
+            };
+            (
+                format!(
+                    "it loads as dispatch.visible_lanes = {}",
+                    loads_as.spelled()
+                ),
+                "rewrite",
+            )
+        }
+        Some(visible) => (
+            format!(
+                "the dispatch.visible_lanes = {} beside it is the limit that loads",
+                visible.spelled(),
+            ),
+            "drop",
+        ),
+    };
+    format!(
+        "note: dispatch.keep_finished_lanes in {} is no longer read — {outcome}. Run \
+         `spoolway sync` to {then} the key.",
+        path.display(),
+    )
 }
 
 /// Every key `raw` holds that the structs below would refuse, stripped from
@@ -1956,6 +2187,17 @@ impl Config {
                         path.display(),
                     ));
                 }
+                // The same for the key `visible_lanes` replaced. `migrate`
+                // below reads it only while `visible_lanes` holds its default,
+                // so the note says what that rule will make of this file.
+                if let Some(keep) = config.dispatch.keep_finished_lanes {
+                    let visible = &config.dispatch.visible_lanes;
+                    notices.push(keep_finished_lanes_note(
+                        &path,
+                        keep,
+                        (!visible.is_default()).then_some(visible),
+                    ));
+                }
                 for (name, profile) in &config.agents {
                     if !profile.env.is_empty() {
                         notices.push(format!(
@@ -1981,18 +2223,25 @@ impl Config {
                     let (patched, ig) = crate::overrides::apply_config_patch(config, overrides)?;
                     config = patched;
                     ignored = ig;
+                    notices.extend(crate::overrides::keep_finished_lanes_note(
+                        overrides, &config, &ignored,
+                    )?);
                 }
                 Ok((config, notices, ignored))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let mut config = Config::default();
+                let mut notices = Vec::new();
                 let mut ignored = Vec::new();
                 if let Some(overrides) = overrides {
                     let (patched, ig) = crate::overrides::apply_config_patch(config, overrides)?;
                     config = patched;
                     ignored = ig;
+                    notices.extend(crate::overrides::keep_finished_lanes_note(
+                        overrides, &config, &ignored,
+                    )?);
                 }
-                Ok((config, Vec::new(), ignored))
+                Ok((config, notices, ignored))
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -2053,6 +2302,19 @@ impl Config {
     /// it. `doctor` fails its kind check instead, and a lane that names it
     /// refuses to start.
     pub(crate) fn migrate(&mut self) {
+        // The retired `keep_finished_lanes` only stands in for a limit the
+        // file did not set itself. A `visible_lanes` that differs from the
+        // default is the person's own choice and wins; one that holds the
+        // default cannot be told apart from an absent key, so the old key is
+        // read as the choice it was.
+        if let Some(keep) = self.dispatch.keep_finished_lanes.take()
+            && self.dispatch.visible_lanes.is_default()
+        {
+            self.dispatch.visible_lanes = match keep {
+                true => VisibleLanes::All,
+                false => VisibleLanes::Count(1),
+            };
+        }
         for profile in self.agents.values_mut() {
             let Some(adapter) = crate::agent::adapter(&profile.kind) else {
                 continue;
@@ -2172,6 +2434,17 @@ impl Config {
                 None => crate::confdoc::remove(&edited, &parts)
                     .with_context(|| format!("editing {}", path.display()))?,
             };
+        }
+
+        // A person who sets `visible_lanes` has made the choice the retired
+        // `keep_finished_lanes` stood in for. Left in the file it would load
+        // back over a value that holds the default — `migrate` cannot tell a
+        // `visible_lanes` of 5 from an absent key — and `agrees_with` would
+        // refuse the edit for it, so a project an older release set up could
+        // never choose 5.
+        if key == "dispatch.visible_lanes" {
+            edited = crate::confdoc::remove(&edited, &["dispatch", "keep_finished_lanes"])
+                .with_context(|| format!("editing {}", path.display()))?;
         }
 
         self.agrees_with(&edited).with_context(|| {
@@ -2583,6 +2856,14 @@ mod tests {
         let long_step = "s".repeat(STEP_ID_MAX + 1);
         let err = check_step_id(&long_step).unwrap_err().to_string();
         assert!(err.contains(&long_step) && err.contains(&STEP_ID_MAX.to_string()));
+        assert!(
+            err.contains("herdr refuses a name past 32 characters"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("Shorten it to 26 characters or fewer."),
+            "{err}"
+        );
         assert!(check_task_id(&"t".repeat(TASK_ID_MAX + 1)).is_err());
     }
 
@@ -3630,26 +3911,162 @@ mod tests {
         );
     }
 
-    /// `keep_finished_lanes` stays out of a defaulted config, so a lane running
-    /// an older binary can still read the file, and is written once a person
-    /// turns it off.
+    /// `hide_commands` stays out of a defaulted config for the same reason,
+    /// and is written once a person turns it off.
     #[test]
-    fn keep_finished_lanes_stays_out_of_a_defaulted_config() {
+    fn hide_commands_stays_out_of_a_defaulted_config() {
         let config = Config::default();
-        assert!(config.dispatch.keep_finished_lanes);
-        let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("keep_finished_lanes"), "{rendered}");
+        assert!(config.dispatch.hide_commands);
+        assert!(!toml::to_string(&config).unwrap().contains("hide_commands"));
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
-        assert!(absent.dispatch.keep_finished_lanes);
+        assert!(absent.dispatch.hide_commands);
 
-        let off: Config = toml::from_str("[dispatch]\nkeep_finished_lanes = false\n").unwrap();
-        assert!(!off.dispatch.keep_finished_lanes);
+        let on: Config = toml::from_str("[dispatch]\nhide_commands = true\n").unwrap();
+        assert!(!toml::to_string(&on).unwrap().contains("hide_commands"));
+
+        let off: Config = toml::from_str("[dispatch]\nhide_commands = false\n").unwrap();
+        assert!(!off.dispatch.hide_commands);
         assert!(
             toml::to_string(&off)
                 .unwrap()
-                .contains("keep_finished_lanes = false")
+                .contains("hide_commands = false")
         );
+    }
+
+    /// `visible_lanes` stays out of a defaulted config, so a lane running an
+    /// older binary can still read the file. A count is written once a person
+    /// picks one, and `all` is written as a string.
+    #[test]
+    fn visible_lanes_stays_out_of_a_defaulted_config() {
+        let config = Config::default();
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(5));
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(!rendered.contains("visible_lanes"), "{rendered}");
+
+        let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
+        assert_eq!(absent.dispatch.visible_lanes, VisibleLanes::default());
+
+        let five: Config = toml::from_str("[dispatch]\nvisible_lanes = 5\n").unwrap();
+        assert!(!toml::to_string(&five).unwrap().contains("visible_lanes"));
+
+        let two: Config = toml::from_str("[dispatch]\nvisible_lanes = 2\n").unwrap();
+        assert_eq!(two.dispatch.visible_lanes, VisibleLanes::Count(2));
+        assert!(toml::to_string(&two).unwrap().contains("visible_lanes = 2"));
+
+        let all: Config = toml::from_str("[dispatch]\nvisible_lanes = \"all\"\n").unwrap();
+        assert_eq!(all.dispatch.visible_lanes, VisibleLanes::All);
+        assert!(
+            toml::to_string(&all)
+                .unwrap()
+                .contains("visible_lanes = \"all\"")
+        );
+    }
+
+    /// A limit of 0 would close the lane a step is starting, and a word that
+    /// is not `all` names nothing: `Config::load` refuses both and says what
+    /// to give instead.
+    #[test]
+    fn visible_lanes_refuses_zero_and_anything_but_all() {
+        for bad in ["0", "-2", "\"lots\"", "\"0\""] {
+            let dir = crate::scratch::root("config-visible-lanes-refused");
+            std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+            std::fs::write(
+                Config::path_in(&dir),
+                format!("[dispatch]\nvisible_lanes = {bad}\n"),
+            )
+            .unwrap();
+            let err = format!("{:#}", Config::load_with_notices(&dir, None).unwrap_err());
+            assert!(
+                err.contains(
+                    "a task shows at least one lane; give a count of 1 or more, or `all` to \
+                     keep every lane"
+                ),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    /// `keep_finished_lanes` is read only to migrate it: `true` loads as
+    /// `all`, `false` as 1, each with a note naming the value and the command
+    /// that rewrites the key, and neither survives a save. A `visible_lanes`
+    /// the person set themselves wins over it.
+    #[test]
+    fn the_retired_keep_finished_lanes_key_loads_as_a_limit_with_one_note() {
+        for (old, loads_as, limit) in [
+            ("true", "all", VisibleLanes::All),
+            ("false", "1", VisibleLanes::Count(1)),
+        ] {
+            let dir = crate::scratch::root(&format!("config-keep-finished-{old}"));
+            std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+            std::fs::write(
+                Config::path_in(&dir),
+                format!("[dispatch]\nkeep_finished_lanes = {old}\n"),
+            )
+            .unwrap();
+
+            let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
+            assert_eq!(config.dispatch.visible_lanes, limit, "{old}");
+            assert_eq!(notices.len(), 1, "{old}: {notices:?}");
+            assert!(
+                notices[0].contains(&format!(
+                    "dispatch.keep_finished_lanes in {} is no longer read — it loads as \
+                     dispatch.visible_lanes = {loads_as}. Run `spoolway sync` to rewrite \
+                     the key.",
+                    Config::path_in(&dir).display()
+                )),
+                "{notices:?}"
+            );
+            let saved = toml::to_string(&config).unwrap();
+            assert!(!saved.contains("keep_finished_lanes"), "{saved}");
+        }
+
+        let dir = crate::scratch::root("config-keep-finished-and-visible");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[dispatch]\nkeep_finished_lanes = false\nvisible_lanes = 3\n",
+        )
+        .unwrap();
+        let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(3));
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(
+                "is no longer read — the dispatch.visible_lanes = 3 beside it is the limit \
+                 that loads. Run `spoolway sync` to drop the key."
+            ),
+            "{notices:?}"
+        );
+    }
+
+    /// A project an older release set up still holds `keep_finished_lanes`,
+    /// and `config set dispatch.visible_lanes` must work on it for every
+    /// value, 5 included: choosing a limit retires the old key from the file.
+    #[test]
+    fn setting_visible_lanes_replaces_a_retired_keep_finished_lanes() {
+        for old in ["true", "false"] {
+            for value in ["5", "3", "all"] {
+                let dir = crate::scratch::root(&format!("config-set-over-keep-{old}-{value}"));
+                std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+                std::fs::write(
+                    Config::path_in(&dir),
+                    format!("[dispatch]\nkeep_finished_lanes = {old}\n"),
+                )
+                .unwrap();
+                let (config, _, _) = Config::load_with_notices(&dir, None).unwrap();
+
+                let set = crate::confkv::set(&config, "dispatch.visible_lanes", value).unwrap();
+                set.save_key(&dir, "dispatch.visible_lanes")
+                    .unwrap_or_else(|err| panic!("{old} {value}: {err:#}"));
+
+                let written = std::fs::read_to_string(Config::path_in(&dir)).unwrap();
+                assert!(!written.contains("keep_finished_lanes"), "{written}");
+                let (loaded, notices, _) = Config::load_with_notices(&dir, None).unwrap();
+                assert_eq!(loaded.dispatch.visible_lanes, set.dispatch.visible_lanes);
+                assert!(notices.is_empty(), "{notices:?}");
+            }
+        }
     }
 
     /// `dispatch.priority` parses from TOML, defaults to `group`, and stays
@@ -4166,6 +4583,38 @@ mod tests {
                 assert_eq!(
                     config.unattended.blocked_agent, "tracked",
                     "a key the patch never named must still come from the tracked file"
+                );
+            },
+        );
+    }
+
+    /// A `keep_finished_lanes` that sits only in the private layer earns the
+    /// same load note as one in the tracked file, so the person is told to
+    /// run `spoolway sync`. The layer's limit applies on top of the tracked one.
+    #[test]
+    fn a_layer_keep_finished_lanes_is_noted_at_load() {
+        with_override_fixture(
+            "layer-keep-finished",
+            "[dispatch]\nvisible_lanes = 3\n",
+            |root| {
+                let overrides = crate::overrides::dir_for(root).unwrap();
+                std::fs::create_dir_all(&overrides).unwrap();
+                std::fs::write(
+                    overrides.join(CONFIG_FILE),
+                    "[dispatch]\nkeep_finished_lanes = false\n",
+                )
+                .unwrap();
+
+                let (config, notices, ignored) =
+                    Config::load_with_notices(root, Some(&overrides)).unwrap();
+                assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(1));
+                assert!(ignored.is_empty(), "{ignored:?}");
+                let layer = overrides.join(CONFIG_FILE).display().to_string();
+                assert!(
+                    notices.iter().any(|note| note.contains(&layer)
+                        && note.contains("dispatch.keep_finished_lanes")
+                        && note.contains("Run `spoolway sync` to rewrite the key")),
+                    "{notices:?}"
                 );
             },
         );

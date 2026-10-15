@@ -532,6 +532,7 @@ mod tests {
                 workspace_id: None,
                 pane_id: None,
                 tab_id: None,
+                spare_pane: None,
                 attempts: 0,
                 paused_at: None,
                 paused_by: None,

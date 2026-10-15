@@ -868,6 +868,7 @@ fn queue_unqueue_forced(
     task.front.workspace_id = None;
     task.front.pane_id = None;
     task.front.tab_id = None;
+    task.front.spare_pane = None;
 
     match crate::status::carry_to_pending(repo, &task)? {
         Some(dest) => {
@@ -1204,6 +1205,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.workspace_id = None;
     front.pane_id = None;
     front.tab_id = None;
+    front.spare_pane = None;
     front.attempts = 0;
     front.paused_at = None;
     front.paused_by = None;

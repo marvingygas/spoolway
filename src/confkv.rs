@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
-use crate::config::{Config, Priority};
+use crate::config::{Config, LaneLayout, Priority};
 
 /// One editable setting.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,11 +84,26 @@ pub const REFERENCE: &[Reference] = &[
                     running before the reminder loop treats it as silent anyway.",
     },
     Reference {
-        key: "dispatch.keep_finished_lanes",
+        key: "dispatch.visible_lanes",
+        values: "<count>, all",
+        default: "5",
+        sentence: "How many of a task's most recent lanes stay open; each new agent step \
+                    or shown command closes the oldest finished ones. Older versions kept \
+                    every lane.",
+    },
+    Reference {
+        key: "dispatch.hide_commands",
         values: "true, false",
         default: "true",
-        sentence: "Whether a finished step's agent stays open in its own pane until its \
-                    task is done, or each new step takes over the last one's place.",
+        sentence: "Whether a command step runs without a pane. Set to `false` and its pane \
+                    stays open after it exits, counting toward `visible_lanes`.",
+    },
+    Reference {
+        key: "dispatch.lane_layout",
+        values: "panes, tabs",
+        default: "panes",
+        sentence: "Whether a task's steps are panes of one tab, or each step opens in a tab \
+                    of its own, named after the step.",
     },
     Reference {
         key: "unattended.enabled",
@@ -414,7 +429,9 @@ pub fn entries(config: &Config) -> Result<Vec<Entry>> {
 pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
     "dispatch.lane_child_ceiling",
     "dispatch.priority",
-    "dispatch.keep_finished_lanes",
+    "dispatch.visible_lanes",
+    "dispatch.hide_commands",
+    "dispatch.lane_layout",
 ];
 
 /// Every scalar setting `config get`/`set` resolves for a key that already
@@ -573,14 +590,17 @@ pub fn get(config: &Config, key: &str) -> Result<String> {
     bail!("no config key `{key}`{}", nearest(config, key))
 }
 
-/// A sentence for the one retired key whose absence is worth more than "no
-/// config key" — somebody who used to set this is told where it went,
+/// A sentence for the retired keys whose absence is worth more than "no
+/// config key" — somebody who used to set one is told where it went,
 /// rather than left to search for a setting `nearest` cannot find, since
 /// nothing left in [`REFERENCE`] is even a substring of its name.
 fn retired_hint(key: &str) -> Option<&'static str> {
     match key {
         "dispatch.interval" => {
             Some("the dispatcher polls at a fixed rate; there is nothing to set")
+        }
+        "dispatch.keep_finished_lanes" => {
+            Some("it is retired; set `dispatch.visible_lanes` to a count of 1 or more, or `all`")
         }
         _ => None,
     }
@@ -607,8 +627,17 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
             Priority::Any => "any".to_string(),
         });
     }
-    if key == "dispatch.keep_finished_lanes" {
-        return Some(config.dispatch.keep_finished_lanes.to_string());
+    if key == "dispatch.visible_lanes" {
+        return Some(config.dispatch.visible_lanes.spelled());
+    }
+    if key == "dispatch.hide_commands" {
+        return Some(config.dispatch.hide_commands.to_string());
+    }
+    if key == "dispatch.lane_layout" {
+        return Some(match config.dispatch.lane_layout {
+            LaneLayout::Panes => "panes".to_string(),
+            LaneLayout::Tabs => "tabs".to_string(),
+        });
     }
     let Some(parts) = models_key(config, key) else {
         concurrency_key(config, key)?;
@@ -680,7 +709,16 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         .get_mut(leaf)
         .with_context(|| format!("no config key `{key}`"))?;
 
-    *slot = coerce(slot, input).with_context(|| format!("`{key}` cannot be set to `{input}`"))?;
+    // `visible_lanes` is a count or `all`, so whatever the file holds now
+    // (an integer, or the string `all`) is no guide to what the input is:
+    // `coerce` would refuse `all` against an integer. The config it is read
+    // back into is what refuses a zero or anything else.
+    *slot = match key == "dispatch.visible_lanes" {
+        true => Value::String(input.trim().to_string()),
+        false => {
+            coerce(slot, input).with_context(|| format!("`{key}` cannot be set to `{input}`"))?
+        }
+    };
 
     let models_glob = (parts.first() == Some(&"models") && parts.len() >= 3).then(|| parts[1]);
     let had_row = models_glob.is_some_and(|glob| config.models.contains_key(glob));
@@ -1145,7 +1183,14 @@ fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
         "lane_child_ceiling" => Value::String(crate::config::format_duration(
             config.dispatch.lane_child_ceiling,
         )),
-        "keep_finished_lanes" => Value::Boolean(config.dispatch.keep_finished_lanes),
+        // Only so `set` finds a slot to overwrite. `set` takes this key's
+        // input as text without calling `coerce`, so the seed is never read
+        // back. A string because `VisibleLanes` reads a digit string as a
+        // count as well as `all`.
+        "visible_lanes" => Value::String(config.dispatch.visible_lanes.spelled()),
+        "hide_commands" => Value::Boolean(config.dispatch.hide_commands),
+        "lane_layout" => Value::try_from(config.dispatch.lane_layout)
+            .expect("LaneLayout always serialises to a string"),
         _ => return,
     };
     if let Some(table) = value.get_mut("dispatch").and_then(Value::as_table_mut) {
@@ -1437,31 +1482,106 @@ mod tests {
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 
-    /// The same read/write-while-absent mechanism, for `keep_finished_lanes`.
+    /// The same read/write-while-absent mechanism, for `visible_lanes`: a
+    /// count or `all`, absent from the file while it is 5, and `0` refused
+    /// with the wording a person is told to act on.
     #[test]
-    fn keep_finished_lanes_is_readable_and_writable_while_absent() {
+    fn visible_lanes_is_readable_and_writable_while_absent() {
+        use crate::config::VisibleLanes;
         let config = Config::default();
-        assert_eq!(
-            get(&config, "dispatch.keep_finished_lanes").unwrap(),
-            "true"
+        assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "5");
+
+        let three = set(&config, "dispatch.visible_lanes", "3").unwrap();
+        assert_eq!(three.dispatch.visible_lanes, VisibleLanes::Count(3));
+        assert_eq!(get(&three, "dispatch.visible_lanes").unwrap(), "3");
+        assert!(
+            toml::to_string(&three)
+                .unwrap()
+                .contains("visible_lanes = 3")
         );
 
-        let off = set(&config, "dispatch.keep_finished_lanes", "false").unwrap();
-        assert!(!off.dispatch.keep_finished_lanes);
-        assert_eq!(get(&off, "dispatch.keep_finished_lanes").unwrap(), "false");
+        let all = set(&three, "dispatch.visible_lanes", "all").unwrap();
+        assert_eq!(all.dispatch.visible_lanes, VisibleLanes::All);
+        assert_eq!(get(&all, "dispatch.visible_lanes").unwrap(), "all");
         assert!(
-            toml::to_string(&off)
+            toml::to_string(&all)
                 .unwrap()
-                .contains("keep_finished_lanes = false")
+                .contains("visible_lanes = \"all\"")
         );
 
-        let back = set(&off, "dispatch.keep_finished_lanes", "true").unwrap();
-        assert!(back.dispatch.keep_finished_lanes);
-        assert!(
-            !toml::to_string(&back)
-                .unwrap()
-                .contains("keep_finished_lanes")
+        let back = set(&all, "dispatch.visible_lanes", "5").unwrap();
+        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::default());
+        assert!(!toml::to_string(&back).unwrap().contains("visible_lanes"));
+
+        let err = format!(
+            "{:#}",
+            set(&config, "dispatch.visible_lanes", "0").unwrap_err()
         );
+        assert!(
+            err.contains("setting `dispatch.visible_lanes` to `0` produces an invalid config"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "a task shows at least one lane; give a count of 1 or more, or `all` to keep \
+                 every lane"
+            ),
+            "{err}"
+        );
+        assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
+    }
+
+    /// The same read/write-while-absent mechanism, for `hide_commands`: a
+    /// bool that is absent from the file while it is `true`.
+    #[test]
+    fn hide_commands_is_readable_and_writable_while_absent() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "true");
+
+        let shown = set(&config, "dispatch.hide_commands", "false").unwrap();
+        assert!(!shown.dispatch.hide_commands);
+        assert_eq!(get(&shown, "dispatch.hide_commands").unwrap(), "false");
+        assert!(
+            toml::to_string(&shown)
+                .unwrap()
+                .contains("hide_commands = false")
+        );
+
+        let back = set(&shown, "dispatch.hide_commands", "true").unwrap();
+        assert!(back.dispatch.hide_commands);
+        assert!(!toml::to_string(&back).unwrap().contains("hide_commands"));
+        assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
+    }
+
+    /// The same read/write-while-absent mechanism, for `lane_layout`.
+    #[test]
+    fn lane_layout_is_readable_and_writable_while_absent() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.lane_layout").unwrap(), "panes");
+        assert!(!toml::to_string(&config).unwrap().contains("lane_layout"));
+
+        let tabs = set(&config, "dispatch.lane_layout", "tabs").unwrap();
+        assert_eq!(tabs.dispatch.lane_layout, LaneLayout::Tabs);
+        assert_eq!(get(&tabs, "dispatch.lane_layout").unwrap(), "tabs");
+        assert!(
+            toml::to_string(&tabs)
+                .unwrap()
+                .contains("lane_layout = \"tabs\"")
+        );
+
+        let panes = set(&tabs, "dispatch.lane_layout", "panes").unwrap();
+        assert_eq!(panes.dispatch.lane_layout, LaneLayout::Panes);
+        assert!(!toml::to_string(&panes).unwrap().contains("lane_layout"));
+        assert!(set(&config, "dispatch.lane_layout", "windows").is_err());
+    }
+
+    /// The retired key is no longer a setting: a person who still types it is
+    /// told it is not a key, not handed a value it no longer reads.
+    #[test]
+    fn keep_finished_lanes_is_no_longer_a_setting() {
+        let err = get(&Config::default(), "dispatch.keep_finished_lanes").unwrap_err();
+        assert!(err.to_string().contains("dispatch.visible_lanes"), "{err}");
+        assert!(set(&Config::default(), "dispatch.keep_finished_lanes", "false").is_err());
     }
 
     /// The same read/write-while-absent mechanism, for `lane_child_ceiling`.

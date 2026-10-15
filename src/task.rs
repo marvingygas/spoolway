@@ -525,6 +525,19 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
 
+    /// The workspace's first pane, while no step has taken it. Written when
+    /// `ensure_workspace` opens or reopens a workspace, and cleared the moment
+    /// a step that shows a pane runs in it, or whenever the task's workspace
+    /// ids are cleared.
+    ///
+    /// A command step that is hidden runs without a pane, so it leaves the
+    /// pane empty. Recording it here is what lets a later pass hand it to the
+    /// next agent step, or the next shown command step, instead of splitting
+    /// a new pane beside an empty shell. It is taken only while nothing runs
+    /// in it: see `Mux::pane_is_idle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spare_pane: Option<String>,
+
     /// How many times a lane for this task has finished without reporting a
     /// stage. Drives the retry-then-escalate rule without any judgement call.
     #[serde(default, skip_serializing_if = "is_zero")]

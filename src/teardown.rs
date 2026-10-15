@@ -367,6 +367,7 @@ impl<'a> Dispatcher<'a> {
         // a task nobody can reach any more (review finding 64).
         runs.reclaim_task(task.id());
         crate::tracking::reclaim(self.repo, task.id());
+        self.forget_lane_names(task, report);
 
         // And now — past every early return — the per-session agent homes the
         // task's lanes were given: the ones just banked above, plus any older
@@ -401,6 +402,20 @@ impl<'a> Dispatcher<'a> {
         self.settle_trial_if_last_arm(task, &remaining, report);
 
         Ok(true)
+    }
+
+    /// Drop the herdr names `task`'s lanes were started under from
+    /// `lane_aliases.json`. None of those lanes can come back once the task
+    /// has left the queue, and nothing else ever prunes the file. A routine
+    /// copy's lanes are named for its routine, so both are dropped.
+    fn forget_lane_names(&self, task: &Task, report: &mut Report) {
+        let owners: Vec<&str> = std::iter::once(task.id()).chain(task.routine()).collect();
+        if let Err(e) = crate::lane_alias::remove_task(self.repo.home(), &owners) {
+            report.problems.push(format!(
+                "{}: its herdr lane names stay on record in lane_aliases.json: {e:#}",
+                task.id()
+            ));
+        }
     }
 
     /// Once a trial arm reaches `done`, ask whether it was the trial's last
@@ -1113,6 +1128,7 @@ impl<'a> Dispatcher<'a> {
 
         runs.reclaim_task(task.id());
         crate::tracking::reclaim(self.repo, task.id());
+        self.forget_lane_names(task, report);
 
         // Every session home this arm was ever given, not just the lane
         // banked above: a copied `auth.json` under one outlives every
