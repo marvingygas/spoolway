@@ -2482,6 +2482,8 @@ fn task_lanes(
 /// it: a park's `parked_from`, a gate's `paused_at`, otherwise
 /// [`resume_target`]. A task that never started has no step to start over,
 /// and neither has one held by a hook, whose pause is on `queued` or `done`.
+/// A step that runs a command is found like any other: it holds no
+/// conversation, but it can be stopped and run again.
 ///
 /// `pub(crate)` for the board's `restart`, which opens its panel only where
 /// this finds a step, so the panel never offers a restart this would refuse.
@@ -2526,30 +2528,27 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
              add`."
         );
     }
-    let Some(declared) = pipeline.step(&step) else {
+    if pipeline.step(&step).is_none() {
         bail!(
             "task `{id}` is on `{step}`, which pipeline `{}` does not define — run \
              `spoolway resume {id} --stage <step>` to send it to one that exists.",
             pipeline.name
         );
-    };
-    match declared.kind() {
-        crate::pipeline::StepKind::Command => bail!(
-            "task `{id}` is on `{step}`, which runs a command and holds no conversation — \
-             run `spoolway resume {id}` to run it again."
-        ),
-        crate::pipeline::StepKind::Agent => Ok(step),
     }
+    Ok(step)
 }
 
 /// Start the step a task is on over with a fresh conversation: the road onto a
-/// step that ends the step's session rather than continuing it.
+/// step that ends the step's session rather than continuing it. A step that
+/// runs a command has no conversation, so there the command is stopped and
+/// the step runs again from the start.
 ///
 /// Every other road back onto a step continues the conversation the step
 /// already has, so a conversation that is itself the problem is walked back
-/// into by a resume and by the next retry alike. This writes `restart:` for
-/// the dispatcher's next launch of the step to read, and sends the task back
-/// to the step it was already on.
+/// into by a resume and by the next retry alike. On a step that holds a
+/// conversation, this writes `restart:` for the dispatcher's next launch of
+/// the step to read. Either way it sends the task back to the step it was
+/// already on.
 ///
 /// Whatever lane the task owns is ended first, [`restart_with`] explains how.
 /// The worktree is left exactly as it is.
@@ -2590,6 +2589,23 @@ pub fn restart(
 /// is: under a backend that keeps a stopped pane, the pane holds the very
 /// conversation being discarded, and keeping it would leave a second session
 /// running on the same task.
+///
+/// A command step goes the same road with three differences. No `restart:` is
+/// written, since there is no conversation for it to name. A running command
+/// is stopped by [`crate::command_step::Runs::stop_in_place`] before the write,
+/// which keeps the run reading as running until the write has cleared it. The
+/// write would stop it too, but only by clearing the run first and then
+/// waiting for the group, and a dispatcher pass landing in that wait would see
+/// a step with nothing running and start the next run beside the dying one.
+/// Nor does a pass between the stop and the write see the run interrupted,
+/// which would count a kill against the command and start it again.
+/// The task is not parked meanwhile: a task on `paused` is announced to the
+/// issue tracker as paused, for a restart that is not a pause. The stop is
+/// preceded by the same staleness check [`crate::dispatch::persist_task`]
+/// makes, so a report that landed first leaves the command running. And the
+/// run's elapsed time and pane are read before anything is touched, because
+/// stopping the run removes the first, and the pane is closed only once the
+/// restart is written, so a refused restart leaves the pane as it was.
 pub(crate) fn restart_with(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2606,7 +2622,22 @@ pub(crate) fn restart_with(
 
     // Read before the lane goes: the dispatcher's own record of it is dropped
     // once the lane is gone, and the ledger is what outlives that.
-    let session = abandoned_session(repo, &step, &task);
+    let on_command = pipeline
+        .step(&step)
+        .is_some_and(|declared| declared.kind() == crate::pipeline::StepKind::Command);
+    let session = (!on_command)
+        .then(|| abandoned_session(repo, &step, &task))
+        .flatten();
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    let run_key = crate::command_step::Runs::key(&step, task.id());
+    let stopped_run = (on_command
+        && runs.state(&run_key) == crate::command_step::RunState::Running)
+        .then(|| runs.elapsed(&run_key).unwrap_or_default());
+    let old_pane = if on_command {
+        runs.pane(&run_key)
+    } else {
+        None
+    };
     let step_ids = pipelines.all_step_ids();
     let lanes: Vec<_> = task_lanes(repo, pipelines, &task, mux.list_lanes()?)
         .into_iter()
@@ -2636,22 +2667,64 @@ pub(crate) fn restart_with(
         task.reset_loop_counts();
     }
     task.front.unblock_laps.clear();
-    task.front.restart = Some(step.clone());
+    task.front.restart = (!on_command).then(|| step.clone());
+    let fresh = if on_command { "run" } else { "session" };
     let message = args
         .message
         .clone()
-        .unwrap_or_else(|| "restarted by hand — fresh session".to_string());
-    task.set_stage_unbanked(&step, &message);
-    if !crate::dispatch::persist_task(repo, &mut task, &mut seen)? {
-        bail!(
+        .unwrap_or_else(|| format!("restarted by hand — fresh {fresh}"));
+    let refused = || {
+        anyhow::anyhow!(
             "task `{}` changed while the restart was being written — a report landed first, so \
              the restart was not written and no lane was touched. Check `spoolway queue show {}` \
              and run it again if it still applies.",
             args.task,
             args.task
-        );
+        )
+    };
+    if stopped_run.is_some() {
+        // Checked before the command is touched, so a restart refused for a
+        // report that landed first leaves it running. The write below checks
+        // again under the task lock, and a change between the two leaves the
+        // command stopped, which its message says.
+        if crate::dispatch::write_is_stale(&task, &seen) {
+            return Err(refused());
+        }
+    }
+    // Held to the end of this function, so the run reads as running until the
+    // write below has cleared it. A refused write lets it go with the error,
+    // and the stopped run then reads as interrupted, as any killed run does.
+    let _stopping = stopped_run.map(|_| runs.stop_in_place(&run_key));
+    task.set_stage_unbanked(&step, &message);
+    if !crate::dispatch::persist_task(repo, &mut task, &mut seen)? {
+        if stopped_run.is_some() {
+            bail!(
+                "the command `{step}` of task `{}` was stopped, but the task changed before the \
+                 restart could be written, so it was not. Check `spoolway queue show {}` and \
+                 run `spoolway restart {}` again if it still applies.",
+                args.task,
+                args.task,
+                args.task
+            );
+        }
+        return Err(refused());
     }
 
+    // The pane the old run landed in would otherwise sit beside the new run's.
+    // Only the pane is closed: its record is left for the dispatcher's next
+    // start of the step, which closes and forgets whatever pane it finds
+    // recorded. Forgetting it here as well would race that start, which may
+    // have recorded the new run's pane over the old one between a read and the
+    // removal, and the new run's pane would go untracked.
+    if let Some(pane) = &old_pane {
+        let _ = mux.close_pane(pane);
+    }
+    if let Some(ran) = stopped_run {
+        println!(
+            "  stopped command `{step}` ({})",
+            crate::status::human_secs(ran.as_secs() as i64)
+        );
+    }
     for lane in lanes {
         // Spelled out rather than `is_busy()`, as in the dispatcher's own
         // teardown: a lane parked on a permission prompt is still spending.
@@ -2673,7 +2746,7 @@ pub(crate) fn restart_with(
     if let Some(session) = &session {
         println!("  session {}", session.describe());
     }
-    println!("{}: -> {step} (fresh session)", args.task);
+    println!("{}: -> {step} (fresh {fresh})", args.task);
     Ok(())
 }
 
@@ -7762,8 +7835,9 @@ mod tests {
         fn split_pane(&self, _tab_id: &str, _cwd: &Path) -> Result<String> {
             unimplemented!()
         }
-        fn close_pane(&self, _pane_id: &str) -> Result<()> {
-            unimplemented!()
+        fn close_pane(&self, pane_id: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("close {pane_id}"));
+            Ok(())
         }
         fn start_lane(
             &self,
@@ -8173,13 +8247,12 @@ mod tests {
         }
     }
 
-    /// A hook-held task and a task on a command step have no conversation to
-    /// start over. Each is refused, and nothing is written.
+    /// A hook-held task has no step to start over. It is refused, and nothing
+    /// is written.
     #[test]
-    fn restarting_refuses_a_hook_held_or_command_step_task() {
+    fn restarting_refuses_a_hook_held_task() {
         let (repo, _root_guard) = fixture("restart-no-conversation");
         add(&repo, "hooked", &[]);
-        add(&repo, "command", &["hooked"]);
         let mux = RestartMux {
             lanes: Vec::new(),
             calls: std::sync::Mutex::new(Vec::new()),
@@ -8191,22 +8264,277 @@ mod tests {
         hooked.front.hook_paused = Some("done".into());
         hooked.set_stage_unbanked(crate::pipeline::PAUSED, "held by a hook");
         hooked.save().unwrap();
-        let mut command = queued(&repo, "command");
-        command.set_stage("handover", None);
-        command.save().unwrap();
 
         let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("hooked"), &mux)
             .unwrap_err()
             .to_string();
         assert!(err.contains("held by a hook"), "{err}");
-        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("command"), &mux)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("runs a command"), "{err}");
         assert_eq!(queued(&repo, "hooked").stage(), crate::pipeline::PAUSED);
         assert_eq!(queued(&repo, "hooked").front.restart, None);
-        assert_eq!(queued(&repo, "command").front.restart, None);
         assert!(mux.calls().is_empty());
+    }
+
+    /// A command step is restartable whether the task runs it, is paused on
+    /// it or is blocked off it, and a restart names no conversation for it.
+    #[test]
+    fn restarting_accepts_a_command_step_task_in_any_holding_state() {
+        let (repo, _root_guard) = fixture("restart-command-states");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "running", &[]);
+        let mut running = queued(&repo, "running");
+        running.set_stage_unbanked("handover", "test setup");
+        let pipeline = pipelines.for_task(&running).unwrap();
+        assert_eq!(restart_step(&running, pipeline).unwrap(), "handover");
+
+        let mut paused = running;
+        paused.front.parked_from = Some("handover".into());
+        paused.set_stage_unbanked(crate::pipeline::PAUSED, "paused");
+        assert_eq!(restart_step(&paused, pipeline).unwrap(), "handover");
+
+        let mut blocked = queued(&repo, "running");
+        blocked.set_stage_unbanked("handover", "test setup");
+        blocked.front.blocked_from = Some("handover".into());
+        blocked.set_stage_unbanked(crate::pipeline::BLOCKED, "blocked");
+        assert_eq!(restart_step(&blocked, pipeline).unwrap(), "handover");
+    }
+
+    /// Restarting a task whose command is running stops its whole process
+    /// group, leaves the step with no pid or exit code, and writes no
+    /// `restart:`.
+    #[test]
+    fn restarting_a_running_command_step_stops_it() {
+        let (repo, _root_guard) = fixture("restart-command-running");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        let pid = runs
+            .start(
+                &key,
+                "sleep 20",
+                &repo.checkout,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("solo"), &mux).unwrap();
+
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), "handover");
+        assert_eq!(task.front.restart, None, "a command holds no conversation");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(
+            !crate::headless::alive(pid),
+            "the process must be gone, not just forgotten"
+        );
+    }
+
+    /// A report that lands before the restart is written leaves the running
+    /// command running, with its pane still recorded.
+    #[test]
+    fn a_refused_command_restart_leaves_the_run_alone() {
+        let (repo, _root_guard) = fixture("restart-command-refused");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let path = task.path.clone();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        let pid = runs
+            .start(
+                &key,
+                "sleep 20",
+                &repo.checkout,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        runs.record_pane(&key, "pane-7").unwrap();
+        let mut mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+        mux.on_list = Box::new(move || {
+            let mut reported = Task::load(&path).unwrap();
+            reported.set_stage("review", Some("reported"));
+            reported.save().unwrap();
+        });
+
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("solo"), &mux)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("a report landed first"), "{err}");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        assert!(crate::headless::alive(pid), "the command is still running");
+        assert_eq!(runs.pane(&key).as_deref(), Some("pane-7"));
+        assert!(mux.calls().is_empty(), "{:?}", mux.calls());
+        runs.stop(&key);
+    }
+
+    /// The pane a paned command ran in is closed by a restart, so it does not
+    /// sit beside the new run's pane. Its record is left for the dispatcher's
+    /// next start of the step to forget, so a new run's pane recorded in the
+    /// meantime is never removed from under it.
+    #[test]
+    fn restarting_a_command_step_closes_its_pane() {
+        let (repo, _root_guard) = fixture("restart-command-pane");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        runs.record_pane(&key, "pane-7").unwrap();
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("solo"), &mux).unwrap();
+
+        assert_eq!(mux.calls(), vec!["close pane-7".to_string()]);
+        assert_eq!(runs.pane(&key).as_deref(), Some("pane-7"));
+    }
+
+    /// Wait for the file a run line touches right after installing its `TERM`
+    /// trap. `Runs::start` returns once the wrapper has written its pid file,
+    /// which is before the child shell has run the trap line, so a stop sent
+    /// at once could land before any trap exists.
+    fn wait_for_trap(ready: &std::path::Path) {
+        let started = std::time::Instant::now();
+        while !ready.exists() && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "the run never installed its TERM trap");
+    }
+
+    /// The command is stopped while the task still stands on its step and the
+    /// run still reads as running: a dispatcher pass in that wait must neither
+    /// start a second run (a pid file gone reads as a step with nothing
+    /// running) nor see the task on `paused`, which the issue tracker would
+    /// be told about. The command here catches `TERM` and records what the
+    /// task file and the run's pid file look like at that moment.
+    #[test]
+    fn restarting_a_running_command_stops_it_in_place() {
+        let (repo, _root_guard) = fixture("restart-command-in-place");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        let pid_file = repo.commands_dir().join(format!("{key}.pid"));
+        let quoted = |path: &std::path::Path| crate::platform::quote(&path.display().to_string());
+        let stage_out = repo.checkout.join("stage-at-stop");
+        let pid_out = repo.checkout.join("pid-file-at-stop");
+        let mark_out = repo.checkout.join("mark-at-stop");
+        let ready = repo.checkout.join("trap-installed");
+        let run = format!(
+            "trap \"grep -m1 '^stage:' {task} > {stage_out}; \
+             [ -e {pid} ] && echo present > {pid_out}; \
+             grep -qx started {pid} && echo marked > {mark_out}; exit 0\" TERM; \
+             touch {ready}; sleep 20 & wait",
+            task = quoted(&task.path),
+            stage_out = quoted(&stage_out),
+            pid = quoted(&pid_file),
+            pid_out = quoted(&pid_out),
+            mark_out = quoted(&mark_out),
+            ready = quoted(&ready),
+        );
+        runs.start(
+            &key,
+            &run,
+            &repo.checkout,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        wait_for_trap(&ready);
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("solo"), &mux).unwrap();
+
+        let at_stop = std::fs::read_to_string(&stage_out).unwrap();
+        assert_eq!(at_stop.trim(), "stage: handover", "{at_stop}");
+        assert!(
+            pid_out.exists(),
+            "the run read as gone while it was stopped"
+        );
+        assert!(
+            !mark_out.exists(),
+            "a command that catches TERM and exits 0 must not leave a code behind"
+        );
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), "handover");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+    }
+
+    /// A report that lands after the command was stopped but before the
+    /// restart is written refuses the restart and says the command was
+    /// stopped. The pane is left open and recorded, and the run reads as
+    /// interrupted, as any killed run does, so the dispatcher starts it
+    /// again if the task is still on the step. The command here catches
+    /// `TERM` and changes the task file, which is that report.
+    #[test]
+    fn a_restart_refused_after_the_stop_says_the_command_was_stopped() {
+        let (repo, _root_guard) = fixture("restart-command-refused-late");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        let ready = repo.checkout.join("trap-installed");
+        let run = format!(
+            "trap \"printf -- '- reported while stopping\\n' >> {task}; exit 0\" TERM; \
+             touch {ready}; sleep 20 & wait",
+            task = crate::platform::quote(&task.path.display().to_string()),
+            ready = crate::platform::quote(&ready.display().to_string()),
+        );
+        let pid = runs
+            .start(
+                &key,
+                &run,
+                &repo.checkout,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        wait_for_trap(&ready);
+        runs.record_pane(&key, "pane-7").unwrap();
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("solo"), &mux)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("was stopped, but the task changed"), "{err}");
+        assert!(!crate::headless::alive(pid), "the command was stopped");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Interrupted);
+        assert_eq!(runs.pane(&key).as_deref(), Some("pane-7"));
+        assert!(mux.calls().is_empty(), "{:?}", mux.calls());
     }
 
     /// A lane's own environment never restarts a step.

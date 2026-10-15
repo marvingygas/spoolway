@@ -1733,6 +1733,46 @@ drive killed gone 300 || true
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
+# ------------------------------------------------------ restarting a command
+# `spoolway restart` on a task whose command is running stops that run and
+# starts the step again from the top. The command appends its child's pid to a
+# file each time it starts, so a second line is a second run, and the first
+# child must be gone by then: two runs of one command share a worktree.
+RESTART_RUNS="$LIVE/restart.runs"
+RESTART_RELEASE="$LIVE/restart.release"
+rm -f "$RESTART_RUNS" "$RESTART_RELEASE"
+add_command_step default rerun \
+  "sleep 60 & echo \$! >> \"$RESTART_RUNS\"; wait" review
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$RESTART_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+
+dispatcher_restart
+task_doc "$LIVE/rerun.md" rerun "$BODY" "group: rerun"
+must "a task whose command step will be restarted" \
+  "$SPOOLWAY" queue add --from "$LIVE/rerun.md"
+
+poll_until 120 test -s "$RESTART_RUNS"
+RERUN_FIRST=$(head -n1 "$RESTART_RUNS" 2>/dev/null)
+must "a restart of the task while its command runs" "$SPOOLWAY" restart rerun
+restart_runs_started() { [ "$(wc -l < "$RESTART_RUNS")" -ge 2 ]; }
+if poll_until 120 restart_runs_started; then
+  ok "the command ran again from the start"
+else
+  bad "the command ran again from the start"
+fi
+if [ -n "$RERUN_FIRST" ] && ! kill -0 "$RERUN_FIRST" 2>/dev/null; then
+  ok "and the run that was going is gone"
+else
+  bad "and the run that was going is gone (pid $RERUN_FIRST)"
+fi
+lacks "and no conversation is named for a command" "restart:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/rerun.md"
+touch "$RESTART_RELEASE"
+drive rerun gone 300 || true
+
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+
 
 
 forget walked
