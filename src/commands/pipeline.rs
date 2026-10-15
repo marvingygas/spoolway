@@ -402,8 +402,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          step's command: while another task's run of it is still going, a task \
          reaching the step waits there unstarted, and its run starts on the \
          first pass after that one exits. A background run holds the step until \
-         it exits, wherever its task has moved on to. The same step id in \
-         another pipeline does not hold it.",
+         it exits, wherever its task has moved on to. The hold is per step id \
+         across the project: one pipeline marking it is enough, and the same \
+         step in another pipeline waits its turn too.",
     ),
 ];
 

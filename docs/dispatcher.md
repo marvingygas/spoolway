@@ -137,8 +137,9 @@ With `dispatch.priority = "group"`, the default, a task from a group that has no
 ranks behind every task from a group that is already running. It still takes a slot when no
 running group has ready work. With `dispatch.priority = "any"` only the three rules apply.
 
-A task that reaches a `serial: true` command step while another task's run of the same step and
-pipeline is going waits there unstarted, out of the sort above. Its run starts on the first pass
+A task that reaches a command step whose id some pipeline marks `serial: true` waits there
+unstarted while another task's run of that step id, on any pipeline, is going. The task's own
+pipeline need not mark it. The wait is out of the sort above. Its run starts on the first pass
 after that run exits, alongside whichever other ready task the sort picks first.
 
 ## What a lane is sent

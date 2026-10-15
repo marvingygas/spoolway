@@ -1746,24 +1746,16 @@ impl<'a> Dispatcher<'a> {
             match step.kind() {
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
-                    // Every other task on this same pipeline, for a `serial:`
-                    // step to ask whether one of them holds it — see
-                    // [`crate::command_step::Runs::serial_holder`]. Filtered
-                    // by pipeline here because a run's key carries none, and
-                    // the same step id in another pipeline holds nothing.
-                    let serial_peers: Vec<String> = match step.serial {
-                        true => tasks
-                            .iter()
-                            .filter(|peer| peer.id() != id)
-                            .filter(|peer| {
-                                self.pipelines
-                                    .for_task(peer)
-                                    .is_ok_and(|p| p.name == pipeline.name)
-                            })
-                            .map(|peer| peer.id().to_string())
-                            .collect(),
-                        false => Vec::new(),
-                    };
+                    // Every other task, on any pipeline, for a serial step to
+                    // ask whether one of them holds it — see
+                    // [`crate::pipeline::Pipelines::serial_peers`]. Owned
+                    // because `run_command` borrows `tasks` mutably.
+                    let serial_peers: Vec<String> = self
+                        .pipelines
+                        .serial_peers(&step.id, &id, tasks.iter().map(|t| t.id()))
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect();
                     let Some((destination, outcome)) =
                         self.run_command(&mut tasks[index], &step, &serial_peers, report)?
                     else {
@@ -5035,8 +5027,8 @@ impl<'a> Dispatcher<'a> {
         pipeline.step(destination).map(|s| s.kind()) == Some(StepKind::Agent)
     }
 
-    /// `serial_peers` are the other tasks on this step's pipeline, and empty
-    /// unless the step is `serial: true` — see the `Fresh` arm.
+    /// `serial_peers` are the other tasks in the project, and empty unless the
+    /// step id is serial in some pipeline — see the `Fresh` arm.
     ///
     /// The destination comes with the outcome that chose it, because a gate
     /// needs to tell a pass from a fail and two routes may name one step.
@@ -23854,20 +23846,24 @@ mod tests {
         assert!(has_run_files(&repo, second));
     }
 
-    /// `serial:` holds one step id in one pipeline. The same id in another
-    /// pipeline is a different step, and a run of it holds nothing here.
-    #[test]
-    fn a_serial_step_is_not_held_by_the_same_step_in_another_pipeline() {
-        let (repo, _root_guard) = fixture("command-serial-other-pipeline");
-        let release = repo.root.join("release");
-        let mut pipelines = pipelines_running_serial(&run_until(&release), false);
+    /// Two pipelines, `default` and `other`, running the same `implement`
+    /// command, with `a-login` on the first and `b-export` on the second.
+    /// `mark_other` says whether `other` marks the step `serial: true` too.
+    fn two_pipelines_one_step(repo: &Repo, run: &str, mark_other: bool) -> Pipelines {
+        let mut pipelines = pipelines_running_serial(run, false);
         let mut other = pipelines.get("default").unwrap().clone();
         other.name = "other".to_string();
+        other
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .serial = mark_other;
         pipelines.pipelines.insert("other".to_string(), other);
-        add_task_with_worktree(&repo, "a-login", "implement");
+        add_task_with_worktree(repo, "a-login", "implement");
         let worktree = repo.root.join("wt-b-export");
         std::fs::create_dir_all(&worktree).unwrap();
-        add_task_with(&repo, "b-export", "implement", |front| {
+        add_task_with(repo, "b-export", "implement", |front| {
             front.pipeline = Some("other".into());
             front.branch = Some("task/b-export".into());
             front.base = Some("work".into());
@@ -23876,21 +23872,69 @@ mod tests {
             front.pane_id = Some("w1:p1".into());
             front.worktree_path = Some(worktree);
         });
+        pipelines
+    }
+
+    /// `serial:` holds one step id across every pipeline: the second task
+    /// leaves no run files while the first task's run, on another pipeline,
+    /// is going. Failed before the hold was keyed by step id alone, when both
+    /// runs started in the first pass.
+    #[test]
+    fn a_serial_step_is_held_by_the_same_step_in_another_pipeline() {
+        let (repo, _root_guard) = fixture("command-serial-other-pipeline");
+        let release = repo.root.join("release");
+        let pipelines = two_pipelines_one_step(&repo, &run_until(&release), true);
         let mux = FakeMux::new(vec![]);
 
         Dispatcher::new(&repo, &pipelines, &mux)
             .pass(&mut || {})
             .unwrap();
 
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for task in ["a-login", "b-export"] {
-            assert_eq!(
-                runs.state(&crate::command_step::Runs::key("implement", task)),
-                crate::command_step::RunState::Running,
-                "`{task}` waited on a step of another pipeline"
-            );
-        }
+        let (_, second) = holder_and_waiter(&repo, "a-login", "b-export");
+        assert!(
+            !has_run_files(&repo, second),
+            "`{second}` started while the other pipeline's run held the step"
+        );
         std::fs::write(&release, "").unwrap();
+    }
+
+    /// One pipeline marking the step id is enough: `other` does not mark it,
+    /// yet its task waits on the run going on `default`, and the other way
+    /// round. Failed before, when an unmarked step never asked.
+    #[test]
+    fn one_pipeline_marking_a_step_serial_holds_it_in_the_other() {
+        for mark_default in [true, false] {
+            let (repo, _root_guard) = fixture("command-serial-one-marks");
+            let release = repo.root.join("release");
+            let mut pipelines = two_pipelines_one_step(&repo, &run_until(&release), false);
+            if !mark_default {
+                // Only `other` marks it; `default` does not.
+                for (name, serial) in [("default", false), ("other", true)] {
+                    pipelines
+                        .pipelines
+                        .get_mut(name)
+                        .unwrap()
+                        .steps
+                        .iter_mut()
+                        .find(|s| s.id == "implement")
+                        .unwrap()
+                        .serial = serial;
+                }
+            }
+            let mux = FakeMux::new(vec![]);
+
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+
+            let (_, second) = holder_and_waiter(&repo, "a-login", "b-export");
+            assert!(
+                !has_run_files(&repo, second),
+                "`{second}` started though only one pipeline marks the step \
+                 (default marks it: {mark_default})"
+            );
+            std::fs::write(&release, "").unwrap();
+        }
     }
 
     /// Without `serial:` a command step starts for every task that reaches

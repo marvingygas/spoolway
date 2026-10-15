@@ -120,9 +120,10 @@ impl Runs {
     /// before answering — already holds the step for the next task the pass
     /// reaches. An exited or interrupted run holds nothing.
     ///
-    /// `peers` are the other tasks on this step's own pipeline: a key names
-    /// no pipeline, so a step of the same id elsewhere is left out by the
-    /// caller, not here.
+    /// `peers` are the other tasks in the project, on any pipeline: a key
+    /// names no pipeline, so the hold is per step id across all of them. One
+    /// pipeline marking the id `serial: true` is enough to hold it in every
+    /// pipeline, marked or not. See [`crate::pipeline::Pipelines::serial_peers`].
     pub fn serial_holder<'a>(
         &self,
         step: &str,
