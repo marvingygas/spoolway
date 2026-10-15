@@ -113,9 +113,10 @@ and `spoolway task contract --from` refuse any other value, naming the task and 
 may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
-digits and hyphens, starting with a letter. A task id may be at most 100 characters and a
-step id at most 64, because spoolway builds file names from the pair and a name past 255 bytes
-fails. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
+digits and hyphens, starting with a letter. A task id may be at most 100 characters, because
+spoolway builds file names from it and a name past 255 bytes fails. A step id may be at most 26,
+because a lane's herdr name is its step plus a short task tag and herdr refuses a name past 32
+characters. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
 refuse a longer id, naming it and the limit. A lane whose name would outgrow the
 multiplexer's own limit gets a short internal alias instead of a refusal.
 

@@ -97,6 +97,11 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   as its id. A job skips its window instead and says ``job <name> · due now · skipped, <routine> is
   still in the queue, at step <step>``. Resume, restart or unqueue a stopped copy to free the
   routine. See [Routines](planning.md#routines).
+- Rename every pipeline step id longer than 26 characters. A lane's herdr name is its step plus a
+  short task tag, and herdr refuses a name past 32 characters, so the limit fell from 64 to 26.
+  `spoolway pipeline check`, `spoolway doctor` and the dispatcher refuse a longer id
+  with ``step id `<id>` is <n> characters long, and the limit is 26``. The longest step id in a
+  shipped pipeline is 15 characters. The task id limit stays 100.
 - Rename a `routine:` key in your own task files. spoolway sets it on every queued copy of a
   routine, so `spoolway queue add` refuses a task file that sets it.
 - Update scripts that find a routine copy by its numbered id. Its lane is now named

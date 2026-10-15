@@ -205,23 +205,34 @@ pub fn check_id(kind: &str, id: &str) -> Result<()> {
 /// `queue add` with and without `--dry-run`, and a task file read from disk
 /// all refuse the same ids in the same words.
 pub fn check_task_id(id: &str) -> Result<()> {
-    check_id_within("task id", id, TASK_ID_MAX)
+    check_id_within(
+        "task id",
+        id,
+        TASK_ID_MAX,
+        "spoolway builds file names from it, and most file systems refuse a name past 255 bytes",
+    )
 }
 
-/// [`check_id`] for a step id, plus the length limit [`STEP_ID_MAX`].
+/// [`check_id`] for a step id, plus the length limit [`STEP_ID_MAX`]. The
+/// reason given is herdr's name limit, which is tighter than any file name's.
 pub fn check_step_id(id: &str) -> Result<()> {
-    check_id_within("step id", id, STEP_ID_MAX)
+    check_id_within(
+        "step id",
+        id,
+        STEP_ID_MAX,
+        "a lane's herdr name is its step plus a short task tag, and herdr refuses a name past \
+         32 characters",
+    )
 }
 
-/// [`check_id`], then refuse an id past `max` bytes. The id is ASCII by then,
-/// so bytes and characters are the same count.
-fn check_id_within(kind: &str, id: &str, max: usize) -> Result<()> {
+/// [`check_id`], then refuse an id past `max` bytes, giving `reason` for the
+/// limit. The id is ASCII by then, so bytes and characters are the same count.
+fn check_id_within(kind: &str, id: &str, max: usize, reason: &str) -> Result<()> {
     check_id(kind, id)?;
     if id.len() > max {
         bail!(
-            "{kind} `{id}` is {} characters long, and the limit is {max} — spoolway builds file \
-             names from it, and most file systems refuse a name past 255 bytes. Shorten it to \
-             {max} characters or fewer.",
+            "{kind} `{id}` is {} characters long, and the limit is {max} — {reason}. Shorten it \
+             to {max} characters or fewer.",
             id.len()
         );
     }
@@ -233,13 +244,17 @@ fn check_id_within(kind: &str, id: &str, max: usize) -> Result<()> {
 /// The longest file name built from a task and a step is the hidden temp file
 /// `write_atomic` makes beside `<task> · <step>.json`:
 /// `.<task> · <step>.json.<pid>-<call>.tmp`. With this limit and
-/// [`STEP_ID_MAX`] that is 1 + 100 + 4 + 64 + 5 + 36 bytes at most, 210 in
-/// all, which leaves 45 bytes under the 255 a file system allows. The 36 is a
+/// [`STEP_ID_MAX`] that is 1 + 100 + 4 + 26 + 5 + 36 bytes at most, 172 in
+/// all, which leaves 83 bytes under the 255 a file system allows. The 36 is a
 /// pid of ten digits, a call counter of twenty and the separators.
 pub const TASK_ID_MAX: usize = 100;
 
-/// The longest step id [`check_step_id`] accepts. See [`TASK_ID_MAX`].
-pub const STEP_ID_MAX: usize = 64;
+/// The longest step id [`check_step_id`] accepts.
+///
+/// A lane's herdr name is its step id, a hyphen and a task tag of up to five
+/// characters, and herdr refuses an agent name past 32 characters. 32 less
+/// that six leaves 26. See also [`TASK_ID_MAX`] for the file-name budget.
+pub const STEP_ID_MAX: usize = 26;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2809,6 +2824,14 @@ mod tests {
         let long_step = "s".repeat(STEP_ID_MAX + 1);
         let err = check_step_id(&long_step).unwrap_err().to_string();
         assert!(err.contains(&long_step) && err.contains(&STEP_ID_MAX.to_string()));
+        assert!(
+            err.contains("herdr refuses a name past 32 characters"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("Shorten it to 26 characters or fewer."),
+            "{err}"
+        );
         assert!(check_task_id(&"t".repeat(TASK_ID_MAX + 1)).is_err());
     }
 
