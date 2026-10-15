@@ -42,8 +42,25 @@ Parallel `config set` calls in one project run one after another, and each saves
 call waits up to ten seconds for the one before it. After that it exits 1, names the process that
 holds the lock, and writes nothing. Run it again.
 
-Run `config set` from the main checkout. The dispatcher reads the project's own config, so in
-a linked worktree the command refuses and prints the `-C` form to run instead.
+In the main checkout, `config set` writes `.spoolway/config.toml` there. In a linked worktree that
+has its own `.spoolway/` on a branch, it loads, checks and saves that worktree's `config.toml`.
+It then prints this line, with the worktree's branch:
+
+```
+  the main checkout keeps its own copy until feature/limits merges
+```
+
+Commit the file on the branch and open a pull request. The dispatcher keeps reading the main
+checkout's config until the branch merges.
+
+`config set` refuses, and writes nothing, in three worktrees. Each refusal prints the command to
+run in the main checkout, as `spoolway -C <root> config set …`.
+
+| Worktree | Why it refuses |
+|---|---|
+| A worktree whose branch has no `.spoolway/` | There is no setup in it to write. |
+| A worktree the dispatcher made for a task | The dispatcher reads the project's config, not this worktree's. |
+| A worktree on a detached HEAD | The change would have no branch to be committed on. Check a branch out first. |
 
 ### What `config set` checks
 
@@ -279,6 +296,12 @@ is the file that does not parse, `doctor` names that file instead.
 `spoolway override promote config.toml` writes every key of the layer into the tracked file,
 or none. A key the tracked config refuses stops the promote with an error naming that key. The
 tracked file stays as it was, and the layer keeps all its keys.
+
+`spoolway override promote` in a linked worktree that has its own `.spoolway/` writes that
+worktree's pipeline file, prompt or `config.toml`. The layer belongs to the whole project, so the
+entry is cleared from it at once. The main checkout's files stay as they were until the branch
+merges. A worktree with no `.spoolway/` of its own, a dispatcher lane's worktree and a worktree
+on a detached HEAD refuse, as `config set` does.
 
 ### When an override takes effect
 

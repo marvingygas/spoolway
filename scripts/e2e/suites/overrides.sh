@@ -462,6 +462,27 @@ works "and leaves the tracked config as it was" \
 has "and keeps the layer as it was" "lane_quite" "$CONFIG_LAYER"
 must "clean up: drop the typo'd layer" "$SPOOLWAY" override drop config.toml
 
+# --------------------------------- promote from a worktree of its own
+# On a feature branch in its own worktree, `override promote` writes that
+# worktree's pipeline file, so the change can be committed and opened as a
+# pull request. The layer entry is cleared at once; the main checkout's file
+# stays as it was until the branch merges.
+must "fork a knob for the worktree case" \
+  "$SPOOLWAY" pipeline override default --set implement.model=fake-wt
+cp "$TRACKED" "$LIVE/tracked.before"
+must "add a worktree of its own on a feature branch" \
+  git worktree add -q -b feature/promote "$LIVE/wt"
+says "override promote in a worktree of its own names the branch" \
+  "the main checkout keeps its own copy until feature/promote merges" \
+  "$SPOOLWAY" -C "$LIVE/wt" override promote default
+has "the worktree's pipeline file carries the promoted value" \
+  "model: fake-wt" "$LIVE/wt/$TRACKED"
+works "the main checkout's pipeline file is byte-identical" \
+  cmp "$TRACKED" "$LIVE/tracked.before"
+works "and the layer entry is cleared" test ! -e "$LAYER"
+must "remove the worktree" git worktree remove --force "$LIVE/wt"
+must "and its branch" git branch -D feature/promote
+
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
 # `install` before the rename has the old directory on disk, and `sync`

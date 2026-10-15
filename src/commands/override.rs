@@ -8,9 +8,10 @@
 //! never `repo.checkout` — because the layer is a sibling of `queue/`, one
 //! per project, not one per worktree; see [`crate::overrides`]'s own doc.
 //! `override promote` is the one exception that also touches a *tracked*
-//! file, and it refuses outside the main checkout for the same reason
-//! [`crate::commands::config_set`] does: the dispatcher reads `repo.root`'s
-//! files, never a linked worktree's own copy.
+//! file. It writes into [`Repo::tracked_write_root`], the same place
+//! [`crate::commands::config_set`] does: this checkout's own `.spoolway/`,
+//! which in a worktree of its own is a copy the dispatcher does not read
+//! until the branch merges.
 
 use super::*;
 
@@ -44,33 +45,6 @@ fn parse_target(target: &str) -> Result<Target> {
         "`{target}` is not an override target — see `spoolway override list`, which prints \
          `pipelines/<name>.yml`, `prompts/<name>` or `config.toml`"
     );
-}
-
-/// A repo standing in for `repo.root` — the tracked file `override promote`
-/// writes lives there, but every reader this file otherwise calls
-/// (`prompt::path_for_tracked`, chiefly) takes a whole `Repo` and reads
-/// `checkout`. Building one rather than adding a second, root-only
-/// signature to each of those keeps this the only place that has to know
-/// promote wants the project's own copy rather than this worktree's.
-fn at_root(repo: &Repo) -> Repo {
-    let mut at_root = repo.clone();
-    at_root.checkout = repo.root.clone();
-    at_root
-}
-
-/// Refuse a write to the tracked control plane from inside a linked
-/// worktree — the same rule and the same reason as [`config_set`]: the
-/// dispatcher reads `repo.root`'s files, never a worktree's own copy, so a
-/// promote here would sit in a file nothing reads until the branch merges.
-fn refuse_in_worktree(repo: &Repo, target: &str) -> Result<()> {
-    if repo.in_linked_worktree() {
-        bail!(
-            "the dispatcher reads the project's tracked files, not this worktree's.\n  spoolway \
-             -C {} override promote {target}",
-            repo.root.display()
-        );
-    }
-    Ok(())
 }
 
 /// `spoolway prompt override <name>`: copy the tracked prompt into the
@@ -499,22 +473,27 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
 
 /// `spoolway override promote <target>`.
 pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
-    refuse_in_worktree(repo, target)?;
+    let write = repo.tracked_write_root("tracked files", &format!("override promote {target}"))?;
+    let write_root = write.root;
     match parse_target(target)? {
-        Target::Pipeline(name) => promote_pipeline(repo, &name),
-        Target::Prompt(name) => promote_prompt(repo, &name),
-        Target::Config => promote_config(repo),
+        Target::Pipeline(name) => promote_pipeline(repo, write_root, &name)?,
+        Target::Prompt(name) => promote_prompt(repo, write_root, &name)?,
+        Target::Config => promote_config(repo, write_root)?,
     }
+    if let Some(note) = write.note() {
+        println!("{note}");
+    }
+    Ok(())
 }
 
-fn promote_pipeline(repo: &Repo, name: &str) -> Result<()> {
+fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
     let overrides_dir = repo.overrides_dir();
     let patch = crate::overrides::read_pipeline_patch(&overrides_dir, name)?
         .filter(|p| !p.steps.is_empty() || p.description.is_some() || p.task_template.is_some())
         .with_context(|| format!("no override for pipeline `{name}`"))?;
 
-    let path = Pipelines::file_in(&repo.root, name);
-    let changes = crate::overrides::promote_pipeline_patch(&repo.root, name, &patch)?;
+    let path = Pipelines::file_in(write_root, name);
+    let changes = crate::overrides::promote_pipeline_patch(write_root, name, &patch)?;
     crate::overrides::remove_pipeline_patch(&overrides_dir, name)?;
 
     println!("  wrote {}", path.display());
@@ -525,13 +504,13 @@ fn promote_pipeline(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn promote_prompt(repo: &Repo, name: &str) -> Result<()> {
+fn promote_prompt(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
     let overrides_dir = repo.overrides_dir();
     let source = crate::overrides::prompt_patch_path(&overrides_dir, name);
     let body = std::fs::read_to_string(&source)
         .with_context(|| format!("no override for prompt `{name}`"))?;
 
-    let dest = crate::prompt::path_for_tracked(&at_root(repo), name);
+    let dest = crate::prompt::tracked_path_in(write_root, name);
     write_atomic(&dest, &body)?;
     crate::overrides::remove_prompt_override(&overrides_dir, name)?;
 
@@ -540,11 +519,11 @@ fn promote_prompt(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn promote_config(repo: &Repo) -> Result<()> {
-    let changes = crate::overrides::promote_config_patch(&repo.root)?;
+fn promote_config(repo: &Repo, write_root: &Path) -> Result<()> {
+    let changes = crate::overrides::promote_config_patch(write_root)?;
     crate::overrides::remove_config_patch(&repo.overrides_dir())?;
 
-    let path = Config::path_in(&repo.root);
+    let path = Config::path_in(write_root);
     println!("  wrote {}", path.display());
     for (key, value) in &changes {
         println!("    {key} = {value}");
@@ -995,14 +974,170 @@ mod tests {
         });
     }
 
+    /// The main checkout, a worktree of its own, a borrowed one and a lane's
+    /// — real git, so `checkout` and `root` land in different directories —
+    /// each as a `Repo`, with the pipeline `demo` carrying an override on
+    /// `implement.model`. `f` gets them in that order, then the main root.
+    fn with_worktrees<T>(name: &str, f: impl FnOnce([&Repo; 4], &Path) -> T) -> T {
+        with_repo(name, |main| {
+            let git = |args: &[&str]| crate::repo::run(&main.root, "git", args).unwrap();
+            git(&["init", "-q", "-b", "main"]);
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", "root"]);
+            let own = main.root.join("own");
+            git(&[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                own.to_str().unwrap(),
+            ]);
+            let lane_dir = main.worktree_root().join("lane");
+            git(&[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/y",
+                lane_dir.to_str().unwrap(),
+            ]);
+
+            let mut own_repo = main.clone();
+            own_repo.checkout = own;
+            let mut lane = main.clone();
+            lane.checkout = lane_dir;
+            let mut borrowed = main.clone();
+            borrowed.borrowed = true;
+            pipeline_override(main, "demo", "implement.model=claude-opus-5").unwrap();
+            f([main, &own_repo, &borrowed, &lane], &main.root)
+        })
+    }
+
+    fn tracked_demo(root: &Path) -> String {
+        std::fs::read_to_string(Pipelines::file_in(root, "demo")).unwrap()
+    }
+
+    /// In a worktree of its own, `override promote` writes that worktree's
+    /// pipeline file and clears the layer entry, and the main checkout's
+    /// file is left as it was.
     #[test]
-    fn override_promote_refuses_from_a_linked_worktree() {
-        with_repo("promote-worktree", |repo| {
-            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
-            let mut worktree = repo.clone();
-            worktree.checkout = repo.root.join("elsewhere");
-            let err = override_promote(&worktree, "demo").unwrap_err();
-            assert!(err.to_string().contains("this worktree's"), "{err}");
+    fn override_promote_in_a_worktree_of_its_own_writes_the_worktrees_file() {
+        with_worktrees("promote-own", |[_, own, _, _], root| {
+            let before = tracked_demo(root);
+            override_promote(own, "demo").unwrap();
+            assert!(tracked_demo(&own.checkout).contains("model: claude-opus-5"));
+            assert_eq!(tracked_demo(root), before);
+            assert!(
+                crate::overrides::read_pipeline_patch(&own.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "the entry is cleared at once, as in the main checkout"
+            );
+        });
+    }
+
+    /// The main checkout still writes its own file, with no extra line.
+    #[test]
+    fn override_promote_in_the_main_checkout_writes_its_own_file() {
+        with_worktrees("promote-main", |[main, ..], root| {
+            override_promote(main, "demo").unwrap();
+            assert!(tracked_demo(root).contains("model: claude-opus-5"));
+            let write = main.tracked_write_root("tracked files", "x").unwrap();
+            assert!(write.note().is_none());
+        });
+    }
+
+    /// A borrowed worktree has no `.spoolway/` of its own, so the promote
+    /// refuses with that reason and writes neither file nor layer.
+    #[test]
+    fn override_promote_refuses_a_borrowed_worktree_and_writes_nothing() {
+        with_worktrees("promote-borrowed", |[_, _, borrowed, _], root| {
+            let before = tracked_demo(root);
+            let err = override_promote(borrowed, "demo").unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "this worktree's branch has no .spoolway/ of its own, so there is no setup \
+                     here to write.\n  spoolway -C {} override promote demo",
+                    borrowed.root.display()
+                )
+            );
+            assert_eq!(tracked_demo(root), before);
+            assert!(
+                crate::overrides::read_pipeline_patch(&borrowed.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_some()
+            );
+        });
+    }
+
+    /// A worktree on a detached HEAD is refused before the file is written,
+    /// so the layer entry survives for the person to promote from a branch.
+    #[test]
+    fn override_promote_refuses_a_detached_worktree_and_keeps_the_entry() {
+        with_worktrees("promote-detached", |[_, own, _, _], root| {
+            let before = tracked_demo(root);
+            let detached = detach(own);
+            let err = override_promote(&detached, "demo").unwrap_err();
+            assert!(
+                format!("{err:#}").contains("detached HEAD"),
+                "unexpected message: {err:#}"
+            );
+            assert_eq!(tracked_demo(&detached.checkout), before);
+            assert!(
+                crate::overrides::read_pipeline_patch(&detached.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_some(),
+                "a refused promote must not clear the layer entry"
+            );
+        });
+    }
+
+    /// A git that cannot run in the worktree is reported as that, not as a
+    /// detached HEAD, and the layer entry survives.
+    #[test]
+    fn override_promote_reports_a_git_failure_rather_than_a_detached_head() {
+        with_worktrees("promote-git-fails", |[_, own, _, _], root| {
+            let mut gone = own.clone();
+            gone.checkout = root.join("not-a-worktree");
+            let err = override_promote(&gone, "demo").unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("cannot tell which branch"), "{message}");
+            assert!(!message.contains("detached HEAD"), "{message}");
+            assert!(
+                crate::overrides::read_pipeline_patch(&gone.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_some(),
+                "a refused promote must not clear the layer entry"
+            );
+        });
+    }
+
+    /// `own` with its worktree moved off its branch onto the same commit.
+    fn detach(own: &Repo) -> Repo {
+        crate::repo::run(&own.checkout, "git", &["checkout", "-q", "--detach"]).unwrap();
+        own.clone()
+    }
+
+    /// A dispatcher lane's worktree keeps today's refusal and writes nothing.
+    #[test]
+    fn override_promote_refuses_a_lane_worktree_and_writes_nothing() {
+        with_worktrees("promote-lane", |[_, _, _, lane], root| {
+            let before = tracked_demo(root);
+            let err = override_promote(lane, "demo").unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "the dispatcher reads the project's tracked files, not this worktree's.\n  \
+                     spoolway -C {} override promote demo",
+                    lane.root.display()
+                )
+            );
+            assert_eq!(tracked_demo(root), before);
+            assert_eq!(tracked_demo(&lane.checkout), before);
         });
     }
 

@@ -1059,14 +1059,25 @@ Refused when `<name>` names no private pipeline. If `<name>` is already a tracke
 name, the message says so plainly and names the tracked file, rather than the generic "no
 private pipeline named" message a name that is missing outright gets.
 
-Refused inside a linked worktree, naming the command to run in the main checkout instead — the
-dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
-against a clash with any tracked file, naming it. Refused if a step names a prompt, or the
-pipeline names a `task_template:`, that is not one plain name, or if a private prompt's folder
-holds a symlinked directory, before anything is moved. Refused if another private pipeline
-names the same skeleton, naming it — promoting one must not pull the file out from under the
-other. Refused in home mode, where the whole setup is already private and there is nothing to
-promote into. Nothing is committed.
+Run in a linked worktree on its own branch that has its own `.spoolway/`, it moves the files
+into that worktree's `.spoolway/`, ready to commit on its branch. The main checkout's files are
+not touched. After the `moved` lines it prints which branch carries the files:
+
+```
+  the main checkout runs without these files until feature/strict merges
+```
+
+The main checkout runs without the pipeline until that branch merges.
+
+Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a
+detached HEAD. The message names the command to run in the main checkout instead, where it
+applies. Refused against a clash with any tracked file, naming it. In a worktree, the check
+covers the worktree's tracked files and the main checkout's. Refused if a step names a prompt,
+or the pipeline names a `task_template:`, that is not one plain name, or if a private prompt's
+folder holds a symlinked directory, before anything is moved. Refused if another private
+pipeline names the same skeleton, naming it, so promoting one does not pull the file out from
+under the other. Refused in home mode, where the whole setup is already private and there is
+nothing to promote into. Nothing is committed.
 
 A promote that fails partway through puts every file back where it was. Nothing is left tracked
 or deleted halfway, and the same `spoolway pipeline promote <name>` can be run again.
@@ -1079,9 +1090,11 @@ once the move starts it applying:
   ~/.spoolway/proj-ab12cd34/overrides/pipelines/impl-strict.yml already exists and will start applying now that it is tracked
 ```
 
+From a worktree the line ends `will start applying once <branch> merges`.
+
 `--json` prints `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and
-`to` relative to the checkout, matching the two columns above. It carries no line for a
-waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
+`to` relative to the checkout written into, matching the two columns above. It carries no line
+for the branch or for a waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
 
@@ -1247,7 +1260,7 @@ spoolway config edit
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
 | `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
-| `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Parallel calls run one after another. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
+| `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
 | `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vi`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
@@ -1289,11 +1302,22 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree. `promote config.toml` writes every key or none |
+| `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
+
+In a worktree of your own, `promote` leaves the main checkout's files as they are and clears
+the entry from the layer, which belongs to the whole project. The command prints this line, with
+the worktree's branch:
+
+```
+  the main checkout keeps its own copy until feature/limits merges
+```
+
+Commit the file on that branch and open a pull request. A refused worktree prints the command to
+run in the main checkout instead, as `spoolway -C <root> override promote <target>`.
 
 ```
 $ spoolway override promote impl && git diff --stat

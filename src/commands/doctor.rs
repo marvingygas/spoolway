@@ -849,7 +849,7 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
     // that do not load are `doctor`'s to report, not a reason to say more here.
     let sets_compaction = key.ends_with(".session_blocked_ctx")
         || (key.starts_with("models.") && key.ends_with(".compact_ctx"));
-    if sets_compaction && let Ok(pipelines) = Pipelines::load(&repo.root, config) {
+    if sets_compaction && let Ok(pipelines) = Pipelines::load(&repo.checkout, config) {
         findings.extend(step_compaction_checks(&pipelines, config));
     }
     findings

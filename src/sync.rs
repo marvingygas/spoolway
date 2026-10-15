@@ -38,8 +38,9 @@
 //! worktree has its own branch's copies, and a sync taken there has to
 //! land on that branch — where it is reviewed and merged — rather than on
 //! whatever the main checkout happens to have out. `config set` and
-//! `override promote` keep the opposite rule and refuse outright in a linked
-//! worktree; this command does not — except in a worktree whose branch has no
+//! `override promote` follow the same rule through
+//! `Repo::tracked_write_root`, which also refuses a dispatcher lane's
+//! worktree and one on a detached HEAD. This command refuses in a worktree whose branch has no
 //! `.spoolway/` at all. Its setup is the main checkout's, so there is no
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
