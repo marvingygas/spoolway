@@ -47,10 +47,10 @@
 #   headless          true               The command runs detached, with no pane.
 #                     false <default>    It runs in a pane of its own.
 #   last              true               Only the last task of a chain runs this
-#                                        command; the rest walk past to `on_pass`.
+#                                        step; the rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
 #   first             true               Only a chain's root (no declared
-#                                        `depends_on`) runs this command; the
+#                                        `depends_on`) runs this step; the
 #                                        rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
 #   serial            true               One task runs this command at a time; the

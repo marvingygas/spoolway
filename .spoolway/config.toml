@@ -6,7 +6,9 @@
 # dispatch.auto_commit                    true, false          true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                       group, any           group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
 # dispatch.lane_child_ceiling             <duration>           1h                                                      How long a lane may be excused for a process it started that is still running before the reminder loop treats it as silent anyway.
-# dispatch.keep_finished_lanes            true, false          true                                                    Whether a finished step's agent stays open in its own pane until its task is done, or each new step takes over the last one's place.
+# dispatch.visible_lanes                  <count>, all         5                                                       How many of a task's most recent lanes stay open; each new agent step or shown command closes the oldest finished ones. Older versions kept every lane.
+# dispatch.hide_commands                  true, false          true                                                    Whether a command step runs without a pane. Set to `false` and its pane stays open after it exits, counting toward `visible_lanes`.
+# dispatch.lane_layout                    panes, tabs          panes                                                   Whether a task's steps are panes of one tab, or each step opens in a tab of its own, named after the step.
 # unattended.enabled                      true, false          false                                                   Whether this run stops for a person, or resumes every block itself with `max_output_tokens` as the only brake.
 # unattended.max_output_tokens            <tokens>             0                                                       Output tokens one unattended run may spend before the dispatcher stops starting work; 0 is no ceiling.
 # unattended.max_cost_usd                 <dollars>            0                                                       Dollars one unattended run may spend before the dispatcher stops starting work, priced from the resolved model table; 0 is no ceiling.
@@ -37,9 +39,9 @@
 # models.<glob>.cache_write_5m            <USD per 1M tokens>  0                                                       Cost per million tokens written to a 5-minute cache.
 # models.<glob>.cache_write_1h            <USD per 1M tokens>  0                                                       Cost per million tokens written to a 1-hour cache.
 # models.<glob>.above_<N>k_tokens.<rate>  <USD per 1M tokens>  0                                                       The same five rates, charged once a prompt passes N thousand tokens. One such tier per model.
-# models.<glob>.prompt_cache_ttl          <duration>           5m (none if local)                                      How long a session's prompt cache is trusted to stay warm. A resume past it opens a fresh session. "0" turns it off.
+# models.<glob>.prompt_cache_ttl          <duration>           none                                                    How long a session's prompt cache is trusted to stay warm. A resume past it opens a fresh session. "0" turns it off.
 # models.<glob>.slots                     <n>                  0                                                       How many lanes this model may run at once, replacing its profile's `concurrency`; 0 leaves the profile in charge.
-# models.<glob>.local                     true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` silences doctor's note that it should probably say so. It also removes the 5m `prompt_cache_ttl` default from this model.
+# models.<glob>.local                     true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` silences doctor's note that it should probably say so.
 
 [dispatch]
 backend = "herdr"
@@ -96,3 +98,9 @@ session_blocked_ctx = 0
 context_window = 100096
 slots = 2
 local = true
+
+[models."claude-*"]
+prompt_cache_ttl = ""
+
+[models."gpt-*"]
+prompt_cache_ttl = ""
