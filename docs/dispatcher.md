@@ -818,6 +818,13 @@ grows as a spiral. A step that comes back is the exception. See [Finished lanes 
 pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
 unless it is its workspace's only tab.
 
+A new workspace opens with one pane. The first step that shows a pane runs in that pane. That is an
+agent step, or a command step when `dispatch.hide_commands` is `false`. A hidden command step
+runs before it and leaves the pane alone, so the next agent step still uses it. The dispatcher
+records the pane as `spare_pane` in the task file until a step takes it. A pane with a command still running in
+it is left alone, and the step splits beside it. An idle pane is moved to the task's worktree
+before the step runs in it.
+
 A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 

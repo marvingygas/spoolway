@@ -75,6 +75,7 @@ const IGNORED_KEYS: &[&str] = &[
     "workspace_id",
     "pane_id",
     "tab_id",
+    "spare_pane",
     "paused_at",
     "paused_by",
     "hook_paused",

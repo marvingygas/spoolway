@@ -466,6 +466,47 @@ pub trait Mux: Sync {
         Ok(None)
     }
 
+    /// Whether `pane_id` holds nothing but its own shell, so a step may take
+    /// it over. Answers `false` when it cannot tell, and for a backend with
+    /// no real panes: a pane that might be in use is never handed away.
+    ///
+    /// Asked of a workspace's first pane before a later step takes it — see
+    /// [`crate::task::Frontmatter::spare_pane`]. A person may have typed into it
+    /// since the workspace opened.
+    fn pane_is_idle(&self, _pane_id: &str) -> bool {
+        false
+    }
+
+    /// Move the shell of `pane_id`, an idle pane that was open before this
+    /// step came for it, to `cwd`. A person may have changed directory in it
+    /// while it sat unused, and a lane started there would run outside the
+    /// worktree. The default does nothing, for a backend with no such panes.
+    fn change_dir(&self, _pane_id: &str, _cwd: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Run a shell script in `pane_id`, a pane that is already open and
+    /// idle, instead of splitting a new one. Answers like
+    /// [`Mux::run_in_pane`], including `None` from a backend with no pane to
+    /// run it in. `pane_id` itself is answered back as the pane it landed in.
+    ///
+    /// The arguments mean what they do for [`Mux::run_in_pane`], except that
+    /// nothing is split and `beside` does not exist. The pane is relabelled,
+    /// so it reads as the step that now runs in it, and moved to `cwd`, since
+    /// a person may have left it elsewhere while it sat idle.
+    #[allow(clippy::too_many_arguments)]
+    fn run_in_open_pane(
+        &self,
+        _pane_id: &str,
+        _cwd: &Path,
+        _key: &str,
+        _label: &str,
+        _script: &str,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Close a pane, killing whatever is in it whatever kind of agent that is.
     ///
     /// Never call this for a task's only pane without meaning to take its tab
@@ -938,9 +979,7 @@ impl Herdr {
     fn wait_for_pane_shell(&self, pane_id: &str, tick: &mut dyn FnMut()) {
         let deadline = Instant::now() + PANE_SHELL_TIMEOUT;
         loop {
-            let ready = self
-                .call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
-                .is_ok_and(|info| info.foreground.is_shell);
+            let ready = self.pane_is_idle(pane_id);
             if ready || Instant::now() >= deadline {
                 return;
             }
@@ -1230,6 +1269,35 @@ impl Herdr {
     fn existing_tab(&self, workspace: &str) -> Result<Option<String>> {
         let tabs: TabList = self.call(&["tab", "list", "--workspace", workspace])?;
         Ok(tab_in(tabs))
+    }
+
+    /// Type a command step's environment and script into `pane`, as
+    /// [`Mux::run_in_pane`] and [`Mux::run_in_open_pane`] both do. What a
+    /// failure leaves behind is the caller's to clean up: a pane it split
+    /// itself is closed, one that was already open is left standing.
+    fn type_script(
+        &self,
+        pane: &str,
+        key: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        // Written to a file and sourced, rather than typed ahead of the
+        // script as one `export` line — see [`hand_environment`]'s own doc
+        // for why: this map is the dispatcher's whole inherited environment,
+        // large enough that a herdr pane has cut it mid-value before, and a
+        // shell left waiting on the unterminated quote that leaves behind
+        // never gets as far as the script line below it.
+        //
+        // Named off `key`, never `label`: `label` is the step alone, and two
+        // tasks running the same step at once would otherwise hand each
+        // other's environment file the same name.
+        if !env.is_empty() {
+            let handover_key = format!("{} · handover", lane_task(key));
+            let source = self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
+            self.pane_run(pane, &source)?;
+        }
+        self.pane_run(pane, script)
     }
 
     /// Write `env` to `<project home>/<dir_name>/<key>.<ext>` and answer the
@@ -1940,35 +2008,46 @@ impl Mux for Herdr {
             None => self.split_pane(tab_id, cwd)?,
         };
         self.rename_pane(&pane, label)?;
-        // Written to a file and sourced, rather than typed ahead of the
-        // script as one `export` line — see [`hand_environment`]'s own doc
-        // for why: this map is the dispatcher's whole inherited environment,
-        // large enough that a herdr pane has cut it mid-value before, and a
-        // shell left waiting on the unterminated quote that leaves behind
-        // never gets as far as the script line below it.
-        //
-        // Named off `key`, never `label`: `label` is
-        // the step alone, and two tasks running the same step at once would
-        // otherwise hand each other's environment file the same name.
-        //
         // A refusal leaves the split pane standing and unrecorded, and the
         // caller closes only a pane it was told about: closed here, or each
         // retry of a line that is too long for this task would add another
         // empty pane to its tab.
-        let typed = (|| {
-            if !env.is_empty() {
-                let handover_key = format!("{} · handover", lane_task(key));
-                let source =
-                    self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
-                self.pane_run(&pane, &source)?;
-            }
-            self.pane_run(&pane, script)
-        })();
+        let typed = self.type_script(&pane, key, script, env);
         if let Err(err) = typed {
             let _ = self.close_pane(&pane);
             return Err(err);
         }
         Ok(Some(pane))
+    }
+
+    fn pane_is_idle(&self, pane_id: &str) -> bool {
+        self.call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
+            .is_ok_and(|info| info.foreground.is_shell)
+    }
+
+    fn change_dir(&self, pane_id: &str, cwd: &Path) -> Result<()> {
+        self.pane_run(
+            pane_id,
+            &format!("cd {}", crate::platform::quote(&cwd.display().to_string())),
+        )
+    }
+
+    fn run_in_open_pane(
+        &self,
+        pane_id: &str,
+        cwd: &Path,
+        key: &str,
+        label: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        // Not closed on a refusal, unlike a pane `run_in_pane` split itself:
+        // this one was open before the step came, and closing the task's
+        // only pane would take its tab and workspace with it.
+        self.change_dir(pane_id, cwd)?;
+        self.rename_pane(pane_id, label)?;
+        self.type_script(pane_id, key, script, env)?;
+        Ok(Some(pane_id.to_string()))
     }
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
@@ -1978,8 +2057,9 @@ impl Mux for Herdr {
     fn start_lane(&self, spec: &LaneSpec<'_>, tick: &mut dyn FnMut()) -> Result<()> {
         // Everything below is typed at a shell prompt, and lands in an agent's
         // chat input instead if anything is running in the pane. Nothing checks
-        // for that here, because every pane the dispatcher hands in is one it
-        // has just split, with no previous occupant.
+        // for that here: the dispatcher hands in a pane it has just split or
+        // opened, or a first pane an earlier pass opened, after asking
+        // `pane_is_idle`.
         //
         // A PATH prefix goes on first, because everything after it — including
         // the agent `agent start` is about to launch — is resolved through this
