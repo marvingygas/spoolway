@@ -221,7 +221,8 @@ Below the list, a line says whether a dispatcher will pick the work up: `Dispatc
 or `Start the dispatcher to begin working`. `enter` closes the popup back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
-requirements. A requirement this machine does not meet draws a gate naming what is unmet, with
+requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
+or a login command that fails, draws a gate naming what is unmet, with
 one answer: `enter` on `queue anyway, without issue tracking` queues the group with `tracking:
 off` written onto every task, and `esc` returns to the queue screen with nothing queued. A task queued with `tracking: off` fires no
 `[issue_tracking]` hook event and is never held waiting on one. See [the shipped hook
@@ -314,8 +315,11 @@ With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row t
 A `--from` path under this project's own pending directory is deleted once the batch is
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
-With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
-unmet one prints the same gate the queue screen draws. At a terminal it waits for `enter` to
+With `[issue_tracking]` configured, it checks the hook's declared tool requirements and runs its
+`# spoolway-login:` command first; an unmet requirement or a failed login prints the same gate
+the queue screen draws. A failed login shows as a `login` row naming the command and a `failed`
+row with the first line of its stderr, for example `acli jira auth status` and `✗ Error:
+unauthorized: ...`. At a terminal it waits for `enter` to
 queue with `tracking: off` written onto every task, or `esc` to back out. With no terminal it
 proceeds the same way without waiting. Otherwise it opens a ticket per task. It calls no `open`
 hook for a task that sets `tracking: off` itself. A batch's other tasks still call it, and a
@@ -1631,6 +1635,14 @@ whether the project runs in repo mode or home mode. A note names each workspace 
 A note names each project home under `~/.spoolway/` whose recorded checkout is gone, by path,
 so you can delete the folder. A workspace is named only when all of its clones are gone.
 `doctor` deletes nothing.
+
+When the configured hook declares a `# spoolway-login: <command>` line, the full run adds one
+row labelled `<hook> login`. It runs that command and fails on a non-zero exit or after 15
+seconds, as below. The warnings screen shown before dispatching never runs it.
+
+```
+  FAIL  jira.sh login: `acli jira auth status` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate. Log in again with `acli jira auth login`, then re-run `spoolway doctor`.
+```
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.

@@ -1109,6 +1109,44 @@ must "the hook is switched to the real jira.sh" \
   "$SPOOLWAY" config set issue_tracking.hook jira.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key KAN
 
+# The login row runs the shipped jira.sh's own `# spoolway-login:` line, so a
+# lapsed Jira login shows up in `doctor` before a group is queued. The stub
+# answers `jira auth status` as unauthorized only while the variable is set.
+says "doctor passes the jira.sh login row while acli is logged in" \
+  "ok    jira.sh login" "$SPOOLWAY" doctor -v
+ACLI_STUB_AUTH=unauthorized says "doctor fails the jira.sh login row on a lapsed login" \
+  "FAIL  jira.sh login: \`acli jira auth status\` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate" \
+  "$SPOOLWAY" doctor
+
+# The submit gate runs the same login command. `queue add --from` is its
+# non-interactive route, so the notice prints and the task queues with
+# `tracking: off`; the stub's item directory is how this proves `open` never
+# ran, since a real `open` would have created a Jira item there.
+task_doc "$LIVE/jira-login-gate.md" jira-login-gate "$BODY" \
+  "group: jira-login-gate" \
+  "group_description: proving the login gate"
+LOGIN_GATE_OUT="$LIVE/jira-login-gate.out"
+ITEMS_BEFORE=$(ls "$ACLI_STUB_DIR" 2>/dev/null | wc -l)
+ACLI_STUB_AUTH=unauthorized "$SPOOLWAY" queue add --from "$LIVE/jira-login-gate.md" \
+  </dev/null >"$LOGIN_GATE_OUT" 2>&1
+LOGIN_GATE_STATUS=$?
+if [ "$LOGIN_GATE_STATUS" -eq 0 ]; then
+  ok "a submit whose jira login has lapsed still queues"
+else
+  bad "a submit whose jira login has lapsed still queues (exit $LOGIN_GATE_STATUS)"
+  sed 's/^/        /' "$LOGIN_GATE_OUT"
+fi
+has "the gate names the login command" "acli jira auth status" "$LOGIN_GATE_OUT"
+has "and the tool's own complaint" \
+  "✗ Error: unauthorized: use 'acli jira auth login' to authenticate" "$LOGIN_GATE_OUT"
+has "and says issue tracking is not supported" \
+  "issue tracking is not supported." "$LOGIN_GATE_OUT"
+has "the task is queued with tracking off" \
+  "tracking: off" "$SPOOLWAY_PROJECT_HOME/queue/jira-login-gate.md"
+lacks "with no ticket opened" "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/jira-login-gate.md"
+works "and no item created in Jira" \
+  test "$(ls "$ACLI_STUB_DIR" 2>/dev/null | wc -l)" -eq "$ITEMS_BEFORE"
+
 # Same Context/Acceptance shape the Jira live proof used, with its own
 # prefixed title too — one task proves the title strip, the Story/Sub-task
 # split, both labels on both items, and the real ADF the hook's own

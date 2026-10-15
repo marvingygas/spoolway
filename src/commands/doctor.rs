@@ -437,6 +437,11 @@ pub fn doctor(
                 backend_without_panes(&mux),
             ));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
+            report.record_all(login_checks(
+                &repo.checkout,
+                &config.issue_tracking.hook,
+                false,
+            ));
             report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
             report.record_all(orphaned_home_note());
@@ -471,6 +476,14 @@ pub fn doctor(
         &tasks,
         pipelines,
         &config.issue_tracking,
+    ));
+    // Beside `gh_status` rather than inside `issue_tracking_checks`: a login
+    // check reaches the tracker's server, and `cheap_findings` — which calls
+    // `issue_tracking_checks` for `dispatch`'s start-up screen — must not.
+    report.record_all(login_checks(
+        &repo.checkout,
+        &config.issue_tracking.hook,
+        true,
     ));
     report.record(mux_finding(&mux));
     match &mux {
@@ -1166,6 +1179,24 @@ pub(crate) fn parse_version(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// What `<tool> --version` printed, stdout and stderr joined because a
+/// version banner may land on either. `None` when the tool could not be run
+/// at all.
+///
+/// `pub(crate)`, alongside [`parse_version`], so every check of a hook's
+/// declared floor asks the tool the same way.
+pub(crate) fn tool_version_answer(tool: &str) -> Option<String> {
+    let out = std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .ok()?;
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
 /// [`parse_version`]'s own output, back as the dotted string a person wrote —
 /// what a passing row and a failing one both name the version found as.
 ///
@@ -1281,17 +1312,7 @@ fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
                 if which(&required.tool).is_none() {
                     continue;
                 }
-                let answered = std::process::Command::new(&required.tool)
-                    .arg("--version")
-                    .output()
-                    .ok()
-                    .map(|out| {
-                        format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&out.stdout),
-                            String::from_utf8_lossy(&out.stderr)
-                        )
-                    });
+                let answered = tool_version_answer(&required.tool);
                 findings.extend(tool_version_finding(
                     &required,
                     &hook_display,
@@ -1304,6 +1325,130 @@ fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// The configured hook's `# spoolway-login:` line, run as one row labelled
+/// `<hook> login`, so a lapsed tracker login is caught here rather than when
+/// the `open` hook fails.
+///
+/// The row passes on exit 0. On any other exit, or a timeout, it fails with
+/// the command, the first line of its stderr and the command to log in again.
+/// It is skipped, with no row, when the command's tool is below the floor the
+/// hook declares for it: [`required_tool_checks`] reports that, and a login
+/// probe run against a tool that old would only add a misleading second
+/// failure. A tool that is not on PATH is a note naming it, unless another
+/// row already fails on it — see [`login_tool_reported_elsewhere`].
+/// `gh_reported` says whether this report includes [`gh_status`]'s row.
+///
+/// A hook that declares tools but no login line gets a note instead, showing
+/// the line to add. Nothing here runs the hook itself: the `check` event was
+/// removed on purpose, and the declared command is all that is executed.
+///
+/// Only the full `doctor` run calls this. [`cheap_findings`] must not reach
+/// the network.
+fn login_checks(checkout: &Path, hook_name: &str, gh_reported: bool) -> Vec<Finding> {
+    let Some(path) = crate::tracking::hook_path_in(checkout, hook_name) else {
+        return Vec::new();
+    };
+    let Ok(script) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let hook = hook_name.trim();
+    let Some(command) = crate::tracking::login_command(&script) else {
+        let declares_tools = crate::tracking::required_tools(&script)
+            .iter()
+            .any(Result::is_ok);
+        return if declares_tools {
+            vec![Finding::Note(format!(
+                "{hook} declares `# spoolway-requires:` tools but no `# spoolway-login:` line, \
+                 so `spoolway doctor` cannot tell when its tracker login lapses. Add a line \
+                 such as `# spoolway-login: acli jira auth status` naming the command that \
+                 exits 0 while you are logged in."
+            ))]
+        } else {
+            Vec::new()
+        };
+    };
+    let tool = &command[0];
+    if which(tool).is_none() {
+        let covered = login_tool_reported_elsewhere(tool, hook, gh_reported);
+        return if covered {
+            Vec::new()
+        } else {
+            vec![Finding::Note(format!(
+                "{hook} declares `# spoolway-login: {}`, but `{tool}` is not on PATH, so its \
+                 login was not checked",
+                command.join(" ")
+            ))]
+        };
+    }
+    let floor = crate::tracking::required_tools(&script)
+        .into_iter()
+        .flatten()
+        .find(|required| &required.tool == tool)
+        .and_then(|required| parse_version(&required.floor));
+    if let Some(floor) = floor {
+        let answered = tool_version_answer(tool);
+        if answered
+            .as_deref()
+            .and_then(parse_version)
+            .is_some_and(|found| below_floor(&found, &floor))
+        {
+            return Vec::new();
+        }
+    }
+    let shown = command.join(" ");
+    let outcome = match crate::tracking::run_login(&command) {
+        crate::tracking::LoginOutcome::LoggedIn => Ok(Some(format!("`{shown}`"))),
+        crate::tracking::LoginOutcome::Failed { stderr } => {
+            let first = first_line(&stderr);
+            Err(anyhow::anyhow!(
+                "`{shown}` failed{}. {}, then re-run `spoolway doctor`.",
+                if first.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {first}")
+                },
+                relogin_advice(&command)
+            ))
+        }
+        crate::tracking::LoginOutcome::TimedOut => Err(anyhow::anyhow!(
+            "`{shown}` did not answer within {} seconds. Check the network. {}, then re-run \
+             `spoolway doctor`.",
+            crate::tracking::LOGIN_TIMEOUT.as_secs(),
+            relogin_advice(&command)
+        )),
+        crate::tracking::LoginOutcome::NotRun(why) => Err(anyhow::anyhow!(
+            "`{shown}` could not be run: {why}. Fix the `# spoolway-login:` line in {hook}."
+        )),
+    };
+    vec![Finding::Check(format!("{hook} login"), outcome)]
+}
+
+/// Whether a row elsewhere in the same report already fails on `tool` being
+/// off PATH, so [`login_checks`] stays quiet rather than say it twice. The
+/// jira hook's `acli` has a PATH row in [`issue_tracking_config_checks`],
+/// which every report runs. `gh` has one only from [`gh_status`], which runs
+/// inside [`branch_and_forge_checks`] and so is absent when pipelines fail to
+/// load; `gh_reported` carries that.
+fn login_tool_reported_elsewhere(tool: &str, hook: &str, gh_reported: bool) -> bool {
+    (tool == "gh" && gh_reported)
+        || (tool == "acli" && hook == crate::cli::Tracker::Jira.hook_name())
+}
+
+/// What to tell a person to do about a failed login check, as a clause with
+/// no full stop. Every tool the shipped hooks use spells the check `… auth
+/// status` against `… auth login`, so a trailing `status` becomes the command
+/// to log in again. Any other command is a custom hook's, whose login command
+/// is unknown, so the advice points at the tool's own help instead of naming
+/// a command that may not exist.
+fn relogin_advice(command: &[String]) -> String {
+    match command.split_last() {
+        Some((last, rest)) if last == "status" && !rest.is_empty() => {
+            format!("Log in again with `{} login`", rest.join(" "))
+        }
+        _ => format!("See `{} --help` for how to log in again", command[0]),
+    }
 }
 
 /// A patch layer changes what runs without `git status` ever showing it —
@@ -3947,6 +4092,130 @@ mod tests {
             )),
             "{findings:?}"
         );
+    }
+
+    /// A declared login command is its own row, labelled by the hook: it
+    /// passes on exit 0, and fails with the command, the tool's own first
+    /// stderr line and the command to log in again.
+    #[test]
+    fn login_checks_passes_on_exit_zero_and_fails_with_the_tools_own_error() {
+        let (repo, _root_guard) = scratch_repo("login-row");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("ok.sh"), "# spoolway-login: true\n").unwrap();
+        let findings = login_checks(&repo.checkout, "ok.sh", true);
+        assert!(
+            matches!(&findings[..], [Finding::Check(label, Ok(_))] if label == "ok.sh login"),
+            "{findings:?}"
+        );
+
+        // A script of our own, so the stderr line does not depend on the
+        // locale the way `ls`'s message does.
+        let tool = repo.checkout.join("lapsed-tool.sh");
+        std::fs::write(&tool, "#!/bin/sh\necho 'lapsed: log in' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        std::fs::write(
+            hooks_dir.join("lapsed.sh"),
+            format!("# spoolway-login: {} status\n", tool.display()),
+        )
+        .unwrap();
+        let findings = login_checks(&repo.checkout, "lapsed.sh", true);
+        let [Finding::Check(label, Err(err))] = &findings[..] else {
+            panic!("{findings:?}");
+        };
+        assert_eq!(label, "lapsed.sh login");
+        let err = err.to_string();
+        let shown = tool.display();
+        assert!(
+            err.contains(&format!("`{shown} status` failed: lapsed: log in")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("Log in again with `{shown} login`")),
+            "{err}"
+        );
+    }
+
+    /// A login command whose tool is below the floor the same hook declares
+    /// for it makes no row, and one whose tool is missing makes a note instead.
+    #[test]
+    fn login_checks_notes_a_missing_tool_and_skips_one_below_its_floor() {
+        let (repo, _root_guard) = scratch_repo("login-skip");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("missing.sh"),
+            "# spoolway-login: definitely-not-a-real-binary auth status\n",
+        )
+        .unwrap();
+        let findings = login_checks(&repo.checkout, "missing.sh", true);
+        assert!(
+            matches!(&findings[..], [Finding::Note(text)] if text.contains("not on PATH")),
+            "{findings:?}"
+        );
+        std::fs::write(
+            hooks_dir.join("old.sh"),
+            "# spoolway-requires: cargo >= 999.0.0\n# spoolway-login: cargo no-such-subcommand\n",
+        )
+        .unwrap();
+        assert!(login_checks(&repo.checkout, "old.sh", true).is_empty());
+    }
+
+    /// A missing `gh` is left to `gh_status`'s row only when that row is in
+    /// the report, so a report without it still names the gap.
+    #[test]
+    fn login_tool_reported_elsewhere_counts_gh_only_when_its_row_ran() {
+        assert!(login_tool_reported_elsewhere("gh", "github.sh", true));
+        assert!(!login_tool_reported_elsewhere("gh", "github.sh", false));
+        assert!(login_tool_reported_elsewhere("acli", "jira.sh", false));
+        assert!(!login_tool_reported_elsewhere("acli", "custom.sh", true));
+        assert!(!login_tool_reported_elsewhere("linear", "jira.sh", true));
+    }
+
+    /// A hook that declares tools but no login line gets one note showing the
+    /// line to add; one that declares neither gets nothing.
+    #[test]
+    fn login_checks_notes_a_hook_with_tools_and_no_login_line() {
+        let (repo, _root_guard) = scratch_repo("login-note");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("bare.sh"),
+            "# spoolway-requires: cargo >= 0.0.1\n",
+        )
+        .unwrap();
+        let findings = login_checks(&repo.checkout, "bare.sh", true);
+        let [Finding::Note(text)] = &findings[..] else {
+            panic!("{findings:?}");
+        };
+        assert!(text.contains("# spoolway-login:"), "{text}");
+        std::fs::write(hooks_dir.join("plain.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(login_checks(&repo.checkout, "plain.sh", true).is_empty());
+    }
+
+    /// The warnings screen must never reach the network, so it never runs a
+    /// login command: the marker the command would create stays absent after
+    /// `cheap_findings`, and appears only once the full check runs.
+    #[test]
+    fn cheap_findings_never_runs_the_login_command() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-no-login");
+        let marker = repo.checkout.join("login-ran");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("login.sh"),
+            format!("# spoolway-login: touch {}\n", marker.display()),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.issue_tracking.hook = "login.sh".into();
+
+        cheap_findings(&repo, &Pipelines::builtin(), &config);
+        assert!(!marker.exists(), "cheap_findings ran the login command");
+
+        login_checks(&repo.checkout, "login.sh", true);
+        assert!(marker.exists(), "login_checks never ran it");
     }
 
     /// A hook with no `# spoolway-requires:` line at all produces exactly the

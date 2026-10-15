@@ -8,6 +8,7 @@
 # spoolway-requires: acli >= 1.3.39
 # spoolway-requires: jq >= 1.6
 # spoolway-requires: gh >= 2.97.0
+# spoolway-login: acli jira auth status
 #
 # The `gh` floor is `done`'s own: it looks up the pull request to comment
 # with through `gh pr view`, the same tool and the same floor `github.sh`

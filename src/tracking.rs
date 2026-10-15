@@ -586,6 +586,117 @@ pub(crate) fn required_tools(script: &str) -> Vec<Result<RequiredTool, String>> 
         .collect()
 }
 
+/// The command a hook's `# spoolway-login: <command>` line declares, split on
+/// whitespace — what proves the tracker login behind the hook still works.
+///
+/// The first such line wins. `None` when the hook declares none, or declares
+/// an empty one: both read as "this hook has no login check" rather than as
+/// a command with nothing in it. The words are never handed to a shell, so a
+/// line cannot quote, pipe or expand anything: it is a program and its
+/// arguments, which is also why this is safe to run from `spoolway doctor`
+/// when the hook itself is not. [`run_login`] is what runs it.
+pub(crate) fn login_command(script: &str) -> Option<Vec<String>> {
+    script.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix('#')?.trim();
+        let rest = rest.strip_prefix("spoolway-login:")?;
+        let words: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+        (!words.is_empty()).then_some(words)
+    })
+}
+
+/// How long [`run_login`] waits for a login command before giving up on it.
+/// An `auth status` call answers from a local file or one network round trip,
+/// so a command still running after this long is hung on a dead connection
+/// or a prompt waiting on a terminal that is not there. Without a bound,
+/// `spoolway doctor` would hang with it.
+pub(crate) const LOGIN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What running a hook's [`login_command`] came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoginOutcome {
+    /// The command exited 0: the login works.
+    LoggedIn,
+    /// The command exited otherwise, or was killed by a signal. `stderr` is
+    /// everything it wrote there, or empty when a descendant still held the
+    /// pipe open once the bound ran out.
+    Failed { stderr: String },
+    /// The command was still running after [`LOGIN_TIMEOUT`] and was killed.
+    TimedOut,
+    /// The command could not be started at all, with the operating system's
+    /// reason.
+    NotRun(String),
+}
+
+/// Run `command` (a program followed by its arguments, as [`login_command`]
+/// returns it) with no shell, waiting at most [`LOGIN_TIMEOUT`] for it.
+pub(crate) fn run_login(command: &[String]) -> LoginOutcome {
+    run_login_within(command, LOGIN_TIMEOUT)
+}
+
+/// [`run_login`] with the bound passed in, so a test can prove the kill
+/// without waiting out the real one.
+///
+/// stdin is closed so a tool that offers a prompt reads end-of-file instead
+/// of waiting for a person. stdout is discarded, since only stderr carries
+/// the tool's complaint. stderr is drained on its own thread: a command that
+/// fills the pipe would otherwise block on a write while this loop waits for
+/// it to exit. The thread hands its text back over a channel rather than
+/// being joined: a descendant that inherited the pipe, such as a credential
+/// helper the command started in the background, can keep it open long after
+/// the command has exited or been killed, and joining would then hang this
+/// call past its bound. Once a failed command has exited, its text is waited
+/// for only for what is left of the bound; if the pipe has not closed by then
+/// the outcome carries no stderr.
+fn run_login_within(command: &[String], limit: Duration) -> LoginOutcome {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let Some((program, args)) = command.split_first() else {
+        return LoginOutcome::NotRun("the command is empty".into());
+    };
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => return LoginOutcome::NotRun(err.to_string()),
+    };
+    let mut pipe = child.stderr.take();
+    let (sender, text) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return LoginOutcome::LoggedIn;
+                }
+                let stderr = text
+                    .recv_timeout(limit.saturating_sub(started.elapsed()))
+                    .unwrap_or_default();
+                return LoginOutcome::Failed { stderr };
+            }
+            Ok(None) if started.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return LoginOutcome::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => return LoginOutcome::NotRun(err.to_string()),
+        }
+    }
+}
+
 /// Whether `script`'s own text ever writes a `slug=` line — the static check
 /// `spoolway doctor` runs when `issue_tracking.key_in_names` is on, the same
 /// shape as [`has_fetch_branch`]. A plain substring search: every shipped
@@ -1468,6 +1579,73 @@ mod tests {
                 Err("nonsense-line".to_string()),
             ]
         );
+    }
+
+    /// The login line is read as a program and its arguments, whatever
+    /// whitespace separates them; a blank one declares nothing.
+    #[test]
+    fn login_command_splits_the_declared_line_on_whitespace() {
+        let script = "#!/bin/sh\n#   spoolway-login:   acli  jira auth status \nexit 0\n";
+        assert_eq!(
+            login_command(script),
+            Some(vec![
+                "acli".into(),
+                "jira".into(),
+                "auth".into(),
+                "status".into()
+            ])
+        );
+        assert_eq!(login_command("# spoolway-login:   \n"), None);
+        assert_eq!(login_command("#!/bin/sh\necho hi\n"), None);
+    }
+
+    /// Exit 0 is a login that works; any other exit hands back stderr.
+    #[test]
+    fn run_login_reports_the_exit_and_stderr() {
+        let sh = |body: &str| vec!["sh".to_string(), "-c".into(), body.into()];
+        assert_eq!(run_login(&sh("exit 0")), LoginOutcome::LoggedIn);
+        assert_eq!(
+            run_login(&sh("echo nope >&2; exit 3")),
+            LoginOutcome::Failed {
+                stderr: "nope\n".into()
+            }
+        );
+        assert!(matches!(
+            run_login(&["definitely-not-a-real-binary-xyz".to_string()]),
+            LoginOutcome::NotRun(_)
+        ));
+    }
+
+    /// A command that never exits is killed once the bound passes, and the
+    /// call returns promptly instead of waiting on it.
+    #[test]
+    fn run_login_stops_a_command_that_never_exits() {
+        let started = std::time::Instant::now();
+        let outcome = run_login_within(
+            &["sleep".to_string(), "30".to_string()],
+            Duration::from_millis(300),
+        );
+        assert_eq!(outcome, LoginOutcome::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(LOGIN_TIMEOUT >= Duration::from_secs(1));
+    }
+
+    /// A command that exits while a background descendant still holds its
+    /// stderr open returns at once, not when the descendant finally exits.
+    #[test]
+    fn run_login_does_not_wait_on_a_descendant_holding_stderr() {
+        let sh = |body: &str| vec!["sh".to_string(), "-c".into(), body.into()];
+        let started = std::time::Instant::now();
+        assert_eq!(
+            run_login_within(&sh("sleep 30 & exit 0"), Duration::from_millis(500)),
+            LoginOutcome::LoggedIn
+        );
+        let outcome = run_login_within(&sh("sleep 30 & exit 1"), Duration::from_millis(500));
+        assert!(
+            matches!(outcome, LoginOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// A script with no `# spoolway-requires:` line at all reads back empty
