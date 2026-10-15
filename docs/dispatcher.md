@@ -169,6 +169,8 @@ run of such passes in a row eventually waits anyway.
 
 The header sits in the top-right corner of the board, on the first line of the wordmark. On a pane too narrow for both, it takes its own right-aligned row above the wordmark. On a pane too narrow for the wordmark, it stays at the left margin. A header wider than the pane is cut short with `…`.
 
+The wordmark's spool turns once a second while a dispatcher is running, even when no task is running. With no dispatcher, it turns only while steps are still finishing.
+
 The header names the running dispatcher's version, next to its pid. If a
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
@@ -276,7 +278,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
