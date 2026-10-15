@@ -1073,6 +1073,13 @@ fn rewritten_config(
     // person's to fix and a newer binary's key is that binary's to read, and
     // neither is `sync`'s to delete. `doctor` and every load name them.
     let unknown = crate::config::unknown_keys(text);
+
+    // A hosted profile's blank `prompt_cache_ttl` row is added to what is
+    // rendered and compared, not pasted into the text afterwards, so the check
+    // below still holds the rewrite to the config it came from. A row the file
+    // already has is left as it is.
+    let mut current = current.clone();
+    current.add_blank_cache_ttl_rows();
     let (rewritten, kept) = crate::confdoc::keep(text, &current.render()?, &unknown)?;
 
     // Its own work, checked. A rewrite may not change a single value — every one
@@ -1134,10 +1141,15 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
             // values, not this one's — the same reason `templates` below
             // seeds a missing skeleton from `skeleton.shipped` rather than
             // from anything read out of the main checkout.
+            //
+            // With the blank cache-lifetime rows a rewrite would add, so a
+            // second sync has nothing left to change.
+            let mut shipped = crate::config::Config::default();
+            shipped.add_blank_cache_ttl_rows();
             acts.push(Act::write(
                 crate::config::write_target(&path),
                 &shown,
-                crate::config::Config::default().render()?,
+                shipped.render()?,
             ));
             outcomes.push(Outcome::wrote(&shown, MISSING));
             return Ok(());
@@ -3070,7 +3082,9 @@ mod tests {
     #[test]
     fn a_sync_leaves_a_config_that_config_set_gave_a_concurrency_as_it_is() {
         let (repo, _root_guard) = fixture("config-set-concurrency");
-        Config::default().save(&repo.root).unwrap();
+        let mut written = Config::default();
+        written.add_blank_cache_ttl_rows();
+        written.save(&repo.root).unwrap();
         let loaded = Config::load(&repo.root).unwrap();
         let updated = crate::confkv::set(&loaded, "agents.claude.concurrency", "2").unwrap();
         updated
@@ -3098,7 +3112,9 @@ mod tests {
     #[test]
     fn a_sync_leaves_a_config_that_config_set_gave_a_models_row_as_it_is() {
         let (repo, _root_guard) = fixture("config-set-models");
-        Config::default().save(&repo.root).unwrap();
+        let mut written = Config::default();
+        written.add_blank_cache_ttl_rows();
+        written.save(&repo.root).unwrap();
         let loaded = Config::load(&repo.root).unwrap();
         let updated = crate::confkv::set(&loaded, "models.foo-model.input", "5.0").unwrap();
         updated
@@ -4741,6 +4757,44 @@ mod tests {
 
         assert!(why.contains(crate::assets::PIPELINE_KEYS_BEGIN), "{why}");
         assert!(why.contains(crate::assets::PIPELINE_KEYS_END), "{why}");
+    }
+
+    /// A blank `prompt_cache_ttl` is a value the project wrote, so the rewrite
+    /// `sync` does keeps it rather than dropping the key with the other
+    /// unset ones.
+    #[test]
+    fn a_rewritten_config_keeps_a_blank_prompt_cache_ttl() {
+        let text = "[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n";
+        let current: crate::config::Config = toml::from_str(text).unwrap();
+        let (rewritten, _) = rewritten_config(&current, text).unwrap().unwrap();
+        assert!(rewritten.contains("prompt_cache_ttl = \"\""), "{rewritten}");
+    }
+
+    /// A `claude` or `codex` profile with no row for its glob gets a blank
+    /// `prompt_cache_ttl` row, a row the file already has is left with its
+    /// value, and rewriting the result again changes nothing.
+    #[test]
+    fn a_rewritten_config_adds_a_missing_blank_row_and_keeps_an_existing_one() {
+        let mut current = crate::config::Config::default();
+        current.agents.retain(|_, profile| profile.kind == "claude");
+        let text = current.render().unwrap();
+        assert!(!text.contains("[models."), "{text}");
+
+        let (added, _) = rewritten_config(&current, &text).unwrap().unwrap();
+        assert!(
+            added.contains("[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n"),
+            "{added}"
+        );
+        assert!(!added.contains("gpt-*"), "{added}");
+
+        let reloaded: crate::config::Config = toml::from_str(&added).unwrap();
+        let (again, _) = rewritten_config(&reloaded, &added).unwrap().unwrap();
+        assert_eq!(again, added);
+
+        let chosen = added.replace("prompt_cache_ttl = \"\"", "prompt_cache_ttl = \"1h\"");
+        let reloaded: crate::config::Config = toml::from_str(&chosen).unwrap();
+        let (kept, _) = rewritten_config(&reloaded, &chosen).unwrap().unwrap();
+        assert_eq!(kept, chosen);
     }
 
     /// For `config.toml` `--replace` rewrites the file as `sync` does, so a

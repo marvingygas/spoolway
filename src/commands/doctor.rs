@@ -2081,17 +2081,28 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
 fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     crate::models::unrouted(pipelines, &config.models)
         .into_iter()
+        // The blank `prompt_cache_ttl` row `init` and `sync` write for a hosted
+        // agent kind is there to be seen and filled in, not a row a rename
+        // left behind, so a row with no other key is not noted. Whatever it
+        // gains besides the lifetime makes it count again.
+        .filter(|glob| {
+            !config
+                .models
+                .get(*glob)
+                .is_some_and(crate::models::sets_only_a_lifetime)
+        })
         .map(|glob| Finding::Note(format!("model `{glob}` routes to no step")))
         .collect()
 }
 
 /// Every check and note that reads a model's own settings rather than an
 /// agent profile's: the legacy/template placeholder, a name that resolves to nothing,
-/// a step nothing caps, a `slots` model that has not said whether it is
-/// `local`, a `session_blocked_ctx` set against a model that cannot
-/// honour it, and a step whose `compact_ctx` cannot take effect. Grouped
-/// together because all six walk the same `pipelines`/`config.models` data,
-/// several of them by way of the same `named` map.
+/// a hosted model with no `prompt_cache_ttl`, a step nothing caps, a `slots`
+/// model that has not said whether it is `local`, a `session_blocked_ctx` set
+/// against a model that cannot honour it, and a step whose `compact_ctx`
+/// cannot take effect. Grouped together because all seven walk the same
+/// `pipelines`/`config.models` data, several of them by way of the same
+/// `named` map.
 fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -2149,6 +2160,8 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
             )));
         }
     }
+
+    findings.extend(unset_lifetime_notes(pipelines, config));
 
     // Nothing caps this step at all. The two counts that could — the model's
     // own `slots` and its profile's `concurrency` — are both a fallback for
@@ -2208,9 +2221,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     }
 
     // `slots` describes one card's worth of hardware, so a model carrying it
-    // is almost certainly local. Setting `local` lifts the 5m
-    // `prompt_cache_ttl` default from it, so a carried session is not refused
-    // for age, and it quiets this note.
+    // is almost certainly local. Setting `local` quiets this note.
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
     // at it yet. `local` itself is never a failure, so this is a note.
@@ -2267,6 +2278,60 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
 
     findings.extend(step_compaction_checks(pipelines, config));
     findings
+}
+
+/// One note per `[models]` row that leaves a hosted model this project runs
+/// without a `prompt_cache_ttl`. An unset or blank lifetime puts no age limit
+/// on a carried session, and only the person knows their provider's cache
+/// lifetime, so the note asks for it until the row has any value, `"0"`
+/// included.
+///
+/// The models are the ones agent steps name, leaving out blank models, plus
+/// `unattended.blocked_model` while unattended is on. The `blocked` step is
+/// left out while unattended is off: every loaded pipeline carries one built
+/// from `[unattended]`, but only an unattended run staffs it (see
+/// `Pipeline::blocked_is_staffed`), so without this a project that never
+/// turned the mode on was told to set a lifetime for a model nothing runs.
+/// The placeholder is skipped: it is not a model, and it has its own failure
+/// above. Each is judged through `models::resolve`, so a value from any
+/// config layer or any glob counts, and a model that resolves as `local` is
+/// never named.
+///
+/// Keyed by the row a person would edit, and by the model's own name when no
+/// row covers it: two models under one glob are one fix, and a line per
+/// model would say the same fix several times. A `BTreeSet` also keeps the
+/// order fixed, since the popup's "hide until these change" is keyed on its
+/// text.
+fn unset_lifetime_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+    let unattended = config.unattended.enabled;
+    let blocked = config.unattended.blocked_model.trim();
+    let blocked = (unattended && !blocked.is_empty()).then_some(blocked);
+    let named = pipelines.pipelines.values().flat_map(|pipeline| {
+        pipeline
+            .steps
+            .iter()
+            .filter(|step| step.kind() == StepKind::Agent)
+            .filter(|step| step.id != crate::pipeline::BLOCKED || unattended)
+            .filter_map(|step| step.model.as_deref())
+            .filter(|model| !model.trim().is_empty())
+    });
+    let rows: std::collections::BTreeSet<&str> = named
+        .chain(blocked)
+        .filter(|model| *model != crate::models::PLACEHOLDER)
+        .filter(|model| {
+            let resolved = crate::models::resolve(&config.models, model);
+            resolved.lifetime.is_none() && !resolved.price.is_some_and(|price| price.local)
+        })
+        .map(|model| crate::models::resolved_row(&config.models, model).unwrap_or(model))
+        .collect();
+    rows.into_iter()
+        .map(|row| {
+            Finding::Note(format!(
+                "models.'{row}'.prompt_cache_ttl is not set; set it to your provider's cache \
+                 TTL (highly recommended)"
+            ))
+        })
+        .collect()
 }
 
 /// One check per agent step, from the function the dispatcher refuses the
@@ -2678,7 +2743,7 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                 continue;
             }
             // The age limit that applies, not the raw field: a model that sets
-            // nothing is held to the 5m default, and `"0"` lifts the limit.
+            // nothing has none, and neither does `"0"`.
             let limited = pipelines
                 .pipelines
                 .values()
@@ -2687,8 +2752,8 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                 .filter_map(|step| step.model.as_deref())
                 .filter(|model| !model.trim().is_empty())
                 .find_map(|model| {
-                    let price = crate::models::resolve(&config.models, model).price;
-                    let limit = crate::usage::ModelPrice::cache_ttl_limit(price.as_ref())?;
+                    let lifetime = crate::models::resolve(&config.models, model).lifetime;
+                    let limit = crate::usage::ModelPrice::cache_ttl_limit(lifetime)?;
                     Some((model, limit))
                 });
             match limited {
@@ -3374,6 +3439,170 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:#?}");
         assert!(notes[0].contains("model `Qwen3.6-35B-A3B`"), "{}", notes[0]);
         assert!(!notes[0].contains("Ornith"), "{}", notes[0]);
+    }
+
+    /// The blank `prompt_cache_ttl` row `init` and `sync` write is not a row a
+    /// rename left behind, so it is not noted, whether blank or filled in. A
+    /// row that sets anything else is still noted.
+    #[test]
+    fn a_row_holding_only_prompt_cache_ttl_is_not_noted_as_unrouted() {
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    model: m\n    on_pass: finish\n  - id: \
+             finish\n    run: x\n    on_pass: done\n",
+        );
+        let mut config = Config::default();
+        config.models.insert(
+            "claude-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl_blank: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "gpt-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "old-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl_blank: true,
+                slots: 2,
+                ..Default::default()
+            },
+        );
+
+        let notes: Vec<String> = unrouted_model_notes(&pipelines, &config)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, ["model `old-*` routes to no step"], "{notes:#?}");
+    }
+
+    /// The `prompt_cache_ttl` notes `model_health_checks` gives for `config`
+    /// over a pipeline whose agent steps name each of `models`, plus one
+    /// command step and one blank model, which are never judged.
+    fn unset_lifetime_texts(models: &[&str], config: &Config) -> Vec<String> {
+        let mut steps = String::new();
+        for (i, model) in models.iter().enumerate() {
+            steps.push_str(&format!(
+                "  - id: s{i}\n    agent: claude\n    model: {model}\n    on_pass: s{}\n",
+                i + 1
+            ));
+        }
+        steps.push_str(&format!(
+            "  - id: s{}\n    agent: claude\n    model: \"\"\n    on_pass: finish\n  \
+             - id: finish\n    run: x\n    on_pass: done\n",
+            models.len()
+        ));
+        model_health_checks(&single_step_pipelines(&steps), config)
+            .into_iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains(".prompt_cache_ttl is not set") => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Two hosted models under one blank glob are one note, naming the row a
+    /// person edits. Fails before the note exists: there is none.
+    #[test]
+    fn a_blank_prompt_cache_ttl_row_is_noted_once_for_every_model_under_it() {
+        let config: Config = toml::from_str("[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n")
+            .expect("a blank prompt_cache_ttl loads");
+        assert_eq!(
+            unset_lifetime_texts(&["claude-opus-5-5", "claude-sonnet-5-5"], &config),
+            [
+                "models.'claude-*'.prompt_cache_ttl is not set; set it to your provider's cache \
+                 TTL (highly recommended)"
+            ]
+        );
+    }
+
+    /// A hosted model no row covers is named by its own name. A model that
+    /// resolves as `local`, one whose row sets any lifetime including `"0"`,
+    /// and the placeholder are not named. Fails before the note exists: the
+    /// uncovered model draws nothing.
+    #[test]
+    fn only_a_hosted_model_with_no_lifetime_is_noted() {
+        let config: Config = toml::from_str(
+            "[models.\"claude-*\"]\nprompt_cache_ttl = \"1h\"\n\n\
+             [models.\"gpt-*\"]\nprompt_cache_ttl = \"0\"\n\n\
+             [models.\"Ornith-*\"]\nlocal = true\n",
+        )
+        .expect("the rows load");
+        assert_eq!(
+            unset_lifetime_texts(
+                &[
+                    "claude-opus-5-5",
+                    "gpt-5",
+                    "Ornith-1.5",
+                    "made-up-model",
+                    crate::models::PLACEHOLDER,
+                ],
+                &config
+            ),
+            [
+                "models.'made-up-model'.prompt_cache_ttl is not set; set it to your provider's \
+                 cache TTL (highly recommended)"
+            ]
+        );
+    }
+
+    /// `unattended.blocked_model` staffs the `blocked` step only while
+    /// unattended is on, so it is judged then and not otherwise. Read off
+    /// pipelines loaded the way `doctor` loads them, which carry a `blocked`
+    /// step built from `[unattended]` whether or not the mode is on. Fails
+    /// before that step is left out: the unattended-off case names
+    /// `claude-opus-5`.
+    #[test]
+    fn the_unattended_blocked_model_is_checked_only_while_unattended_is_on() {
+        let (repo, _root_guard) = scratch_repo("blocked-model-ttl");
+        let dir = Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  - id: build\n    agent: pi\n    model: local-model\n    \
+             on_pass: done\n",
+        )
+        .unwrap();
+        let mut config: Config =
+            toml::from_str("[models.\"local-*\"]\nlocal = true\n").expect("the row loads");
+        config.unattended.blocked_model = "claude-opus-5".into();
+        let notes = |config: &Config| -> Vec<String> {
+            let pipelines = Pipelines::load_tracked(&repo.checkout, config).unwrap();
+            assert_eq!(
+                pipelines.pipelines["default"]
+                    .step(crate::pipeline::BLOCKED)
+                    .and_then(|step| step.model.as_deref()),
+                Some("claude-opus-5"),
+                "the loaded pipeline should carry the blocked step"
+            );
+            unset_lifetime_notes(&pipelines, config)
+                .into_iter()
+                .filter_map(|f| match f {
+                    Finding::Note(text) => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        config.unattended.enabled = false;
+        assert_eq!(notes(&config), Vec::<String>::new());
+        config.unattended.enabled = true;
+        assert_eq!(
+            notes(&config),
+            [
+                "models.'claude-opus-5'.prompt_cache_ttl is not set; set it to your provider's \
+                 cache TTL (highly recommended)"
+            ]
+        );
     }
 
     /// A prompt directory no step runs is noted — the `summariser/` a 0.1.0

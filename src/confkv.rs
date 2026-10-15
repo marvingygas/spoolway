@@ -310,7 +310,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "models.<glob>.prompt_cache_ttl",
         values: "<duration>",
-        default: "5m (none if local)",
+        default: "none",
         sentence: "How long a session's prompt cache is trusted to stay warm. A resume \
                     past it opens a fresh session. \"0\" turns it off.",
     },
@@ -327,8 +327,7 @@ pub const REFERENCE: &[Reference] = &[
         default: "false",
         sentence: "Whether this model runs on hardware you own. Setting it on a model that \
                     carries `slots` silences doctor's note that it should \
-                    probably say so. It also removes the 5m `prompt_cache_ttl` default from \
-                    this model.",
+                    probably say so.",
     },
 ];
 
@@ -635,8 +634,8 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
     let current = config.clone();
     let mut value = Value::try_from(config).context("rendering config")?;
 
-    // `[models]` is the one section that ships empty and is meant to be filled
-    // in: every other key exists before you can set it, but a price or a
+    // `[models]` is the one section whose rows are not all known in advance:
+    // every other key exists before you can set it, but a price or a
     // window for a model spoolway never named cannot. So a new glob is
     // created on first write rather than rejected as unknown.
     let parts = match models_key(config, key) {

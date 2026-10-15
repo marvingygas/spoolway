@@ -176,7 +176,7 @@ In a glob, `*` matches any run of characters, and the glob has to match the whol
 | `input`, `output` | USD per 1M tokens |
 | `cache_read` | USD per 1M tokens read from the prompt cache |
 | `cache_write_5m`, `cache_write_1h` | USD per 1M tokens written to a five-minute or one-hour cache |
-| `prompt_cache_ttl` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Defaults to `5m`, and to no limit on a `local` model. `"0"` turns it off. |
+| `prompt_cache_ttl` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. No limit unless you set one. `""` and `"0"` also mean no limit. |
 | `compact_ctx` | Percentage of context at which a lane on this model compacts, from `1` to `100`. See [Compaction threshold](agents.md#compaction-threshold). |
 | `slots`, `local` | See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is) |
 
@@ -235,7 +235,8 @@ A model is priced from the first table that knows it:
 A project row keeps the refreshed or built-in value for every field it leaves out, when those tables
 know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
-A model in none of them has an unknown cost, not a free one. `spoolway models` lists every
+A model in none of them has an unknown cost, not a free one. A project row that sets only
+`prompt_cache_ttl` does not price a model. A model that no table knows stays unpriced under it. `spoolway models` lists every
 model the pipelines name, its window, its rates, which table answered, and how old that table
 is. `spoolway doctor` notes a table older than `housekeeping.price_max_age_days`.
 

@@ -1600,6 +1600,110 @@ mod tests {
         assert!(again.panel().join("\n").contains("prompt `another-prompt`"));
     }
 
+    /// A blank `prompt_cache_ttl` row the pipelines' hosted models resolve to
+    /// is one note under `settings`, wrapped at the popup's width. Hiding the
+    /// popup hides it like any other note, and once the row has a value the
+    /// note is gone. Fails before the note exists: the popup does not name
+    /// the row.
+    #[test]
+    fn the_warnings_popup_names_a_blank_prompt_cache_ttl_row_until_it_is_set() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-ttl");
+        repo.config.models.insert(
+            "claude-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl_blank: true,
+                ..Default::default()
+            },
+        );
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hosted.yml"),
+            "steps:\n  - id: build\n    agent: claude\n    model: claude-opus-5-5\n    \
+             on_pass: review\n  - id: review\n    agent: claude\n    model: \
+             claude-sonnet-5-5\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
+        let Some(Popup::Warnings(gate)) = &tab.popup else {
+            panic!("the warnings popup should be up");
+        };
+        let panel = gate.panel();
+        // Each row inside the box's side borders and padding, so the indents
+        // compared are the body's own. The padding is measured off the
+        // `settings` heading, which the body draws at column zero.
+        let bordered: Vec<&str> = panel
+            .iter()
+            .map(|l| l.trim_start_matches('│').trim_end_matches('│').trim_end())
+            .collect();
+        let pad = bordered
+            .iter()
+            .find(|l| l.trim_start() == "settings")
+            .map(|l| l.len() - "settings".len())
+            .unwrap_or_else(|| panic!("no settings heading: {panel:#?}"));
+        let inner: Vec<&str> = bordered
+            .iter()
+            .map(|l| l.get(pad..).unwrap_or(""))
+            .collect();
+        let note = inner
+            .iter()
+            .position(|l| *l == "  models.'claude-*'.prompt_cache_ttl is not set; set it to your")
+            .unwrap_or_else(|| panic!("the note is not drawn as one row: {panel:#?}"));
+        assert_eq!(
+            inner[note + 1],
+            "    provider's cache TTL (highly recommended)",
+            "{panel:#?}"
+        );
+        assert!(
+            inner[..note].contains(&"settings"),
+            "the note is not under settings: {panel:#?}"
+        );
+        assert_eq!(
+            panel
+                .iter()
+                .filter(|l| l.contains("prompt_cache_ttl"))
+                .count(),
+            1,
+            "one row, one note: {panel:#?}"
+        );
+        assert!(tab.child.is_none());
+
+        let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();
+        crate::commands::warnings_popup(&repo, &pipelines)
+            .expect("the gate should still have something to say")
+            .hide(&repo)
+            .unwrap();
+        assert!(crate::commands::warnings_popup(&repo, &pipelines).is_none());
+
+        // Whether the row has a value is read off the findings the popup is
+        // built from, not off the popup: it is hidden now, so it would answer
+        // `None` for a note that stayed exactly as it was.
+        let ttl_settings = |repo: &Repo| -> Vec<String> {
+            crate::commands::cheap_findings(repo, &pipelines, &repo.config)
+                .into_iter()
+                .filter_map(|warning| match warning {
+                    crate::commands::Warning::Setting(text)
+                        if text.contains("prompt_cache_ttl") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(ttl_settings(&repo).len(), 1, "{:#?}", ttl_settings(&repo));
+        repo.config.models.insert(
+            "claude-*".into(),
+            crate::usage::ModelPrice {
+                prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(ttl_settings(&repo), Vec::<String>::new());
+    }
+
     /// Pipelines on disk that do not load stop the start with the load
     /// error shown, and nothing is started.
     #[test]
