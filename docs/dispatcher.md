@@ -828,6 +828,27 @@ before the step runs in it.
 A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 
+#### How a lane is named in herdr
+
+Herdr's sidebar shows one name per agent, at most 32 characters, and no two live agents share
+one. Every agent lane starts in herdr as `<step>-<tag>`, such as `review-spec-5f2`. The tag is the
+first three hex characters of a hash of the task id, so all of a task's lanes share it. The hash
+never changes, so a task keeps its tag across passes, restarts and releases. A copy of a routine
+uses the routine's name.
+
+Two tasks can have the same tag. A name is taken only when herdr lists it as a live agent right
+now. The later lane then gets a four-character tag, and a five-character one if that is taken too.
+A step that runs again first takes its name away from its own old agent with `herdr agent rename
+<old> --clear`, then starts with its task's three-character tag.
+
+Each lane has a record in `lane_aliases.json` in the project's home. The record maps the herdr
+name back to `<task> · <step>`, and the dispatcher reads it after a restart. Archiving a task
+removes its records, and so does discarding a trial. If the file cannot be read or does not
+parse, spoolway reports it and leaves it as it is.
+
+A `<task>__<step>` name reads back directly, and an `l…` name reads back through its record. The
+name spoolway shows in files, messages and commands is `<task> · <step>`.
+
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with
 an error naming the pane and the byte count, and nothing is typed. A command step's pane, when
 `dispatch.hide_commands` is `false`, is typed one short line that runs the step's script file. See [Background and

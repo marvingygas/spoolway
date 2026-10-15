@@ -263,10 +263,11 @@ struct ContractOutput {
 /// on it is written from.
 ///
 /// `longest_agent_step` no longer bounds a task id's length — see gh-359 and
-/// [`crate::mux::check_task_id`] — but is kept here as information: a lane
-/// name too long for herdr's own wire spelling still gets a short internal
-/// alias rather than a name change, and a person sizing a task id may still
-/// want to know which step it will run longest against.
+/// [`crate::mux::check_task_id`] — but is kept here as information: every
+/// lane starts in herdr as `<step>-<tag>`, so a task id's length never
+/// reaches herdr's name, and it is the step id that is held to a limit. It
+/// names the pipeline's longest step for a person who wants to know which
+/// one that is.
 #[derive(Debug, serde::Serialize)]
 struct PipelineContract {
     longest_agent_step: String,

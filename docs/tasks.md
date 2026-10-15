@@ -117,8 +117,9 @@ digits and hyphens, starting with a letter. A task id may be at most 100 charact
 spoolway builds file names from it and a name past 255 bytes fails. A step id may be at most 26,
 because a lane's herdr name is its step plus a short task tag and herdr refuses a name past 32
 characters. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
-refuse a longer id, naming it and the limit. A lane whose name would outgrow the
-multiplexer's own limit gets a short internal alias instead of a refusal.
+refuse a longer id, naming it and the limit. A task id's length does not matter to herdr, since
+its lanes are named by step and a three-character tag of the task id. See [How a lane is named in
+herdr](dispatcher.md#how-a-lane-is-named-in-herdr).
 
 ### What only holds across a set
 

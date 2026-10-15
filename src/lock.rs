@@ -664,6 +664,88 @@ impl Drop for EditLock {
     }
 }
 
+/// A short-lived advisory lock over a project's `lane_aliases.json`
+/// load-modify-save.
+///
+/// The dispatcher's lane threads reserve a record while `spoolway trial
+/// discard` and the archive sweep drop a task's records, and the last two run
+/// in processes of their own. Each starts from the file as it read it, so a
+/// record written between another caller's read and its save is silently
+/// dropped, and the lane that record named is no longer found by name. A
+/// mutex inside the dispatcher cannot stop that; this lock holds across
+/// processes.
+///
+/// A live holder still in it past [`LaneAliasLock::WAIT`] fails the call
+/// rather than letting it write unlocked, because a lost record is not
+/// noticed until a restart. A crashed holder's file is reaped as in
+/// [`TaskLock`], and a file that vanishes between a waiter's failed link and
+/// its read is retried without removing anything, so a release never costs
+/// a waiter someone else's lock.
+pub struct LaneAliasLock {
+    path: PathBuf,
+}
+
+impl LaneAliasLock {
+    /// A holder is a read, a filter and one `write_atomic` over a file of a
+    /// few hundred small records. Ten seconds covers a burst of lanes
+    /// reserving behind one another; a holder still in it has stalled.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    pub fn acquire(path: &Path) -> Result<LaneAliasLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(LaneAliasLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder_if_present(path)? {
+                    // The holder released between our link and our read. Try
+                    // the link again and remove nothing: another waiter may
+                    // already have linked its own lock into that gap, and
+                    // deleting it would admit two holders at once, which is
+                    // the lost record this lock exists to stop.
+                    None => {}
+                    Some(Some(pid)) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "another `spoolway` process (pid {pid}) has held the lane alias \
+                                 lock at {} for {:?}, so no lane record was written. Run this \
+                                 again once that one has finished.",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    // Stale: a file is there but nothing alive holds it.
+                    Some(None) => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for LaneAliasLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Puts `contents` at `path`, but only if nothing is there yet — `true` on
 /// success, `false` if `path` was already taken.
 ///

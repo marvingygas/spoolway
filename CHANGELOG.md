@@ -40,6 +40,7 @@ bookkeeping out of them and describe user-visible outcomes.
 - A pipeline step id may be at most 26 characters, where 0.10.0 allowed 64. A lane's herdr name is its step plus a short task tag, and herdr refuses a name past 32 characters. `spoolway pipeline check`, `spoolway doctor` and the dispatcher refuse a longer one with ``step id `<id>` is <n> characters long, and the limit is 26``. Rename every step id longer than 26 characters; the shipped pipelines' longest is 15.
 
 ### Features
+- Every agent lane starts in herdr as `<step>-<tag>`, such as `review-spec-5f2`, where the tag is three hex characters of a hash of the task id, so a task's lanes share it and its step is what herdr's sidebar shows. A name is taken only while herdr lists it as a live agent, and the later lane grows its tag to four, then five characters. A step that runs again takes the name back from its old agent with `herdr agent rename --clear`. Lanes started by an older release are still found, and archiving a task removes its lane names from `lane_aliases.json`.
 - `spoolway doctor` lists each file `sync` refuses on a line of its own and leaves it out of the count of files that are behind; under `-v` an `editor` row names the program `open` runs, where it came from, and whether it opens its own window. (#962, #964)
 - The shipped `spoolway-config` skill edits a pipeline, prompt or setting in place on a private setup, in home mode or under `local/`, instead of making an override of it. Run `spoolway sync` to install it. (#951)
 

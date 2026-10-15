@@ -13,7 +13,9 @@
 //! are depended on, as below. Archiving a task deletes its own `commands/`
 //! and `tracking/` files at once, handover log included, after copying the
 //! pull request and conflicts lines into the archived task file; what is left
-//! in those two is a run of a task that never reached the archive. This
+//! in those two is a run of a task that never reached the archive. It also
+//! removes the task's records from `lane_aliases.json`, which no sweep here
+//! ever prunes. This
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
 //! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for the one

@@ -10454,6 +10454,41 @@ mod tests {
         );
     }
 
+    /// Discarding a trial removes its arms' herdr lane names from
+    /// `lane_aliases.json`, as archiving a task does. The discard is a
+    /// separate path from archiving, and without this nothing would ever
+    /// prune the names of an arm that never reached `done`. A task outside
+    /// the trial keeps its own.
+    #[test]
+    fn discarding_a_trial_removes_its_arms_lane_names() {
+        let (repo, _root_guard) = fixture("trial-discard-lane-names");
+        add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+        });
+        add_task_with(&repo, "real-1", "implement", |front| {
+            front.group = Some("demo-group".into());
+        });
+        let none = std::collections::HashSet::new();
+        crate::lane_alias::reserve(repo.home(), "beta-1 · implement", "w1:p1", &none).unwrap();
+        crate::lane_alias::reserve(repo.home(), "real-1 · implement", "w1:p2", &none).unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false).unwrap();
+
+        assert_eq!(
+            crate::lane_alias::alias_for(repo.home(), "beta-1 · implement").unwrap(),
+            None,
+            "a discarded arm's lane name leaves lane_aliases.json"
+        );
+        assert!(
+            crate::lane_alias::alias_for(repo.home(), "real-1 · implement")
+                .unwrap()
+                .is_some(),
+            "a task outside the trial keeps its record"
+        );
+    }
+
     /// The same exemption settlement makes, at the other trigger: an arm's
     /// branch is debris whether or not a remote ever saw it, because the
     /// comparison the arm was run for lives in the usage ledger rather than

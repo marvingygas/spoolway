@@ -30,6 +30,14 @@
 # `pane run` over 512 bytes is refused with `line_too_long`, as a Mac's pane
 # would garble it.
 #
+# An agent name is held to herdr's own rule: a lowercase letter, then
+# lowercase letters, digits, `-` or `_`, at most 32 characters in all, and
+# unique among the agents live at that moment. `agent start` refuses any other
+# name with `invalid_agent_name`, or one a live agent holds with
+# `agent_name_taken`, and `agent rename <name> --clear` takes a name away from
+# its agent and leaves the agent running unnamed. A double that accepted any
+# name would let a suite pass over a name herdr rejects.
+#
 # An agent is a registration, not a process. `agent start` records that a
 # named session sits in a pane, and `agent list` reports it idle for as long
 # as the pane stands — which is what a finished agent that herdr has not been
@@ -43,7 +51,8 @@
 #   workspaces     workspace_id \t label \t checkout_path (empty for none)
 #   tabs           tab_id \t workspace_id \t label
 #   panes          pane_id \t tab_id \t workspace_id \t label
-#   agents         name \t pane_id \t kind, one line per `agent start`
+#   agents         name \t pane_id \t kind, one line per `agent start`; the
+#                  name is `-` once `agent rename --clear` has taken it
 #   typed/<n>      one file per `pane run`, holding exactly what was typed
 #   typed.index    pane_id \t bytes \t typed/<n>, one line per `pane run`
 #   p<n>.cwd       the directory that pane's shell was started in
@@ -90,7 +99,9 @@ next_id() {
 
 # Flags off the argv, in whatever order they came. `--no-focus` and `--force`
 # take no value and are simply ignored: this double has one focus and nothing
-# to force. A bare `--` ends the flags, and what follows is the agent's own
+# to force. `--clear` takes none either, and is dropped like them: `agent
+# rename` never checks it, because clearing is the only rename this double
+# models. A bare `--` ends the flags, and what follows is the agent's own
 # argv, kept in REST and read by nothing here.
 declare -A FLAG=()
 POS=()
@@ -99,7 +110,7 @@ parse_flags() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --) shift; REST=("$@"); return ;;
-      --no-focus|--force) shift ;;
+      --no-focus|--force|--clear) shift ;;
       --*) FLAG[${1#--}]=${2:-}; shift 2 ;;
       *) POS+=("$1"); shift ;;
     esac
@@ -196,8 +207,11 @@ case "$DOMAIN $VERB" in
         cwd=$(cat "$STATE/p${pane##*:p}.cwd" 2>/dev/null || true)
         [ $first -eq 1 ] || printf ','
         first=0
-        printf '{"name":%s,"agent":%s,"agent_status":"idle","pane_id":%s,"tab_id":%s,"workspace_id":%s,"cwd":%s}' \
-          "$(jstr "$name")" "$(jstr "$kind")" "$(jstr "$pane")" "$(jstr "$tab")" \
+        # An agent whose name was cleared is listed without one, as herdr does.
+        namefield=""
+        [ "$name" = "-" ] || namefield="\"name\":$(jstr "$name"),"
+        printf '{%s"agent":%s,"agent_status":"idle","pane_id":%s,"tab_id":%s,"workspace_id":%s,"cwd":%s}' \
+          "$namefield" "$(jstr "$kind")" "$(jstr "$pane")" "$(jstr "$tab")" \
           "$(jstr "$ws")" "$(jstr "$cwd")"
       done <"$STATE/agents"
       printf ']}}\n'; }
@@ -207,7 +221,25 @@ case "$DOMAIN $VERB" in
     name=${POS[0]:?}
     pane=${FLAG[pane]:?}
     [ -n "$(field "$pane" 2 "$STATE/panes")" ] || fail no_such_pane "no pane $pane"
+    if [ "${#name}" -gt 32 ] || ! [[ $name =~ ^[a-z][a-z0-9_-]*$ ]]; then
+      fail invalid_agent_name "agent name must match [a-z][a-z0-9_-]{0,31}: $name"
+    fi
+    # The name is held while a live agent has it. Rows of closed panes are
+    # already gone from the file, so the name of a closed lane is free again.
+    if [ -n "$(field "$name" 1 "$STATE/agents")" ]; then
+      fail agent_name_taken "agent name $name is held by a live agent"
+    fi
     printf '%s\t%s\t%s\n' "$name" "$pane" "${FLAG[kind]:-}" >>"$STATE/agents"
+    echo '{"result":{}}'
+    ;;
+
+  "agent rename")
+    # Only `--clear` is modelled: the one way spoolway renames an agent is to
+    # take a name away from an old lane so that a step run again can use it.
+    name=${POS[0]:?}
+    [ -n "$(field "$name" 1 "$STATE/agents")" ] || fail no_such_agent "no agent $name"
+    awk -F'\t' -v OFS='\t' -v n="$name" '$1==n {$1="-"} {print}' "$STATE/agents" >"$STATE/agents.tmp"
+    mv "$STATE/agents.tmp" "$STATE/agents"
     echo '{"result":{}}'
     ;;
 

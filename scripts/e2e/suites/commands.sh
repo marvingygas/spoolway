@@ -524,9 +524,9 @@ else
   sed 's/^/        /' "$LIVE/task-contract.err"
 fi
 
-# gh-359: a lane too long for the multiplexer's own name limit gets a short
-# internal alias instead of a refusal, so the contract advertises no
-# pipeline-dependent task-id budget any more.
+# gh-359: every lane is named `<step>-<tag>` in the multiplexer, whatever its
+# task id's length, so the contract advertises no pipeline-dependent task-id
+# budget any more.
 if jq -e '.pipelines.default | has("id_budget") | not' <<<"$CHECK_JSON" >/dev/null 2>&1; then
   ok "the contract advertises no pipeline-dependent task-id budget"
 else
@@ -634,10 +634,10 @@ fi
 # `release-spoolway-2` on the release pipeline's `merge-released-repair` step
 # used to be refused before it ever queued: the lane it would build there ran
 # past the multiplexer's own 32-character name limit, and the queue measured
-# a task id against that full, unaliased lane name. A lane too long for the
-# wire now gets a short internal alias instead, so nothing about a task id's
-# length is the queue's business any more — checked here against an id well
-# past what the old 34-byte lane budget ever allowed.
+# a task id against that full lane name. Every lane is now named
+# `<step>-<tag>` in the multiplexer, so nothing about a task id's length is
+# the queue's business any more — checked here against an id well past what
+# the old 34-byte lane budget ever allowed.
 LONG_ID="a-task-id-much-longer-than-herdrs-own-agent-name-limit-of-32-characters"
 LONG_ID_DOC="$LIVE/long-id.md"
 {
