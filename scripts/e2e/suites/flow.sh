@@ -496,6 +496,14 @@ for outcome in pause block; do
       "$task" "$task"
   } > "$SPOOLWAY_PROJECT_HOME/queue/$task.md"
 
+  # Nobody staffs `blocked` in an attended run, so the row names the step it
+  # blocked from, and `state` is the field that says it is blocked.
+  if "$SPOOLWAY" queue list --json | jq -e --arg id "$task" \
+    '.tasks[] | select(.id == $id) | .stage == "implement" and .state == "blocked"' >/dev/null
+  then ok "queue list names the step a block came from, with state blocked"
+  else bad "queue list names the step a block came from, with state blocked"
+    "$SPOOLWAY" queue list --json | sed 's/^/        /'; fi
+
   OUT=$("$SPOOLWAY" report "$task" --"$outcome" -m "only the owner can clear this" 2>&1)
   if [ $? -eq 0 ]; then ok "reporting --$outcome from blocked"
   else bad "reporting --$outcome from blocked"; sed 's/^/        /' <<<"$OUT"; fi
@@ -514,6 +522,13 @@ for outcome in pause block; do
     "$SPOOLWAY_PROJECT_HOME/queue/$task.md"
   has "blocked_from survives the pause, naming the step to hand back to" \
     "blocked_from: implement" "$SPOOLWAY_PROJECT_HOME/queue/$task.md"
+  # `blocked` itself paused it, so that is the step the row names, though
+  # `paused_at` still names the step that first blocked.
+  if "$SPOOLWAY" queue list --json | jq -e --arg id "$task" \
+    '.tasks[] | select(.id == $id) | .stage == "blocked" and .state == "paused"' >/dev/null
+  then ok "queue list names blocked as the step a --$outcome from blocked came from"
+  else bad "queue list names blocked as the step a --$outcome from blocked came from"
+    "$SPOOLWAY" queue list --json | sed 's/^/        /'; fi
 done
 
 # And resuming either one hands the task back to the step it blocked on —

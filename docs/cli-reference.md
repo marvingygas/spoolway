@@ -364,6 +364,9 @@ spoolway queue list --json
 dispatcher runs, NEXT is routed on the pipelines that dispatcher loaded at start. See [Editing a
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
+On a paused or blocked row, STEP and the `--json` `stage` name the step the stop came from, so a
+script that finds paused or blocked tasks matches `state`, not `stage`.
+
 A file in the queue that does not parse has no row. Under the table, the text output lists each
 such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
 

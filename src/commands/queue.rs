@@ -106,10 +106,13 @@ struct QueueRowJson {
     /// The other group this row's own group stacks on — see
     /// [`crate::status::Row::after`].
     after: Option<String>,
+    /// The step the STEP column names — see [`crate::status::Row::stage`].
+    /// On a stopped row it is the step the stop came from, and `state` is
+    /// the field that says `paused` or `blocked`.
     stage: String,
     pipeline: String,
     state: &'static str,
-    /// How many times this task has arrived at the step it is on. Mirrors
+    /// How many times this task has arrived at the step `stage` names. Mirrors
     /// `Row::arrivals`, which the board draws inline on the STEP column as
     /// `↻ <n>` from the second arrival on.
     arrivals: u32,
@@ -9429,6 +9432,35 @@ mod tests {
                 "lane_time_s",
             ]
         );
+    }
+
+    /// A stopped row's `stage` names the step the stop came from, the same
+    /// step the board's STEP column draws, and `state` is still the field
+    /// that says `paused` or `blocked`.
+    #[test]
+    fn queue_json_names_the_step_a_stopped_row_came_from() {
+        use crate::status::testutil::{add_to, fixture};
+
+        let (repo, _root_guard) = fixture("stopped-json");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "gate-it", &[], Some("review"), Some("gate-it"));
+        let mut gated = repo.task("gate-it").unwrap();
+        gated.front.paused_at = Some("review".into());
+        gated.set_stage(crate::pipeline::PAUSED, None);
+        gated.save().unwrap();
+        add_to(&repo, "add-api", &[], Some("review"), Some("add-api"));
+        let mut walled = repo.task("add-api").unwrap();
+        walled.front.blocked_from = Some("review".into());
+        walled.set_stage(crate::pipeline::BLOCKED, None);
+        walled.save().unwrap();
+
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let json = |id: &str| QueueRowJson::from(rows.iter().find(|r| r.id == id).unwrap());
+
+        assert_eq!(json("gate-it").stage, "review");
+        assert_eq!(json("gate-it").state, "paused");
+        assert_eq!(json("add-api").stage, "review");
+        assert_eq!(json("add-api").state, "blocked");
     }
 
     #[test]
