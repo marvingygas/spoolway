@@ -93,8 +93,8 @@ steps:
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
-| `last` | `false` | Command steps only. `true` runs it only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
-| `first` | `false` | Command steps only. `true` runs it only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
+| `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
+| `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
@@ -397,7 +397,8 @@ refuses longer text with an error naming the pane and the byte count.
 The top task of a chain carries every change beneath it, so a suite the whole stack must pass
 runs once, there. A task is last when no unfinished task in its own group depends on it. Any
 other task walks past the step to its `on_pass`. Each group gets its own `last:` run, whatever
-stacks on top of it. `last:` is allowed on command steps only.
+stacks on top of it. `last:` is allowed on any step, and a task walked past an agent step
+starts no lane there.
 
 ### `first:` — a step only a chain's root runs
 
@@ -405,8 +406,9 @@ The root task of a chain carries no declared dependency, so setup that a whole s
 runs only once, there. A task is the root when its own `depends_on` is empty. `depends_on`
 is read from the task's own file, and archiving what it names does not empty it, so a task
 naming an archived dependency is still not the root. Any other task walks past the step to
-its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on command
-steps only, and is refused together with `last:` on the same step.
+its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on any step, and a
+task walked past an agent step starts no lane there. It is refused together with `last:` on the
+same step.
 
 ### Steps a task walks past
 
@@ -432,6 +434,9 @@ reach it:
 - A task that was waiting its `serial:` turn when a dependent was queued above it.
 - A task sent to a step by a failed lane start's `on_fail`, a resume of a parked task, or an
   unattended self-resume after an escalation.
+
+The dispatcher does not walk a task past a step while the task's own lane or foreground command
+run is still working on it. The lane or run finishes and reports first.
 
 ### `serial:` — one run of the step at a time
 

@@ -190,8 +190,8 @@ agent works from it, and you own the skeleton it is written from.
 - Reuse previous sessions until the context threshold is met
 - Give the pipeline a `version:` and raise it when you change the pipeline, so eval can compare
   versions
-- Run a command step only on a chain's root task with `first:`, or one task at a time with
-  `serial:`
+- Run a step only on a chain's root task with `first:`, only on its top task with `last:`, or
+  a command step one task at a time with `serial:`
 
 ```yaml
 # .spoolway/pipelines/default.yml

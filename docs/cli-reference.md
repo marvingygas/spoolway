@@ -883,7 +883,7 @@ pipeline `impl`  entry: implement
              pass -> document   fail -> e2e
 ```
 
-A command step marked `first: true` prints `first-of-chain` the same way, in place of
+A step marked `first: true` prints `first-of-chain` the same way, in place of
 `last-of-chain`. A pipeline loaded from `local/pipelines/` prints `private · <file>` after its
 `entry:` line, naming the file it came from. See [Private
 pipelines](pipelines.md#private-pipelines).

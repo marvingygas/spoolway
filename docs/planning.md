@@ -307,7 +307,7 @@ spoolway does not prescribe how a finished task is published. The optional [`spo
 stack`](pipelines.md#spoolway-stack) command can open one GitHub pull request per task without
 using a model, but where or whether a pipeline calls it is up to you.
 
-A command step with `last:` runs once for the chain. See
+A step with `last:` runs once for the chain. See
 [`last:`](pipelines.md#last--a-step-the-chain-runs-once).
 
 ## Why a plan is a chain

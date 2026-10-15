@@ -383,12 +383,12 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "last",
-        "Command steps only. Only the task at the top of a chain runs it; every \
+        "Only the task at the top of a chain runs it; every \
          task below walks past to `on_pass`.",
     ),
     (
         "first",
-        "Command steps only, `false` when absent. Only a chain's declared root \
+        "`false` when absent. Only a chain's declared root \
          — a task whose own `depends_on` is empty — runs it; every task that \
          names a dependency walks past to `on_pass`. `depends_on` is read \
          from the task's own file, and archiving what it names does not empty \
@@ -644,7 +644,7 @@ pub fn pipeline_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     Ok(())
 }
 
-/// `pipeline show`'s marker for a command step carrying `last:` or `first:`
+/// `pipeline show`'s marker for a step carrying `last:` or `first:`
 /// — refused together at load, so at most one ever applies. Pulled out of
 /// [`show_one`] so the text is a fact `cargo test` can check without
 /// capturing stdout.
@@ -702,6 +702,9 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
             if step.gate {
                 print!(" human-gate");
             }
+            // Same marker a command step gets below: an agent step can walk
+            // most tasks past it too.
+            print!("{}", chain_marker(step));
             if !step.r#loop.is_unbounded() {
                 print!(" loop={}", step.r#loop.describe());
                 print!(" exit={}", step.loop_exit());
@@ -3641,7 +3644,7 @@ mod tests {
         );
     }
 
-    /// `pipeline show`'s marker for a command step that reads differently for
+    /// `pipeline show`'s marker for a step that reads differently for
     /// two tasks on the same pipeline — `last:` and `first:` are refused
     /// together at load, so a step is marked for at most one of them.
     #[test]

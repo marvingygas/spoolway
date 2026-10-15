@@ -1695,7 +1695,33 @@ impl<'a> Dispatcher<'a> {
                 // for groups that may now stack on one another.
                 let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
 
-                match fall_through(&this_step, &tasks[index], dependents) {
+                // A step already working for this task is not walked past. A
+                // `last:` or `first:` step starts its lane or command while
+                // nothing hides it, and a dependent queued afterwards would
+                // make it hidden mid-turn. Walking on would bank the live
+                // lane as finished and refuse its own report, so the work
+                // finishes and reports first, and the step is hidden only
+                // for what has yet to start.
+                //
+                // A background step's run key is not counted: its task
+                // leaves on the pass the run starts, and the run's files stay
+                // in `commands/` after it exits. On a later visit that
+                // leftover would read as live work and start the command
+                // again for a task the step is hidden for. A foreground
+                // step's key is cleared by `reap_stale_runs` once the task is
+                // elsewhere, so one found here belongs to this visit.
+                let live_work = owned.iter().any(|(lane_step, lane_task, _)| {
+                    *lane_step == this_step.id && lane_task == tasks[index].id()
+                }) || (!this_step.background
+                    && keys.contains(&crate::command_step::Runs::key(
+                        &this_step.id,
+                        tasks[index].id(),
+                    )));
+                let fall = match live_work {
+                    true => FallThrough::Runs,
+                    false => fall_through(&this_step, &tasks[index], dependents),
+                };
+                match fall {
                     FallThrough::Runs => {
                         step = Some(this_step);
                         break;
@@ -5550,10 +5576,11 @@ impl<'a> Dispatcher<'a> {
             // Once the task is anywhere else, the run is stopped and its files
             // forgotten, and its exit is never routed on: `on_fail` of a
             // foreground step only applies while the task sits on that step.
-            // A manual `spoolway report` and the walk past a hidden `last:`
-            // step both move the stage without stopping the run, so without
-            // this a late non-zero exit would drag the task off a later
-            // step, even one an agent is mid-turn on.
+            // A manual `spoolway report` and the moves that write a raw
+            // destination (see [`fall_through`]) move the stage without
+            // stopping the run, so without this a late non-zero exit would
+            // drag the task off a later step, even one an agent is mid-turn
+            // on.
             if !step.background {
                 if let Some(pane) = runs.pane(key) {
                     let _ = self.mux.close_pane(&pane);
@@ -10454,12 +10481,23 @@ mod tests {
     }
 
     /// A pipeline whose one command step carries `last: true`, so a task
-    /// either runs it or walks past it. `suite` is a `run:` rather than a lane
-    /// because that is the only kind of step `last:` is allowed on — a lane
-    /// nobody started reports nothing.
+    /// either runs it or walks past it.
     fn last_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: suite\n    run: true\n    last: true\n    on_pass: closeout\n  \
+             - id: closeout\n    run: x\n    on_pass: done\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// A pipeline whose one agent step carries `last: true`, so a task either
+    /// starts a lane there or walks past without one.
+    fn last_agent_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+             - id: review\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             last: true\n    on_pass: closeout\n  \
              - id: closeout\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
@@ -10578,6 +10616,198 @@ mod tests {
         );
     }
 
+    /// `last:` on an agent step: the top of the chain starts a lane there,
+    /// and the tasks below walk past it to `on_pass` with no lane started.
+    #[test]
+    fn only_the_top_of_a_chain_runs_a_last_agent_step() {
+        let (repo, _root_guard) = fixture("last-agent-chain");
+        let pipelines = last_agent_pipelines();
+        let mux = FakeMux::new(vec![]);
+
+        for (id, deps) in [
+            ("foot", vec![]),
+            ("middle", vec!["foot"]),
+            ("top", vec!["middle"]),
+        ] {
+            add_task_with(&repo, id, "review", |f| {
+                f.group = Some("stack".into());
+                f.depends_on = deps.iter().map(|d| d.to_string()).collect();
+            });
+        }
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        for id in ["foot", "middle"] {
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(id) && a.contains("not last in its chain")),
+                "`{id}` should have walked past `review`: {:?}",
+                report.actions
+            );
+            assert!(
+                !report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(id) && a.contains("started")),
+                "`{id}` should have started no lane: {:?}",
+                report.actions
+            );
+        }
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("top") && a.contains("started")),
+            "the top of the chain should have started a lane on `review`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A lane already working on a `last:` agent step is not walked past it
+    /// when a dependent is queued above its task afterwards. Walking on would
+    /// bank the live lane as finished and refuse its own report, so the task
+    /// stays on the step until the lane reports.
+    #[test]
+    fn a_dependent_queued_later_does_not_walk_a_live_last_lane_past_its_step() {
+        let (repo, _root_guard) = fixture("last-agent-live-lane");
+        let pipelines = last_agent_pipelines();
+        add_task_with(&repo, "top", "review", |f| {
+            f.group = Some("stack".into());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        add_task_with(&repo, "above", "queued", |f| {
+            f.group = Some("stack".into());
+            f.depends_on = vec!["top".into()];
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "top · review", LaneStatus::Working)]);
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("top") && a.contains("not last in its chain")),
+            "a lane mid-turn on `review` must not be walked past it: {:?}",
+            report.actions
+        );
+        let task = repo.tasks().unwrap().into_iter().find(|t| t.id() == "top");
+        assert_eq!(task.unwrap().stage(), "review");
+    }
+
+    /// A pipeline whose one command step carries `last: true` and `run:`s in
+    /// the foreground or the background, for the tests about a run already on
+    /// disk when the step is looked at.
+    fn last_command_pipelines(background: bool) -> Pipelines {
+        let yaml = format!(
+            "steps:\n  \
+             - id: suite\n    run: true\n    last: true\n    background: {background}\n    \
+             on_pass: closeout\n  \
+             - id: closeout\n    run: x\n    on_pass: done\n"
+        );
+        let pipeline = crate::pipeline::Pipeline::parse("default", &yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// A foreground command still running on a `last:` step is not walked
+    /// past it when a dependent is queued above its task afterwards. Walking
+    /// on would leave the run to be stopped unread by the next pass.
+    #[test]
+    fn a_dependent_queued_later_does_not_walk_a_live_last_run_past_its_step() {
+        let (repo, _root_guard) = fixture("last-command-live-run");
+        let pipelines = last_command_pipelines(false);
+        let path = add_task_with_worktree(&repo, "top", "suite");
+        add_task_with(&repo, "above", "queued", |f| {
+            f.depends_on = vec!["top".into()];
+        });
+        let mut top = reload(&path);
+        top.front.group = Some("stack".into());
+        top.save().unwrap();
+        let mut above = repo
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id() == "above")
+            .unwrap();
+        above.front.group = Some("stack".into());
+        above.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("suite", "top");
+        runs.start(
+            &key,
+            "sleep 30",
+            &repo.root.join("wt-top"),
+            &Default::default(),
+        )
+        .unwrap();
+
+        let report = run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+        runs.stop(&key);
+
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("top") && a.contains("not last in its chain")),
+            "a run in flight on `suite` must not be walked past it: {:?}",
+            report.actions
+        );
+        assert_eq!(reload(&path).stage(), "suite");
+    }
+
+    /// A background run's files stay in `commands/` after it exits, so a task
+    /// that comes back to the step later and is hidden there is still walked
+    /// past it: the leftover key is an earlier visit's, not live work.
+    #[test]
+    fn a_leftover_background_run_does_not_hold_a_hidden_last_step() {
+        let (repo, _root_guard) = fixture("last-background-leftover");
+        let pipelines = last_command_pipelines(true);
+        let path = add_task_with_worktree(&repo, "top", "suite");
+        add_task_with(&repo, "above", "queued", |f| {
+            f.depends_on = vec!["top".into()];
+        });
+        let mut top = reload(&path);
+        top.front.group = Some("stack".into());
+        top.save().unwrap();
+        let mut above = repo
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id() == "above")
+            .unwrap();
+        above.front.group = Some("stack".into());
+        above.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("suite", "top");
+        runs.start(&key, "true", &repo.root.join("wt-top"), &Default::default())
+            .unwrap();
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(0) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command never exited"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let report = run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+        runs.stop(&key);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("top") && a.contains("not last in its chain")),
+            "the leftover run of an earlier visit must not hold the step: {:?}",
+            report.actions
+        );
+    }
+
     /// A fan is not a stack. Nobody depends on anybody, so no task's branch
     /// contains another's and every one of them runs the step — the answer
     /// `when: last` got wrong by asking about declared dependents instead.
@@ -10669,8 +10899,7 @@ mod tests {
 
     /// A pipeline whose one command step carries `first: true`, so a task
     /// either runs it or walks past it depending on its own declared
-    /// `depends_on`. `setup` is a `run:` for the same reason `suite` is
-    /// above: `first:` is only ever a command step's key.
+    /// `depends_on`.
     fn first_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
@@ -10714,6 +10943,55 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("next") && a.contains("not first in its chain")),
             "`next` should have walked past `setup`: {:?}",
+            report.actions
+        );
+    }
+
+    /// `first:` on an agent step: the root starts a lane there, and a task
+    /// with a dependency walks past it to `on_pass` with no lane started.
+    #[test]
+    fn only_the_root_of_a_chain_runs_a_first_agent_step() {
+        let (repo, _root_guard) = fixture("first-agent-chain");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: setup\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             first: true\n    on_pass: work\n  \
+             - id: work\n    run: x\n    on_pass: done\n",
+        );
+        let mux = FakeMux::new(vec![]);
+
+        add_task_with(&repo, "root", "setup", |f| {
+            f.group = Some("stack".into());
+        });
+        add_task_with(&repo, "next", "setup", |f| {
+            f.group = Some("stack".into());
+            f.depends_on = vec!["root".into()];
+        });
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("root") && a.contains("started")),
+            "the root of the chain should have started a lane on `setup`: {:?}",
+            report.actions
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("next") && a.contains("not first in its chain")),
+            "`next` should have walked past `setup`: {:?}",
+            report.actions
+        );
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("next") && a.contains("started")),
+            "`next` should have started no lane: {:?}",
             report.actions
         );
     }
