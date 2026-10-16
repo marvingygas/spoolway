@@ -222,6 +222,57 @@ else
   bad "and its worktree is gone (\"$GHOST_WORKTREE\" still exists)"
 fi
 
+# ------------------------------------------ closing a stuck task lets its dependent go on
+# `resume --stage done` is the way out for a task that cannot pass: it moves a
+# paused or blocked task to `done`, and the dispatcher then archives it and
+# starts whatever waited on it. A unit test settles the file edits; only a real
+# dispatcher pass and a real dependent show that the dependent actually starts.
+# A task still running on a step is refused, so it is paused first.
+echo hang > "$CTL/closer"
+echo hang > "$CTL/after-closer"
+task_doc "$LIVE/closer.md" closer "$BODY" "group: closer"
+must "a task whose lane will hang" "$SPOOLWAY" queue add --from "$LIVE/closer.md"
+task_doc "$LIVE/after-closer.md" after-closer "$BODY" "group: closer" \
+  "depends_on: [closer]"
+must "and a task that waits on it" "$SPOOLWAY" queue add --from "$LIVE/after-closer.md"
+if drive closer implement 120; then ok "the first task reaches implement and hangs"
+else bad "the first task reaches implement and hangs (at \`$(stage_of closer)\`)"; fi
+CLOSER_PID=$(lane_pid "closer · implement" 30)
+if [ -n "$CLOSER_PID" ]; then ok "its lane really is mid-turn"
+else bad "its lane really is mid-turn"; fi
+lacks "the dependent has not started" "worktree_path:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/after-closer.md"
+refuses "a task still running on a step is not closed" "queue pause closer" \
+  "$SPOOLWAY" resume closer --stage done
+must "pausing it stops the lane" "$SPOOLWAY" queue pause closer
+if drive closer paused 60; then ok "and the task parks on paused"
+else bad "and the task parks on paused (at \`$(stage_of closer)\`)"; fi
+
+CLOSE_OUT="$LIVE/close.out"
+# The close is refused for the moment while the dispatcher is still booting a
+# lane for the task, and says to run it again; a pass that read the task just
+# before the pause can be doing exactly that. So it is asked again until it
+# takes.
+close_closer() {
+  "$SPOOLWAY" resume closer --stage done -m "work already on main" >"$CLOSE_OUT" 2>&1
+}
+if poll_until 30 close_closer; then
+  ok "\`resume --stage done\` closes a task standing on a step"
+else
+  bad "\`resume --stage done\` closes a task standing on a step"
+  sed 's/^/        /' "$CLOSE_OUT"
+fi
+has "it says what it skipped" "closer: -> done (skipped: " "$CLOSE_OUT"
+if drive closer gone 60; then ok "the dispatcher archives the closed task"
+else bad "the dispatcher archives the closed task (at \`$(stage_of closer)\`)"; fi
+if wait_for_text 60 "$E2E_DISPATCH_LOG" "started after-closer · implement"; then
+  ok "and the task that waited on it starts"
+else
+  bad "and the task that waited on it starts"
+  tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+dispatcher_stop
+
 # ------------------------------------------------------------- --all --force
 # Refused outright, in either flag order — tearing down every checkout in the
 # queue is not a command a script should reach by accident.

@@ -23233,6 +23233,46 @@ mod tests {
         assert!(repo.archive_dir().join("demo.md").exists());
     }
 
+    /// A blocked task a person closes with `spoolway resume --stage done` is
+    /// torn down and archived by the next pass like any task that reaches
+    /// `done`, and the task waiting on it is no longer held back.
+    #[test]
+    fn a_task_closed_as_done_by_hand_is_archived_and_frees_its_dependent() {
+        let (mut repo, _root_guard) = fixture("close-as-done");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let path = add_task_with(&repo, "parent", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/parent".into());
+            f.blocked_from = Some("handover".into());
+        });
+        add_task_with(&repo, "child", crate::pipeline::QUEUED, |f| {
+            f.depends_on = vec!["parent".into()];
+        });
+
+        crate::commands::resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "parent".into(),
+                stage: Some(crate::pipeline::DONE.into()),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert!(!path.exists(), "the closed task left the queue");
+        assert!(repo.archive_dir().join("parent.md").exists());
+        let tasks = repo.tasks().unwrap();
+        let graph = crate::graph::Graph::build(&tasks, &repo.archive_dir());
+        assert!(graph.waiting_on("child").is_empty());
+    }
+
     /// Archiving a task takes its hook and command run files with it, so
     /// `tracking::failures` stops naming a long-gone task's failed hook
     /// (review finding 64). Another task's files are left untouched.

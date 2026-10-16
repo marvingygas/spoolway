@@ -320,12 +320,13 @@ task whose own `gate_at:` names the step it is reporting from, whatever that ste
 same holds for a command step: `gate: true` holds a passing exit, and `gate_at:` holds any exit.
 Nothing went wrong. You decide whether it goes on.
 
-Press `r` on the paused row. The picker preselects the step the gate's pass leads to, and
-`enter` sends the task on. Pick another step to send it back round to that step.
+Press `r` on the paused row. The picker preselects the step a plain resume lands on, and
+`enter` sends the task there. After a caught pass, that is the step the pass leads to. Pick
+another step to send the task to that step instead.
 
 A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
-column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
+column names the outcome a scheduled pause caught, such as `review failed → implement`, when it was
 not a plain pass.
 
 A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the `on_pass` of the
@@ -333,14 +334,42 @@ step the task stopped at, which is where an unheld pass would have gone. A comma
 at runs again. The board's resume picker says the block was cleared. When the stopped step has
 `gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
 
-A `gate_at` that caught a command step's failing exit sends a plain resume down that step's
-`on_fail`, the route the exit code chose.
+A `gate_at` that caught a `--fail`, at an agent step or a command step alike, sends a plain
+resume down that step's `on_fail`, the route the failure chose. The picker preselects that
+step. A step with no `on_fail` sends the task to `blocked`. To wave the failure through
+instead, pick the step's `on_pass` step in the picker. To close the task instead, pick the
+`done` row. See [Closing a stuck task](#closing-a-stuck-task).
 
 A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events)
 also pauses the task, on `queued`, on `started` or on `done`. `spoolway resume` forgets that
 hook's failed run, so the hook fires again. A task paused on `queued` or `started` resumes back
 to `queued`. A task paused on `done` resumes straight back to `done` instead, since a plain
 resume only knows pipeline steps and `queued`.
+
+### Closing a stuck task
+
+A task whose last step can never pass can be closed as `done` by hand. Close a `blocked` or
+`paused` task with the `done` row at the end of the board's resume picker, or with a command:
+
+```
+$ spoolway resume cart-totals --stage done -m "work already on main (#71)"
+cart-totals: -> done (skipped: handover)
+```
+
+The output names every step the task skips, or `none`. The task's `## Status Log` gets one
+line, with `-m` as its Note:
+
+```
+→ `done`: resumed from `blocked` at `handover` with --stage done; skipped: handover. Note: work already on main (#71)
+```
+
+A lane still working on the task is stopped first. The task is then torn down and archived like
+any task that reaches `done`, and the tasks that depend on it go on.
+
+Only a person closes a task. `spoolway report --pass --stage done` from an unblocker lane exits 1
+and says so. The close is refused while a task in `depends_on` has not finished, and while the
+dispatcher is starting a lane for the task. In the second case, run the command again in a
+moment.
 
 ### A start branch that does not exist
 

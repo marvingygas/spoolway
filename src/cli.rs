@@ -1103,7 +1103,8 @@ pub struct ResumeArgs {
 
     /// Step to resume at, overriding the route. On a blocked task this
     /// replaces the step it stopped on; on a paused task it reroutes past the
-    /// gate entirely, to a step of your choosing.
+    /// gate entirely, to a step of your choosing. `done` closes a blocked or
+    /// paused task instead, skipping every step it has left.
     #[arg(long, value_name = "STEP")]
     pub stage: Option<String>,
 

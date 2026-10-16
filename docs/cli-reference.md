@@ -761,7 +761,7 @@ transcript.
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A failing exit of a command step goes to that step's `on_fail`. A task an [issue-tracking
+it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
 hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
 `queued`, and one paused on `done` resumes straight back to `done`. A task paused because its
@@ -774,7 +774,7 @@ These tasks are refused, each with a message that names the reason and what to d
 |---|---|---|
 | On `queued` | Always | It starts on its own, so there is nothing to resume |
 | On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
-| On `blocked` while its unblocker lane is live or starting | Always | Run `spoolway queue pause <task>` to take the task from the unblocker, then `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage` puts the task back on `blocked` |
+| On `blocked` while its unblocker lane is live or starting | Always, except `--stage done` with a live lane, which stops the lane | Run `spoolway queue pause <task>` to take the task from the unblocker, then `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage` puts the task back on `blocked` |
 | Archived | Always, with or without `--stage` | There is nothing to resume. Run `spoolway queue add` to queue a new task |
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
@@ -794,11 +794,15 @@ While a dispatcher runs, the destination comes from the pipelines it loaded at s
 ```
 spoolway resume <task>
 spoolway resume <task> --stage review -m "send it back round"
+spoolway resume <task> --stage done -m "work already on main"
 ```
+
+`--stage done` prints `<task>: -> done (skipped: <steps>)` and stops a lane still working on the
+task. See [Closing a stuck task](tasks.md#closing-a-stuck-task).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--stage <STEP>` | | Resume at this step instead |
+| `--stage <STEP>` | | Resume at this step instead. `done` closes a `blocked` or `paused` task, skipping every step it has left |
 | `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).

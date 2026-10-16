@@ -560,8 +560,8 @@ pub struct Frontmatter {
     /// The step rather than the destination, because the destination is the
     /// pipeline's to say and the pipeline may have been edited since. Released,
     /// the task goes wherever that step's `on_pass` points *now*; rejected, its
-    /// `on_fail`. A command step's held failure is the exception: its release
-    /// takes the `on_fail` its exit code chose. Cleared by the release.
+    /// `on_fail`. A held failure is the exception: its release takes the
+    /// `on_fail` the failure chose. Cleared by the release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<String>,
 

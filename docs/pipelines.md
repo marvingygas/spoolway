@@ -275,7 +275,11 @@ lane without a session, set `blocked_session = false` in the config.
 - `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
   or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker, then
   `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage`
-  puts the task back on `blocked` and starts another unblocker.
+  puts the task back on `blocked` and starts another unblocker. `spoolway resume <task> --stage
+  done` is the exception: it stops the unblocker lane and closes the task.
+- An unblocker cannot close a task. `spoolway report --pass --stage done` from its lane exits 1.
+  Only a person closes a task, as described in
+  [Closing a stuck task](tasks.md#closing-a-stuck-task).
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
 - `spoolway pipeline show` marks where each pipeline's `blocked` step comes from.
 
@@ -550,12 +554,13 @@ open. A command step has no lane to report: `gate: true` holds its passing exit 
 and a task's `gate_at:` holds a command step's exit whatever it was. A `background: true` step
 passes as soon as it starts, so `gate: true` is refused there.
 
-On the board, press `r` on the paused row. The picker preselects the `on_pass` route, so `enter`
-lets the task past. Pick another step to send the task there instead.
+On the board, press `r` on the paused row. After a caught pass, the picker preselects the
+`on_pass` route, so `enter` lets the task past. Pick another step to send the task there
+instead.
 
-- `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
-  declares or does not. The one exception is a command step whose failing exit a task's
-  `gate_at:` held: resuming that takes the step's `on_fail`, the route the exit code chose.
+- A plain resume takes `on_pass` after a caught pass, whatever `on_fail` a step declares or does
+  not. After a task's `gate_at:` caught a `--fail` or a failing command exit, a plain resume
+  takes the step's `on_fail`, the route the failure chose.
 - Picking another step in the picker reroutes the task to that step, whatever the gate would
   otherwise have done.
 - A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
