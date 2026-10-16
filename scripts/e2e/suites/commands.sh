@@ -1374,6 +1374,10 @@ override contract
 group list
 sync
 queue add
+queue add --from nothing.md --dry-run
+queue show nothing
+prompt show implement
+whats-new
 LIST
 
 BEFORE_ROOT=$(cat .spoolway/config.toml)

@@ -410,12 +410,19 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 --force` removes that value, so a task sent again is cut again from its start branch. A
 `starts_from:` you set before the cut stays.
 
-`unqueue --force` keeps the task's branch when it has commits no remote has. A task sent again
-with that branch in place is refused and moves to `blocked`, because its first cut never uses a
-branch that already exists. Rename the branch with `git branch -m task/<id> <name>` and set
-`starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop it. Then resume
-the task. See [Where work happens on
+`unqueue --force` keeps the task's branch when it has commits no remote has. Sending the task
+again with that branch in place is refused by `queue add`, because its first cut never uses a
+branch that already exists. Nothing is queued. Rename the branch with `git branch -m task/<id>
+<name>` and set `starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop
+it. Then send the task again. See [Where work happens on
 disk](dispatcher.md#where-work-happens-on-disk).
+
+Deleting a running task's queue file takes the task off the board and leaves its worktree and
+`task/<id>` branch behind. Nothing removes them, and a command step already running in that
+worktree keeps running. `spoolway doctor` fails the row `no deleted task left a
+worktree or branch` and names both. `spoolway queue add` refuses that id until they are gone,
+and the message gives the `git worktree remove --force` and `git branch -D` commands, or the
+`git branch -m` rename that keeps the work.
 
 ### The stop is yours to work in
 

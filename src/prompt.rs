@@ -374,6 +374,48 @@ const PROMPT_SKELETON: &str = "\
 ## Never
 - <a guardrail; none is fine>";
 
+/// The step a task not standing on a step is going to run, which is the step
+/// its contract is for.
+///
+/// `queued`, `paused` and `done` are stages, not steps, so none can be looked
+/// up in the pipeline. A paused task is sent where `spoolway resume` sends it,
+/// read through the same [`crate::commands::resume_road`] that `queue route`
+/// prints: the step after the gate it is held at, not the gate itself. A
+/// queued task, or a paused one that never started, runs the first agent step
+/// once its dependencies clear. A `done` task runs nothing, so it is refused
+/// in words rather than as a step the pipeline lacks.
+fn next_step<'a>(
+    repo: &Repo,
+    pipeline: &'a Pipeline,
+    pipelines: &Pipelines,
+    task: &Task,
+) -> Result<&'a Step> {
+    let first_agent = || {
+        pipeline
+            .steps
+            .iter()
+            .find(|step| step.kind() == StepKind::Agent)
+            .with_context(|| format!("pipeline `{}` has no agent step", pipeline.name))
+    };
+    let landing = match task.stage() {
+        crate::pipeline::QUEUED => return first_agent(),
+        crate::pipeline::DONE => crate::pipeline::DONE.to_string(),
+        _ => {
+            let dependents = crate::dispatch::queue_dependents(repo, task)?;
+            crate::commands::resume_road(task, pipelines)?.landing(pipeline, task, dependents)
+        }
+    };
+    match landing.as_str() {
+        crate::pipeline::QUEUED => first_agent(),
+        crate::pipeline::DONE => bail!(
+            "task `{}` is done: nothing runs next, so there is no prompt to write for it. Name \
+             a step with `--step` to see that step's contract instead.",
+            task.id()
+        ),
+        step => pipeline.require_step(step),
+    }
+}
+
 /// Which step this contract is for, and a task to render its prompt against.
 fn subject<'a>(
     repo: &Repo,
@@ -384,13 +426,18 @@ fn subject<'a>(
     if let Some(id) = &args.task {
         let task = repo.task(id)?;
         let pipeline = pipelines.for_task(&task)?;
-        let step_id = args
-            .step
-            .clone()
-            .unwrap_or_else(|| task.stage().to_string());
-        let step = pipeline.require_step(&step_id)?;
-        // A task sitting on `queued` or `done` has no prompt to write: say so
-        // rather than printing a contract for a step no agent runs.
+        let step = match &args.step {
+            Some(id) => pipeline.require_step(id)?,
+            None => match task.stage() {
+                crate::pipeline::QUEUED | crate::pipeline::PAUSED | crate::pipeline::DONE => {
+                    next_step(repo, pipeline, pipelines, &task)?
+                }
+                stage => pipeline.require_step(stage)?,
+            },
+        };
+        // A task whose step is a `wait` or a command step has no prompt to
+        // write: say so rather than printing a contract for a step no agent
+        // runs.
         agent_step(pipeline, step)?;
         return Ok((pipeline, step, task, false));
     }
@@ -1250,6 +1297,50 @@ mod tests {
         );
         assert!(message.contains("bugfix"), "{message}");
         assert!(message.contains("default"), "{message}");
+    }
+
+    /// `--task` on a queued or paused task names no step on its own, since
+    /// neither stage is one. It must resolve to the step `resume` would send
+    /// the task to, as `queue route` says, and not to the gate it is held at:
+    /// a task held at a finished gate has nothing left to do there. A road
+    /// that lands on a command step, or on `done`, is refused in words.
+    #[test]
+    fn contract_for_a_held_task_follows_the_road_resume_takes() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("prompt-contract-held");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let first_agent = pipeline
+            .steps
+            .iter()
+            .find(|step| step.kind() == StepKind::Agent)
+            .unwrap();
+        let write = |id: &str, stage: &str, extra: &str| {
+            let raw =
+                format!("---\nid: {id}\nstage: {stage}\npipeline: default\ngroup: g\n{extra}---\n");
+            std::fs::write(repo.queue_dir().join(format!("{id}.md")), raw).unwrap();
+            let args = crate::cli::PromptContractArgs {
+                step: None,
+                pipeline: None,
+                task: Some(id.to_string()),
+            };
+            subject(&repo, &pipelines, &args).map(|(_, step, _, _)| step.id.clone())
+        };
+
+        assert_eq!(write("q1", "queued", "").unwrap(), first_agent.id);
+        let gated = pipeline.step("implement").unwrap();
+        let after_gate = pipeline.next_running_step("implement").unwrap();
+        assert_ne!(gated.id, after_gate);
+        assert_eq!(
+            write("p1", "paused", "paused_at: implement\n").unwrap(),
+            after_gate
+        );
+        let err = write("p2", "paused", "paused_at: document\n").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no agent runs there"),
+            "{err:#}"
+        );
+        let err = write("d1", "done", "").unwrap_err();
+        assert!(format!("{err:#}").contains("is done"), "{err:#}");
     }
 
     /// `init` is advised only for a prompt it writes; any other name is the

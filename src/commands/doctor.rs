@@ -2529,7 +2529,8 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// Queue ids that cannot work: a second queue file holding an id another file
-/// already holds, and a queued task whose id is a routine's name.
+/// already holds, and a queued task whose id is a routine's name. Also the
+/// worktree and branch of a task whose queue file is gone.
 ///
 /// The first is the Windows Explorer copy `dd1 - Copy.md` beside `dd1.md`.
 /// The dispatcher skips the copy and names it on every pass, but only a
@@ -2570,9 +2571,39 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
         Err(anyhow::anyhow!("{}", clashing.join("; ")))
     };
 
+    // A queue file deleted while its task ran leaves the checkout and the
+    // branch behind. Nothing removes them, and `queue add` of the same id is
+    // refused until they are gone, so this is where a person learns of them.
+    let stray = match repo.orphaned_task_checkouts(&tasks) {
+        Err(err) => Err(anyhow::anyhow!(
+            "git could not list this repository's worktrees, so leftovers of a deleted task \
+             were not checked for: {err:#}"
+        )),
+        Ok(found) if found.is_empty() => Ok(None),
+        Ok(found) => Err(anyhow::anyhow!(
+            "{}",
+            found
+                .iter()
+                .map(|(path, branch)| {
+                    format!(
+                        "worktree {} and branch `{branch}` belong to no queued task. To drop \
+                         them, run `git worktree remove --force {}` and `git branch -D \
+                         {branch}`. To keep the work, rename the branch with `git branch -m \
+                         {branch} <name>` after removing the worktree, and set `starts_from: \
+                         <name>` in the task you queue next",
+                        path.display(),
+                        path.display()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    };
+
     vec![
         Finding::Check("queue ids are unique".into(), unique),
         Finding::Check("no queued task is named like a routine".into(), unrouted),
+        Finding::Check("no deleted task left a worktree or branch".into(), stray),
     ]
 }
 
@@ -4032,6 +4063,109 @@ mod tests {
         assert!(duplicate.contains("dd1 - Copy.md"), "{duplicate}");
         let routine = why("no queued task is named like a routine").expect("a failed row");
         assert!(routine.contains("routine `nite`"), "{routine}");
+    }
+
+    /// A worktree on `task/<id>` that no queued task records fails its row
+    /// and is named with its branch; a queued task's own checkout does not.
+    #[test]
+    fn queue_id_checks_name_a_worktree_left_by_a_deleted_queue_file() {
+        let (repo, _scratch) = crate::commands::testutil::fixture("doctor-leftover-worktree");
+        let cut = |id: &str| {
+            let path = repo.worktree_root().join(format!("task-{id}"));
+            crate::repo::run(
+                &repo.root,
+                "git",
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("task/{id}"),
+                    &path.display().to_string(),
+                ],
+            )
+            .unwrap();
+            path
+        };
+        let gone = cut("gone");
+        cut("kept");
+        std::fs::write(
+            repo.queue_dir().join("kept.md"),
+            "---\nid: kept\nstage: implement\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+
+        let findings = queue_id_checks(&repo);
+
+        let why = findings.iter().find_map(|finding| match finding {
+            Finding::Check(name, Err(err)) if name.contains("left a worktree") => {
+                Some(format!("{err:#}"))
+            }
+            _ => None,
+        });
+        let why = why.expect("a failed row");
+        assert!(why.contains(&gone.display().to_string()), "{why}");
+        assert!(why.contains("`task/gone`"), "{why}");
+        assert!(why.contains("git branch -m task/gone"), "{why}");
+        assert!(!why.contains("task/kept"), "{why}");
+    }
+
+    /// A queue file that will not parse still belongs to a live task, so its
+    /// checkout is not a leftover. The row must not tell a person to remove it.
+    #[test]
+    fn queue_id_checks_leave_the_checkout_of_a_task_whose_file_will_not_parse() {
+        let (repo, _scratch) = crate::commands::testutil::fixture("doctor-leftover-unparsed");
+        let path = repo.worktree_root().join("task-broken");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/broken",
+                &path.display().to_string(),
+            ],
+        )
+        .unwrap();
+        std::fs::write(
+            repo.queue_dir().join("broken.md"),
+            "---\nid: broken\nstage: implement\nlabels: [unclosed\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+
+        assert!(repo.tasks().unwrap().is_empty(), "the file must not parse");
+
+        let findings = queue_id_checks(&repo);
+
+        assert!(
+            findings.iter().all(|finding| !matches!(
+                finding,
+                Finding::Check(name, Err(_)) if name.contains("left a worktree")
+            )),
+            "{findings:?}"
+        );
+    }
+
+    /// When git cannot list worktrees the row must say so, not pass having
+    /// checked nothing.
+    #[test]
+    fn queue_id_checks_fail_the_leftover_row_when_git_cannot_be_read() {
+        let (repo, _scratch) = scratch_repo("leftover-no-git");
+
+        let findings = queue_id_checks(&repo);
+
+        let why = findings.iter().find_map(|finding| match finding {
+            Finding::Check(name, Err(err)) if name.contains("left a worktree") => {
+                Some(format!("{err:#}"))
+            }
+            _ => None,
+        });
+        assert!(
+            why.expect("a failed row").contains("could not list"),
+            "the row passed without checking"
+        );
     }
 
     /// `doctor`'s note names the file that failed: the override layer's

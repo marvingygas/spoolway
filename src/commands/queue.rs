@@ -1397,6 +1397,12 @@ fn validate_batch_undescribed(
                 existing.display()
             );
         }
+        // After the existing-task check: a task still in the queue owns its
+        // own worktree and branch, and telling a person to remove those would
+        // be advice to destroy live work.
+        if let Some(refusal) = leftover_refusal(repo, &task.front.id, &task_branch(&task)) {
+            bail!("{refusal}");
+        }
         if tasks.iter().any(|t: &Task| t.id() == task.id()) {
             bail!(
                 "`{}` is named by more than one task in this submission",
@@ -1652,6 +1658,54 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
     })
 }
 
+/// The refusal for an id whose worktree or branch an earlier task left
+/// behind, or `None` when neither exists.
+///
+/// Deleting a running task's queue file drops it without cleaning up.
+/// Queueing the id again would adopt the leftover checkout without a word, so
+/// the new task would start from the old one's half-finished work. A branch
+/// alone is not adopted, but the first cut would refuse it later. Nothing is
+/// deleted here: the person may mean to continue that work, so the refusal
+/// names both and the commands that remove or rename them.
+fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
+    let worktree = repo.worktree_root().join(crate::mux::branch_slug(branch));
+    let has_worktree = worktree.exists();
+    let has_branch = ref_exists(repo, branch);
+    if !has_worktree && !has_branch {
+        return None;
+    }
+    let mut what = Vec::new();
+    let mut remove = Vec::new();
+    if has_worktree {
+        what.push(format!("worktree {}", worktree.display()));
+        remove.push(format!(
+            "`git worktree remove --force {}`",
+            worktree.display()
+        ));
+    }
+    if has_branch {
+        what.push(format!("branch `{branch}`"));
+        remove.push(format!("`git branch -D {branch}`"));
+    }
+    // The two leftovers fail differently: a worktree already on disk is
+    // adopted without a word, while a branch alone is refused by the first cut.
+    let why = match has_worktree {
+        true => "and the new task would pick it up",
+        false => {
+            "and the new task's first cut would be refused because it never uses a \
+                  branch that already exists"
+        }
+    };
+    Some(format!(
+        "task id `{id}` cannot be queued: {} from an earlier task with that id is still \
+         there, {why}. To drop it, run {}. To keep the work, rename the branch with `git \
+         branch -m {branch} <name>` and set `starts_from: <name>` in the task. Nothing was \
+         queued.",
+        what.join(" and "),
+        remove.join(", then "),
+    ))
+}
+
 /// The lowest-numbered `<id>-N` held by no queue file, archive file,
 /// `task/<id>` branch or routine name — see [`existing_task_path`] — and not
 /// already claimed earlier in the same trial, since a batch of arms is minted
@@ -1700,9 +1754,23 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
     }
 }
 
+/// The branch `task` will be cut onto: the one recorded in it, which
+/// `issue_tracking.key_in_names` may have prefixed with a tracker slug, and
+/// `task/<id>` otherwise.
+fn task_branch(task: &Task) -> String {
+    task.front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(task.id()))
+}
+
 /// Whether `task/<id>` is a local branch.
 fn branch_exists(repo: &Repo, id: &str) -> bool {
-    let branch = crate::task::default_branch(id);
+    ref_exists(repo, &crate::task::default_branch(id))
+}
+
+/// Whether `branch` is a local branch.
+fn ref_exists(repo: &Repo, branch: &str) -> bool {
     repo.git(&[
         "show-ref",
         "--verify",
@@ -2131,6 +2199,12 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
                 existing.display()
             );
         }
+        // The branch the task will really get: `task/<slug>-<id>` once
+        // `issue_tracking.key_in_names` has prefixed it, which `validate_batch`
+        // could not know when it ran.
+        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+            bail!("{refusal}");
+        }
     }
     // The group's shape is checked again now that the group is locked. The
     // check in [`validate_batch`] ran with no lock, so six parallel adds of a
@@ -2276,12 +2350,29 @@ fn open_and_prefix(
     // it into the queue — because a sibling task further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let group_slug = open_tickets(repo, submitted, task_files, tasks, log)?;
+    let opened = open_tickets(repo, submitted, task_files, tasks, log)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
     // already stamped and the lane name already checked by `validate_batch`.
-    prefix_generated_names(tasks, &group_slug, log);
+    prefix_generated_names(tasks, &opened.group_slug, log);
+
+    // The branch a task will really get is only known now, so a leftover
+    // checkout on a slug-prefixed branch is only found now — after the hook
+    // has opened its issue. Refusing here as the hook-failure path does keeps
+    // that issue from being lost: its id goes back into the pending file and
+    // the message names it, so the run after the leftover is cleared reuses
+    // it instead of opening a second one.
+    for task in tasks.iter() {
+        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+            let written_back = write_back_ids(repo, submitted, tasks, &opened.tasks)?;
+            let rows = lost_ids_rows(&opened.opened, &written_back);
+            if rows.is_empty() {
+                bail!("{refusal}");
+            }
+            bail!("{refusal}\n\n{}", rows.trim_end());
+        }
+    }
     Ok(())
 }
 
@@ -2771,8 +2862,9 @@ fn prefix_generated_names(
 ///
 /// A failing call bails out — nothing in this batch is queued — but not
 /// before every id already answered is written back into the task it
-/// came from, in place on disk: see [`write_back_ids`], which is what makes
-/// re-running the same `queue add` resume rather than open a second set.
+/// came from, in place in the pending directory: see [`write_back_ids`],
+/// which is what makes re-running the same `queue add` resume rather than
+/// open a second set.
 ///
 /// Returns the slug decided for each `group:` this batch touches — one per
 /// group, the first non-blank `slug=` a hook answers, seeded from tasks
@@ -2789,7 +2881,7 @@ fn open_tickets(
     task_files: &[String],
     tasks: &mut [Task],
     log: &mut dyn TicketLog,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<OpenedTickets> {
     // `group:` on every task in this batch is still the bare name a task
     // wrote — `validate_batch` never prefixes it — so every map here is keyed
     // by the bare group.
@@ -2797,7 +2889,10 @@ fn open_tickets(
     let key_in_names = repo.config.issue_tracking.key_in_names;
 
     if !crate::tracking::configured(repo) {
-        return Ok(group_slug);
+        return Ok(OpenedTickets {
+            group_slug,
+            ..Default::default()
+        });
     }
 
     let mut group_size: BTreeMap<String, usize> = BTreeMap::new();
@@ -2903,6 +2998,10 @@ fn open_tickets(
     // say exactly that — not "an id", the id — the same way the task's own
     // Mockup does.
     let mut opened: Vec<String> = Vec::new();
+    // The tasks this call opened an issue for, as against a task that merely
+    // carries a `ticket:` from an earlier run or a `slug:` stamped on it from
+    // its group. Only these have an id a failure can lose.
+    let mut opened_tasks: std::collections::BTreeSet<String> = Default::default();
 
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
@@ -2971,6 +3070,7 @@ fn open_tickets(
                     group_epic.insert(group.clone(), epic.clone());
                     log.row("group issue", "created", &epic, &group);
                     opened.push(format!("epic {epic} (`{group}`)"));
+                    opened_tasks.insert(tasks[i].id().to_string());
                 }
                 if !epic.is_empty() {
                     tasks[i].set_extra_str("epic", &epic);
@@ -2978,6 +3078,7 @@ fn open_tickets(
                 if !ticket.is_empty() {
                     tasks[i].set_extra_str("ticket", &ticket);
                     opened.push(format!("ticket {ticket} (`{}`)", tasks[i].id()));
+                    opened_tasks.insert(tasks[i].id().to_string());
                 }
                 record_slug_and_url(
                     &mut tasks[i],
@@ -2996,7 +3097,7 @@ fn open_tickets(
                 // a later task's own raw answer, which task order would
                 // otherwise let win the re-run.
                 stamp_group_slugs(tasks, &group_slug);
-                let written_back = write_back_ids(submitted, tasks)?;
+                let written_back = write_back_ids(repo, submitted, tasks, &opened_tasks)?;
                 let code = exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "no code".to_string());
@@ -3012,21 +3113,7 @@ fn open_tickets(
                     &repo.home,
                     &crate::command_step::Runs::new(&repo.tracking_dir()).log_path(&key),
                 );
-                let mut rows = String::new();
-                for item in &opened {
-                    let label = if rows.is_empty() { "opened" } else { "" };
-                    rows.push_str(&format!("    {label:<9}{item}\n"));
-                }
-                if !opened.is_empty() {
-                    let ids = if written_back {
-                        "written into pending/".to_string()
-                    } else {
-                        "not written — no task on disk to record them in; close those \
-                         by hand first"
-                            .to_string()
-                    };
-                    rows.push_str(&format!("    {:<9}{ids}\n", "ids"));
-                }
+                let mut rows = lost_ids_rows(&opened, &written_back);
                 rows.push_str(&format!("    {:<9}{log}", "log"));
                 bail!(
                     "the open hook exited {code} for `{}` — nothing was queued.\n\n{rows}",
@@ -3040,7 +3127,11 @@ fn open_tickets(
     if !printed_header.is_empty() {
         log.done();
     }
-    Ok(group_slug)
+    Ok(OpenedTickets {
+        group_slug,
+        opened,
+        tasks: opened_tasks,
+    })
 }
 
 /// The bare `group:` name, with a recognised `<slug>-` prefix removed. A
@@ -3286,7 +3377,7 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
 }
 
 /// Write every value `open_tickets` already secured back into the task it
-/// came from, in place on disk — called only once a hook call has failed,
+/// came from, in place in the pending directory — called only once a hook call has failed,
 /// so a re-run of the same `queue add` sees those tasks already carrying
 /// `epic:`/`ticket:`/`slug:`/`url:` and does not undo the first call's work:
 /// a `ticket:` reports the task `kept` and skips the hook, and a `slug:`
@@ -3296,16 +3387,47 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
 /// `submitted` and `tasks` are index-aligned: `validate_batch` parses one
 /// [`Task`] per submitted item, in the order `submitted` names them, and
 /// never reorders that top-level list — only a task's own `depends_on` is
-/// ever reordered. A task read from `-` (standard input) has no file to
-/// write back to and is silently skipped; there is nowhere on disk for its
-/// answer to resume from anyway. Returns whether any task was written at
-/// all, so the failure message can say where the ids went — or that they
-/// went nowhere.
-fn write_back_ids(submitted: &[(String, String)], tasks: &[Task]) -> Result<bool> {
-    let mut written = false;
-    for (task, (name, raw)) in tasks.iter().zip(submitted.iter()) {
+/// ever reordered.
+///
+/// A task read from `-` (standard input) has no file to write back to, and
+/// neither does a routine's: there is nowhere on disk for its answer to
+/// resume from anyway. A file outside this project's pending directory is not
+/// written to either: `--from` documents that such a path is read and left
+/// alone, and rewriting a person's own file would break that promise.
+///
+/// Returns where the ids of each task in `opened_tasks` went, so the failure
+/// message can say it per task — a batch can mix files inside pending with
+/// files outside it. A task this call opened nothing for is in neither list:
+/// a `ticket:` it already carried is not something the failure lost, and the
+/// group's slug stamped on every sibling is not an id a person has to close.
+fn write_back_ids(
+    repo: &Repo,
+    submitted: &[(String, String)],
+    tasks: &[Task],
+    opened_tasks: &std::collections::BTreeSet<String>,
+) -> Result<WriteBack> {
+    let pending_dir = repo.pending_dir().comparable();
+    let mut outcome = WriteBack::default();
+    for (i, task) in tasks.iter().enumerate() {
+        let id = task.id().to_string();
+        let lost = opened_tasks.contains(&id);
+        let Some((name, raw)) = submitted.get(i) else {
+            if lost {
+                outcome.left.push((id, "no file to write to"));
+            }
+            continue;
+        };
         let path = std::path::Path::new(name);
         if !path.is_file() {
+            if lost {
+                outcome.left.push((id, "no file to write to"));
+            }
+            continue;
+        }
+        if path.comparable().parent() != Some(pending_dir.as_path()) {
+            if lost {
+                outcome.left.push((id, "outside pending/"));
+            }
             continue;
         }
 
@@ -3319,10 +3441,66 @@ fn write_back_ids(submitted: &[(String, String)], tasks: &[Task]) -> Result<bool
         if updated != *raw {
             crate::task::write_atomic(path, &updated)
                 .with_context(|| format!("writing the opened ids back into {name}"))?;
-            written = true;
+        }
+        if lost {
+            outcome.written.push(id);
         }
     }
-    Ok(written)
+    Ok(outcome)
+}
+
+/// What [`open_tickets`] did: the slug decided for each `group:`, one line per
+/// issue it opened, and the tasks those issues were opened for.
+#[derive(Default)]
+struct OpenedTickets {
+    group_slug: BTreeMap<String, String>,
+    opened: Vec<String>,
+    tasks: std::collections::BTreeSet<String>,
+}
+
+/// The `opened` and `ids` rows of a refusal that comes after the hook has
+/// opened issues: what was opened, and per task whether its id reached a
+/// pending file. Empty when nothing was opened, because there is nothing to
+/// resume from and running the command again starts fresh.
+fn lost_ids_rows(opened: &[String], written_back: &WriteBack) -> String {
+    let mut rows = String::new();
+    for item in opened {
+        let label = if rows.is_empty() { "opened" } else { "" };
+        rows.push_str(&format!("    {label:<9}{item}\n"));
+    }
+    // One row per verdict, because a batch can mix files inside pending with
+    // files outside it or read from `-`.
+    let mut id_rows = Vec::new();
+    if !written_back.written.is_empty() {
+        id_rows.push(format!(
+            "written into pending/: {}",
+            written_back.written.join(", ")
+        ));
+    }
+    if !written_back.left.is_empty() {
+        let left: Vec<String> = written_back
+            .left
+            .iter()
+            .map(|(id, why)| format!("{id} ({why})"))
+            .collect();
+        id_rows.push(format!(
+            "not written — only files in pending/ are updated: {}; close those by hand first",
+            left.join(", ")
+        ));
+    }
+    for (n, row) in id_rows.iter().enumerate() {
+        let label = if n == 0 { "ids" } else { "" };
+        rows.push_str(&format!("    {label:<9}{row}\n"));
+    }
+    rows
+}
+
+/// Where [`write_back_ids`] put each task's ids: the tasks whose ids are now
+/// in their pending file, and those whose ids went nowhere, with why.
+#[derive(Default)]
+struct WriteBack {
+    written: Vec<String>,
+    left: Vec<(String, &'static str)>,
 }
 
 /// Sections are appended to a body later, and `append_to_section` reasons in
@@ -10010,6 +10188,14 @@ mod tests {
         path.display().to_string()
     }
 
+    /// Write `text` into the project's pending directory, the one place a
+    /// failed hook call writes ids back into, and hand back its path.
+    fn write_pending_doc(repo: &Repo, name: &str, text: &str) -> String {
+        let path = repo.pending_dir().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    }
+
     /// `--base` set to the fixture's own checkout branch — the ambient value
     /// every one of these tests relied on before a base had to be chosen —
     /// so a task under test can still leave `base:` out unless the test
@@ -10022,6 +10208,132 @@ mod tests {
             dry_run: false,
             no_tracking: Vec::new(),
         }
+    }
+
+    /// An id whose `task/<id>` branch or worktree an earlier task left behind
+    /// is refused, naming both and the commands that clear them. Before this,
+    /// `queue add` took the id and the new task adopted the old checkout.
+    #[test]
+    fn queue_add_refuses_an_id_whose_worktree_and_branch_were_left_behind() {
+        let (repo, _root_guard) = fixture("queue-add-leftovers");
+        let worktree = repo.worktree_root().join("task-ghost");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/ghost",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let path = write_doc(
+            &repo,
+            "ghost.md",
+            &task_text("ghost", "group: ghosts\n", BODY),
+        );
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(&worktree.display().to_string()), "{err}");
+        assert!(err.contains("branch `task/ghost`"), "{err}");
+        assert!(err.contains("git worktree remove --force"), "{err}");
+        assert!(err.contains("git branch -D task/ghost"), "{err}");
+        assert!(repo.queued_ids().is_empty());
+
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        crate::repo::run(&repo.root, "git", &["branch", "-D", "task/ghost"]).unwrap();
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("the same advice, once followed, lets the id through");
+    }
+
+    /// An id still in the queue is "already exists", whatever its checkout
+    /// looks like. Its worktree and branch are live, so the leftover advice
+    /// to remove them would be advice to destroy a running task's work.
+    #[test]
+    fn queue_add_of_a_live_id_says_it_exists_and_not_that_it_left_a_leftover() {
+        let (repo, _root_guard) = fixture("queue-add-live-id");
+        crate::commands::testutil::add(&repo, "live", &[]);
+        let worktree = repo.worktree_root().join("task-live");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/live",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let path = write_doc(&repo, "live2.md", &task_text("live", "group: demo\n", BODY));
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert!(!err.contains("git worktree remove"), "{err}");
+    }
+
+    /// A branch alone is not adopted by a new task; its first cut would
+    /// refuse it. The refusal says that, and not that the task would "pick
+    /// it up", which is only true of a worktree.
+    #[test]
+    fn queue_add_gives_the_true_reason_when_only_a_branch_is_left() {
+        let (repo, _root_guard) = fixture("queue-add-branch-only");
+        crate::repo::run(&repo.root, "git", &["branch", "task/solo"]).unwrap();
+        let path = write_doc(&repo, "solo.md", &task_text("solo", "group: solos\n", BODY));
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("first cut would be refused"), "{err}");
+        assert!(!err.contains("pick it up"), "{err}");
+        assert!(err.contains("git branch -D task/solo"), "{err}");
+        assert!(!err.contains("git worktree remove"), "{err}");
     }
 
     /// A lane cannot mutate the queue for itself — `in_lane: true` is refused
@@ -19394,13 +19706,13 @@ mod tests {
                 "group: scanner-rework\ngroup_description: scanning rework\n",
                 BODY,
             );
-            let first_path = write_doc(&repo, "scan-pending.md", &first);
+            let first_path = write_pending_doc(&repo, "scan-pending.md", &first);
             let second = task_text(
                 "split-fields",
                 "group: scanner-rework\ndepends_on: [scan-pending]\n",
                 BODY,
             );
-            let second_path = write_doc(&repo, "split-fields.md", &second);
+            let second_path = write_pending_doc(&repo, "split-fields.md", &second);
 
             let err = queue_add(
                 &repo,
@@ -19531,13 +19843,13 @@ mod tests {
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
             );
-            let a_path = write_doc(&repo, "auth-01.md", &a);
+            let a_path = write_pending_doc(&repo, "auth-01.md", &a);
             let b = task_text(
                 "auth-02",
                 "group: auth-rework\ndepends_on: [auth-01]\n",
                 BODY,
             );
-            let b_path = write_doc(&repo, "auth-02.md", &b);
+            let b_path = write_pending_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
                 &Pipelines::builtin(),
@@ -19605,11 +19917,11 @@ mod tests {
                 "group: chain\ngroup_description: chained work\n",
                 BODY,
             );
-            let a_path = write_doc(&repo, "chain-a.md", &a);
+            let a_path = write_pending_doc(&repo, "chain-a.md", &a);
             let b = task_text("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
-            let b_path = write_doc(&repo, "chain-b.md", &b);
+            let b_path = write_pending_doc(&repo, "chain-b.md", &b);
             let c = task_text("chain-c", "group: chain\ndepends_on: [chain-b]\n", BODY);
-            let c_path = write_doc(&repo, "chain-c.md", &c);
+            let c_path = write_pending_doc(&repo, "chain-c.md", &c);
 
             // Submitted back to front.
             queue_add(
@@ -19836,6 +20148,218 @@ mod tests {
             assert!(refusal.contains("broken.md"), "{refusal}");
         }
 
+        /// A `--from` file outside pending is read and left alone, even when
+        /// the hook fails after answering: its text is byte for byte what it
+        /// was, and the failure says the ids went nowhere. Before this, the
+        /// ids were written into the person's own file and the message said
+        /// `written into pending/`.
+        #[test]
+        fn a_failing_hook_leaves_a_file_outside_pending_unwritten() {
+            let (mut repo, _root_guard) = fixture("open-fails-outside-pending");
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "split-fields" ]; then exit 1; fi
+                   echo "ticket=acme/app#43" >"$SPOOLWAY_OUT""#,
+            );
+            let first = task_text(
+                "scan-pending",
+                "group: scanner-rework\ngroup_description: scanning rework\n",
+                BODY,
+            );
+            let first_path = write_doc(&repo, "scan-pending.md", &first);
+            let second = task_text(
+                "split-fields",
+                "group: scanner-rework\ndepends_on: [scan-pending]\n",
+                BODY,
+            );
+            let second_path = write_doc(&repo, "split-fields.md", &second);
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&first_path, &second_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("acme/app#43"), "{err}");
+            assert!(err.contains("ids      not written"), "{err}");
+            assert!(!err.contains("written into pending/"), "{err}");
+            assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
+            assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
+        }
+
+        /// A batch mixing a file outside pending with files inside it gets one
+        /// verdict per task: the ids written into pending are named, and so
+        /// are the ones that went nowhere. A single verdict for the batch
+        /// said `written into pending/` for all of them.
+        #[test]
+        fn a_mixed_batch_says_per_task_where_its_ids_went() {
+            let (mut repo, _root_guard) = fixture("open-fails-mixed");
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "c3" ]; then exit 1; fi
+                   echo "ticket=acme/app#$SPOOLWAY_TASK" >"$SPOOLWAY_OUT""#,
+            );
+            let head = task_text("c1", "group: mixed\ngroup_description: mixed batch\n", BODY);
+            let outside = write_doc(&repo, "c1.md", &head);
+            let inside = write_pending_doc(
+                &repo,
+                "c2.md",
+                &task_text("c2", "group: mixed\ndepends_on: [c1]\n", BODY),
+            );
+            let failing = write_pending_doc(
+                &repo,
+                "c3.md",
+                &task_text("c3", "group: mixed\ndepends_on: [c2]\n", BODY),
+            );
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&outside, &inside, &failing]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("written into pending/: c2"), "{err}");
+            assert!(err.contains("c1 (outside pending/)"), "{err}");
+            assert!(!err.contains("none was submitted"), "{err}");
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), head);
+        }
+
+        /// Only a task this run opened an issue for has an id the failure can
+        /// lose. A group slug stamped on every sibling, and a task the hook was
+        /// never reached for, are not ids to close by hand, so they are not
+        /// listed. Naming all four of these files told a person to close
+        /// tickets that do not exist.
+        #[test]
+        fn the_failure_names_only_the_tasks_it_opened_something_for() {
+            let (mut repo, _root_guard) = fixture("open-fails-names-opened");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "c3" ]; then exit 1; fi
+                   { echo "ticket=acme/app#$SPOOLWAY_TASK"; echo "slug=acme-1"; } >"$SPOOLWAY_OUT""#,
+            );
+            let mut paths = Vec::new();
+            for (n, id) in ["c1", "c2", "c3", "c4"].into_iter().enumerate() {
+                let extra = match n {
+                    0 => "group: chain\ngroup_description: a chain\n".to_string(),
+                    _ => format!("group: chain\ndepends_on: [c{n}]\n"),
+                };
+                paths.push(write_doc(
+                    &repo,
+                    &format!("{id}.md"),
+                    &task_text(id, &extra, BODY),
+                ));
+            }
+            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&paths),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("c1 (outside pending/)"), "{err}");
+            assert!(err.contains("c2 (outside pending/)"), "{err}");
+            assert!(!err.contains("c3 (outside"), "{err}");
+            assert!(!err.contains("c4 (outside"), "{err}");
+        }
+
+        /// With `issue_tracking.key_in_names` the branch is `task/<slug>-<id>`,
+        /// a name `validate_batch` cannot know before the hook has answered. A
+        /// leftover checkout on that branch must still refuse the id, or the
+        /// new task adopts the old worktree without a word.
+        #[test]
+        fn a_leftover_on_a_slug_prefixed_branch_refuses_the_id() {
+            let (mut repo, _root_guard) = fixture("open-slug-leftover");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=acme-1"; } >"$SPOOLWAY_OUT""#,
+            );
+            let worktree = repo.worktree_root().join("task-acme-1-c9");
+            crate::repo::run(
+                &repo.root,
+                "git",
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/acme-1-c9",
+                    &worktree.display().to_string(),
+                ],
+            )
+            .unwrap();
+            let text = task_text(
+                "c9",
+                "group: slugged\ngroup_description: slugged work\n",
+                BODY,
+            );
+            let path = write_pending_doc(&repo, "c9.md", &text);
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("branch `task/acme-1-c9`"), "{err}");
+            assert!(err.contains(&worktree.display().to_string()), "{err}");
+            assert!(repo.queued_ids().is_empty());
+
+            // The issue the hook opened before the refusal is not lost: it is
+            // named, and written into the pending file for the next run.
+            assert!(err.contains("ticket PROJ-13 (`c9`)"), "{err}");
+            assert!(err.contains("written into pending/: c9"), "{err}");
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("ticket: PROJ-13"),
+                "the opened ticket was not written back"
+            );
+
+            // Once the leftover is gone, the run reuses that ticket. The hook
+            // now fails, so a second call to it would fail the add.
+            crate::repo::run(
+                &repo.root,
+                "git",
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree.display().to_string(),
+                ],
+            )
+            .unwrap();
+            crate::repo::run(&repo.root, "git", &["branch", "-D", "task/acme-1-c9"]).unwrap();
+            with_hook(&mut repo, "exit 1");
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            assert_eq!(queued(&repo, "c9").extra_str("ticket"), "PROJ-13");
+        }
+
         /// A routine has no task on disk for a failed batch's ids to be
         /// written back into, so the failure must not send a person to
         /// `pending/` to look for them: it says the ids went nowhere, and
@@ -19865,11 +20389,11 @@ mod tests {
             .to_string();
 
             assert!(
-                err.contains("ids      not written — no task on disk"),
+                err.contains("ids      not written — only files in pending/ are updated"),
                 "{err}"
             );
             assert!(err.contains("close those by hand first"), "{err}");
-            assert!(!err.contains("pending/"), "{err}");
+            assert!(!err.contains("written into pending/"), "{err}");
             assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
             assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
             assert!(

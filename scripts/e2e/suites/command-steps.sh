@@ -466,7 +466,7 @@ forget cant-launch
 
 # ------------------------------------------- a launch that fails for another reason
 # The other kind of launch that never succeeds: the step is fine, and what
-# stops it is around it. Here `task/branch-taken` already exists and the task
+# stops it is around it. Here `task/branch-taken` appears after the task queues and the task
 # has no checkout on record, so the worktree cannot be cut. `implement` is
 # given an `on_fail` for this case, which is what tells the two roads apart:
 # sent down it, the task would be routed as though `implement` had run and
@@ -476,11 +476,13 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 sed -i '0,/^    loop: 2$/s//    loop: 2\n    on_fail: review/' .spoolway/pipelines/default.yml
 works "a pipeline whose first step names an on_fail checks out" \
   "$SPOOLWAY" pipeline check
-git branch task/branch-taken HEAD
 
 task_doc "$LIVE/branch-taken.md" branch-taken "$BODY" "group: branch-taken"
-must "a task whose branch name is already taken" \
+must "a task whose branch name is free when it queues" \
   "$SPOOLWAY" queue add --from "$LIVE/branch-taken.md"
+# `queue add` refuses an id whose branch is already there, so the branch is
+# taken after the task is queued and before the dispatcher cuts it.
+git branch task/branch-taken HEAD
 if drive branch-taken blocked 120; then
   ok "three failed launches that are not the step's fault park the task on blocked"
 else

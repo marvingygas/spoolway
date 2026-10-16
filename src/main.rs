@@ -140,6 +140,7 @@ fn run() -> Result<()> {
     // Keep it ahead of cwd resolution and project discovery so it works from
     // an empty directory just as `--version` does.
     if let Command::WhatsNew(args) = &cli.command {
+        commands::refuse_json("whats-new", cli.json)?;
         print!("{}", release_notes::whats_new(args.since.as_deref())?);
         return Ok(());
     }
@@ -463,7 +464,10 @@ fn run() -> Result<()> {
                     let files = routing_for_rows(&repo, &graph)?;
                     commands::queue_list(&repo, &files, cli.json)
                 }
-                Command::Queue(QueueCommand::Show { task }) => commands::queue_show(&repo, task),
+                Command::Queue(QueueCommand::Show { task }) => {
+                    commands::refuse_json("queue show", cli.json)?;
+                    commands::queue_show(&repo, task)
+                }
                 Command::Queue(QueueCommand::Route { task }) => {
                     // Routed as `spoolway resume` routes, so the destination
                     // it prints is the one a resume takes.
@@ -471,9 +475,7 @@ fn run() -> Result<()> {
                     commands::queue_route(&repo, &routed, task, cli.json)
                 }
                 Command::Queue(QueueCommand::Add(args)) => {
-                    if args.from.is_empty() {
-                        commands::refuse_json("queue add", cli.json)?;
-                    }
+                    commands::refuse_json("queue add", cli.json)?;
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     // A running dispatcher's own pipelines, not the files —
                     // see `routing_for_task`. Handed over unread, because
@@ -559,7 +561,10 @@ fn run() -> Result<()> {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
                     prompt::list(&repo, &read)
                 }
-                Command::Prompt(PromptCommand::Show { name }) => prompt::show(&repo, name),
+                Command::Prompt(PromptCommand::Show { name }) => {
+                    commands::refuse_json("prompt show", cli.json)?;
+                    prompt::show(&repo, name)
+                }
                 Command::Prompt(PromptCommand::Override { name }) => {
                     commands::refuse_json("prompt override", cli.json)?;
                     commands::prompt_override(&repo, name)

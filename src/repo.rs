@@ -513,6 +513,58 @@ impl Repo {
         Ok(None)
     }
 
+    /// Every task checkout git lists under [`Repo::worktree_root`] that no
+    /// queued task owns, as its path and the branch it has out.
+    ///
+    /// Deleting a running task's queue file takes the task off the board but
+    /// leaves its worktree and branch behind, and nothing else reports it.
+    /// A checkout counts as owned when a parsed queued task records its path,
+    /// or names its branch. A queue file that will not parse still belongs to
+    /// a live task, so any branch `queue add` could have given its file-name
+    /// id owns the checkout too. Only branches under `task/` are looked at,
+    /// so the scratch checkouts `pipeline contract` cuts under the same root
+    /// are not taken for leftovers.
+    pub fn orphaned_task_checkouts(&self, tasks: &[Task]) -> Result<Vec<(PathBuf, String)>> {
+        let listing = self.git(&["worktree", "list", "--porcelain"])?;
+        let root = self.worktree_root();
+        let unparsed: Vec<String> = self
+            .queued_ids()
+            .into_iter()
+            .filter(|id| !tasks.iter().any(|task| task.id() == id))
+            .collect();
+        let owned = |path: &Path, branch: &str| {
+            tasks.iter().any(|task| {
+                task.front.worktree_path.as_deref().map(Path::new) == Some(path)
+                    || task
+                        .front
+                        .branch
+                        .as_deref()
+                        .unwrap_or(&task::default_branch(task.id()))
+                        == branch
+            }) || unparsed
+                .iter()
+                .any(|id| task::branch_belongs_to(branch, id))
+        };
+        let mut found = Vec::new();
+        let mut path: Option<PathBuf> = None;
+        for line in listing.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(rest));
+            } else if let Some(reference) = line.strip_prefix("branch refs/heads/")
+                && let Some(checkout) = path.take()
+            {
+                let branch = reference.trim();
+                if branch.starts_with("task/")
+                    && crate::platform::is_within(&checkout, &root)
+                    && !owned(&checkout, branch)
+                {
+                    found.push((checkout, branch.to_string()));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Whether git still holds `checkout` under its `initializing` lock.
     ///
     /// `git worktree add` locks the entry it is making with that reason and

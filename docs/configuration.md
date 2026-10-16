@@ -564,7 +564,9 @@ The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 | `url=` | `url:` | Must be an absolute `http` or `https` URL. |
 
 A non-zero exit refuses the whole batch. Ids already returned are written back into the
-pending tasks first, so running the command again resumes.
+pending tasks first, so running the command again resumes. A task read from outside the pending
+directory, or from `-`, gets nothing written back. The failure message lists it, and you close
+its ticket by hand.
 
 ### `fetch` — a sixth event, run by `spoolway issue show`
 

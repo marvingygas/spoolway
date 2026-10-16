@@ -45,7 +45,7 @@ list` and `sync`.
 say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt contract`,
 `prompt list`, `prompt override`, `config show`, `config get`, `config contract`,
 `config override`, `template contract`, `hook contract`, `override contract`, `group list`,
-`sync` and `queue add` without `--from`.
+`sync`, `queue add`, `queue show`, `prompt show` and `whats-new`.
 
 ## Your work
 
@@ -333,7 +333,24 @@ See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-e
 With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
 A `--from` path under this project's own pending directory is deleted once the batch is
-written. A `--from` path anywhere else, including `-`, is read and left alone.
+written. A `--from` path anywhere else, including `-`, is read and left alone. When an `open`
+hook fails, the ids it already returned are written back into the files in the pending
+directory. A file anywhere else is never written. The failure message lists, task by task, which
+ids were written into `pending/` and which were not. It names each task whose ticket you must
+close by hand.
+
+```
+    ids      written into pending/: c2
+             not written — only files in pending/ are updated: c1 (outside pending/); close those by hand first
+```
+
+A task whose `task-<id>` worktree or `task/<id>` branch is still on disk refuses the whole batch.
+Those are the leftovers of an earlier task with that id, such as one whose queue file was
+deleted. Nothing is queued. The message names the worktree and the branch, the `git worktree
+remove --force` and `git branch -D` commands that drop them, and the `git branch -m` rename that
+keeps the work. The queue screen and routines refuse the same id. A task still in the queue is
+reported as already existing instead. See [A start branch that does not
+exist](tasks.md#a-start-branch-that-does-not-exist).
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements and runs its
 `# spoolway-login:` command first; an unmet requirement or a failed login prints the same gate
@@ -1148,6 +1165,11 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 | `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
 
+With `--task` and no `--step`, a task on a step renders that step. A queued task renders the
+pipeline's first agent step. A paused task renders the step `spoolway resume` sends it to, the
+one `spoolway queue route` prints. If that step is a command step, the command says no agent
+runs there. A done task has no next step, and the command says so.
+
 With neither `--pipeline` nor `--task`, and no pipeline yet in the project, it prints a line
 pointing at `spoolway pipeline contract` instead of a step's contract: there is no step yet to
 render against.
@@ -1681,6 +1703,10 @@ seconds, as below. The warnings screen shown before dispatching never runs it.
 A `FAIL` row labelled `queue ids are unique` names each queue file that holds an id another file
 holds. A `FAIL` row labelled `no queued task is named like a routine` names each queued task whose
 id is the name of a routine.
+
+A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
+`task/<id>` branch that no queued task owns, with the commands that drop them and the rename
+that keeps the work. The row also fails when git cannot list the worktrees.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.
