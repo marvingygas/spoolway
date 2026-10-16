@@ -349,6 +349,16 @@ impl Headless {
             script.push_str(&crate::platform::env_export(&record.env));
             script.push('\n');
         }
+        // A threshold the dispatcher's own shell exports reaches every lane
+        // through the inherited environment. A model with no `compact_ctx`
+        // sends nothing, so the variable is dropped here rather than left to
+        // set a threshold the model never chose.
+        if let Some(crate::agent::Compaction::PercentEnv(var)) =
+            crate::agent::adapter(&record.kind).and_then(|adapter| adapter.compaction.as_ref())
+            && !record.env.contains_key(*var)
+        {
+            script.push_str(&format!("unset {var}\n"));
+        }
 
         // Both values go through `printf`'s arguments rather than into its
         // format string: a label is a prompt name today, and a `%` finding its
@@ -1749,6 +1759,61 @@ mod tests {
 
         let log = f.mux.read("implement-demo", 20).unwrap();
         assert!(log.contains("TASK=add-endpoint STEP=implement"), "{log}");
+    }
+
+    /// A threshold exported in the dispatcher's own shell must not reach a lane
+    /// whose model sets none, and must not override one the model does set.
+    #[test]
+    fn an_inherited_compaction_threshold_is_dropped_unless_the_lane_sets_one() {
+        let f = Fixture::new("compaction-env");
+        f.agent("claude", r#"echo "PCT=[$CLAUDE_AUTOCOMPACT_PCT_OVERRIDE]""#);
+        // Cleared again when the test ends, panic included: a lane any
+        // parallel test spawns while it is set inherits it.
+        struct Exported;
+        impl Drop for Exported {
+            fn drop(&mut self) {
+                crate::platform::remove_test_env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE");
+            }
+        }
+        // Held for the test, since this is the only writer of the variable.
+        static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _writer = WRITER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _exported = Exported;
+        crate::platform::set_test_env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "50");
+
+        f.lane("bare-demo", "claude", &[]);
+        f.mux.prompt("bare-demo", "go").unwrap();
+        f.settle("bare-demo");
+        let bare = f.mux.read("bare-demo", 20).unwrap();
+
+        let env = BTreeMap::from([(
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+            "30".to_string(),
+        )]);
+        let pane = new_pane_id(&f.root);
+        f.mux
+            .start_lane(
+                &LaneSpec {
+                    name: "set-demo",
+                    key: "set-demo",
+                    label: "implementer",
+                    kind: "claude",
+                    pane_id: &pane,
+                    args: &[],
+                    env: &env,
+                    path_prefix: Some(&f.bin),
+                },
+                &mut || {},
+            )
+            .unwrap();
+        f.mux.prompt("set-demo", "go").unwrap();
+        f.settle("set-demo");
+        let set = f.mux.read("set-demo", 20).unwrap();
+
+        assert!(bare.contains("PCT=[]"), "{bare}");
+        assert!(set.contains("PCT=[30]"), "{set}");
     }
 
     /// A value with a quote in it has to arrive as one argument with nothing

@@ -98,6 +98,8 @@ Warnings come from the same checks `doctor` runs. They cover only the keys you s
 |---|---|
 | `unattended.blocked_agent` | The name has no profile in `[agents]` |
 | `unattended.*` | `unattended.enabled` is on and `unattended.blocked_model` is blank |
+| `unattended.enabled`, `unattended.blocked_agent`, `unattended.blocked_model` | `unattended.enabled` is on and the `blocked` step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
+| `unattended.enabled`, `unattended.blocked_prompt` | `unattended.enabled` is on and the prompt file of the `blocked` step is missing |
 | `issue_tracking.*` | Any issue-tracking check of `doctor` fails, such as a missing hook script or a blank `project_key` beside a hook |
 | `models.<glob>.compact_ctx`, `agents.<profile>.session_blocked_ctx` | A pipeline step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
 

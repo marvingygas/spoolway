@@ -1684,17 +1684,20 @@ mod tests {
         // built from, not off the popup: it is hidden now, so it would answer
         // `None` for a note that stayed exactly as it was.
         let ttl_settings = |repo: &Repo| -> Vec<String> {
-            crate::commands::cheap_findings(repo, &pipelines, &repo.config)
-                .into_iter()
-                .filter_map(|warning| match warning {
-                    crate::commands::Warning::Setting(text)
-                        if text.contains("prompt_cache_ttl") =>
-                    {
-                        Some(text)
-                    }
-                    _ => None,
-                })
-                .collect()
+            crate::commands::cheap_findings(
+                repo,
+                &pipelines,
+                &repo.config,
+                repo.config.unattended.enabled,
+            )
+            .into_iter()
+            .filter_map(|warning| match warning {
+                crate::commands::Warning::Setting(text) if text.contains("prompt_cache_ttl") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
         };
         assert_eq!(ttl_settings(&repo).len(), 1, "{:#?}", ttl_settings(&repo));
         repo.config.models.insert(

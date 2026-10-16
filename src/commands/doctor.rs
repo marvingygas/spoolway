@@ -254,7 +254,12 @@ pub(crate) enum Warning {
 /// - [`unrouted_model_notes`] is never called: a `[models]` row no step routes
 ///   to is dead config that costs nothing at run time, so it is worth naming
 ///   in the `spoolway doctor` report but not worth stopping a run over.
-pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Warning> {
+pub(crate) fn cheap_findings(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    config: &Config,
+    unattended: bool,
+) -> Vec<Warning> {
     let mux = crate::mux::backend(repo);
     let tasks = repo.tasks().unwrap_or_default();
     let graph = Graph::build(&tasks, &repo.archive_dir());
@@ -276,7 +281,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
         crate::commands::dispatch::check_index_lock(repo),
     ));
     report.record_all(agent_checks(repo, pipelines, config));
-    report.record_all(model_health_checks(pipelines, config));
+    report.record_all(model_health_checks(pipelines, config, unattended));
     report.record_all(agent_kind_checks(config));
     // `doctor_sync`'s own rows are the ones tagged `Warning::File` below —
     // marked by index range rather than by a new `Row` variant, since `Row`
@@ -285,7 +290,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     let sync_start = report.rows.len();
     doctor_sync(repo, &mut report);
     let sync_end = report.rows.len();
-    report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(prompt_checks(repo, pipelines, unattended));
     report.record_all(jobs_checks(repo, pipelines, false));
 
     warnings_from_rows(report.rows, sync_start..sync_end)
@@ -508,11 +513,15 @@ pub fn doctor(
         },
     ));
     report.record_all(agent_checks(repo, pipelines, &config));
-    report.record_all(model_health_checks(pipelines, &config));
+    // The mode a live `--unattended` run holds, else the config's own: the
+    // `blocked` step is judged for the mode that will staff it, and no other
+    // check here reads the flag.
+    let unattended = repo.unattended();
+    report.record_all(model_health_checks(pipelines, &config, unattended));
     report.record_all(unrouted_model_notes(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
-    report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(prompt_checks(repo, pipelines, unattended));
     report.record_all(jobs_checks(repo, pipelines, true));
 
     // A dispatcher that is running is a fact about this moment that changes
@@ -854,12 +863,32 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
         findings.extend(issue_tracking_config_checks(repo, &config.issue_tracking));
     }
     // Block lives on the profile and compaction on the model, so only a
-    // pipeline step pairs them and `confkv::set` cannot order them. Pipelines
-    // that do not load are `doctor`'s to report, not a reason to say more here.
+    // pipeline step pairs them and `confkv::set` cannot order them.
+    // `unattended.blocked_agent` and `blocked_model` choose the pair the
+    // `blocked` step is built from, and `unattended.enabled` decides whether
+    // it is judged at all. Pipelines that do not load are `doctor`'s to
+    // report, not a reason to say more here.
     let sets_compaction = key.ends_with(".session_blocked_ctx")
-        || (key.starts_with("models.") && key.ends_with(".compact_ctx"));
+        || (key.starts_with("models.") && key.ends_with(".compact_ctx"))
+        || matches!(
+            key,
+            "unattended.enabled"
+                | "unattended.blocked_agent"
+                | "unattended.blocked_model"
+                | "unattended.blocked_prompt"
+        );
     if sets_compaction && let Ok(pipelines) = Pipelines::load(&repo.checkout, config) {
-        findings.extend(step_compaction_checks(&pipelines, config));
+        findings.extend(step_compaction_checks(
+            &pipelines,
+            config,
+            config.unattended.enabled,
+        ));
+        // The unblocker prompt is read only once unattended can staff
+        // `blocked`, so turning it on, or renaming the prompt, is when a
+        // missing file starts to matter.
+        if matches!(key, "unattended.enabled" | "unattended.blocked_prompt") {
+            findings.extend(prompt_checks(repo, &pipelines, config.unattended.enabled));
+        }
     }
     findings
         .into_iter()
@@ -2098,7 +2127,7 @@ fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
 /// cannot take effect. Grouped together because all seven walk the same
 /// `pipelines`/`config.models` data, several of them by way of the same
 /// `named` map.
-fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+fn model_health_checks(pipelines: &Pipelines, config: &Config, unattended: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // The one unresolvable name that is a failure rather than a note: the
@@ -2271,7 +2300,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         )));
     }
 
-    findings.extend(step_compaction_checks(pipelines, config));
+    findings.extend(step_compaction_checks(pipelines, config, unattended));
     findings
 }
 
@@ -2344,15 +2373,21 @@ fn unset_lifetime_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
 /// One check per agent step, from the function the dispatcher refuses the
 /// same step with: a profile's block and a model's compaction meet only in a
 /// step. Shared with `spoolway config set`, which runs it after a
-/// `compact_ctx` or `session_blocked_ctx` is saved.
-fn step_compaction_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+/// `compact_ctx`, a `session_blocked_ctx` or the unattended staffing of
+/// `blocked` is saved. The `blocked` step is left out while unattended is off.
+fn step_compaction_checks(
+    pipelines: &Pipelines,
+    config: &Config,
+    unattended: bool,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (pipeline_name, pipeline) in &pipelines.pipelines {
-        for step in pipeline
-            .steps
-            .iter()
-            .filter(|step| step.kind() == StepKind::Agent)
-        {
+        for step in pipeline.steps.iter().filter(|step| {
+            step.kind() == StepKind::Agent
+                // An attended run never staffs the materialised `blocked`
+                // step, so its pairing is not a failure there.
+                && (unattended || step.id != crate::pipeline::BLOCKED)
+        }) {
             let (Some(agent), Some(model)) = (
                 step.agent.as_deref(),
                 step.model.as_deref().filter(|m| !m.trim().is_empty()),
@@ -2423,7 +2458,10 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
 /// exists. The lint over a prompt's own prose is `spoolway pipeline check`'s
 /// alone now, since a surviving finding there fails the build — doctor would
 /// only be repeating a check that already has a sharper place to fail.
-fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
+///
+/// The materialised `blocked` step's prompt is read only when `unattended` is
+/// on: an attended run parks on `blocked` and starts no lane there.
+fn prompt_checks(repo: &Repo, pipelines: &Pipelines, unattended: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // One row per prompt file rather than one per step that names one:
@@ -2435,7 +2473,7 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     let mut prompts: std::collections::BTreeMap<&str, Vec<&str>> =
         std::collections::BTreeMap::new();
     for step in pipelines.pipelines.values().flat_map(|p| &p.steps) {
-        if step.kind() != StepKind::Agent {
+        if step.kind() != StepKind::Agent || (step.id == crate::pipeline::BLOCKED && !unattended) {
             continue;
         }
         let steps = prompts.entry(step.prompt_name()).or_default();
@@ -3362,12 +3400,14 @@ mod tests {
                 profile.kind = "claude".into();
                 profile.session_blocked_ctx = 40;
             }
-            let steps: Vec<Finding> = model_health_checks(&pipelines, &config)
-                .into_iter()
-                .filter(
-                    |f| matches!(f, Finding::Check(label, _) if label.starts_with("pipeline `")),
-                )
-                .collect();
+            let steps: Vec<Finding> = model_health_checks(
+                &pipelines,
+                &config,
+                config.unattended.enabled,
+            )
+            .into_iter()
+            .filter(|f| matches!(f, Finding::Check(label, _) if label.starts_with("pipeline `")))
+            .collect();
             let failed = steps
                 .iter()
                 .filter_map(|f| match f {
@@ -3423,13 +3463,14 @@ mod tests {
             },
         );
 
-        let local_notes: Vec<String> = model_health_checks(&pipelines, &config)
-            .iter()
-            .filter_map(|f| match f {
-                Finding::Note(text) if text.contains("but not `local`") => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        let local_notes: Vec<String> =
+            model_health_checks(&pipelines, &config, config.unattended.enabled)
+                .iter()
+                .filter_map(|f| match f {
+                    Finding::Note(text) if text.contains("but not `local`") => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
 
         // One for Qwen; nothing for the `local` Ornith entry, the priced
         // cloud one or the Muse glob that carries only the retired flag.
@@ -3534,13 +3575,17 @@ mod tests {
              - id: finish\n    run: x\n    on_pass: done\n",
             models.len()
         ));
-        model_health_checks(&single_step_pipelines(&steps), config)
-            .into_iter()
-            .filter_map(|f| match f {
-                Finding::Note(text) if text.contains(".prompt_cache_ttl is not set") => Some(text),
-                _ => None,
-            })
-            .collect()
+        model_health_checks(
+            &single_step_pipelines(&steps),
+            config,
+            config.unattended.enabled,
+        )
+        .into_iter()
+        .filter_map(|f| match f {
+            Finding::Note(text) if text.contains(".prompt_cache_ttl is not set") => Some(text),
+            _ => None,
+        })
+        .collect()
     }
 
     /// Two hosted models no row covers are one note, naming the glob a person
@@ -3657,7 +3702,7 @@ mod tests {
              on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         );
 
-        let notes: Vec<String> = prompt_checks(&repo, &pipelines)
+        let notes: Vec<String> = prompt_checks(&repo, &pipelines, true)
             .iter()
             .filter_map(|f| match f {
                 Finding::Note(text) if text.contains("run by no step") => Some(text.clone()),
@@ -3684,13 +3729,14 @@ mod tests {
              model: m\n    on_pass: done\n"
         ));
 
-        let reasons: std::collections::BTreeMap<String, String> = prompt_checks(&repo, &pipelines)
-            .into_iter()
-            .filter_map(|f| match f {
-                Finding::Check(label, Err(err)) => Some((label, format!("{err:#}"))),
-                _ => None,
-            })
-            .collect();
+        let reasons: std::collections::BTreeMap<String, String> =
+            prompt_checks(&repo, &pipelines, true)
+                .into_iter()
+                .filter_map(|f| match f {
+                    Finding::Check(label, Err(err)) => Some((label, format!("{err:#}"))),
+                    _ => None,
+                })
+                .collect();
 
         let ours = &reasons[&format!("prompt `{shipped}`")];
         assert!(ours.contains("run `spoolway init`"), "{ours}");
@@ -3949,6 +3995,88 @@ mod tests {
             "{unattended:?}"
         );
         assert!(failures_after_set(&repo, &config, "housekeeping.retention_days").is_empty());
+    }
+
+    /// The materialised `blocked` step is judged for its compaction pairing
+    /// only while unattended is on, and `config set` of the keys that choose
+    /// its agent and model reports the pairing in `doctor`'s words. Fails
+    /// before the step is left out when unattended is off, and before the
+    /// `unattended.*` keys re-run the check.
+    #[test]
+    fn the_blocked_steps_compaction_pairing_is_judged_only_while_unattended_is_on() {
+        let (repo, _root) = scratch_repo("blocked-compaction");
+        let dir = Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  - id: build\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        let mut config: Config =
+            toml::from_str("[models.\"blk-*\"]\ncompact_ctx = 50\n").expect("the row loads");
+        config.unattended.blocked_agent = "claude".into();
+        config.unattended.blocked_model = "blk-model".into();
+        config.agents.get_mut("claude").unwrap().session_blocked_ctx = 40;
+
+        config.unattended.enabled = false;
+        let pipelines = Pipelines::load_tracked(&repo.checkout, &config).unwrap();
+        assert!(
+            pipelines.pipelines["default"]
+                .step(crate::pipeline::BLOCKED)
+                .is_some()
+        );
+        assert!(step_compaction_checks(&pipelines, &config, false).is_empty());
+        let off = failures_after_set(&repo, &config, "unattended.blocked_model");
+        assert!(off.is_empty(), "{off:?}");
+
+        config.unattended.enabled = true;
+        for key in [
+            "unattended.enabled",
+            "unattended.blocked_agent",
+            "unattended.blocked_model",
+            "unattended.blocked_prompt",
+        ] {
+            let warned = failures_after_set(&repo, &config, key);
+            let pairing: Vec<&String> = warned
+                .iter()
+                .filter(|w| w.contains("pipeline `default` step `blocked`"))
+                .collect();
+            assert_eq!(pairing.len(), 1, "{key}: {warned:?}");
+            assert!(
+                pairing[0].contains("agents.claude.session_blocked_ctx = 40"),
+                "{key}: {warned:?}"
+            );
+            // The project has no unblocker prompt, which only turning
+            // unattended on makes a failure.
+            assert_eq!(
+                warned.iter().any(|w| w.contains("prompt `unblocker`")),
+                matches!(key, "unattended.enabled" | "unattended.blocked_prompt"),
+                "{key}: {warned:?}"
+            );
+        }
+    }
+
+    /// An attended project whose pipeline has no unblocker prompt is not
+    /// failed for the `blocked` step it never staffs; turning unattended on
+    /// fails it. Fails before the step is left out of `prompt_checks`.
+    #[test]
+    fn the_unblocker_prompt_is_read_only_while_unattended_is_on() {
+        let (repo, _root) = scratch_repo("blocked-prompt");
+        let dir = Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  - id: build\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines::load_tracked(&repo.checkout, &Config::default()).unwrap();
+        let blocked = |unattended| {
+            prompt_checks(&repo, &pipelines, unattended)
+                .iter()
+                .any(|f| matches!(f, Finding::Check(label, _) if label.contains("unblocker")))
+        };
+        assert!(!blocked(false));
+        assert!(blocked(true));
     }
 
     /// Writes `<task> · <event>.exit` holding `code` under `tracking/`, with
@@ -4476,7 +4604,12 @@ mod tests {
         let mut config = Config::default();
         config.issue_tracking.hook = "login.sh".into();
 
-        cheap_findings(&repo, &Pipelines::builtin(), &config);
+        cheap_findings(
+            &repo,
+            &Pipelines::builtin(),
+            &config,
+            config.unattended.enabled,
+        );
         assert!(!marker.exists(), "cheap_findings ran the login command");
 
         login_checks(&repo.checkout, "login.sh", true);
@@ -5581,7 +5714,7 @@ mod tests {
 
         let pipelines = Pipelines::builtin();
         let config = Config::default();
-        let warnings = cheap_findings(&repo, &pipelines, &config);
+        let warnings = cheap_findings(&repo, &pipelines, &config, config.unattended.enabled);
 
         fn text(w: &Warning) -> &str {
             match w {
@@ -5710,7 +5843,7 @@ mod tests {
         .unwrap();
         crate::platform::test_home::pin(&home);
 
-        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default(), false);
         assert!(
             warnings.iter().all(|w| match w {
                 Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
@@ -5742,7 +5875,7 @@ mod tests {
         )
         .unwrap();
 
-        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default(), false);
         let texts: Vec<&str> = warnings
             .iter()
             .map(|w| match w {
@@ -5781,7 +5914,7 @@ mod tests {
                 crate::repo::workspace_clone_lenient(&repo.checkout).unwrap();
             assert_eq!(broken.len(), 1, "{broken:?}");
             assert_eq!(skipped.len(), 1, "{skipped:?}");
-            let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+            let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default(), false);
             let said = |record: &Path, why: &str| {
                 let record = crate::repo::shorten_home(record);
                 warnings.iter().any(
@@ -5815,7 +5948,7 @@ mod tests {
             .count();
         assert_eq!(doctor_notes, 1, "the doctor report must still name the row");
 
-        let warnings = cheap_findings(&repo, &pipelines, &config);
+        let warnings = cheap_findings(&repo, &pipelines, &config, config.unattended.enabled);
         let routed: Vec<&Warning> = warnings
             .iter()
             .filter(|w| match w {

@@ -237,11 +237,15 @@ compacts earlier, so a value above its default of about 95 changes nothing. Code
 token count. spoolway sends `compact_ctx` percent of the model's `context_window`, rounded
 down. With `context_window = 100096` and `compact_ctx = 60`, codex gets `60057`. A codex lane
 on a model with no `context_window` gets nothing. A model with no `compact_ctx` sends nothing.
-Both backends, herdr and headless, send the same value. See
+Both backends, herdr and headless, send the same value for a model that sets `compact_ctx`.
+A headless lane on a model with no `compact_ctx` starts without `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+even when the dispatcher's shell exports it. See
 [`compact_ctx`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 `spoolway doctor` prints one `FAIL` row for each pipeline step that cannot take the threshold.
 The dispatcher refuses to start the same step with the same words and runs no lane for it.
+The `blocked` step is judged only while `unattended.enabled` is on, or for a run started with
+`spoolway dispatch --unattended`. An attended run never staffs it.
 
 | Step | Why it is refused | What to change |
 |---|---|---|

@@ -4414,6 +4414,7 @@ mod tests {
                 &repo,
                 &crate::pipeline::Pipelines::builtin(),
                 &repo.config,
+                false,
             )
             .into_iter()
             .map(|warning| match warning {

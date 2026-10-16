@@ -192,7 +192,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         if !overrides_gate(repo)? {
             return Ok(0);
         }
-        if !warnings_gate(repo, pipelines)? {
+        // Judged in the mode this run settled on, not the config's: a
+        // `--unattended` flag staffs `blocked` whatever `unattended.enabled`
+        // says.
+        if !warnings_gate(repo, pipelines, args.unattended(&repo.config))? {
             return Ok(0);
         }
     }
@@ -788,18 +791,20 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
 /// An unattended run with no ceiling gets no block of its own here any
 /// more: doctor's own `unattended.enabled` note (see
 /// `pipeline_graph_checks`) already lands under `settings`, since both read
-/// the same string. It fires on `config.unattended.enabled` alone and
-/// cannot see a `--unattended` flag with the config setting left off — an
-/// accepted gap, not one this screen closes.
+/// the same string. That note still fires on `config.unattended.enabled`
+/// alone. The `blocked` step's unblocker prompt and compaction pairing are
+/// judged for `unattended`, the mode the run settled on, so a `--unattended`
+/// flag with the config setting left off sees them.
 ///
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`.
 /// After [`overrides_gate`], and — like it — before `Lock::acquire`: `esc`
 /// here must still mean "nothing has happened yet", which is only true ahead
 /// of the lock.
-fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
+fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: bool) -> Result<bool> {
     warnings_gate_with(
         repo,
         pipelines,
+        unattended,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
@@ -821,12 +826,13 @@ fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
 fn warnings_gate_with(
     repo: &Repo,
     pipelines: &Pipelines,
+    unattended: bool,
     interactive: bool,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
-    let (settings, files, problems) = cheap_sections(repo, pipelines);
+    let (settings, files, problems) = cheap_sections(repo, pipelines, unattended);
 
     if settings.is_empty() && files.is_empty() && problems.is_empty() {
         return Ok(true);
@@ -872,11 +878,17 @@ fn warnings_gate_with(
 
 /// Doctor's cheap findings, sorted under the warnings screen's three
 /// headings: settings, files and problems.
-fn cheap_sections(repo: &Repo, pipelines: &Pipelines) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn cheap_sections(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    unattended: bool,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     use crate::commands::doctor::Warning;
 
     let (mut settings, mut files, mut problems) = (Vec::new(), Vec::new(), Vec::new());
-    for warning in crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config) {
+    for warning in
+        crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config, unattended)
+    {
         match warning {
             Warning::Setting(text) => settings.push(text),
             Warning::File(text) => files.push(text),
@@ -1007,7 +1019,8 @@ const WARNINGS_POPUP_WRAP: usize = 70;
 /// The warnings popup, or `None` when [`warnings_gate`] would not ask:
 /// nothing to say, or the same findings already hidden.
 pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GatePopup> {
-    let (settings, files, problems) = cheap_sections(repo, pipelines);
+    let (settings, files, problems) =
+        cheap_sections(repo, pipelines, repo.config.unattended.enabled);
     if settings.is_empty() && files.is_empty() && problems.is_empty() {
         return None;
     }
@@ -2717,6 +2730,7 @@ mod tests {
             &repo,
             &pipelines,
             true,
+            true,
             &mut keys(""),
             &mut out,
             Some(crate::platform::TermGuard::inert),
@@ -2724,6 +2738,31 @@ mod tests {
         .unwrap();
         assert!(proceed);
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    /// The warnings screen judges the `blocked` step for the mode the run
+    /// settled on: a `--unattended` flag with `unattended.enabled` left off
+    /// names the missing unblocker prompt, and an attended run does not.
+    /// Fails if the screen reads the config's setting instead of the mode.
+    #[test]
+    fn the_warnings_screen_judges_blocked_for_the_mode_the_run_settled_on() {
+        let (repo, _root_guard) = fixture("warnings-settled-mode");
+        let dir = Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  - id: build\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines::load_tracked(&repo.checkout, &repo.config).unwrap();
+        assert!(!repo.config.unattended.enabled);
+
+        let named = |unattended| {
+            let (_, _, problems) = cheap_sections(&repo, &pipelines, unattended);
+            problems.iter().any(|p| p.contains("unblocker"))
+        };
+        assert!(named(true));
+        assert!(!named(false));
     }
 
     /// A failing task hook lands under `problems`, and a second failure
@@ -2757,13 +2796,13 @@ mod tests {
             body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
             "{body:#?}"
         );
-        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        let (_, _, problems) = cheap_sections(&repo, &pipelines, false);
         let first = warnings_fingerprint(&[], &[], &problems);
         popup.hide(&repo).unwrap();
         assert!(warnings_popup(&repo, &pipelines).is_none());
 
         fail("second");
-        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        let (_, _, problems) = cheap_sections(&repo, &pipelines, false);
         assert_ne!(warnings_fingerprint(&[], &[], &problems), first);
         assert!(
             warnings_popup(&repo, &pipelines).is_some(),
@@ -2877,6 +2916,7 @@ mod tests {
             &repo,
             &pipelines,
             false,
+            false,
             &mut input,
             &mut out,
             Some(crate::platform::TermGuard::inert),
@@ -2905,6 +2945,7 @@ mod tests {
             warnings_gate_with(
                 &repo,
                 &pipelines,
+                false,
                 true,
                 &mut input,
                 &mut out,
@@ -2931,6 +2972,7 @@ mod tests {
             !warnings_gate_with(
                 &repo,
                 &pipelines,
+                false,
                 true,
                 &mut input,
                 &mut out,
@@ -2956,6 +2998,7 @@ mod tests {
             warnings_gate_with(
                 &repo,
                 &pipelines,
+                false,
                 true,
                 &mut input,
                 &mut out,
@@ -2970,6 +3013,7 @@ mod tests {
             warnings_gate_with(
                 &repo,
                 &pipelines,
+                false,
                 true,
                 &mut no_input,
                 &mut out,
@@ -2997,6 +3041,7 @@ mod tests {
         warnings_gate_with(
             &repo,
             &pipelines,
+            false,
             true,
             &mut input,
             &mut out,
