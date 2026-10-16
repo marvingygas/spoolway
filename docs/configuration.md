@@ -510,6 +510,16 @@ file name, a script with no `fetch` branch, `key_in_names` on with a script that
 `slug=`, and a tool named in a `# spoolway-requires:` line whose installed version is below
 the line's floor.
 
+It also fails a script that cannot start. Each failure names the fix.
+
+| Script | Run time result | Fix |
+|---|---|---|
+| First line ends in a carriage return (Windows line endings) | Exit 127 | `sed -i 's/\r$//' <path>` |
+| No executable bit, such as mode 644 | Exit 126 | `chmod +x <path>` |
+
+Either failure makes every `queue add` fail and pauses each task on its next lifecycle event.
+The mode check runs on Unix only. spoolway never rewrites the script.
+
 ### `open` — a fifth event, run by `queue add` itself
 
 `spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no

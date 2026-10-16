@@ -287,6 +287,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     doctor_sync(repo, &mut report);
     let sync_end = report.rows.len();
     report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(task_template_checks(repo, pipelines));
     report.record_all(jobs_checks(repo, pipelines, false));
 
     warnings_from_rows(report.rows, sync_start..sync_end)
@@ -515,6 +516,7 @@ pub fn doctor(
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(task_template_checks(repo, pipelines));
     report.record_all(jobs_checks(repo, pipelines, true));
 
     // A dispatcher that is running is a fact about this moment that changes
@@ -980,9 +982,10 @@ pub(crate) fn issue_tracking_checks(
 
 /// What `[issue_tracking]`'s settings can get wrong on their own: a hook
 /// named with nothing to hand it, a hook that cannot resolve to a real file,
-/// a hook file that was never written, a hook script too old to have a
-/// `fetch` branch, and — for the one hook that shells out — the binaries it
-/// needs beside it.
+/// a hook file that was never written, a script that cannot start (a
+/// carriage return ending its `#!` line, or no executable bit), a hook script
+/// too old to have a `fetch` branch, and — for the one hook that shells out —
+/// the binaries it needs beside it.
 ///
 /// Reads nothing under the project's home, so it is what [`doctor`] runs
 /// when that home did not resolve, and what `spoolway config set` runs
@@ -1039,6 +1042,28 @@ fn issue_tracking_config_checks(
                      issue tracking off",
                     path.display()
                 )),
+            },
+        ));
+    }
+    // Two ways an existing script still cannot start: a `\r` ending its
+    // `#!` line (exit 127) and no executable bit (exit 126). Either one
+    // fails every `queue add` and pauses every lifecycle event's task, and
+    // `exists()` above sees neither.
+    if let Some(path) = crate::tracking::hook_path_in(&repo.checkout, &tracking.hook)
+        && path.is_file()
+    {
+        findings.push(Finding::Check(
+            "the configured hook script has Unix line endings".into(),
+            match crate::tracking::crlf_first_line_problem(&path) {
+                Some(problem) => Err(anyhow::anyhow!("{problem}")),
+                None => Ok(None),
+            },
+        ));
+        findings.push(Finding::Check(
+            "the configured hook script is executable".into(),
+            match crate::tracking::not_executable_problem(&path) {
+                Some(problem) => Err(anyhow::anyhow!("{problem}")),
+                None => Ok(None),
             },
         ));
     }
@@ -2414,19 +2439,21 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
     findings
 }
 
-/// Every prompt a pipeline's agent steps actually run: whether its file
-/// exists. The lint over a prompt's own prose is `spoolway pipeline check`'s
-/// alone now, since a surviving finding there fails the build — doctor would
-/// only be repeating a check that already has a sharper place to fail.
+/// Every prompt a pipeline's agent steps actually run: whether its name is
+/// free of a leading `/` and of `..`, and whether its file exists. The lint
+/// over a prompt's own prose is `spoolway pipeline check`'s alone now, since
+/// a surviving finding there fails the build — doctor would only be repeating
+/// a check that already has a sharper place to fail.
 fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // One row per prompt file rather than one per step that names one:
     // `path_for` resolves a prompt from its name alone and never sees a step,
     // so the step id on a passing row never described what was read. The steps
-    // come back when the file is missing, which is the only time they say
-    // anything — and in prompt-name order, since step order stops meaning
-    // anything once a file is checked once.
+    // come back when the file is missing or the name holds `..` or a leading
+    // `/`, which is the only time they say anything — and in prompt-name
+    // order, since step order stops meaning anything once a file is checked
+    // once.
     let mut prompts: std::collections::BTreeMap<&str, Vec<&str>> =
         std::collections::BTreeMap::new();
     for step in pipelines.pipelines.values().flat_map(|p| &p.steps) {
@@ -2439,6 +2466,13 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
         }
     }
     for (prompt, steps) in &prompts {
+        if let Some(problem) = super::pipeline::prompt_name_problem(prompt) {
+            findings.push(Finding::Check(
+                format!("prompt `{prompt}`"),
+                Err(anyhow::anyhow!("{steps:?} run it, but {problem}")),
+            ));
+            continue;
+        }
         let path = crate::prompt::path_for(repo, prompt);
         findings.push(Finding::Check(
             format!("prompt `{prompt}`"),
@@ -2475,6 +2509,23 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     }
 
     findings
+}
+
+/// One failing row per pipeline whose `task_template:` names a skeleton nobody
+/// wrote. `pipeline check` fails the same pipeline, and one `queue add` onto
+/// it would have no skeleton to start from.
+fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
+    pipelines
+        .pipelines
+        .values()
+        .filter_map(|pipeline| {
+            let problem = super::pipeline::missing_task_template_problem(repo, pipeline)?;
+            Some(Finding::Check(
+                format!("task template of pipeline `{}`", pipeline.name),
+                Err(anyhow::anyhow!("{problem}")),
+            ))
+        })
+        .collect()
 }
 
 /// Queue ids that cannot work: a second queue file holding an id another file
@@ -3685,6 +3736,55 @@ mod tests {
         assert!(!notes[0].contains("`worker`"), "{}", notes[0]);
     }
 
+    /// A pipeline whose `task_template:` names a file nobody wrote fails
+    /// `doctor` the way it already fails `pipeline check`.
+    #[test]
+    fn task_template_checks_fail_a_template_that_is_not_there() {
+        let (repo, _root_guard) = scratch_repo("missing-task-template");
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    prompt: worker\n    model: m\n    \
+             on_pass: done\n",
+        );
+        let mut pipelines = pipelines;
+        pipelines
+            .pipelines
+            .values_mut()
+            .for_each(|p| p.task_template = Some("ghost".into()));
+        let err = task_template_checks(&repo, &pipelines)
+            .into_iter()
+            .find_map(|f| match f {
+                Finding::Check(label, Err(err)) if label.contains("task template") => Some(err),
+                _ => None,
+            })
+            .expect("a task template row");
+        assert!(err.to_string().contains("`ghost`"), "{err}");
+    }
+
+    /// A prompt name that climbs out of the prompts directory fails even
+    /// though the file it points at is reachable.
+    #[test]
+    fn prompt_checks_fail_a_prompt_path_leaving_the_prompts_directory() {
+        let (repo, _root_guard) = scratch_repo("escaping-prompt");
+        std::fs::create_dir_all(repo.checkout.join(".spoolway/prompts")).unwrap();
+        std::fs::write(repo.checkout.join(".spoolway/outside.md"), "x\n").unwrap();
+        assert!(
+            crate::prompt::path_for(&repo, "../outside").exists(),
+            "the escaped file must be reachable, or the old code would report it missing"
+        );
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    prompt: ../outside\n    model: m\n    \
+             on_pass: done\n",
+        );
+        let err = prompt_checks(&repo, &pipelines)
+            .into_iter()
+            .find_map(|f| match f {
+                Finding::Check(label, Err(err)) if label == "prompt `../outside`" => Some(err),
+                _ => None,
+            })
+            .expect("a failing prompt row");
+        assert!(err.to_string().contains("holds `..`"), "{err}");
+    }
+
     /// A missing prompt `init` ships is still met with "run `spoolway init`";
     /// one it does not ship names the path to write instead, since `init`
     /// would leave the row failing.
@@ -4132,9 +4232,71 @@ mod tests {
         assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
+    /// A script whose `#!` line ends in a carriage return: the kernel looks
+    /// for an interpreter named `sh\r`, so every run exits 127 while the file
+    /// itself exists and is executable.
+    #[test]
+    fn issue_tracking_checks_refuses_a_hook_with_crlf_line_endings() {
+        let (repo, _root_guard) = scratch_repo("crlf-hook");
+        let path = repo.checkout.join(".spoolway/hooks/crlf.sh");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "#!/bin/sh\r\nexit 0\r\n").unwrap();
+        make_executable(&path);
+        let findings = issue_tracking_checks(&repo, &tracking("crlf.sh"));
+        let err = hook_row(&findings, "Unix line endings")
+            .as_ref()
+            .unwrap_err();
+        assert!(err.to_string().contains("CRLF"), "{err}");
+        assert!(err.to_string().contains("127"), "{err}");
+
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("crlf.sh"));
+        assert!(hook_row(&findings, "Unix line endings").is_ok());
+    }
+
+    /// A script with no executable bit: `queue add` fails with exit 126.
+    #[cfg(unix)]
+    #[test]
+    fn issue_tracking_checks_refuses_a_hook_that_is_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = scratch_repo("plain-mode-hook");
+        let path = repo.checkout.join(".spoolway/hooks/plain.sh");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("plain.sh"));
+        let err = hook_row(&findings, "is executable").as_ref().unwrap_err();
+        assert!(err.to_string().contains("mode 644"), "{err}");
+        assert!(err.to_string().contains("chmod +x"), "{err}");
+
+        make_executable(&path);
+        let findings = issue_tracking_checks(&repo, &tracking("plain.sh"));
+        assert!(hook_row(&findings, "is executable").is_ok());
+    }
+
+    fn make_executable(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    fn hook_row<'a>(findings: &'a [Finding], label_part: &str) -> &'a Result<Option<String>> {
+        findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Check(label, outcome) if label.contains(label_part) => Some(outcome),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no row mentioning `{label_part}`"))
+    }
+
     /// `jira.sh` is the one shipped hook that shells out to binaries this
     /// project does not otherwise need — checked only when the hook actually
-    /// names it, unlike the three checks above, which run for any hook.
+    /// names it, unlike the checks above, which run for any hook.
     #[test]
     fn issue_tracking_checks_requires_acli_and_jq_for_the_jira_hook() {
         let (repo, _root_guard) = scratch_repo("jira-hook");

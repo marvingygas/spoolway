@@ -99,13 +99,18 @@ fn render_hook_contract(repo: &Repo) -> String {
          that ran and\n  found nothing.\n\n",
     );
 
-    out.push_str(
-        "spoolway doctor  checks the script names `fetch` when it is used, and writes a \
-         `slug=`\n                 line when `issue_tracking.key_in_names` is on. A hook \
-         proves itself only on\n                 a real event: `queued`, `started` or `done` \
-         failing pauses the task, with the\n                 hook's own last output under \
-         `## Hook error` on the task file.\n\n",
-    );
+    // Each line is its own string so the hanging indent under `spoolway
+    // doctor` is written once and every printed line stays under 90 columns.
+    let doctor_lines = [
+        "spoolway doctor  checks the script has Unix line endings and an executable bit,",
+        "names `fetch` when it is used, and writes a `slug=` line when",
+        "`issue_tracking.key_in_names` is on. A hook proves itself only on",
+        "a real event: `queued`, `started` or `done` failing pauses the",
+        "task, with the hook's own last output under `## Hook error` on",
+        "the task file.",
+    ];
+    out.push_str(&doctor_lines.join("\n                 "));
+    out.push_str("\n\n");
 
     out.push_str(
         "Every shipped hook's `done` is a pull request handed off, not a merge — `spoolway \

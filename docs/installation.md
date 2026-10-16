@@ -322,6 +322,8 @@ spoolway doctor
 - each base branch the queue names can be pushed
 - each agent binary is on `PATH`, has a model set, and accepts the configured permission mode
 - every prompt a step names exists and passes its checks
+- each pipeline's `task_template:` names a file that exists
+- the configured issue-tracking hook has Unix line endings and an executable bit
 - the configured backend is one `spoolway dispatch` accepts
 
 Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section

@@ -750,6 +750,48 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
     (!has_fetch_branch(&script)).then(|| name.to_string())
 }
 
+/// Why the hook script at `path` would exit 127 when run: its first line ends
+/// in a carriage return, so the kernel looks for an interpreter named
+/// `/bin/sh\r` and the shell reports exit 127. `None` when the line ends
+/// cleanly or the file cannot be read.
+///
+/// Only the first line is read, because only the `#!` line is parsed by the
+/// kernel; a CRLF later in the file is the shell's own affair.
+pub(crate) fn crlf_first_line_problem(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let first = bytes.split(|&b| b == b'\n').next()?;
+    (bytes.len() > first.len() && first.ends_with(b"\r")).then(|| {
+        format!(
+            "{} has Windows (CRLF) line endings, so `queue add` fails with exit 127 and \
+             every lifecycle event pauses its task — convert it with `sed -i 's/\\r$//' {}`",
+            path.display(),
+            path.display()
+        )
+    })
+}
+
+/// Why the hook script at `path` would exit 126 when run: no executable bit
+/// is set. `None` when it is executable, cannot be read, or the platform has
+/// no mode bits to check.
+#[cfg(unix)]
+pub(crate) fn not_executable_problem(path: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+    (mode & 0o111 == 0).then(|| {
+        format!(
+            "{} has mode {mode:03o} and is not executable, so `queue add` fails with exit 126 \
+             and every lifecycle event pauses its task — run `chmod +x {}`",
+            path.display(),
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn not_executable_problem(_path: &Path) -> Option<String> {
+    None
+}
+
 /// Whether a hook is configured at all — what lets `queue add` skip
 /// [`open_ticket`] and its own report entirely rather than call it once per
 /// task only to have every call answer [`OpenResult::NoHook`].

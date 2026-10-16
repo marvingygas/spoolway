@@ -774,10 +774,54 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
     Ok(())
 }
 
+/// The problem when `pipeline` names a `task_template:` whose file is not
+/// there, shared by `pipeline check` and `doctor` so the two refuse the same
+/// pipelines in the same words.
+pub(crate) fn missing_task_template_problem(repo: &Repo, pipeline: &Pipeline) -> Option<String> {
+    let named = pipeline.task_template.as_ref()?;
+    if crate::task_template::exists_for(repo, pipeline) {
+        return None;
+    }
+    let path = repo.task_templates_dir().join(format!("{named}.md"));
+    Some(format!(
+        "pipeline `{}` names task skeleton `{named}`, and {} is not there — write \
+         it, or drop the `task_template:` to take `{}`",
+        pipeline.name,
+        relative(&repo.checkout, &path),
+        crate::task_template::FALLBACK
+    ))
+}
+
+/// The problem when a step's prompt name is an absolute path or holds a `..`
+/// component. A prompt is looked up as `prompts/<name>`, so `../implementer`
+/// reads a file from outside the prompts directory and still passes the
+/// existence check. Shared by `pipeline check` and `doctor`.
+///
+/// Any `..` is refused, even one that would stay inside, such as
+/// `team/../worker`: telling the two apart needs the same path arithmetic the
+/// lookup itself does, and a name that needs it is better written plainly. A
+/// name with a `/` and no `..`, such as `team/worker`, resolves at run time
+/// and is left alone. This is not a load-time refusal either: a pipeline set
+/// that fails to load stops every command, and `pipeline promote` already
+/// refuses non-plain names in its own words.
+pub(crate) fn prompt_name_problem(prompt: &str) -> Option<String> {
+    use std::path::Component;
+    let leaves = Path::new(prompt)
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+    leaves.then(|| {
+        format!(
+            "prompt `{prompt}` is an absolute path or holds `..`, which can leave the prompts \
+             directory — a name is looked up beneath it, so use a name with no leading `/` \
+             and no `..`"
+        )
+    })
+}
+
 /// Every disk-dependent problem `pipeline_check` finds in the project's own
 /// loaded pipelines: an agent profile a step names but config does not
 /// define or whose kind spoolway cannot launch, a task skeleton a `task_template:` names but nobody wrote, and —
-/// per agent step — a missing prompt file, a blank model, an
+/// per agent step — a prompt name that is absolute or holds `..`, a missing prompt file, a blank model, an
 /// `effort:`/`session:`/`skills:` the step's agent kind cannot carry.
 ///
 /// Runtime readiness is a project's own to answer: whether `assets/pipelines/*.yml`
@@ -812,18 +856,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
         // file: it takes its own name, and `default.md` answers when there is
         // nothing under it. One that names a skeleton meant that name, so a
         // file that is not there is a typo rather than an intention.
-        if let Some(named) = &pipeline.task_template
-            && !crate::task_template::exists_for(repo, pipeline)
-        {
-            let path = repo.task_templates_dir().join(format!("{named}.md"));
-            problems.push(format!(
-                "pipeline `{}` names task skeleton `{named}`, and {} is not there — write \
-                 it, or drop the `task_template:` to take `{}`",
-                pipeline.name,
-                relative(&repo.checkout, &path),
-                crate::task_template::FALLBACK
-            ));
-        }
+        problems.extend(missing_task_template_problem(repo, pipeline));
 
         for step in &pipeline.steps {
             // A command or terminal step starts no lane, so `skills:` on one
@@ -845,8 +878,16 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
             if step.kind() != StepKind::Agent {
                 continue;
             }
+            // A name that leaves the directory is reported on its own, and the
+            // existence check is skipped: the file it points at may well be
+            // there, and "missing" would send the person to write a second one.
+            // Everything below still runs, so one pass reports every problem.
+            let escapes = prompt_name_problem(step.prompt_name());
+            if let Some(problem) = &escapes {
+                problems.push(format!("`{}`/`{}`: {problem}", pipeline.name, step.id));
+            }
             let prompt = crate::prompt::path_for(repo, step.prompt_name());
-            if !prompt.exists() {
+            if escapes.is_none() && !prompt.exists() {
                 problems.push(crate::prompt::missing_prompt_message(
                     repo,
                     pipeline.private_file.is_some(),
@@ -3904,6 +3945,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(chain_marker(first.step("a").unwrap()), " first-of-chain");
+    }
+
+    /// A name with a `/` and no `..` runs today and must not be failed; any
+    /// `..` or an absolute path is refused.
+    #[test]
+    fn prompt_name_problem_leaves_a_nested_name_alone() {
+        assert!(prompt_name_problem("team/worker").is_none());
+        assert!(prompt_name_problem("implementer").is_none());
+        for bad in [
+            "../implementer",
+            "a/../../b",
+            "team/../worker",
+            "/etc/passwd",
+        ] {
+            assert!(prompt_name_problem(bad).is_some(), "`{bad}`");
+        }
+    }
+
+    /// `prompt: ../implementer` resolves to a file that exists outside the
+    /// prompts directory, so only the name itself can be refused. The step's
+    /// other problems, here a blank model, still come out in the same pass.
+    #[test]
+    fn pipeline_check_refuses_a_prompt_path_leaving_the_prompts_directory() {
+        let root = crate::scratch::root("commands-check-escaping-prompt");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        std::fs::write(root.join(".spoolway/implementer.md"), "outside\n").unwrap();
+        let repo = Repo {
+            borrowed: false,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+        assert!(
+            crate::prompt::path_for(&repo, "../implementer").exists(),
+            "the escaped file must be reachable, or the old code would report it missing"
+        );
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    agent: pi\n    prompt: ../implementer\n    \
+             model: \"\"\n    on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+        };
+        let problems = step_problems(&repo, &pipelines, &repo.config);
+        assert!(
+            problems.iter().any(|p| p.contains("holds `..`")),
+            "{problems:#?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("names no model")),
+            "{problems:#?}"
+        );
+        assert!(
+            !problems.iter().any(|p| p.contains("missing")),
+            "{problems:#?}"
+        );
     }
 
     /// A `session:` step whose agent profile runs a kind spoolway cannot

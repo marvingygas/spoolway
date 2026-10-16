@@ -953,6 +953,10 @@ $ spoolway pipeline check
 A missing or overlong `description:` is a warning, not a failure. So is a step that no route
 from the first step reaches.
 
+A step's `prompt:` fails when it starts with `/` or holds `..`. A name such as `team/worker` is
+looked up beneath the prompts directory and passes. A `task_template:` that names a missing file
+also fails.
+
 While a dispatcher runs, the check first prints a line naming each pipeline file edited since
 it started. That line is not a failure. See [Editing a pipeline while it
 runs](dispatcher.md#editing-a-pipeline-while-it-runs).
@@ -1680,6 +1684,15 @@ id is the name of a routine.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.
+
+A `FAIL` row labelled `the configured hook script has Unix line endings` names a hook whose first
+line ends in a carriage return. A `FAIL` row labelled `the configured hook script is executable`
+names a hook with no executable bit and gives its mode. Each row gives the command that fixes it.
+See [The issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+
+A `FAIL` row labelled ``prompt `<name>` `` names a step prompt that starts with `/` or holds `..`.
+A `FAIL` row labelled ``task template of pipeline `<name>` `` names a pipeline whose
+`task_template:` file is missing.
 
 ```
   note  2 project home(s) under ~/.spoolway/ record a checkout that is gone; delete a folder to remove it: /home/you/.spoolway/scratch-1a2b, /home/you/.spoolway/demo-3c4d

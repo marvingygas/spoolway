@@ -138,6 +138,30 @@ says "doctor refuses a hook name that is not a bare filename" \
 must "hook is restored to the bare name" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
+# A hook that cannot start is something only a real process can prove. These
+# two are run for real, so `doctor`'s claim of exit 127 or 126 is checked
+# against what the shell does, then `doctor` must fail each and pass it fixed.
+printf '#!/bin/sh\r\nexit 0\r\n' > .spoolway/hooks/crlf.sh
+chmod +x .spoolway/hooks/crlf.sh
+printf '#!/bin/sh\nexit 0\n' > .spoolway/hooks/noexec.sh
+chmod 644 .spoolway/hooks/noexec.sh
+rc=0; (cd .spoolway/hooks && sh -c ./crlf.sh) >/dev/null 2>&1 || rc=$?
+works "a CRLF hook really exits 127" test "$rc" = 127
+rc=0; (cd .spoolway/hooks && sh -c ./noexec.sh) >/dev/null 2>&1 || rc=$?
+works "a mode-644 hook really exits 126" test "$rc" = 126
+must "hook is set to the CRLF one" "$SPOOLWAY" config set issue_tracking.hook crlf.sh
+says "doctor fails a hook saved with CRLF line endings" \
+  "Windows (CRLF) line endings" "$SPOOLWAY" doctor
+must "hook is set to the one without an executable bit" \
+  "$SPOOLWAY" config set issue_tracking.hook noexec.sh
+says "doctor fails a hook that is not executable, naming the mode" \
+  "mode 644" "$SPOOLWAY" doctor
+chmod +x .spoolway/hooks/noexec.sh
+silent_about "and doctor stops complaining once the mode is fixed" \
+  "is not executable" "$SPOOLWAY" doctor
+must "hook is restored to the bare name again" \
+  "$SPOOLWAY" config set issue_tracking.hook record.sh
+
 # `handover` is `spoolway stack`, and the second task of a group is the second
 # pull request of a stack — one `gh api` call that needs a remote reading as
 # `github.com` and a `gh` that tracks stack membership. This suite's forge is
