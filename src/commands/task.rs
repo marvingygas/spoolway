@@ -505,6 +505,10 @@ pub fn task_contract(
 
     let tasks = super::queue::gather_tasks(&args.from)?;
     let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &tasks)?;
+    // `queue add` refuses a task whose start branch is missing right after
+    // validating; the check has to run here too, or this says "no problems"
+    // about a file `queue add` would turn away.
+    super::queue::refuse_missing_start(repo, &tasks)?;
     print_check_report(&tasks, pipelines)
 }
 
@@ -625,6 +629,48 @@ mod tests {
             sentence.contains(&format!("{} characters", crate::config::TASK_ID_MAX)),
             "{sentence}"
         );
+    }
+
+    /// `task contract --from` refuses a `starts_from:` naming a branch that
+    /// does not exist, in the words `queue add` uses, and passes once the
+    /// task names one that does. Fails without the check: it says "no
+    /// problems" about the first.
+    #[test]
+    fn contract_refuses_a_start_branch_that_does_not_exist() {
+        let (repo, _root_guard) = fixture("contract-missing-start");
+        let pipelines = Pipelines::builtin();
+        let gone = task_text("t", "group: demo\nstarts_from: no/such\n", BODY);
+        let path = write_doc(&repo, "t.md", &gone);
+        let err = task_contract(&repo, &pipelines, &contract_args(&[&path]), &repo.root)
+            .expect_err("a start branch that is not there is reported");
+        assert!(
+            format!("{err:#}").contains(
+                "t starts from no/such, which doesn't exist. Set starts_from: in the task \
+                 front matter and requeue."
+            ),
+            "{err:#}"
+        );
+
+        let set = task_text("t", "group: demo\nstarts_from: plan/demo\n", BODY);
+        let path = write_doc(&repo, "t.md", &set);
+        task_contract(&repo, &pipelines, &contract_args(&[&path]), &repo.root).unwrap();
+    }
+
+    /// `task contract --from` reports a task still holding the skeleton's
+    /// placeholders, as `queue add` does. Fails without the check.
+    #[test]
+    fn contract_refuses_the_unfilled_skeleton() {
+        let (repo, _root_guard) = fixture("contract-skeleton");
+        let skeleton = crate::assets::task_template("default").unwrap();
+        let path = write_doc(&repo, "t.md", &task_text("t", "group: demo\n", skeleton));
+        let err = task_contract(
+            &repo,
+            &Pipelines::builtin(),
+            &contract_args(&[&path]),
+            &repo.root,
+        )
+        .expect_err("placeholders are reported");
+        assert!(format!("{err:#}").contains("placeholder"), "{err:#}");
     }
 
     fn contract_args(paths: &[&str]) -> TaskContractArgs {

@@ -110,7 +110,20 @@ words with a hyphen instead, for example `needs-triage`.
 
 `gate_at` must name a step of the task's pipeline. `done` is not a step. `spoolway queue add`
 and `spoolway task contract --from` refuse any other value, naming the task and the steps it
-may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
+may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`. A trial
+refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
+[Trials](planning.md#trials).
+
+A body may not still hold the `[[…]]` placeholder text of its skeleton. `spoolway queue add`,
+the queue screen, `spoolway task contract --from` and a trial refuse such a task. The refusal
+names the section the placeholder sits under:
+
+```
+$ spoolway queue add --from mine.md
+mine.md: the section `Context` still holds the skeleton's `[[…]]` placeholder text. Replace it
+with the task's own words, or delete the section if the task has nothing to say there, then add
+it again.
+```
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
 digits and hyphens, starting with a letter. A task id may be at most 100 characters, because
@@ -242,7 +255,8 @@ that does not parse is named on the queue screen. See [`spoolway queue list`](cl
 A group is one chain: each task depends on the one before it. There is one root, with no
 `depends_on`, and one tail, that nothing depends on. `queue add` and `task contract` refuse
 any other shape, over the queue, the archive and the batch being added together, so a group
-split across two `queue add` calls is still caught.
+split across two `queue add` calls is still caught. Adds into one group at the same moment take
+turns. The first queues its root. The others are refused, naming the group and both roots.
 
 ```
 TASK       STEP       NOTE
@@ -367,6 +381,8 @@ branch exists neither locally nor on `origin`. It prints, for each such task:
 ```
 cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
 ```
+
+`spoolway task contract --from` prints the same line for such a task.
 
 The queue screen queues the rest of the selection. It leaves the task and every selected task that
 depends on it in the pending directory, and lists them in its popup. Once `starts_from:` names a

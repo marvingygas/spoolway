@@ -1325,21 +1325,12 @@ fn validate_batch_undescribed(
         // gh-359 — so a task id needs no pipeline at all to be checked
         // against, just the plain path-safety rule below.
         let pipeline = pipelines.get(pipeline_name)?;
-        // `gate_at:` pauses a task when it reports from the step it names. A
-        // name that is no step of this pipeline — a typo, or `done`, which is
-        // not a step — is never matched, so the checkpoint is dropped and the
-        // task runs straight through. Refused here, where the task can still
-        // be corrected, rather than left to fail silently at run time.
-        if let Some(gate_at) = task.front.gate_at.as_deref()
-            && pipeline.step(gate_at).is_none()
-        {
-            bail!(
-                "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
-                 `{pipeline_name}` — it may name one of: {}",
-                task.front.id,
-                pipeline.step_ids().join(", ")
-            );
-        }
+        check_gate_at(&task, pipeline)?;
+        refuse_unfilled_skeleton(
+            name,
+            &task,
+            &[crate::task_template::resolve_for(repo, pipeline)],
+        )?;
         // A task id becomes a branch and a file name too. Both are checked
         // here rather than only when a task's value happens to differ,
         // the same as `check_task_base` above.
@@ -1369,6 +1360,89 @@ fn validate_batch_undescribed(
     untrack_named_groups(&mut tasks, no_tracking)?;
     check_dependencies_set(repo, &mut tasks)?;
     Ok(tasks)
+}
+
+/// Every `[[…]]` placeholder in `text`, as written there, brackets included.
+/// Placeholders wrap across lines in the skeletons, so the span is taken from
+/// the text, not line by line.
+fn placeholders_in(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(len) = rest[start..].find("]]") else {
+            break;
+        };
+        found.push(&rest[start..start + len + 2]);
+        rest = &rest[start + len + 2..];
+    }
+    found
+}
+
+/// Refuse a task body that still holds a `[[…]]` placeholder of the skeleton
+/// it was written from.
+///
+/// A task queued without its skeleton filled in reaches a lane whose brief
+/// says "[[what this task achieves]]", and the lane has nothing to build. The
+/// placeholders refused are those of `own`, the skeletons this project writes
+/// the task from ([`crate::task_template::resolve_for`]), and of the
+/// shipped skeletons, since a project's own file may be one an older release
+/// wrote, whose placeholder wording the shipped file no longer has. Only that
+/// exact text is refused, so a task that writes double brackets of its own on
+/// purpose still queues. The refusal names the heading the placeholder sits
+/// under, the one thing a person needs to find it. Run for `queue add`, `task
+/// contract` and a trial's arms alike.
+fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<()> {
+    let body = task.body.as_str();
+    let Some(at) = own
+        .iter()
+        .map(String::as_str)
+        .chain(crate::assets::TASK_TEMPLATES.iter().map(|(_, text)| *text))
+        .flat_map(placeholders_in)
+        .filter_map(|p| body.find(p))
+        .min()
+    else {
+        return Ok(());
+    };
+    let heading = body[..at]
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("## "))
+        .map_or("the top of the task", str::trim);
+    bail!(
+        "{name}: the section `{heading}` still holds the skeleton's `[[…]]` \
+         placeholder text. Replace it with the task's own words, or delete the \
+         section if the task has nothing to say there, then add it again."
+    );
+}
+
+/// Refuse a task whose `gate_at:` names no step of its pipeline.
+///
+/// `gate_at:` pauses a task when it reports from the step it names. A name
+/// that is no step of this pipeline — a typo, or `done`, which is not a step —
+/// is never matched, so the checkpoint is dropped and the task runs straight
+/// through. Refused where the task can still be corrected, rather than left to
+/// fail silently at run time. `queue add` uses this; a trial's arms use
+/// [`unmatched_gate_at`] and word the refusal for the picker instead.
+fn check_gate_at(task: &Task, pipeline: &crate::pipeline::Pipeline) -> Result<()> {
+    if let Some(gate_at) = unmatched_gate_at(task, pipeline) {
+        bail!(
+            "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
+             `{}` — it may name one of: {}",
+            task.front.id,
+            pipeline.name,
+            pipeline.step_ids().join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The `gate_at:` of `task` when `pipeline` has no step of that name, which
+/// is what [`check_gate_at`] and a trial arm both refuse.
+fn unmatched_gate_at<'a>(task: &'a Task, pipeline: &crate::pipeline::Pipeline) -> Option<&'a str> {
+    task.front
+        .gate_at
+        .as_deref()
+        .filter(|gate_at| pipeline.step(gate_at).is_none())
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -1812,7 +1886,7 @@ fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
 /// `queue add`'s refusal of a whole batch over any task whose start branch
 /// does not exist. A command has no summary to list the rest in, so it
 /// queues none of it, the way every other refusal of `queue add` does.
-fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
+pub(crate) fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let sentences = missing_start_sentences(&not_queued(repo, tasks));
     if !sentences.is_empty() {
         bail!("{}\n\nNothing was queued.", sentences.join("\n"));
@@ -1909,6 +1983,39 @@ fn queue_add_tasks(
     Ok(())
 }
 
+/// The groups [`save_new_tasks`] locks for `tasks`: each task's own, and the
+/// group of every dependency that sits in another group.
+///
+/// The shape check under the lock reads the tail of a group a task stacks
+/// onto through a cross-group `depends_on`, so an add extending that group at
+/// the same time would pass both checks and leave the stack on a task that is
+/// no longer the tail. A dependency in the batch itself, or one no queued or
+/// archived task answers to, adds nothing.
+fn groups_to_lock(repo: &Repo, tasks: &[Task]) -> BTreeSet<String> {
+    let mut groups: BTreeSet<String> = tasks.iter().filter_map(|t| bare_group(repo, t)).collect();
+    let in_batch: BTreeSet<&str> = tasks.iter().map(Task::id).collect();
+    let deps: BTreeSet<&str> = tasks
+        .iter()
+        .flat_map(|t| t.front.depends_on.iter().map(String::as_str))
+        .filter(|dep| !in_batch.contains(dep))
+        .collect();
+    if deps.is_empty() {
+        return groups;
+    }
+    let mut siblings = repo.tasks().unwrap_or_default();
+    let archive_dir = repo.archive_dir();
+    if let Ok(indexed) = crate::archive_index::read_at(&archive_dir) {
+        siblings.extend(indexed.iter().map(|entry| entry.to_task(&archive_dir)));
+    }
+    groups.extend(
+        siblings
+            .iter()
+            .filter(|t| deps.contains(t.id()))
+            .filter_map(|t| bare_group(repo, t)),
+    );
+    groups
+}
+
 /// Write a validated batch of brand-new tasks, refusing any id that was
 /// taken after [`validate_batch`] looked.
 ///
@@ -1921,7 +2028,38 @@ fn queue_add_tasks(
 /// write anything. Locks are taken in id order so two overlapping batches
 /// cannot wait on each other. Unlike the dispatcher's use of this lock, a
 /// timeout is an error here: proceeding unlocked is the race itself.
+///
+/// The groups the batch joins are locked too, each from the group-shape check
+/// to the write, for the same reason as the ids: parallel adds of a root into
+/// one group would each pass the earlier unlocked check. The lock is per
+/// group, so adds into different groups never wait on each other.
 fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    // Group locks first, in lock-path order, then the task locks below in id
+    // order: every caller takes them in that one order, so none waits on a
+    // lock held by something that waits on one of its own. By path, not
+    // group name, and each path once: two group names can share a lock file
+    // (see [`Repo::group_lock_file`]), and taking one twice in a call would
+    // wait out [`crate::lock::TaskLock::WAIT`] on itself and then refuse.
+    let groups = groups_to_lock(repo, tasks);
+    let paths: BTreeSet<std::path::PathBuf> =
+        groups.iter().map(|g| repo.group_lock_file(g)).collect();
+    let mut group_locks = Vec::new();
+    for path in &paths {
+        group_locks.push(crate::lock::TaskLock::acquire(path).with_context(|| {
+            // Only the groups behind the path that was held: the rest of the
+            // batch's groups are not what is busy.
+            let busy: Vec<String> = groups
+                .iter()
+                .filter(|g| repo.group_lock_file(g) == *path)
+                .map(|g| format!("`{g}`"))
+                .collect();
+            format!(
+                "could not lock group {} to queue into it — another `queue add` into the \
+                 same group is holding it. Run this again in a moment.",
+                busy.join(" or ")
+            )
+        })?);
+    }
     let mut ids: Vec<&str> = tasks.iter().map(Task::id).collect();
     ids.sort_unstable();
     let mut locks = Vec::new();
@@ -1944,12 +2082,20 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
             );
         }
     }
-    // All or none: every task parsed and validated above and every id was
-    // just re-checked under its lock, so the writes are the commit.
+    // The group's shape is checked again now that the group is locked. The
+    // check in [`validate_batch`] ran with no lock, so six parallel adds of a
+    // root into one group each saw it empty and each passed. Under the lock
+    // the earlier add's file is on disk, and this one is refused naming the
+    // root that is already there.
+    check_dependencies_set(repo, &mut tasks.to_vec())?;
+    // All or none: every task parsed and validated above, every id was just
+    // re-checked under its lock and every group's shape under the group's
+    // lock, so the writes are the commit.
     for task in tasks {
         task.save()?;
     }
     drop(locks);
+    drop(group_locks);
     Ok(())
 }
 
@@ -8344,6 +8490,22 @@ fn build_trial_arm(
     arm.front.trial_group = Some(stamp.source_group.to_string());
     arm.front.group = Some(stamp.group.to_string());
     arm.front.pipeline = Some(pipeline.name.clone());
+    // `with_trial_pipeline` swapped the pipeline in before the parse, so
+    // nothing yet has checked the task's `gate_at:` against *this* pipeline.
+    // Without it an arm on a pipeline lacking that step is written with a
+    // checkpoint nothing can match, and runs straight to `done`. The refusal
+    // names the source task, not the arm: the arm's minted id exists nowhere
+    // yet. Its remedy is the trial's own — the same `gate_at:` has to suit
+    // every ticked pipeline, so editing it to fit this one would break another.
+    if let Some(gate_at) = unmatched_gate_at(&arm, pipeline) {
+        bail!(
+            "{name} has `gate_at: {gate_at}`, which is no step of pipeline `{}`. \
+             Untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
+             names a step every ticked pipeline has.",
+            pipeline.name,
+            pipeline.name
+        );
+    }
     // Only the ticked steps this pipeline actually has: `spoolway doctor`
     // refuses a `skip:` naming a step its own pipeline lacks
     // (`src/commands/pipeline.rs`). Each pipeline keeps its own skip set
@@ -8491,6 +8653,23 @@ fn begin_trial(
                     return outcome("trial refused", format!("{err:#}"));
                 }
             };
+            // The skeleton check `queue add` runs. The task was written from
+            // its own pipeline's skeleton, which is not the ticked one's, so
+            // both are read: a trial of a pending row would otherwise queue an
+            // unfilled skeleton that `queue add` refuses.
+            let written_from = match task.pipeline.as_deref().map(|name| pipelines.get(name)) {
+                Some(Ok(source)) => crate::task_template::resolve_for(repo, source),
+                _ => crate::task_template::resolve(repo, crate::task_template::FALLBACK),
+            };
+            let skeletons = [
+                written_from,
+                crate::task_template::resolve_for(repo, pipeline),
+            ];
+            if let Err(err) =
+                refuse_unfilled_skeleton(&task.path.display().to_string(), &arm, &skeletons)
+            {
+                return outcome("trial refused", format!("{err:#}"));
+            }
 
             // Every dependency this copy also forks maps to that
             // predecessor's own minted id — the bare id it named is never
@@ -13538,6 +13717,244 @@ mod tests {
         )
         .expect("a task naming a start branch that exists is queued");
         assert!(repo.queue_dir().join("index-file.md").exists());
+    }
+
+    /// A trial arm on a pipeline that lacks the step the task's `gate_at:`
+    /// names is refused, the way `queue add` refuses the same file, rather
+    /// than written with a checkpoint nothing matches. The pipeline that has
+    /// the step still takes it. Fails without the check: the arm is built.
+    #[test]
+    fn a_trial_arm_on_a_pipeline_without_the_gate_at_step_is_refused() {
+        let pipelines = Pipelines::builtin();
+        let doc = task_text("gated", "group: demo\ngate_at: implement\n", BODY);
+        let stamp = TrialStamp {
+            trial: "t1",
+            source_group: "demo",
+            group: "demo-bugfix",
+        };
+        let skip = Default::default();
+
+        let bugfix = pipelines.get("bugfix").unwrap();
+        let err = build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-1",
+            &stamp,
+            bugfix,
+            &skip,
+        )
+        .expect_err("bugfix has no `implement` step");
+        let said = format!("{err:#}");
+        assert!(said.contains("gated.md has `gate_at: implement`"), "{said}");
+        assert!(said.contains("Untick `bugfix`"), "{said}");
+        assert!(!said.contains("gated-1"), "{said}");
+
+        let default = pipelines.get("default").unwrap();
+        let arm = build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-2",
+            &stamp,
+            default,
+            &skip,
+        )
+        .expect("default has an `implement` step");
+        assert_eq!(arm.front.gate_at.as_deref(), Some("implement"));
+    }
+
+    /// Six `queue add` calls of a root task into one group, all validated
+    /// before any saved, queue exactly one. The rest are refused naming the
+    /// group and the root already there. Fails without the group lock: each
+    /// validated against an empty group and all six are saved.
+    #[test]
+    fn parallel_adds_of_roots_into_one_group_queue_one() {
+        let (repo, _root_guard) = fixture("parallel-root-adds");
+        let pipelines = Pipelines::builtin();
+        let validated: Vec<Vec<Task>> = (0..6)
+            .map(|n| {
+                let id = format!("root-{n}");
+                let text = task_text(&id, "group: shared\n", BODY);
+                validate_batch(
+                    &repo,
+                    &pipelines,
+                    Some("plan/demo"),
+                    &[(format!("{id}.md"), text)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let results: Vec<Result<()>> = std::thread::scope(|scope| {
+            let repo = &repo;
+            let handles: Vec<_> = validated
+                .iter()
+                .map(|batch| scope.spawn(move || save_new_tasks(repo, batch)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        for err in results.iter().filter_map(|r| r.as_ref().err()) {
+            let said = format!("{err:#}");
+            assert!(said.contains("group `shared`"), "{said}");
+            assert!(said.contains("root-"), "{said}");
+        }
+        assert_eq!(repo.tasks().unwrap().len(), 1);
+    }
+
+    /// A task still holding a skeleton's `[[…]]` placeholder is refused,
+    /// naming the section; double brackets the skeletons never wrote queue.
+    /// Fails without the check: both validate.
+    #[test]
+    fn a_task_holding_a_skeleton_placeholder_is_refused_by_heading() {
+        let (repo, _root_guard) = fixture("skeleton-placeholder");
+        let check = |body: &str| {
+            validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("a.md".into(), task_text("a", "group: demo\n", body))],
+            )
+        };
+
+        let skeleton = crate::assets::task_template("default").unwrap();
+        let err = check(skeleton).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(said.contains("`Context`"), "{said}");
+        assert!(said.contains("[[…]]"), "{said}");
+
+        let filled = "## Intend\n\nPrint `a[[0]]` for the index.\n";
+        check(filled).expect("brackets the skeleton never wrote are the task's own");
+    }
+
+    /// One batch with roots in groups whose names share a lock file (`a.b`
+    /// and `a_b`) saves both. Fails without the deduped lock paths: the
+    /// second acquire waits on the first, which this same call holds, and the
+    /// batch is refused after the lock wait.
+    #[test]
+    fn a_batch_in_two_groups_sharing_a_lock_file_is_saved() {
+        let (repo, _root_guard) = fixture("shared-group-lock-file");
+        assert_eq!(repo.group_lock_file("a.b"), repo.group_lock_file("a_b"));
+        let submitted: Vec<(String, String)> = [("one", "a.b"), ("two", "a_b")]
+            .iter()
+            .map(|(id, group)| {
+                (
+                    format!("{id}.md"),
+                    task_text(id, &format!("group: {group}\n"), BODY),
+                )
+            })
+            .collect();
+        let tasks =
+            validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted).unwrap();
+        save_new_tasks(&repo, &tasks).expect("one lock file taken once covers both groups");
+        assert_eq!(repo.tasks().unwrap().len(), 2);
+    }
+
+    /// A group a task stacks onto through a `depends_on` in another group is
+    /// locked with the task's own, so a parallel add extending that group
+    /// cannot leave the stack on a task that stopped being its tail.
+    #[test]
+    fn groups_to_lock_includes_the_group_a_cross_group_dependency_sits_in() {
+        let (repo, _root_guard) = fixture("lock-stacked-onto-group");
+        add(&repo, "parent", &[]);
+        let text = task_text("child", "group: other\ndepends_on: [parent]\n", BODY);
+        let tasks = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("child.md".into(), text)],
+        )
+        .unwrap();
+        let groups = groups_to_lock(&repo, &tasks);
+        assert_eq!(
+            groups.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["demo", "other"]
+        );
+    }
+
+    /// The placeholders refused are those of the skeleton this project writes
+    /// the task from, not only the shipped ones. Fails when only the shipped
+    /// skeletons are read: this one's placeholder passes.
+    #[test]
+    fn a_placeholder_of_the_projects_own_skeleton_is_refused() {
+        let (repo, _root_guard) = fixture("own-skeleton-placeholder");
+        let dir = repo.task_templates_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.md"),
+            "## Panels\n\n[[the panels this task has to match]]\n",
+        )
+        .unwrap();
+        let body = "## Panels\n\n[[the panels this task has to match]]\n";
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("a.md".into(), task_text("a", "group: demo\n", body))],
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("`Panels`"), "{err:#}");
+    }
+
+    /// A trial of a pending task still holding the skeleton queues nothing,
+    /// as `queue add` refuses the same file. Fails without the check in the
+    /// trial loop: the arm is queued.
+    #[test]
+    fn a_trial_of_a_task_holding_the_skeleton_queues_nothing() {
+        let (repo, _root_guard) = fixture("screen-trial-skeleton");
+        let skeleton = crate::assets::task_template("default").unwrap();
+        write_pending(
+            &repo,
+            "raw",
+            &task_text("raw", "group: audits\npipeline:\n", skeleton),
+        );
+        let groups = listed(&repo);
+
+        screen(&repo, groups, "o\r \r\r");
+
+        assert!(
+            repo.tasks().unwrap().is_empty(),
+            "no arm of an unfilled skeleton is queued"
+        );
+    }
+
+    /// A pending task written from its own pipeline's project skeleton is
+    /// checked against that skeleton even when the trial ticks only another
+    /// pipeline. Fails without the source's skeleton in the check: the
+    /// `default` arm is checked against `default.md` alone and is queued.
+    #[test]
+    fn a_trial_checks_the_skeleton_the_task_was_written_from() {
+        let (repo, _root_guard) = fixture("screen-trial-source-skeleton");
+        let dir = repo.task_templates_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let placeholder = "[[the panels this task has to match]]";
+        std::fs::write(
+            dir.join("bugfix.md"),
+            format!("## Panels\n\n{placeholder}\n"),
+        )
+        .unwrap();
+        write_pending(
+            &repo,
+            "solo",
+            &task_text(
+                "solo",
+                "group: audits\npipeline: bugfix\n",
+                &format!("## Panels\n\n{placeholder}\n"),
+            ),
+        );
+        let groups = listed(&repo);
+
+        // `bugfix` starts ticked: `space` unticks it, `j` moves to `default`,
+        // `space` ticks it, `enter` twice past both screens.
+        screen(&repo, groups, "o\r j \r\r");
+
+        assert!(repo.tasks().unwrap().is_empty(), "nothing is queued");
     }
 
     /// Only a task with something to check is checked: one whose dependency

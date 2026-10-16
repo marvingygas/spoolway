@@ -309,6 +309,13 @@ refused with the same message and write nothing. The queue screen, scheduled job
 routines tab follow the same rule. An add that cannot take the id's lock within three seconds is refused with
 `could not lock task`. Run it again.
 
+When several adds of root tasks into one group run at the same moment, one queues its root and
+the others are refused. The message names the group and both roots. An add that cannot take the
+group's lock within three seconds is refused with `could not lock group`. Run it again.
+
+A task body that still holds its skeleton's `[[…]]` placeholder text refuses the whole batch. The
+message names the section. See [One constraint no key can express](tasks.md#one-constraint-no-key-can-express).
+
 A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
 command prints one line for each such task and then `Nothing was queued.`:
 
@@ -1226,8 +1233,8 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 
 The contract holds every pipeline's longest agent step and body skeleton, the sizing guidance,
 the output directory, the allowed and refused keys, one sentence per key, and the rules that
-hold across a set. `--from` runs the same validation as `queue add --from`
-and exits non-zero on a refusal.
+hold across a set. `--from` runs the same validation as `queue add --from`, including the
+start-branch check and the placeholder check, and exits non-zero on a refusal.
 
 Bare, with no `--from`, the contract also carries a top-level `base`: the branch the checkout
 it ran in has out. A worktree reports its own branch. A detached checkout reports `null`.

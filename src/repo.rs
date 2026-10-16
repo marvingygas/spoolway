@@ -792,6 +792,28 @@ impl Repo {
         self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
+    /// The advisory lock held while a group's shape is checked and its new
+    /// tasks saved, so two `queue add` calls into one group cannot both see
+    /// it without a root — see `save_new_tasks` in `commands::queue`. It lives
+    /// beside the task locks but in its own folder, so a group named like a
+    /// task id never shares a lock with that task. Any character that is not
+    /// safe in a file name becomes `_`, so two names (`a.b` and `a_b`, or
+    /// two spellings on a disk that ignores case) can land on one file. Their
+    /// adds then take turns, which is harmless, but a caller locking both in
+    /// one call must take the path once.
+    pub fn group_lock_file(&self, group: &str) -> PathBuf {
+        let safe: String = group
+            .chars()
+            .map(
+                |c| match c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    true => c,
+                    false => '_',
+                },
+            )
+            .collect();
+        self.home().join("group-locks").join(format!("{safe}.lock"))
+    }
+
     /// The advisory lock held while a routine is checked for a live copy and
     /// its next copy saved, so two submissions of one routine cannot both
     /// find the queue clear — see `claim_routines` in `commands::queue`.
