@@ -69,7 +69,7 @@ as JSON.
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
 | `spare_pane` | the dispatcher | The workspace's first pane, until a step runs in it. See [Herdr](dispatcher.md#herdr). |
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
-| `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back onto each command step. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
+| `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back towards each command step, by a plain pass or by `--stage`. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |

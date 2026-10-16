@@ -1855,6 +1855,48 @@ counter "three laps were handed back to the gate, not a fourth" \
 lacks "and it never reached the step the gate guards" "→ \`document\`" \
   $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
 
+# --------------------- an unblocker that answers `--stage` instead of a plain pass
+# The count watches the command, not the road the unblocker takes back to it.
+# The `stage:<step>` stand-in answers `--pass --stage <step>` on `blocked`, a
+# route the plain-pass cases above never take. The gate pipeline is still in
+# place, so the first case sends the task back to the agent step behind the gate.
+forget gated-unattended
+echo "stage:e2e" > "$CTL/gated-stage"
+task_doc "$LIVE/gated-stage.md" gated-stage "$BODY" "group: gated-stage"
+must "a task whose gate never turns green, with an unblocker that answers --stage" \
+  "$SPOOLWAY" queue add --from "$LIVE/gated-stage.md"
+if drive gated-stage paused 150; then
+  ok "an unblocker that answers --stage to the agent behind a red gate ends on paused"
+else
+  bad "an unblocker that answers --stage to the agent behind a red gate ends on paused \
+(at \`$(stage_of gated-stage)\`)"
+fi
+has "the Status Log names the gate and the laps" \
+  "\`gate\` failed again after 3 unblocker passes had sent the task back to it" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated-stage.md
+counter "three laps were handed back towards the gate, not a fourth" \
+  steps "blocked->gate" 3 $SPOOLWAY_PROJECT_HOME/queue/gated-stage.md
+
+# The direct shape: the command is the step the unblocker names.
+forget gated-stage
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default redgate "echo 'CI would fail here' >&2; exit 1" review ""
+echo "stage:redgate" > "$CTL/redstage"
+task_doc "$LIVE/redstage.md" redstage "$BODY" "group: redstage"
+must "a task whose gate is always red, with an unblocker that answers --stage" \
+  "$SPOOLWAY" queue add --from "$LIVE/redstage.md"
+if drive redstage paused 150; then
+  ok "an unblocker that answers --stage to the failing command ends on paused"
+else
+  bad "an unblocker that answers --stage to the failing command ends on paused \
+(at \`$(stage_of redstage)\`)"
+fi
+has "the Status Log names the command and the laps" \
+  "\`redgate\` failed again after 3 unblocker passes had sent the task back to it" \
+  $SPOOLWAY_PROJECT_HOME/queue/redstage.md
+counter "three laps were handed back to the command, not a fourth" \
+  steps "blocked->redgate" 3 $SPOOLWAY_PROJECT_HOME/queue/redstage.md
+
 must "unattended off again, so nothing later in this file inherits it" \
   "$SPOOLWAY" config set unattended.enabled false
 dispatcher_stop

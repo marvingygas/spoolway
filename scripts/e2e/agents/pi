@@ -65,7 +65,15 @@ case "$mode" in
     ;;
 esac
 
+# `stage:<step>` is the unblocker that answers `--pass --stage <step>` instead of
+# a plain `--pass`. It governs only the lane on `blocked`: every other step of the
+# same task takes the ordinary turn, so the task can reach `blocked` at all.
 case "$mode" in
+  stage:*) [ "$SPOOLWAY_STEP" = blocked ] || mode=$SPOOLWAY_TASK ;;
+esac
+
+case "$mode" in
+  stage:*) "$SPOOLWAY" report --pass --stage "${mode#stage:}" -m "back to ${mode#stage:}" ;;
   crash) exit 0 ;;          # ends its turn without reporting
   hang | vanish) sleep 300 ;; # never finishes on its own
   # A turn that leaves a change behind and passes. A task cut straight onto

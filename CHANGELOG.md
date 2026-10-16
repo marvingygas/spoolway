@@ -46,6 +46,7 @@ bookkeeping out of them and describe user-visible outcomes.
 
 ### Fixes
 - A worktree cut whose `git fetch` hangs on its transport gives up within its bound and stops the fetch, and unrelated tasks start in the meantime. Each question to `origin` about a remote-only base gives up after 10 seconds: `spoolway dispatch` then starts and holds only that task, saying `origin` could not be asked, where 0.10.0 hung on a hung `origin` and refused an offline one as if the branch did not exist. (#933)
+- An unattended unblocker that answers `--pass --stage <step>` can no longer loop a failing command for ever: the lap count watches the command, so the task parks on `paused` after the third lap whatever route the unblocker took back to it.
 - An unblocker lane that was mid-turn when a resume was refused can still report, and its report moves the task on instead of leaving it on `blocked`. (#944)
 - The eval tab's cursor stops at the table's last row, and keys typed faster than it draws are applied in order in one frame, so holding `↓` no longer keeps it moving after you let go. (#936)
 - The eval tab opens and rereads faster: it walks the claude and pi transcript stores once per read, prices every model once, and rebuilds the table only when its data changes. (#928, #931)

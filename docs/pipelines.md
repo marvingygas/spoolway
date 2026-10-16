@@ -174,16 +174,20 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - That reset cannot stop a command step that fails every time while an unattended unblocker
-  keeps passing it. So spoolway counts those laps itself. Each unblocker pass that sends the
-  task back onto a command step is a lap. It counts whether the task stopped at the command
-  step or at an agent step behind it, as it does for a gate that fails back to that agent.
+  keeps passing it. So spoolway counts those laps itself, and the count watches the command,
+  not the route the unblocker takes. Each unblocker pass that sends the task back towards a
+  command step is a lap. It counts whether the pass is a plain `--pass`, a `--pass --stage`
+  naming the command, or a `--pass --stage` naming an earlier agent step that runs before the
+  command fails again. It counts whether the task stopped at the command step or at an agent
+  step behind it, as it does for a gate that fails back to that agent.
   The pass after the third lap parks the task on `paused` instead. The unblocker lane that
   makes that pass has already run, so four unblocker lanes run in all, and no fifth starts.
   `## Status Log` names the command step and the three laps. A person's `spoolway resume`
   starts the count again. It sends the task back to the step it stopped at, which is the
-  command step itself, or the agent step behind a gate that failed back to it. A pass that
-  lands on an agent step, a pass that names a step with `--stage`, and a command that
-  passes on its next run end the count rather than add to it.
+  command step itself, or the agent step behind a gate that failed back to it. A command that
+  passes on its next run ends the count. So does a pass whose road does not lead back to a
+  failing command: an agent step that blocked on its own, or a `--stage` to a step past the
+  command. Attended runs are not counted: a person at the board is the bound.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
   limit, so delete the line to keep the meaning 0.7 gave `loop: 0`. `loop: 1` is not the same:
   it blocks the task on its second arrival. `spoolway sync` refuses a file carrying it, and
@@ -204,7 +208,9 @@ outcome at every step, and the walk-past and the failed launch or busy pane, to 
 depth. It runs over the shipped pipelines, the tracked `.spoolway/pipelines` files, and
 pipelines it generates that pass `spoolway pipeline check`.
 Each path it walks must reach `done` or `blocked`, keep every `loop` count rising, and start no
-more lanes than a stated bound.
+more lanes than a stated bound. The walk treats `blocked` as resting, so it does not walk an
+unblocker's `--stage` out of `blocked`, and it does not take the unblocker laps above. Unit
+tests in `src/commands/report.rs` cover those.
 
 ## Unattended runs
 

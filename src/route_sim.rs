@@ -232,12 +232,15 @@ mod tests {
     /// passes have sent it back onto the command (`Task::unblock_laps`). This
     /// walk never takes those laps, because it treats `blocked` as resting
     /// and so never routes a pass from it back onto the command a second
-    /// time. `unattended.max_output_tokens`/`max_cost_usd` stay the money
-    /// brake behind that bound, one this walk has no `Repo` to read. What
-    /// this walk still proves at that boundary is [`walk_from_blocked`]'s own
-    /// job: a task that actually stopped at some real step, seeded with that
-    /// step's own `blocked_from`, is routed and checked for the rounds
-    /// properties on every outcome — including the one hop a `--pass` takes
+    /// time, and so never routes a `--stage` out of `blocked` either: the lap
+    /// count watches the command whatever route the unblocker names, and
+    /// `commands::report`'s own tests cover that.
+    /// `unattended.max_output_tokens`/`max_cost_usd` stay the money brake
+    /// behind that bound, one this walk has no `Repo` to read. What this walk
+    /// still proves at that boundary is [`walk_from_blocked`]'s own job: a
+    /// task that actually stopped at some real step, seeded with that step's
+    /// own `blocked_from`, is routed and checked for the rounds properties on
+    /// every outcome — including the one hop a `--pass` takes
     /// back into real work, which this walk then carries on from exactly as
     /// it would any other arrival.
     fn is_resting(stage: &str) -> bool {
