@@ -264,6 +264,13 @@ must "a task whose build fails" "$SPOOLWAY" queue add --from "$LIVE/broken.md"
 records "what the command printed is on the record" "the build is broken" \
   "$SPOOLWAY_PROJECT_HOME/commands/broken · build.log" broken
 
+# The lane the failing build sent the task back to is briefed on it: the
+# second `implement` lane's composed prompt names the command step and its
+# log. The file is rewritten per launch, so this only matches the second one.
+records "the lane sent back is told which command failed" \
+  "The command step \`build\` failed" \
+  "$SPOOLWAY_PROJECT_HOME/system-prompts/broken · implement.md" broken
+
 if drive broken gone 180; then ok "a task whose command fails still reaches the end"
 else bad "a task whose command fails still reaches the end (at \`$(stage_of broken)\`)"; fi
 # Counted rather than matched: every task arrives at `implement` once on its

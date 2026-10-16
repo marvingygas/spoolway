@@ -781,6 +781,13 @@ fn drain_ready(pipe: &mut impl std::io::Read, into: &mut Vec<u8>) {
 /// prompt. Transient by construction: the pane is busy with what `start_lane`
 /// itself just typed into it, and the same start succeeds on a later attempt.
 ///
+/// The headless backend refuses with it too, when a start would overwrite a
+/// lane whose previous turn is still running: there the "pane" is that old
+/// lane, and the same start succeeds once its turn ends. `mid_turn` says
+/// which of the two it is, so the waiting line and the reason a ten-minute
+/// wait leaves on the task's `## Status Log` describe what really held the
+/// start up.
+///
 /// The dispatcher asks for this by downcasting the `anyhow::Error`, rather than
 /// the `Mux` trait growing a second return type for the one caller that needs
 /// to tell a busy pane apart from every other way a launch can fail. Carries
@@ -790,15 +797,25 @@ fn drain_ready(pipe: &mut impl std::io::Read, into: &mut Vec<u8>) {
 #[derive(Debug)]
 pub struct PaneBusy {
     pub pane_id: String,
+    /// The pane holds a lane still finishing a turn, rather than a shell that
+    /// has not yet reached its prompt.
+    pub mid_turn: bool,
 }
 
 impl std::fmt::Display for PaneBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "pane {} is not yet at an interactive shell prompt",
-            self.pane_id
-        )
+        match self.mid_turn {
+            true => write!(
+                f,
+                "the lane in pane {} is still finishing a turn",
+                self.pane_id
+            ),
+            false => write!(
+                f,
+                "pane {} is not yet at an interactive shell prompt",
+                self.pane_id
+            ),
+        }
     }
 }
 
@@ -1064,6 +1081,7 @@ impl Herdr {
         match is_pane_busy_envelope(&stderr) {
             true => Err(anyhow::Error::new(PaneBusy {
                 pane_id: pane_id.to_string(),
+                mid_turn: false,
             })
             .context(err)),
             false => Err(err),

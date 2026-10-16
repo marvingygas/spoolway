@@ -115,7 +115,8 @@ enum LaunchFault {
 const MAX_COMMAND_KILLS: u32 = 3;
 
 /// How long a step tolerates its pane refusing `agent start` with
-/// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before giving up on the wait:
+/// `agent_pane_busy` under herdr, or its old lane still finishing a turn under
+/// headless — [`crate::mux::PaneBusy`] both — before giving up on the wait:
 /// the task is routed to `step.on_fail`, or `blocked` when it names none.
 /// That is not where [`MAX_LAUNCH_FAILURES`]'s ceiling sends an agent lane:
 /// that goes to `blocked`, or to `paused` when the lane is the unblocker.
@@ -4155,14 +4156,16 @@ impl<'a> Dispatcher<'a> {
 
     /// A launch refused because its pane is still busy — [`crate::mux::
     /// PaneBusy`] — never spends one of [`MAX_LAUNCH_FAILURES`]'s strikes:
-    /// the refusal is transient by construction (see [`crate::mux::Herdr::
-    /// start_lane`]'s own poll ahead of `agent start`). `boot_start_lane`'s
-    /// own take-back closes the pane, and a fresh one is split on every
-    /// attempt,
-    /// exactly as it does for any other launch failure — see its own doc
-    /// comment — so three of these in a row are three different panes
-    /// caught by the same race, not the same pane refusing three times over;
-    /// either way, not three broken launches.
+    /// the refusal is transient by construction. Under herdr it is a pane that
+    /// has not reached its prompt (see [`crate::mux::Herdr::start_lane`]'s own
+    /// poll ahead of `agent start`); `boot_start_lane`'s own take-back closes
+    /// the pane, and a fresh one is split on every attempt, exactly as it does
+    /// for any other launch failure — see its own doc comment — so three of
+    /// these in a row are three different panes caught by the same race, not
+    /// the same pane refusing three times over. Under headless it is the same
+    /// old lane every time, still finishing its turn, which `PaneBusy::
+    /// mid_turn` says and the two lines below word accordingly. Either way,
+    /// not three broken launches.
     ///
     /// Stamps [`Task::stamp_launch_busy`] on the first refusal only and
     /// reports one waiting line naming the pane and the elapsed time, below
@@ -4178,16 +4181,21 @@ impl<'a> Dispatcher<'a> {
         &self,
         task: &mut Task,
         step: &Step,
-        pane_id: &str,
+        busy: &crate::mux::PaneBusy,
         report: &mut Report,
     ) -> Option<String> {
+        let pane_id = busy.pane_id.as_str();
         let now = now_secs();
         let since = task.stamp_launch_busy(&step.id, now);
         let elapsed = (now - since).max(0) as u64;
         let bound = LAUNCH_BUSY_TIMEOUT.as_secs();
         if elapsed < bound {
+            let waiting_for = match busy.mid_turn {
+                true => format!("the lane in pane `{pane_id}` to finish its turn"),
+                false => format!("pane `{pane_id}` to reach its prompt"),
+            };
             report.actions.push(format!(
-                "{}: waiting for pane `{pane_id}` to reach its prompt (busy {} of {})",
+                "{}: waiting for {waiting_for} (busy {} of {})",
                 task.id(),
                 mmss(elapsed),
                 mmss(bound),
@@ -4195,8 +4203,12 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         task.clear_launch_busy(&step.id);
+        let held_up = match busy.mid_turn {
+            true => format!("the lane in pane `{pane_id}` was still finishing a turn"),
+            false => format!("pane `{pane_id}` never reached its prompt"),
+        };
         let reason = format!(
-            "`{}` could not be started: pane `{pane_id}` never reached its prompt after {}",
+            "`{}` could not be started: {held_up} after {}",
             step.id,
             mmss(bound)
         );
@@ -4933,10 +4945,7 @@ impl<'a> Dispatcher<'a> {
         // road keeps routing as it always has, so a busy unblocker pane still
         // reaches `blocked` again rather than parking.
         let (destination, from_ceiling) = match err.downcast_ref::<crate::mux::PaneBusy>() {
-            Some(busy) => (
-                self.note_pane_busy(task, step, &busy.pane_id, report),
-                false,
-            ),
+            Some(busy) => (self.note_pane_busy(task, step, busy, report), false),
             None => (
                 self.note_launch_failure(
                     task,
@@ -8654,6 +8663,9 @@ mod tests {
         /// and carrying [`crate::mux::PaneBusy`] rather than an ordinary
         /// failure.
         refuse_start_pane_busy: bool,
+        /// Like `refuse_start_pane_busy`, but as the headless backend answers: the
+        /// old lane under this name is still finishing a turn.
+        refuse_start_mid_turn: bool,
         /// Make the briefing refuse to land, the way a real backend does when
         /// a freshly started session never begins its turn — the lane is up,
         /// and `Mux::prompt` still comes back an error.
@@ -8781,6 +8793,7 @@ mod tests {
                 refuse_start: false,
                 tabless: false,
                 refuse_start_pane_busy: false,
+                refuse_start_mid_turn: false,
                 refuse_prompt: false,
                 refuse_start_named: None,
                 refuse_prompt_named: None,
@@ -8930,6 +8943,12 @@ mod tests {
         /// `agent_pane_busy`, transient by construction.
         fn refusing_to_start_with_a_busy_pane(mut self) -> FakeMux {
             self.refuse_start_pane_busy = true;
+            self
+        }
+        /// A backend whose `start_lane` always answers the way headless does for
+        /// a step revisited while its old lane still runs a turn.
+        fn refusing_to_start_over_a_lane_mid_turn(mut self) -> FakeMux {
+            self.refuse_start_mid_turn = true;
             self
         }
         /// A backend that starts a lane and then will not carry its briefing
@@ -9356,9 +9375,17 @@ mod tests {
             if self.refuse_start_named.as_deref() == Some(spec.name) {
                 anyhow::bail!("agent_start_failed");
             }
+            if self.refuse_start_mid_turn {
+                return Err(anyhow::Error::new(crate::mux::PaneBusy {
+                    pane_id: spec.pane_id.to_string(),
+                    mid_turn: true,
+                })
+                .context("lane is still finishing a turn"));
+            }
             if self.refuse_start_pane_busy {
                 return Err(anyhow::Error::new(crate::mux::PaneBusy {
                     pane_id: spec.pane_id.to_string(),
+                    mid_turn: false,
                 })
                 .context(format!(
                     "herdr agent start {} --pane {}: agent target pane {} is not an available shell",
@@ -15987,6 +16014,47 @@ mod tests {
         assert!(
             task.body
                 .contains("`implement` could not be started: pane `"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// Under headless the thing held up is an old lane finishing its turn, not
+    /// a pane without a prompt, and both lines the wait writes say so: the
+    /// pass's waiting line, and the reason on the `## Status Log` once the
+    /// ten minutes are spent — the entry an unblocker is sent to read.
+    #[test]
+    fn a_lane_still_finishing_a_turn_is_not_called_a_pane_without_a_prompt() {
+        let (repo, _root_guard) = fixture("lane-mid-turn-wait");
+        let path = add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).refusing_to_start_over_a_lane_mid_turn();
+
+        let report = run_pass(&repo, &mux);
+        let waiting = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("demo: waiting for the lane in pane "))
+            .unwrap_or_else(|| panic!("no waiting line: {:?}", report.actions));
+        assert!(waiting.contains("to finish its turn (busy "), "{waiting}");
+        assert_eq!(reload(&path).stage(), "queued");
+
+        let path = add_task_with(&repo, "late", "queued", |front| {
+            front
+                .launch_busy_since
+                .insert("implement".to_string(), now_secs() - 601);
+        });
+        run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked");
+        assert!(
+            task.body
+                .contains("`implement` could not be started: the lane in pane `")
+                && task.body.contains("was still finishing a turn after 10:00"),
+            "{}",
+            task.body
+        );
+        assert!(
+            !task.body.contains("never reached its prompt"),
             "{}",
             task.body
         );
@@ -27645,14 +27713,17 @@ mod tests {
     /// arrive knowing only that it was there again. It redid the work, passed,
     /// and handed the same tree back for the same failure — a loop whose only
     /// exit was the round cap. The paragraph names the step and its log.
+    ///
+    /// On `blocked` the paragraph cannot claim the command failed, because a
+    /// command without `on_fail` reaches `blocked` on a pass into a spent
+    /// `loop:` as well; it says the command stopped the task instead.
     #[test]
     fn a_lane_a_command_step_failed_into_is_told_which_one_and_where_to_read_it() {
         let (repo, _root_guard) = fixture("prompt-command-fail");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         // `handover` is the shipped pipeline's command step (`spoolway
-        // stack`), and its `on_fail` now goes straight to `blocked` — the
-        // shape this paragraph exists for.
+        // stack`), and its `on_fail` goes straight to `blocked`.
         let step = pipeline.step("blocked").unwrap();
 
         let mut task = reload(&add_task(&repo, "demo", "blocked"));
@@ -27661,7 +27732,221 @@ mod tests {
         task.front.arrived_from = Some("handover".to_string());
         let prompt = sent(&repo, &task, pipeline, step);
         assert!(
+            prompt.contains("command step `handover` stopped the task here"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+    }
+
+    /// The briefing is composed before the launch writes `arrived_from`, so a
+    /// task still sitting on the command step it is being sent back from has
+    /// `arrived_from` naming the step *before* that one. The paragraph used to
+    /// read that stale value and never appear, also for a `session: true` lane
+    /// whose prompt promises its reason in THIS PASS.
+    #[test]
+    fn the_command_that_failed_is_named_before_the_launch_records_the_arrival() {
+        let (repo, _root_guard) = fixture("prompt-command-fail-first-launch");
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.id == "handover" {
+                    step.on_fail = Some("implement".to_string());
+                }
+            }
+        }
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("implement").unwrap();
+        assert!(step.session, "the case is a `session:` step");
+
+        // On `handover` when the lane for `implement` is composed;
+        // `arrived_from` is still `document`, the arrival before that one.
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(
             prompt.contains("command step `handover` failed"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+
+        // Once the launch has moved the task and a retry composes again, the
+        // recorded arrival is the answer and still names it.
+        task.front.stage = "implement".to_string();
+        task.front.arrived_from = Some("handover".to_string());
+        assert!(sent(&repo, &task, pipeline, step).contains("command step `handover` failed"));
+    }
+
+    /// Every road into `blocked` is the fail route of a step with no
+    /// `on_fail`, so the route cannot say which one it was. A task that
+    /// reported `--block`, or was escalated, has no `## Handoff` to point at.
+    #[test]
+    fn an_unblocker_is_told_how_the_task_really_reached_it() {
+        let (repo, _root_guard) = fixture("prompt-blocked-cause");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+        let report = |outcome: &str| crate::task::LastReport {
+            step: "document".to_string(),
+            outcome: outcome.to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        };
+
+        // `document` declares no `on_fail`, so a fail also lands on `blocked`.
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("document".to_string());
+
+        task.front.last_report = Some(report("block"));
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("`document` reported `--block`"), "{prompt}");
+        assert!(prompt.contains("latest entry of"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("no `## Handoff`"), "{prompt}");
+
+        task.front.escalated = true;
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("dispatcher stopped its lane"), "{prompt}");
+        assert!(prompt.contains("`## Blocker`"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("no `## Handoff`"), "{prompt}");
+
+        task.front.escalated = false;
+        task.front.last_report = Some(report("fail"));
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("failed this task back"), "{prompt}");
+    }
+
+    /// A report of the same step from an earlier lap, one that did not leave
+    /// the task on `blocked`, is not why the task is there now. The launch
+    /// guard and the launch-failure ceiling stop a task without marking
+    /// `escalated`, so the old fail used to be read as a fresh one and the
+    /// unblocker was told the step "failed this task back".
+    #[test]
+    fn an_old_report_of_the_same_step_is_not_read_as_the_cause_of_a_later_stop() {
+        let (repo, _root_guard) = fixture("prompt-blocked-stale-report");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("review".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".to_string(),
+            outcome: "fail".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: false,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("reported `--block`"), "{prompt}");
+        assert!(
+            prompt.contains("`review` is where this task stopped, and it did not report"),
+            "{prompt}"
+        );
+    }
+
+    /// A `--fail` whose own `on_fail` step has spent its `loop:` is
+    /// redirected to `blocked`, and the reason is the loop's, not the
+    /// findings. `review` fails back to `implement`, so its fail route is not
+    /// `blocked` and the old "Fix pass" wording does not apply.
+    #[test]
+    fn a_fail_redirected_by_a_spent_loop_is_not_a_fix_pass() {
+        let (repo, _root_guard) = fixture("prompt-blocked-spent-loop-fail");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("review".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".to_string(),
+            outcome: "fail".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(
+            prompt.contains("`review` is where this task stopped"),
+            "{prompt}"
+        );
+    }
+
+    /// A pass that left the task on `blocked` because the next step had spent
+    /// its `loop:` is where the `Some(_)` arm lands.
+    #[test]
+    fn a_pass_stopped_by_a_spent_loop_says_where_the_task_stopped() {
+        let (repo, _root_guard) = fixture("prompt-blocked-spent-loop-pass");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("document".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "document".to_string(),
+            outcome: "pass".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(
+            prompt.contains("`document` is where this task stopped"),
+            "{prompt}"
+        );
+    }
+
+    /// A command gate that fails back to an agent step with a spent `loop:`
+    /// is redirected to `blocked`. Its fail route is not `blocked`, so the
+    /// route alone says nothing, but the unblocker is still told which command
+    /// stopped the task and where its log is.
+    #[test]
+    fn a_command_gate_stopped_by_a_spent_loop_is_named_to_the_unblocker() {
+        let (repo, _root_guard) = fixture("prompt-blocked-command-loop");
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.id == "handover" {
+                    step.on_fail = Some("implement".to_string());
+                }
+            }
+        }
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(
+            prompt.contains("command step `handover` stopped the task here"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+    }
+
+    /// A command with no `on_fail` of its own fails to `blocked`, so its fail
+    /// route leads there. It may equally have passed into a step whose
+    /// `loop:` is spent. The unblocker cannot be told it "failed and routes
+    /// back here" when the exit code is gone and it may have passed.
+    #[test]
+    fn a_command_with_no_on_fail_is_not_said_to_have_failed_on_blocked() {
+        let (repo, _root_guard) = fixture("prompt-blocked-command-default-fail");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed and routes back here"), "{prompt}");
+        assert!(
+            prompt.contains("command step `handover` stopped the task here"),
             "{prompt}"
         );
         assert!(prompt.contains("demo · handover.log"), "{prompt}");

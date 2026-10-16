@@ -488,6 +488,21 @@ fn stands_in_for_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> Str
     )
 }
 
+/// The step the task is arriving at `step` from.
+///
+/// When the dispatcher moves the task itself — after a command step, a watch
+/// step, or off `queued` — the briefing is composed before
+/// `finish_launch_bookkeeping` writes the move, so the task still sits on the
+/// step it comes from and `arrived_from` holds the arrival before that one.
+/// Otherwise — a lane's report already moved the task, or this is a retry —
+/// the task is on `step` and `arrived_from` is the answer.
+fn arrived_from<'a>(task: &'a Task, step: &Step) -> Option<&'a str> {
+    match task.stage() != step.id {
+        true => Some(task.stage()),
+        false => task.front.arrived_from.as_deref(),
+    }
+}
+
 /// The step this task arrived from, when this pass exists because that
 /// step's *fail* route led here and its *pass* route led somewhere else —
 /// never when both routes lead here, which cannot say which one was taken.
@@ -501,7 +516,7 @@ fn stands_in_for_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> Str
 /// `blocked`, and this has to notice that arrival exactly the same as one
 /// that names the step outright.
 fn arrived_by_fail<'a>(task: &Task, pipeline: &'a Pipeline, step: &Step) -> Option<&'a Step> {
-    let from = task.front.arrived_from.as_deref()?;
+    let from = arrived_from(task, step)?;
     let previous = pipeline.step(from)?;
     let arrived_by =
         |outcome: crate::pipeline::Outcome| previous.destination(outcome) == Some(step.id.as_str());
@@ -523,7 +538,17 @@ fn arrived_by_fail<'a>(task: &Task, pipeline: &'a Pipeline, step: &Step) -> Opti
 /// So this names the step and points at the log rather than quoting it: the
 /// output of a real gate is tens of thousands of lines, and a tail cut to fit
 /// a prompt would as often as not cut away the error.
+///
+/// Only for an agent step a command failed back to. The `blocked` step is
+/// [`stopped_command`]'s: there the route says nothing about the exit code.
 fn failed_command(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+    // On `blocked` the route cannot say what the exit code was: a command
+    // with no `on_fail` of its own fails to `blocked`, but it may as well have
+    // passed into a step whose `loop:` is spent. Only [`stopped_command`]
+    // words that both ways.
+    if step.id == crate::pipeline::BLOCKED {
+        return stopped_command(repo, task, pipeline, step);
+    }
     let Some(previous) = arrived_by_fail(task, pipeline, step) else {
         return String::new();
     };
@@ -541,6 +566,36 @@ fn failed_command(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) ->
     )
 }
 
+/// The paragraph the `blocked` lane gets when the task arrived from a command
+/// step. Whatever that command's routes are, the sentence cannot say how it
+/// ended: a gate that failed back to an agent step whose `loop:` is spent is
+/// redirected to `blocked`, a pass into such a step is too, and a command with
+/// no `on_fail` fails there directly. [`arrived_by_fail`] reads the route
+/// alone and cannot tell these apart, and the exit code is gone by now, so the
+/// sentence names both outcomes and points at the entry that says which.
+fn stopped_command(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+    if step.id != crate::pipeline::BLOCKED {
+        return String::new();
+    }
+    let Some(previous) = arrived_from(task, step)
+        .and_then(|from| pipeline.step(from))
+        .filter(|previous| previous.run.is_some())
+    else {
+        return String::new();
+    };
+
+    let from = previous.id.as_str();
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    let log = runs.log_path(&crate::command_step::Runs::key(from, task.id()));
+    format!(
+        "The command step `{from}` stopped the task here: it failed, or the step it routes to \
+         has spent its `loop:`. Why is in the latest entry of {task_file}'s `## Status Log` that \
+         contains `→ `blocked`` and the ones just above it. Its last run's whole output is at\n\n    {log}",
+        task_file = task.path.display(),
+        log = log.display(),
+    )
+}
+
 /// The paragraph a lane gets when an *agent* step failed it back here — what
 /// a failing `## Review` verdict used to say, before a review became this
 /// project's own concern and not spoolway's. Spoolway's own fixed wording:
@@ -551,6 +606,9 @@ fn failed_command(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) ->
 /// [`failed_command`]'s own case, not this one: a command step reports
 /// nothing, so there is no verdict here for it to name.
 fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+    if step.id == crate::pipeline::BLOCKED {
+        return blocked_cause_paragraph(task, pipeline, step);
+    }
     let Some(previous) = arrived_by_fail(task, pipeline, step) else {
         return String::new();
     };
@@ -558,12 +616,81 @@ fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> S
         return String::new();
     }
 
+    fix_pass(task, previous)
+}
+
+fn fix_pass(task: &Task, previous: &Step) -> String {
     format!(
         "Fix pass. `{from}` failed this task back. Its findings are in {task_file}'s `## \
          Handoff`. Address exactly those.",
         from = previous.id,
         task_file = task.path.display(),
     )
+}
+
+/// The paragraph the `blocked` step's lane gets about how the task reached it.
+///
+/// Every road into `blocked` shares the route a fail takes when a step
+/// declares no `on_fail`, so the route alone cannot say which one it was, and
+/// reading it as a fail told an unblocker "`review` failed this task back.
+/// Its findings are in `## Handoff`" about a task that reported `--block`.
+/// The task's own record says more: the dispatcher marks a lane it stopped,
+/// and a lane's report is kept with its outcome and whether it left the task
+/// on `blocked`. That last fact is what keeps an old report of the same step
+/// from being read as the cause of a later stop it did not make.
+///
+/// Where the reason lives differs by road, so the paragraph points at a place
+/// to read rather than at one line: the latest `## Status Log` entry that
+/// contains `→ `blocked``, and the entries just above it. A lane's `--block
+/// -m` is on that entry. A failed launch or a spent `loop:` logs its reason as
+/// an entry of its own first, and the move after it carries none. It is not
+/// "the latest line", because the unblocker's own launch has already added one
+/// below. A lane may have left `## Handoff` entries whatever it reported, so
+/// none is claimed or denied. A command step is [`stopped_command`]'s to
+/// describe, so it gets nothing here.
+fn blocked_cause_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+    let Some(previous) = arrived_from(task, step).and_then(|from| pipeline.step(from)) else {
+        return String::new();
+    };
+    if previous.run.is_some() {
+        return String::new();
+    }
+    let from = previous.id.as_str();
+    let task_file = task.path.display();
+    let reported = task
+        .front
+        .last_report
+        .as_ref()
+        .filter(|report| report.step == from && report.blocked)
+        .map(|report| report.outcome.as_str());
+
+    if task.front.escalated {
+        return format!(
+            "`{from}` did not report: the dispatcher stopped its lane and sent the task here. \
+             Why is in {task_file}'s `## Blocker`, and in the latest entry of its `## Status \
+             Log` that contains `→ `blocked`` and the ones just above it."
+        );
+    }
+    match reported {
+        Some("block") => format!(
+            "`{from}` reported `--block`. Its reason is in the latest entry of {task_file}'s `## \
+             Status Log` that contains `→ `blocked``. Any `## Handoff` it left is in the same file."
+        ),
+        // Only when the step's own fail route is `blocked`. A `--fail` whose
+        // `on_fail` step has spent its `loop:` is redirected here too, and
+        // then the findings are not what stopped the task.
+        Some("fail") if arrived_by_fail(task, pipeline, step).is_some() => fix_pass(task, previous),
+        Some(_) => format!(
+            "`{from}` is where this task stopped. Why is in the latest entry of {task_file}'s `## Status \
+             Log` that contains `→ `blocked``, and the ones just above it."
+        ),
+        None => format!(
+            "`{from}` is where this task stopped, and it did not report this stop: the \
+             dispatcher sent it here. Why is in the latest entry of {task_file}'s `## Status \
+             Log` that contains `→ `blocked`` and the ones just above it, and in `## Blocker` \
+             when the dispatcher wrote one."
+        ),
+    }
 }
 
 /// One offered form: the exact command line, and the sentence under it
@@ -869,8 +996,8 @@ pub(crate) fn opening_messages(
 ///
 /// Attended, a person has been and gone, and the `## Status Log` says what
 /// they did. Unattended, an unblocker lane has — the default staffing for
-/// `blocked` under `unattended.blocked_prompt` — and both `## Status Log`
-/// and `## Blocker` say what it tried.
+/// `blocked` under `unattended.blocked_prompt` — and its `## Status Log`
+/// entries say what it did, with `## Blocker` for a stop the dispatcher made.
 ///
 /// No report form and no `stage:` warning here any more — both are already
 /// in [`system_prompt`], which a resumed lane was also launched with, so
@@ -887,8 +1014,8 @@ pub(crate) fn resume_prompt(task: &Task, _pipeline: &Pipeline, unattended: bool)
         ),
         true => format!(
             "This lane was blocked; an unblocker lane has since run. Same session — do not \
-             start over. What it did is the last `## Status Log` entry in {task_file}; what \
-             it tried is `## Blocker`."
+             start over. What it did is the last `## Status Log` entry in {task_file}; if the \
+             dispatcher stopped you, why is in `## Blocker`."
         ),
     }
 }

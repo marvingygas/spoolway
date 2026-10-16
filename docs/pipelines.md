@@ -87,9 +87,9 @@ steps:
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
-| `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
+| `on_pass` | none | Where a pass goes. `done` finishes the task. Required on every step except `blocked`: `spoolway pipeline check` refuses an agent or command step without it, because a task reaching it would never leave. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
-| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. A written value is 1 or more. |
+| `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane, whatever `dispatch.hide_commands` says. |
@@ -227,7 +227,7 @@ flowchart LR
   D -->|pause| F[paused, for a person]
 ```
 
-The unblocker lane continues the lane that stopped, with everything it had read. A `gate:` on an
+The unblocker lane opens its own session on the `unblocker` prompt. The lane that stopped is continued only when the task goes back to its step, and then with everything it had read. A `gate:` on an
 agent step still waits for a person. A lane that keeps dying at launch is retried with a doubling
 delay, up to an hour.
 
