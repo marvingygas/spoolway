@@ -374,6 +374,21 @@ script that finds paused or blocked tasks matches `state`, not `stage`.
 A file in the queue that does not parse has no row. Under the table, the text output lists each
 such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
 
+A task whose pipeline is missing still has a row, and the other rows are drawn as usual. The row
+reads `unknown`, and NEXT says why. The command still exits 0, and `spoolway pipeline check` names
+the task.
+
+| NEXT reads | When |
+|---|---|
+| ``names pipeline `<name>`, which is missing — restore it or run `spoolway pipeline check` `` | The task's `pipeline:` names a pipeline that does not exist. |
+| ``has no pipeline — set `pipeline:` in the task file`` | The task file has no `pipeline:`. |
+| ``` `<id>` is not a task — fix `depends_on` ``` | A queued task depends on an id with no task in the queue and no task in the archive. |
+| ``` `<a>`, `<b>` are not tasks — fix `depends_on` ``` | The same, for several ids. |
+| `→ <step>` | A command step has exited non-zero. The step is the destination of its failure: its `on_fail`, or `blocked` when it has none, or the exit of a `loop:` that is spent. |
+
+A dependency whose queue file does not parse is still a task. A task waiting on it reads
+`waiting on: <id>`.
+
 ### `spoolway queue show <task>`
 
 Print one task file.

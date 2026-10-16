@@ -11,7 +11,8 @@ use crate::screen::{
     read_key,
 };
 
-/// Which dependencies a task on a wait step is still waiting for.
+/// Which dependencies a task on a wait step is still waiting for, or, when
+/// one of them has no task file at all, that it never will finish.
 ///
 /// `None` means nothing in the graph is holding it: it is simply waiting for a
 /// worker slot, and the step's own description is the better thing to print.
@@ -19,6 +20,16 @@ pub(crate) fn dependency_note(graph: &Graph, id: &str) -> Option<String> {
     let waiting = graph.waiting_on(id);
     if waiting.is_empty() {
         return None;
+    }
+    // A dependency whose file is gone is not pending, it can never finish.
+    // Saying `waiting on` would send a person to wait for it.
+    let lost = graph.lost_dependencies(id);
+    if !lost.is_empty() {
+        let names = lost.join("`, `");
+        return Some(match lost.len() {
+            1 => format!("`{names}` is not a task — fix `depends_on`"),
+            _ => format!("`{names}` are not tasks — fix `depends_on`"),
+        });
     }
     Some(format!("waiting on: {}", waiting.join(", ")))
 }

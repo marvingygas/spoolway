@@ -976,22 +976,48 @@ pub fn apply_loop_budget(
     destination: String,
     unattended: bool,
 ) -> String {
-    let Some(dest_step) = pipeline.step(&destination) else {
-        return destination;
-    };
-    let Some((limit, count)) = spent_budget(pipeline, task, dest_step, unattended) else {
+    let Some((exit, limit, count)) = spent_loop_exit(pipeline, task, &destination, unattended)
+    else {
         return destination;
     };
 
     // The move it is not making, counted the way a reader counts: the budget
     // is spent, so the one being refused is the next arrival after it.
-    let exit = dest_step.loop_exit();
     task.log_status(&format!(
         "`{current}` may not send this to `{destination}` a {} time — `{destination}` has \
          `loop: {limit}`; carrying on to `{exit}`",
         ordinal(count + 1)
     ));
-    exit.to_string()
+    exit
+}
+
+/// Where a move to `destination` really goes: its [`Step::loop_exit`] when
+/// that step's `loop:` is spent, `destination` itself otherwise. The same
+/// answer [`apply_loop_budget`] acts on, with nothing written to the task, for
+/// a reader — the board's NEXT column — that only names the step.
+pub(crate) fn budgeted_destination(
+    pipeline: &Pipeline,
+    task: &Task,
+    destination: String,
+    unattended: bool,
+) -> String {
+    match spent_loop_exit(pipeline, task, &destination, unattended) {
+        Some((exit, ..)) => exit,
+        None => destination,
+    }
+}
+
+/// The exit, limit and arrival count of `destination`'s spent `loop:`, or
+/// `None` when it names no step, has no budget, or has room left.
+fn spent_loop_exit(
+    pipeline: &Pipeline,
+    task: &Task,
+    destination: &str,
+    unattended: bool,
+) -> Option<(String, u32, u32)> {
+    let dest_step = pipeline.step(destination)?;
+    let (limit, count) = spent_budget(pipeline, task, dest_step, unattended)?;
+    Some((dest_step.loop_exit().to_string(), limit, count))
 }
 
 /// The `loop:` limit and arrival count of `step` when its budget is spent,

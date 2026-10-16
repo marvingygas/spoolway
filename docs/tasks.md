@@ -260,6 +260,10 @@ or the `done` hook holds the dependency on `blocked` or `paused`, every task beh
 `queued`. A dependency is refused when it names a task that does not exist, names itself, closes
 a cycle, or crosses two bases.
 
+A queued task whose dependency has no task in the queue and none in the archive stays `queued`.
+Its row reads ``` `<id>` is not a task — fix `depends_on` ```, and each dispatcher pass names it as a
+problem. See [A dependency with no task](dispatcher.md#a-dependency-with-no-task).
+
 Work that has nothing to do with another task goes in a group of its own, not a second root of
 the same group.
 

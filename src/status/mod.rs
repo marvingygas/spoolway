@@ -3729,6 +3729,23 @@ fn onward(
     }
 }
 
+/// The non-zero code a command step's run exited with, when the dispatcher
+/// has read it but not yet moved the task. The code stays on disk until the
+/// move lands, which waits for a free slot at an agent destination.
+fn failed_command_exit(
+    runs: &crate::command_step::Runs,
+    key: &str,
+    step: &crate::pipeline::Step,
+) -> Option<i32> {
+    if step.kind() != crate::pipeline::StepKind::Command {
+        return None;
+    }
+    match runs.state(key) {
+        crate::command_step::RunState::Exited(code) if code != 0 => Some(code),
+        _ => None,
+    }
+}
+
 /// The step a move to `destination` writes as `task`'s stage: `destination`
 /// itself, or the first step past it along `on_pass` that the task runs.
 ///
@@ -3974,7 +3991,26 @@ fn build_rows(
             rows.push(unroutable_row(repo, tasks, graph, task, refusal));
             continue;
         }
-        let pipeline = pipelines.for_task(task)?;
+        let pipeline = match pipelines.for_task(task) {
+            Ok(pipeline) => pipeline,
+            // A task naming a pipeline that is not on disk is one row's
+            // problem, not the whole listing's: failing here made one stale
+            // `pipeline:` hide every other task from `queue list` and the
+            // board. The dispatcher still refuses to start it; this only
+            // keeps the row drawn, saying why.
+            Err(_) => {
+                let name = task.front.pipeline.as_deref().unwrap_or("");
+                let why = match name.is_empty() {
+                    true => "has no pipeline — set `pipeline:` in the task file".to_string(),
+                    false => format!(
+                        "names pipeline `{name}`, which is missing — restore it \
+                         or run `spoolway pipeline check`"
+                    ),
+                };
+                rows.push(unroutable_row(repo, tasks, graph, task, &why));
+                continue;
+            }
+        };
         let step = pipeline.step(task.stage());
         // Read off the graph this frame already built, for every step NEXT
         // names: the `last:` rule needs the open tasks above this one.
@@ -4219,7 +4255,30 @@ fn build_rows(
                     (None, true) => State::Running,
                     (None, false) => State::Queued,
                 };
-                (state, onward(task, pipeline, &step.id, dependents), false)
+                // A command that already exited non-zero is only waiting for
+                // a slot to land its `on_fail` destination, so that is where
+                // the row points, not at the `on_pass` one.
+                let next = match failed_command_exit(&runs, &key, step) {
+                    Some(_) if task.front.gate_at.as_deref() != Some(step.id.as_str()) => {
+                        let to = step
+                            .on_fail
+                            .clone()
+                            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
+                        let to = landed(pipeline, task, to, dependents);
+                        // The dispatcher bounds this move by the
+                        // destination's `loop:` too, and lands on its exit
+                        // when that is spent.
+                        let to = crate::commands::budgeted_destination(
+                            pipeline,
+                            task,
+                            to,
+                            repo.unattended(),
+                        );
+                        format!("→ {to}")
+                    }
+                    _ => onward(task, pipeline, &step.id, dependents),
+                };
+                (state, next, false)
             }
         };
         // The lane's clock, which runs from the launch of the round in flight
@@ -10626,6 +10685,108 @@ mod tests {
             "{}",
             gate.next
         );
+    }
+
+    /// One live task naming a pipeline that is not on disk is drawn as a row
+    /// that names it, and every other task is still drawn. Before, the
+    /// whole reading failed on the one task.
+    #[test]
+    fn a_task_naming_a_missing_pipeline_is_drawn_and_the_rest_still_are() {
+        let (repo, _root_guard) = fixture("row-missing-pipeline");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "fine", &[], Some("implement"), Some("fine"));
+        add_to(&repo, "stale", &[], Some("implement"), Some("stale"));
+        let mut task = repo.task("stale").unwrap();
+        task.front.pipeline = Some("deleted-pipeline".into());
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        assert!(rows.iter().any(|r| r.id == "fine"));
+        let row = rows.iter().find(|r| r.id == "stale").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(!row.resumable);
+        assert!(
+            row.next.contains("`deleted-pipeline`, which is missing"),
+            "{}",
+            row.next
+        );
+    }
+
+    /// A command step whose non-zero exit is waiting to land is drawn going
+    /// to its `on_fail` destination. The default pipeline's `handover` has
+    /// none, so that is `blocked`; before, the row said `done`.
+    #[test]
+    fn a_failed_command_step_row_points_at_its_fail_destination() {
+        let (repo, _root_guard) = fixture("row-failed-command-next");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "exit 1", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let started = Instant::now();
+        while !matches!(runs.state(&key), crate::command_step::RunState::Exited(1)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(row.next.ends_with("→ blocked"), "{}", row.next);
+
+        runs.stop(&key);
+    }
+
+    /// A task with no `pipeline:` at all gets its own wording, telling the
+    /// person to set the key, and is drawn like the missing-pipeline row.
+    #[test]
+    fn a_task_with_no_pipeline_is_drawn_and_told_to_set_one() {
+        let (repo, _root_guard) = fixture("row-no-pipeline");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "bare", &[], Some("implement"), Some("bare"));
+        let mut task = repo.task("bare").unwrap();
+        task.front.pipeline = None;
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "bare").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(row.next.contains("set `pipeline:`"), "{}", row.next);
+    }
+
+    /// A failed command whose `on_fail` step has spent its `loop:` lands on
+    /// that step's exit, `blocked`, in the dispatcher; the row names the same.
+    #[test]
+    fn a_failed_command_row_follows_a_spent_loop_to_its_exit() {
+        let (repo, _root_guard) = fixture("row-failed-command-spent-loop");
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines.get_mut("default").unwrap();
+        default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap()
+            .on_fail = Some("implement".into());
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        let mut task = repo.task("login").unwrap();
+        // `implement` carries `loop: 2`.
+        task.front.arrivals.insert("implement".into(), 2);
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "exit 1", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let started = Instant::now();
+        while !matches!(runs.state(&key), crate::command_step::RunState::Exited(1)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(row.next.ends_with("→ blocked"), "{}", row.next);
+
+        runs.stop(&key);
     }
 
     /// An `r` the dispatcher's copy refuses after the row was read — it

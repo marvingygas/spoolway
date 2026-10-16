@@ -1410,6 +1410,15 @@ impl<'a> Dispatcher<'a> {
         // The dependency graph, resolved once for the whole pass. It owns its
         // data, so the rest of the pass is free to keep writing task files.
         let graph = Graph::build(&tasks, &self.repo.archive_dir());
+        // Named every pass for a dependent still on `queued`, which a lost
+        // dependency holds back for good and which would otherwise read as an
+        // idle queue. One already past `queued` is held by nothing.
+        report.problems.extend(
+            tasks
+                .iter()
+                .filter(|t| t.stage() == crate::pipeline::QUEUED)
+                .flat_map(|t| graph.lost_dependency_problems_of(t.id())),
+        );
 
         // A lane whose step is over keeps its pane, but it is no longer the
         // task's work: it is banked, marked `kept`, and dropped from `owned`,
@@ -21698,6 +21707,50 @@ mod tests {
         // takes to release everything behind it.
         assert_eq!(reload(&root).stage(), "blocked");
         assert_eq!(reload(&leaf).stage(), "queued");
+    }
+
+    /// A dependency whose task file is gone is a different wait from the two
+    /// above: it can never be released, so each pass names it as a problem
+    /// instead of printing `nothing to do`.
+    #[test]
+    fn a_dependency_with_no_task_file_is_named_as_a_problem_each_pass() {
+        let (repo, _root_guard) = fixture("lost-dependency");
+        let leaf = add_task_with(&repo, "leaf", "queued", |f| {
+            f.depends_on = vec!["d1".into()]
+        });
+
+        let mux = FakeMux::new(vec![]);
+        for _ in 0..2 {
+            let report = run_pass(&repo, &mux);
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|p| p.contains("`leaf` depends on `d1`, which is not a task")),
+                "problems: {:?}",
+                report.problems
+            );
+        }
+        assert!(mux.did("start").is_empty());
+        assert_eq!(reload(&leaf).stage(), "queued");
+    }
+
+    /// Only a dependent still on `queued` is held by the lost dependency, so
+    /// one already past it is not named every pass.
+    #[test]
+    fn a_lost_dependency_is_not_named_for_a_dependent_past_queued() {
+        let (repo, _root_guard) = fixture("lost-dependency-past-queued");
+        add_task_with(&repo, "leaf", "paused", |f| {
+            f.depends_on = vec!["d1".into()]
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let report = run_pass(&repo, &mux);
+        assert!(
+            !report.problems.iter().any(|p| p.contains("`d1`")),
+            "problems: {:?}",
+            report.problems
+        );
     }
 
     #[test]

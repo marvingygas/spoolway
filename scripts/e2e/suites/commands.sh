@@ -1516,6 +1516,24 @@ says "queue list --json names it under unparseable" \
 says "in a key of its own" '"unparseable"' "$SPOOLWAY" queue list --json
 rm -f "$TORN_QUEUED"
 
+# `queue list` draws every task in both forms when one names a pipeline that is
+# gone, and a task on a real pipeline whose dependency has no task file reads
+# that the dependency is not a task. Both placed by hand, as a deleted
+# pipeline and a deleted task file would leave them.
+STALE_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/stale-pipeline-task.md"
+LOST_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/lost-dependency-task.md"
+printf -- '---\nid: stale-pipeline-task\nstage: implement\npipeline: deleted-pipeline\n---\n' >"$STALE_QUEUED"
+printf -- '---\nid: lost-dependency-task\nstage: queued\npipeline: default\ndepends_on:\n- lost-dependency\n---\n' >"$LOST_QUEUED"
+says "queue list marks a task naming a missing pipeline" \
+  "deleted-pipeline" "$SPOOLWAY" queue list
+says "queue list --json still draws it" \
+  '"stale-pipeline-task"' "$SPOOLWAY" queue list --json
+says "queue list says a lost dependency is not a task" \
+  "is not a task" "$SPOOLWAY" queue list
+says "queue list --json says the same" \
+  "is not a task" "$SPOOLWAY" queue list --json
+rm -f "$STALE_QUEUED" "$LOST_QUEUED"
+
 # ------------------------------------------------------ config set checks
 # `config set` runs the file-based checks `doctor` runs. A value that can
 # never be right is refused, and one naming something not set up yet is saved
