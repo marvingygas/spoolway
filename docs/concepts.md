@@ -87,6 +87,9 @@ Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place
 `~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the
 checkout's own `.git`.
 
+The workspace's project jobs fire once for all its clones. Their firing record is the
+workspace's own `jobs.state.json`. See [Jobs](jobs.md#a-project-job-in-a-home-mode-workspace).
+
 `spoolway init --force` in one clone rewrites that shared `config/` for every clone in the
 workspace, so it names the other clones that share it before rewriting it.
 

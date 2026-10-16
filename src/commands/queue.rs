@@ -1518,18 +1518,18 @@ pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()>
     }
     match repo.remote_branch_answer(base) {
         Some(true) => Ok(()),
-        Some(false) => Err(BaseProblem::error(format!(
+        Some(false) => Err(anyhow::Error::msg(format!(
             "{name}: `base: {base}` names a branch this repository does not have locally or on \
              `origin` — create or fetch it first, or name one it already has"
         ))),
-        // Not a `BaseProblem`: offline, a refused credential or a timeout
-        // says nothing about whether the branch exists, and the next try
-        // may get an answer.
-        None => bail!(
+        // Unlike the refusal above, an `OriginUnreachable`: offline, a
+        // refused credential or a timeout says nothing about whether the
+        // branch exists, and the next try may get an answer.
+        None => Err(anyhow::Error::new(OriginUnreachable(format!(
             "{name}: `base: {base}` is not a branch this repository has locally, and `origin` \
              could not be asked whether it has it — fetch the branch first, or try again when \
              `origin` can be reached"
-        ),
+        )))),
     }
 }
 
@@ -1540,13 +1540,13 @@ pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()>
 /// the network (`doctor`'s pre-run warnings) stops there.
 pub(crate) fn check_task_base_locally(repo: &Repo, name: &str, base: &str) -> Result<bool> {
     if base.starts_with('-') {
-        return Err(BaseProblem::error(format!(
+        return Err(anyhow::Error::msg(format!(
             "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
              branch instead"
         )));
     }
     if repo.git(&["check-ref-format", "--branch", base]).is_err() {
-        return Err(BaseProblem::error(format!(
+        return Err(anyhow::Error::msg(format!(
             "{name}: `base: {base}` is not a valid branch name — name a branch instead"
         )));
     }
@@ -9060,31 +9060,101 @@ impl std::fmt::Display for RoutineBusy {
 
 impl std::error::Error for RoutineBusy {}
 
-/// A refusal that comes from a task's base itself and that only an edit to
-/// the task or the job, or creating the branch, will lift: a task with no
-/// `base:` under a job with no `base` key, a base git would read as a flag,
-/// a name that is not a branch name, or a branch the repository and
-/// `origin` both lack. A job's firing fails the same way on every pass until
-/// then, so `jobs::fire_due` tells it apart from a transient failure (a
-/// hook that failed once, a write that raced, `origin` unreachable) by
-/// downcasting to this type, and retries only the latter within a due
-/// minute.
+/// A base `origin` could not be asked about: offline, a refused credential
+/// or a timeout. The one refusal in a job's firing that may be gone by the
+/// next pass, so `jobs::fire_due` leaves the minute open for it and records
+/// every other failure.
 #[derive(Debug)]
-pub(crate) struct BaseProblem(String);
+pub(crate) struct OriginUnreachable(String);
 
-impl BaseProblem {
-    fn error(text: String) -> anyhow::Error {
-        anyhow::Error::new(BaseProblem(text))
-    }
-}
-
-impl std::fmt::Display for BaseProblem {
+impl std::fmt::Display for OriginUnreachable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for BaseProblem {}
+impl std::error::Error for OriginUnreachable {}
+
+/// The tasks a routine `target` holds: every one at or below a folder, or the
+/// one a single file is. Refused when the folder has a file that will not
+/// parse or holds no task.
+fn read_routine_tasks(target: &std::path::Path) -> Result<Vec<RoutineTask>> {
+    if target.is_dir() {
+        let folder = super::routines::read_folder_at(target)?;
+        if let Some(refusal) = folder.refusal() {
+            bail!("{refusal}");
+        }
+        // `folder.tasks` is already this folder's own tasks plus every
+        // nested subfolder's, depth-first — the same list `enter` queues.
+        if folder.tasks.is_empty() {
+            bail!("{} holds no tasks", target.display());
+        }
+        Ok(folder.tasks)
+    } else {
+        Ok(vec![super::routines::read_task_at(target)?])
+    }
+}
+
+/// What [`validate_routine_batch`] hands back: the validated tasks, the
+/// `(source, text)` pairs they were made from, and the routine name each
+/// minted id stands for.
+type ValidatedRoutine = (Vec<Task>, Vec<(String, String)>, BTreeMap<String, String>);
+
+/// Mint ids for a routine's tasks, put them on `pipeline` and validate them
+/// as one batch, writing nothing. The one rule [`queue_routine_target`]
+/// queues by and [`check_routine_target`] checks by, so the two cannot
+/// disagree.
+fn validate_routine_batch(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: Option<&str>,
+    target: &std::path::Path,
+    pipeline: &str,
+    routine: &[RoutineTask],
+) -> Result<ValidatedRoutine> {
+    let tasks: Vec<&RoutineTask> = routine.iter().collect();
+    let (mut submitted, names) = if target.is_dir() {
+        mint_routine_batch(repo, &tasks)
+    } else {
+        mint_routine_solo(repo, tasks[0])
+    };
+
+    for (_, doc) in &mut submitted {
+        *doc = with_frontmatter_field(doc, "pipeline", pipeline);
+    }
+
+    let tasks = validate_batch(repo, pipelines, base, &submitted).map_err(|err| {
+        // `parse_submission` tells a person at `queue add` to pass `--base`,
+        // which a job has no way to do. Name the job's own key instead, so
+        // the advice works.
+        let text = format!("{err:#}");
+        match text.split_once("sets no `base:` and no --base was given") {
+            Some((name, _)) => anyhow::Error::msg(format!(
+                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
+                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
+            )),
+            None => err,
+        }
+    })?;
+    Ok((tasks, submitted, names))
+}
+
+/// Whether a job's routine could be queued at all, writing nothing and
+/// running no hook: every refusal [`queue_routine_target`] makes from the
+/// routine's own files, the job's `pipeline` and `base`. A live copy in the
+/// queue is not one — it ends by itself. `doctor` asks this so a routine
+/// that no due minute can queue, such as one with `gate_at: nosuchstep`, is
+/// named before it fires and not on every firing.
+pub(crate) fn check_routine_target(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: Option<&str>,
+    target: &std::path::Path,
+    pipeline: &str,
+) -> Result<()> {
+    let routine = read_routine_tasks(target)?;
+    validate_routine_batch(repo, pipelines, base, target, pipeline, &routine).map(|_| ())
+}
 
 /// Queue a routine target the way the routines tab does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
@@ -9109,51 +9179,14 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
-    let folder;
-    let solo;
-    let tasks: Vec<&RoutineTask> = if target.is_dir() {
-        folder = super::routines::read_folder_at(target)?;
-        if let Some(refusal) = folder.refusal() {
-            bail!("{refusal}");
-        }
-        // `folder.tasks` is already this folder's own tasks plus every
-        // nested subfolder's, depth-first — the same list `enter` queues.
-        if folder.tasks.is_empty() {
-            bail!("{} holds no tasks", target.display());
-        }
-        folder.tasks.iter().collect()
-    } else {
-        solo = super::routines::read_task_at(target)?;
-        vec![&solo]
-    };
+    let routine = read_routine_tasks(target)?;
     // Held until the copies are saved below.
-    let (_routine_locks, live) = claim_routines(repo, tasks.iter().map(|task| task.id.as_str()))?;
+    let (_routine_locks, live) = claim_routines(repo, routine.iter().map(|task| task.id.as_str()))?;
     if !live.is_empty() {
         return Err(anyhow::Error::new(StillQueued(live)));
     }
-    let (mut submitted, names) = if target.is_dir() {
-        mint_routine_batch(repo, &tasks)
-    } else {
-        mint_routine_solo(repo, tasks[0])
-    };
-
-    for (_, doc) in &mut submitted {
-        *doc = with_frontmatter_field(doc, "pipeline", pipeline);
-    }
-
-    let mut tasks = validate_batch(repo, pipelines, base, &submitted).map_err(|err| {
-        // `parse_submission` tells a person at `queue add` to pass `--base`,
-        // which a job has no way to do. Name the job's own key instead, so
-        // the advice works.
-        let text = format!("{err:#}");
-        match text.split_once("sets no `base:` and no --base was given") {
-            Some((name, _)) => BaseProblem::error(format!(
-                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
-                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
-            )),
-            None => err,
-        }
-    })?;
+    let (mut tasks, submitted, names) =
+        validate_routine_batch(repo, pipelines, base, target, pipeline, &routine)?;
     stamp_routines(&mut tasks, &names);
     // No task to write ids back into — see `open_and_prefix`. The
     // dispatcher firing a job has no screen and nobody to answer it, even
@@ -9161,8 +9194,7 @@ pub(crate) fn queue_routine_target(
     // in a pane). So this passes `ToolGate::Print { interactive: false }`
     // whatever `crate::ask` says: the gate prints its notice naming the
     // unmet tool or failed login and goes on with tracking off. Asking would block the
-    // whole dispatcher pass on a key, and `esc` would leave the minute
-    // unrecorded so the next pass asked again. Because the firing
+    // whole dispatcher pass on a key. Because the firing
     // returns `Ok`, `jobs::fire_due` marks the minute fired and the notice
     // prints once for it.
     //

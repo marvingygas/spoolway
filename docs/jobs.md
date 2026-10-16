@@ -14,7 +14,7 @@ under `.spoolway/routines/`.
 
 spoolway has no clock of its own. The dispatcher fires a due job at the top of its pass.
 While any job is enabled, `spoolway dispatch` stays up on an empty queue, so a dispatcher left
-running is all a job needs.
+running is all a job needs. It also stays up while a job store will not parse.
 
 A job only queues routine tasks that already exist. It never changes them.
 
@@ -39,9 +39,10 @@ flowchart LR
 A folder routine is queued as one batch with fresh ids. A single `.md` routine is queued alone
 with its `depends_on` emptied. The same pass dispatches what it queued.
 
-The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. A
-window that passes between two passes of one running dispatcher still fires, up to one hour
-back. A window that passes while no dispatcher runs is not caught up when a dispatcher
+The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. If
+that file cannot be written, the job still fires once per matching minute while the dispatcher
+runs, and the dispatcher names the problem on every pass. A window that passes between two
+passes of one running dispatcher still fires, up to one hour back. A window that passes while no dispatcher runs is not caught up when a dispatcher
 starts. A disabled job skips its windows, so enabling it again does not fire the window it
 was off for. A job whose previous run is still in the queue skips its window. So does a job
 whose routine has any other live copy, such as one queued from the routines tab. A routine runs
@@ -52,6 +53,11 @@ The dispatcher names each such skip once per matching minute, with the step the 
 ```
 job nightly · due now · skipped, audit is still in the queue, at step queued
 ```
+
+A firing that fails is recorded for its minute and is not tried again on every pass. This covers
+a failing `open` hook and a routine that cannot be queued, such as one with a `gate_at:` that
+names no step. The dispatcher names the failure once for that minute. Only an `origin` that
+cannot be reached, or a routine that is being queued at that moment, leaves the minute open.
 
 A job also fires nothing while a file in the queue will not parse, and the dispatcher names the
 file. If another submission of the same routine is being queued at that moment, the job fires
@@ -69,9 +75,34 @@ A job whose table holds any other key, such as `enable = false`, never fires. Th
 names the job and the key once per matching minute. Remove or correct the key and the job fires
 again.
 
+### A project job in a home-mode workspace
+
+A project job fires once per window for the whole workspace, however many clones run a
+dispatcher. The workspace keeps one `jobs.state.json` for its project jobs, next to a
+`jobs.state.json.lock` file. Each clone's dispatcher takes the lock while it checks and records
+a firing.
+
+The record names the clone that holds the job's copy. While that copy is still queued in any
+clone, the next window is skipped.
+
+The first time the workspace record is read, it copies each project job's latest firing from the
+clones' own `jobs.state.json` files. A job that already fired in its window does not fire again.
+
+If a dispatcher holds the lock, the other clones leave project jobs alone for that pass and try
+again on the next. If the lock file cannot be written, no project job fires from that clone. The
+dispatcher names the problem on every pass:
+
+```
+jobs: could not lock <workspace>/jobs.state.json.lock: <reason> — no project job fires from this clone until it can, so make the workspace folder writable by this user
+```
+
+User jobs are not affected. They keep their record in `~/.spoolway/<project>/jobs.state.json`.
+
 ### The resident dispatcher
 
-While any job is enabled, an empty queue does not stop the run. The plain run prints once:
+While any job is enabled, an empty queue does not stop the run. A job store that will not
+parse keeps the run up too, and the dispatcher names the parse error on every pass. It fires
+jobs again once the file parses. The plain run prints once:
 
 ```
 nothing queued
@@ -80,7 +111,7 @@ next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
 
 The board shows the greeting and `Nothing queued`, and under them the job ledger: every enabled job and when it next fires. See
 [The empty board](dispatcher.md#the-empty-board).
-With no job enabled, an empty queue stops the run as usual. See
+With no job enabled and both stores parsing, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
 
 ## The jobs screen
@@ -160,7 +191,8 @@ machine's local time.
 | --- | --- | --- |
 | `~/.spoolway/<project>/jobs.toml` | `user`, the default | No |
 | `<checkout>/.spoolway/jobs.toml` | `project`, shared with the team | Yes |
-| `~/.spoolway/<project>/jobs.state.json` | firing history | No |
+| `~/.spoolway/<project>/jobs.state.json` | firing history of user jobs, and of project jobs outside a home-mode workspace | No |
+| `<workspace>/jobs.state.json` | firing history of project jobs in a home-mode workspace | No |
 
 A store file holds `[jobs.<name>]` tables:
 
@@ -238,11 +270,12 @@ not parse.
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
+| job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step, a `*.md` file that does not parse, or a folder with no task. |
 | job `<name>` base exists | `base` is set, and it starts with `-`, is not a valid branch name, or names a branch that neither the repository nor `origin` has. |
 | job stores load | A name is in both stores, or a store is malformed TOML. |
 
 The warnings the dispatcher shows before it starts run the base check without asking `origin`.
-A base that is not a local branch is not judged there.
+A base that is not a local branch is not judged there. They do not run the routine check.
 
 ## Reference
 
@@ -257,7 +290,7 @@ A base that is not a local branch is not judged there.
 ## Constraints
 
 A supervisor that restarts `spoolway dispatch` on exit code 3 will wait forever once a job is
-enabled, because the dispatcher stays up on an empty queue.
+enabled or a job store will not parse, because the dispatcher stays up on an empty queue.
 
 There is no `[jobs]` section in `config.toml`. A job is defined only in a store file.
 

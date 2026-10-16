@@ -2556,6 +2556,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
         // The same rule a firing applies, so a base that every due minute
         // would refuse is named here first. A job with no `base` key has
         // nothing to check: its routine tasks may each set their own.
+        let mut base_ok = true;
         if let Some(base) = &job.spec.base {
             let who = format!("job `{name}`");
             let result = if ask_origin {
@@ -2565,9 +2566,36 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
                 // say, and this path may not ask it.
                 super::queue::check_task_base_locally(repo, &who, base).map(|_| ())
             };
+            base_ok = result.is_ok();
             findings.push(Finding::Check(
                 format!("job `{name}` base exists"),
                 result.map(|()| None),
+            ));
+        }
+
+        // The refusals a firing would make from the routine's own files, run
+        // here so a routine no due minute can queue — `gate_at:` naming no
+        // step, a file that will not parse, a folder with no task — fails
+        // `doctor` and not just the log. Left to the rows above when they
+        // already name the cause, and skipped when `ask_origin` is off: every
+        // task's `base:` is checked against `origin` when queueing, and the
+        // cheap path may not reach the network.
+        if let Ok(target) = job.target(repo)
+            && target.exists()
+            && pipelines.pipelines.contains_key(&job.spec.pipeline)
+            && base_ok
+            && ask_origin
+        {
+            findings.push(Finding::Check(
+                format!("job `{name}` routine can be queued"),
+                super::queue::check_routine_target(
+                    repo,
+                    pipelines,
+                    job.spec.base.as_deref(),
+                    &target,
+                    &job.spec.pipeline,
+                )
+                .map(|()| None),
             ));
         }
     }
@@ -3267,6 +3295,88 @@ mod tests {
             check("job `clean` has no unknown keys")
                 .expect("the check exists")
                 .is_ok()
+        );
+    }
+
+    /// A job whose routine no firing can queue fails its own check naming
+    /// why, and a routine that queues cleanly passes.
+    #[test]
+    fn a_job_whose_routine_can_never_be_queued_fails_its_doctor_check() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-job-queueable");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        let routines = repo.routines_dir();
+        for (dir, extra) in [("bad", "gate_at: nosuchstep\n"), ("good", "")] {
+            std::fs::create_dir_all(routines.join(dir)).unwrap();
+            std::fs::write(
+                routines.join(dir).join("audit.md"),
+                format!(
+                    "---\nid: audit\ntitle: audit, done\ngroup: demo\n{extra}---\n## Goal\n\nGo.\n"
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.bad]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"bad\"\n\
+             base = \"plan/demo\"\n\
+             [jobs.good]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"good\"\n\
+             base = \"plan/demo\"\n",
+        )
+        .unwrap();
+
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin(), true);
+        let check = |label: &str| {
+            findings.iter().find_map(|f| match f {
+                Finding::Check(l, result) if l == label => Some(result),
+                _ => None,
+            })
+        };
+        let failure = check("job `bad` routine can be queued")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("a gate_at naming no step can never be queued");
+        assert!(format!("{failure:#}").contains("nosuchstep"), "{failure:#}");
+        assert!(
+            check("job `good` routine can be queued")
+                .expect("the check exists")
+                .is_ok()
+        );
+    }
+
+    /// The path that may not reach the network draws no queueability row:
+    /// a base-less job whose routine task names a base only `origin` could
+    /// have would otherwise run `git ls-remote` from `dispatch`'s start.
+    #[test]
+    fn the_cheap_path_does_not_ask_origin_whether_a_routine_can_be_queued() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-job-cheap");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        crate::repo::run(
+            &repo.checkout,
+            "git",
+            &["remote", "add", "origin", "/nonexistent/spoolway-origin"],
+        )
+        .unwrap();
+        let dir = repo.routines_dir().join("r");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\nbase: only/on-origin\n---\n\
+             ## Goal\n\nGo.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.bare]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\n",
+        )
+        .unwrap();
+
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin(), false);
+        assert!(
+            findings.iter().all(|f| match f {
+                Finding::Check(label, _) => !label.contains("can be queued"),
+                _ => true,
+            }),
+            "no row, and so no ask of origin"
         );
     }
 

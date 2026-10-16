@@ -60,7 +60,8 @@ own.
 The run stops when the queue is empty. A `paused` or `blocked` task keeps the run alive,
 because it is waiting on a person. A queue file that does not parse keeps the run alive too. Each
 pass names the file until it is fixed or moved out of the queue. While any job is enabled, the run also stays up on an empty
-queue and prints when the next job fires. See [Jobs](jobs.md).
+queue and prints when the next job fires. A job store that will not parse keeps the run up too.
+See [Jobs](jobs.md).
 
 `ctrl-c` stops the run the same way. A stop tears nothing down. Every worktree, pane, tab and
 lane stays where it is, and the next run picks it back up. Before it exits, the run banks each

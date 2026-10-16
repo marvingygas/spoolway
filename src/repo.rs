@@ -43,6 +43,24 @@ pub struct Repo {
     pub home: PathBuf,
 }
 
+/// The ids of the `.md` files in a queue directory — [`Repo::queued_ids`]
+/// for any clone's queue.
+fn queued_ids_under(queue: &Path) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(queue) else {
+        return ids;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("md")
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            ids.insert(stem.to_string());
+        }
+    }
+    ids
+}
+
 /// How long [`Repo::remote_branch_answer`] waits for `origin` to answer.
 ///
 /// The dispatcher asks inside its pass, where nothing else runs while it
@@ -754,11 +772,72 @@ impl Repo {
         self.home().join(crate::config::JOBS_STORE)
     }
 
-    /// When each job last fired, always in machine home whichever store the
-    /// job itself came from — a fired minute is a fact about this machine,
-    /// not about the project. See [`crate::jobs`].
+    /// When each job last fired, in machine home: every user job's record,
+    /// and a project job's outside a home-mode workspace. A fired minute is a
+    /// fact about this machine, not about the project. A project job in a
+    /// workspace keeps its record in [`Repo::project_jobs_state_file`]
+    /// instead. See [`crate::jobs`].
     pub fn jobs_state_file(&self) -> PathBuf {
         self.home().join(crate::jobs::STATE_FILE)
+    }
+
+    /// When each project job last fired. In a home-mode workspace this is
+    /// one file beside the workspace's `config/`, because the job store it
+    /// answers for is shared by every clone: a record per clone made each
+    /// clone's dispatcher fire the same job. Anywhere else it is
+    /// [`Repo::jobs_state_file`], the one machine-home file. See
+    /// [`crate::jobs`].
+    pub fn project_jobs_state_file(&self) -> PathBuf {
+        match workspace_clone(&self.root) {
+            Some(clone) => clone.workspace.join(crate::jobs::STATE_FILE),
+            None => self.jobs_state_file(),
+        }
+    }
+
+    /// The dispatcher folder name this checkout is registered under in its
+    /// home-mode workspace, which is how a shared record names the clone
+    /// holding a job's copy. `None` outside a workspace.
+    pub fn workspace_dispatcher(&self) -> Option<String> {
+        workspace_clone(&self.root).map(|clone| clone.dispatcher)
+    }
+
+    /// Every clone's `jobs.state.json` in this checkout's home-mode
+    /// workspace, this one's included, as `(dispatcher, path)`. Empty outside
+    /// a workspace.
+    pub fn sibling_jobs_state_files(&self) -> Vec<(String, PathBuf)> {
+        let Some(clone) = workspace_clone(&self.root) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(clone.workspace.join("dispatchers")) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                let path = entry.path().join(crate::jobs::STATE_FILE);
+                path.is_file().then_some((name, path))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The ids queued in another clone of this home-mode workspace, or
+    /// `None` when `dispatcher` names no clone here. Read-only: a job's
+    /// copy queued in a sibling clone is still queued for the job's next
+    /// window, whichever clone's dispatcher reaches it.
+    pub fn queued_ids_in_clone(
+        &self,
+        dispatcher: &str,
+    ) -> Option<std::collections::BTreeSet<String>> {
+        let clone = workspace_clone(&self.root)?;
+        let queue = clone
+            .workspace
+            .join("dispatchers")
+            .join(dispatcher)
+            .join(crate::config::QUEUE_DIR);
+        queue.is_dir().then(|| queued_ids_under(&queue))
     }
 
     /// The advisory lock over the usage ledger's read-diff-append — see
@@ -844,19 +923,7 @@ impl Repo {
     /// [`crate::tracking::failures`], so `spoolway doctor` stops naming a hook
     /// failure once its task is archived.
     pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
-        let mut ids = std::collections::BTreeSet::new();
-        let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {
-            return ids;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("md")
-                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-            {
-                ids.insert(stem.to_string());
-            }
-        }
-        ids
+        queued_ids_under(&self.queue_dir())
     }
 
     /// Find a task by id in the queue, then in the archive.

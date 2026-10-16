@@ -8,9 +8,10 @@ use crate::screen::PollableRead;
 
 /// An empty queue is an ordinary ending: nothing was there to dispatch, and
 /// running again once something is queued is exactly what a person or a
-/// script should do next. Only when no job is enabled — an enabled job keeps
-/// the run resident on an empty queue instead, so it is alive when the
-/// job's window comes round — and never for a run bare `spoolway` started
+/// script should do next. Only when no job is enabled and no job store fails
+/// to parse — an enabled job, or a store that will not parse and so may hold
+/// one, keeps the run resident on an empty queue instead, so it is alive when
+/// the job's window comes round — and never for a run bare `spoolway` started
 /// (`--from-screen`), which waits on an empty queue until the screen stops
 /// it.
 pub const EXIT_EMPTY_QUEUE: i32 = 3;
@@ -111,11 +112,12 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // next drain says it again.
     let mut idle_announced = false;
 
-    // Nothing queued is nothing to dispatch — unless a job is enabled, which
-    // keeps the run resident so it is alive when that job's window comes
-    // round. Without the guard the loop would sit there printing "nothing to
-    // do" until somebody noticed, and a dispatcher started in the wrong
-    // project looks exactly like one with no work yet.
+    // Nothing queued is nothing to dispatch — unless a job is enabled, or a
+    // job store will not parse, which keeps the run resident so it is alive
+    // when that job's window comes round. Without the guard the loop would
+    // sit there printing "nothing to do" until somebody noticed, and a
+    // dispatcher started in the wrong project looks exactly like one with no
+    // work yet.
     //
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
@@ -130,7 +132,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // over `Nothing queued` meanwhile — the screen, not the queue, decides
     // when it ends.
     if live_tasks.is_empty() && live_problems.is_empty() && !args.screen {
-        if crate::jobs::enabled_count(repo) == 0 {
+        if !crate::jobs::keeps_dispatcher_up(repo) {
             println!("nothing is queued, so there is nothing to dispatch.");
             println!("  spoolway queue add --from <path>");
             return Ok(EXIT_EMPTY_QUEUE);
@@ -386,7 +388,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             Ok((tasks, problems)) if tasks.is_empty() && problems.is_empty() => {
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
-                if crate::jobs::enabled_count(repo) == 0 && !args.screen {
+                if !crate::jobs::keeps_dispatcher_up(repo) && !args.screen {
                     stop(&live, pipelines, mux.as_ref())?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
