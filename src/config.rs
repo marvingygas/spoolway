@@ -2387,8 +2387,10 @@ impl Config {
     /// achieves it: the one key's value is replaced in the document, or the key
     /// is added where [`Config::render`] would put it if the file never had it,
     /// and the rest — every comment, every blank line, the order of everything —
-    /// is copied through unread. A new key moves the keys that follow it down,
-    /// and a table header the rendering would not write is dropped.
+    /// is copied through unread, line endings included: a file that ends every
+    /// line in CRLF is still CRLF throughout afterwards. A new key moves the
+    /// keys that follow it down, and a table header the rendering would not
+    /// write is dropped.
     ///
     /// The result is parsed back and compared against `self` before it lands,
     /// so a document edit that somehow did not mean what the struct means is a
@@ -2428,7 +2430,10 @@ impl Config {
         }
 
         let rendered = self.render()?;
-        let mut edited = text.to_string();
+        // Edited as LF and given its endings back at the end: the edits write
+        // the lines they add with LF, and the cache-hint settling below looks
+        // for `\n`.
+        let (mut edited, crlf) = crate::confdoc::lf_endings(text);
         for key in &keys {
             let parts = crate::confkv::parts(self, key);
             // Absent from the serialised config means this key was just set
@@ -2459,6 +2464,7 @@ impl Config {
 
         let edited = settle_cache_hint(&edited, &rendered)
             .with_context(|| format!("editing {}", path.display()))?;
+        let edited = crate::confdoc::restore_endings(edited, crlf);
 
         self.agrees_with(&edited).with_context(|| {
             format!(

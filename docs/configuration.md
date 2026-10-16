@@ -22,9 +22,15 @@ spoolway config set models.claude-opus-5.input 5.0
 ```
 
 The top of the file holds a table of every key, its values and its default. `config set`
-changes one key and leaves every other byte alone. It refuses a key the file does not already
-hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
-created on first write.
+changes one key and leaves every other byte alone. A file with CRLF line endings keeps them, so
+one `config set` changes one line. A comment after the value stays. Setting a key to the value it
+already holds changes no byte. A key of a `[models]` row written as an inline table, such as
+`"claude-haiku-5-5" = { context_window = 200000 }`, is changed inside that row.
+
+`config set` refuses a key the file does not already hold, with two exceptions: a
+`[models."<glob>"]` field and `agents.<profile>.concurrency` are created on first write.
+A model glob may be quoted in the key, as in `spoolway config set
+'models."claude-haiku-5-5".context_window' 200000`. It names the same row as the unquoted glob.
 
 `spoolway sync` rewrites the table when it matches a table an older spoolway shipped. It refuses a
 table that matches none, and `spoolway sync --replace .spoolway/config.toml` rewrites the file and
@@ -84,6 +90,7 @@ These keys are refused:
 | `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
 | `models.<glob>.input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`, and the same rates under an `above_<N>k_tokens` tier | The value is negative, `inf` or `NaN` | A finite number of dollars per million tokens, 0 or more |
 | `unattended.max_cost_usd` | The value is negative, `inf` or `NaN` | A finite number of dollars, 0 or more |
+| `dispatch.lane_quiet`, `dispatch.lane_child_ceiling` | The value is `0`, `0s` or any other zero duration | A duration above zero, such as `15m` or `1h` |
 
 Warnings come from the same checks `doctor` runs. They cover only the keys you set:
 
@@ -153,7 +160,7 @@ Run `spoolway config get <key>` to see what the key holds.
 
 A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
 on. This covers the three agent-profile values above. It also covers a model's `compact_ctx`
-over `100`. Two commands report each such value:
+over `100`, and a `dispatch.lane_quiet` or `dispatch.lane_child_ceiling` of zero. Two commands report each such value:
 
 | Command | What it shows |
 |---|---|
@@ -347,10 +354,10 @@ auto_commit = true
 | Key | Default | What it controls |
 |---|---|---|
 | `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
-| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
+| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. Zero is refused. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
-| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
+| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. Zero is refused. |
 | `visible_lanes` | `5` | How many of a task's most recent lanes stay open in its tab, or `all`. Each new agent step, and each shown command step, first closes the task's oldest finished lanes until the tab, with the new lane in it, holds this many, then opens where the spiral puts it. The oldest lane keeps the biggest area and the newest the smallest. A running lane and a pane held for you on `blocked` or `paused` are never closed, so a tab can go over its limit until they end. A limit of `1` opens the new pane first and closes the old one after, so the tab is never empty. `0` is refused. Five is a new default: a task that used to keep every pane now keeps its five newest. Set `visible_lanes = "all"` to keep every pane until the task is done, as before. |
 | `hide_commands` | `true` | Whether a command step runs detached with no pane, so it never takes a place in its task's tab. Its output still goes to the same log file. Set to `false` and a command opens a pane that stays open after the command exits. It then counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose command is still running is never closed by the limit. |
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |

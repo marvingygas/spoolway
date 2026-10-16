@@ -890,6 +890,11 @@ pub(crate) fn list_prompt_overrides(overrides: &Path) -> Result<Vec<String>> {
 /// `dispatch.visible_lanes`, since that is the key [`apply_config_table`]
 /// applies it as. `false` when there is no patch.
 pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
+    // A quoted model glob, `models."x".input`, is the key `models.x.input`
+    // that `current_spelling` names a layer's leaf by.
+    let key = crate::confkv::split_models_key(key)
+        .map(|parts| parts.join("."))
+        .unwrap_or_else(|| key.to_string());
     let path = config_patch_path(overrides);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -2186,6 +2191,7 @@ agent: pi
         assert!(config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
         assert!(!config_patch_sets(&overrides, "dispatch.keep_finished_lanes").unwrap());
         assert!(config_patch_sets(&overrides, "models.gpt-5.1.compact_ctx").unwrap());
+        assert!(config_patch_sets(&overrides, "models.\"gpt-5.1\".compact_ctx").unwrap());
         assert!(!config_patch_sets(&overrides, "dispatch.lane_quiet").unwrap());
     }
 }

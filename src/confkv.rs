@@ -578,7 +578,15 @@ fn render_scalar(value: &Value) -> String {
 /// asking what a setting currently is deserves the answer rather than "no such
 /// key", which is what a genuine typo gets.
 pub fn get(config: &Config, key: &str) -> Result<String> {
-    if let Some(entry) = entries(config)?.into_iter().find(|entry| entry.key == key) {
+    // Entries are named by the glob as the file holds it, so a quoted glob is
+    // looked up by its name. Left as typed it matches no entry and falls
+    // through to the unset answer, which reads 0 for a row that holds a value.
+    let canonical = split_models_key(key).map(|parts| parts.join("."));
+    let looked_up = canonical.as_deref().unwrap_or(key);
+    if let Some(entry) = entries(config)?
+        .into_iter()
+        .find(|entry| entry.key == looked_up)
+    {
         return Ok(entry.value);
     }
     if let Some(unset) = unset_value(config, key) {
@@ -882,6 +890,29 @@ pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
             );
         }
     }
+    // Zero is "off" for most durations, but these two read it as "at once": a
+    // ceiling of 0 s escalates a lane at the first pass that sees a child
+    // process, and a quiet time of 0 s reminds it on every pass.
+    for (field, value, suggestion) in [
+        ("lane_quiet", config.dispatch.lane_quiet, "15m"),
+        (
+            "lane_child_ceiling",
+            config.dispatch.lane_child_ceiling,
+            "1h",
+        ),
+    ] {
+        if value.is_zero() {
+            problems.push(ValueProblem {
+                scope: "dispatch".to_string(),
+                field,
+                message: format!(
+                    "`dispatch.{field}` cannot be 0: it does not mean off here, it means a \
+                     lane is acted on at the first pass that looks, however briefly it has \
+                     been running\n  set a duration such as `{suggestion}` instead"
+                ),
+            });
+        }
+    }
     for (glob, price) in &config.models {
         if price.compact_ctx > 100 {
             problems.push(ValueProblem {
@@ -1123,19 +1154,32 @@ pub fn parts<'a>(config: &Config, key: &'a str) -> Vec<&'a str> {
 /// field that reads as a tier name is taken as the tier, not as the end of
 /// the glob. Every caller that addresses a models row by a dotted key goes
 /// through here, so how such a key is split changes in one place.
+///
+/// A glob written as a TOML quoted key, `models."claude-haiku-5-5".input`, is
+/// the name inside the quotes. Left as typed it would be a glob whose name
+/// holds the quote marks, and the edit would write a table nothing reads while
+/// reporting success.
 pub(crate) fn split_models_key(key: &str) -> Option<Vec<&str>> {
     let rest = key.strip_prefix("models.")?;
     let (head, field) = rest.rsplit_once('.')?;
     let parts = match head.rsplit_once('.') {
         Some((glob, tier)) if crate::usage::PriceTier::threshold_in(tier).is_some() => {
-            vec!["models", glob, tier, field]
+            vec!["models", unquoted(glob), tier, field]
         }
-        _ => vec!["models", head, field],
+        _ => vec!["models", unquoted(head), field],
     };
     if parts[1].is_empty() {
         return None;
     }
     Some(parts)
+}
+
+/// `name` without the matching pair of quotes TOML allows around a key.
+fn unquoted(name: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|quote| name.strip_prefix(*quote)?.strip_suffix(*quote))
+        .unwrap_or(name)
 }
 
 /// [`split_models_key`], for a key whose field `ModelPrice` actually has.
@@ -2325,5 +2369,84 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].scope, "agents.claude");
         assert!(problems[0].message.contains("(15) must be above"));
+    }
+
+    /// A model glob typed as a TOML quoted key is the name inside the quotes.
+    ///
+    /// Before, the quote marks were part of the glob, so the edit reported
+    /// success and wrote a table named `'"claude-haiku-5-5"'` that no model
+    /// ever matched.
+    #[test]
+    fn a_quoted_model_glob_is_split_to_its_name() {
+        assert_eq!(
+            split_models_key("models.\"claude-haiku-5-5\".context_window").unwrap(),
+            ["models", "claude-haiku-5-5", "context_window"]
+        );
+        assert_eq!(
+            split_models_key("models.'gpt-4.1-*'.above_200k_tokens.input").unwrap(),
+            ["models", "gpt-4.1-*", "above_200k_tokens", "input"]
+        );
+    }
+
+    /// The quoted key writes the row the unquoted one would.
+    #[test]
+    fn a_quoted_model_glob_writes_that_models_table() {
+        let config = Config::default();
+
+        let changed = set(
+            &config,
+            "models.\"claude-haiku-5-5\".context_window",
+            "200000",
+        )
+        .unwrap();
+
+        assert_eq!(changed.models["claude-haiku-5-5"].context_window, 200000);
+        assert_eq!(changed.models.len(), 1);
+    }
+
+    /// Zero is refused for the two durations that would read it as "at once".
+    #[test]
+    fn a_zero_lane_duration_is_refused() {
+        let config = Config::default();
+        for key in ["dispatch.lane_child_ceiling", "dispatch.lane_quiet"] {
+            for zero in ["0", "0s", "0m"] {
+                let err = set(&config, key, zero).unwrap_err().to_string();
+                assert!(err.contains("cannot be 0"), "{key} {zero}: {err}");
+            }
+        }
+    }
+
+    /// Reading a row by its quoted key answers with the row's value, not the
+    /// zero an unset field reads as.
+    #[test]
+    fn a_quoted_model_glob_is_read_back() {
+        let config = set(
+            &Config::default(),
+            "models.claude-haiku-5-5.context_window",
+            "200000",
+        )
+        .unwrap();
+
+        assert_eq!(
+            get(&config, "models.\"claude-haiku-5-5\".context_window").unwrap(),
+            "200000"
+        );
+    }
+
+    /// A hand-written zero lane duration is reported, so `doctor` and
+    /// `config edit` say what the dispatcher will do with it.
+    #[test]
+    fn value_problems_names_a_zero_lane_duration() {
+        let mut config = Config::default();
+        assert!(value_problems(&config).is_empty());
+        config.dispatch.lane_quiet = std::time::Duration::ZERO;
+        config.dispatch.lane_child_ceiling = std::time::Duration::ZERO;
+
+        let fields: Vec<_> = value_problems(&config)
+            .iter()
+            .map(|problem| problem.field)
+            .collect();
+
+        assert_eq!(fields, ["lane_quiet", "lane_child_ceiling"]);
     }
 }
