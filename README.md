@@ -190,7 +190,7 @@ agent works from it, and you own the skeleton it is written from.
 - Reuse previous sessions until the context threshold is met
 - Give the pipeline a `version:` and raise it when you change the pipeline, so eval can compare
   versions
-- Run a step only on a chain's root task with `first:`, only on its top task with `last:`, or
+- Run a step only on a chain's root task with `first:`, only on a chain's last task with `last:`, or
   a command step one task at a time with `serial:`
 
 ```yaml

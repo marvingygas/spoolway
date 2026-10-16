@@ -108,9 +108,17 @@ words with a hyphen instead, for example `needs-triage`.
 
 ### One constraint no key can express
 
-`gate_at` must name a step of the task's pipeline. `done` is not a step. `spoolway queue add`
-and `spoolway task contract --from` refuse any other value, naming the task and the steps it
-may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
+`gate_at` must name a step of the task's pipeline that the task runs. `done` is not a step.
+`spoolway queue add` and `spoolway task contract --from` refuse any other value, naming the task
+and the steps it may name. `spoolway task contract` lists the steps of each pipeline under
+`.pipelines.<name>.gate_at`.
+
+`spoolway queue add` also refuses a `gate_at` on a step the task [walks
+past](pipelines.md#steps-a-task-walks-past), because that gate would never fire. An example is the
+`last:` step of a task that has another task above it in its group. The refusal names the task,
+the step, the rule and the steps the task does run. It applies to the tasks in the batch. It also
+applies to a task already queued when the batch adds a dependent above it. The refusal then
+names the queued task, its step and the new dependent.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
 digits and hyphens, starting with a letter. A task id may be at most 100 characters, because

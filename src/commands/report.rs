@@ -209,7 +209,7 @@ pub fn report(
     // `docs/concepts.md`'s Reach section.
     let unattended = repo.unattended();
 
-    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
     let routed = route(
         &mut task,
         pipeline,
@@ -2169,7 +2169,7 @@ fn resume_checked(
     let road = match &args.stage {
         Some(stage) => {
             let pipeline = pipelines.for_task(&task)?;
-            let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+            let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
             // A step the task walks past is never written as its stage, so
             // naming one by hand is refused rather than accepted and walked
             // past on the next tick.
@@ -2197,7 +2197,7 @@ fn resume_checked(
             // task or one paused by a failed done hook resumes without it,
             // even when its pipeline is no longer defined.
             let pipeline = pipelines.for_task(&task)?;
-            let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+            let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
             let landing =
                 crate::dispatch::land_past_hidden(pipeline, &task, destination, dependents);
             let (destination, walked_past) =
@@ -2257,7 +2257,7 @@ fn close_as_done(
         );
     }
     let pipeline = pipelines.for_task(&task)?;
-    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
     let skipped = steps_a_close_skips(&task, pipelines, pipeline, dependents);
     let skipped = match skipped.is_empty() {
         true => "none".to_string(),
@@ -2627,7 +2627,7 @@ fn back_onto_its_step(
     // Lands past the steps this task does not run. `queued` is not a step,
     // so a task that never started lands as it is.
     let pipeline = pipelines.for_task(&task)?;
-    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
     let landing = crate::dispatch::land_past_hidden(
         pipeline,
         &task,

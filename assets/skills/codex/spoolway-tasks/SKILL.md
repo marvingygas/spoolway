@@ -312,13 +312,13 @@ reading the file whole.
    tell them something downstream will check it; do not invent a section for it.
 
    **Then check each group's own last task carries a `last:` step.** A group's last task —
-   the one nothing else in its own group depends on — is the only one whose run of the
-   pipeline ever reaches a step marked `last-of-chain` in step 1's contract. When that task's
-   own routed pipeline carries none, that group loses the step silently: nobody after it ever
-   runs it, since every other task in the group walks straight past. Re-route that one task to
-   the first pipeline from step 1's gathering that carries a `last-of-chain` step — there is no
-   project default to prefer over the rest — and say the swap out loud to the caller instead of
-   just writing a different `pipeline:` into its task.
+   the one nothing else in its own group depends on — is the task whose run of the
+   pipeline reaches a step marked `last-of-chain` in step 1's contract. When that task's own
+   routed pipeline carries none, the step still runs, but on the nearest task below it whose
+   pipeline has one, so it checks a stack without the tasks above it. If the whole stack should
+   pass it, re-route that last task to the first pipeline from step 1's gathering that carries a
+   `last-of-chain` step — there is no project default to prefer over the rest — and say the swap
+   out loud to the caller instead of just writing a different `pipeline:` into its task.
 
 5. **Prove the tasks.** `spoolway task contract --from <home>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it

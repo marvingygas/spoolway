@@ -262,6 +262,12 @@ struct ContractOutput {
 /// `first-of-chain`, this pipeline's own `description:`, and the body a task
 /// on it is written from.
 ///
+/// The `gate_at` list is every step of the pipeline, not what any one task may
+/// name: `queue add` refuses a step the task walks past, so a task with another
+/// task above it in its group whose pipeline has a `last-of-chain` step may not
+/// name its own, and a task that depends on another may not name its
+/// `first-of-chain` step.
+///
 /// `longest_agent_step` no longer bounds a task id's length — see gh-359 and
 /// [`crate::mux::check_task_id`] — but is kept here as information: every
 /// lane starts in herdr as `<step>-<tag>`, so a task id's length never

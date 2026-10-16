@@ -340,7 +340,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
   and kill count. The log stays. This holds for
   every way a task reaches the step, including a lane's report and a resume.
 - A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
-  the step, or routes on the exit code that run wrote.
+  the step, or routes on the exit code that run wrote. If the step has become an agent step in
+  the meantime, the dispatcher stops the run and starts the agent lane. If an agent lane is
+  still on a step that has become a command step, the dispatcher stops the lane, counts its
+  usage and starts the command. Only one of the two runs on the task at a time.
 - The run's pid file holds the pid, the process start time, and a `started` line the command's
   shell adds as the command begins. After a reboot, a live process
   with the same pid but a different start time is not the run. The step reads as interrupted and
@@ -410,11 +413,15 @@ refuses longer text with an error naming the pane and the byte count.
 
 ### `last:` — a step the chain runs once
 
-The top task of a chain carries every change beneath it, so a suite the whole stack must pass
-runs once, there. A task is last when no unfinished task in its own group depends on it. Any
-other task walks past the step to its `on_pass`. Each group gets its own `last:` run, whatever
-stacks on top of it. `last:` is allowed on any step, and a task walked past an agent step
-starts no lane there.
+The highest task of a chain that has a `last:` step carries every change beneath it, so a suite
+the whole stack must pass runs once, there. A task is last when no unfinished task in its own
+group depends on it and runs a `last:` step of its own. A task that depends on it counts only
+when its pipeline has a `last:` step that its `skip:` does not name. Any other task walks past
+the step to its `on_pass`. Each group gets its own `last:` run, whatever stacks on top of it.
+`last:` is allowed on any step, and a task walked past an agent step starts no lane there.
+
+If the top task of a chain uses a pipeline with no `last:` step, the next task down that has
+one runs it, once.
 
 ### `first:` — a step only a chain's root runs
 
@@ -429,7 +436,7 @@ same step.
 ### Steps a task walks past
 
 A step is hidden for a task when its own `skip:` names it, when it is a `last:` step and
-something in the task's group is still open above it, or when it is a `first:` step and the
+an open task above it in the task's group runs a `last:` step, or when it is a `first:` step and the
 task is not its chain's root. These moves follow `on_pass` past hidden steps and write the
 first step the task runs as its stage: a lane's report, a command step's exit,
 `spoolway resume`, a cleared block, and a task's start off `queued`. The walk stops after as

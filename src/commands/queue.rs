@@ -197,7 +197,7 @@ pub fn queue_show(repo: &Repo, id: &str) -> Result<()> {
 /// resuming sends its task.
 pub fn queue_route(repo: &Repo, pipelines: &Pipelines, id: &str, json: bool) -> Result<()> {
     let task = repo.task(id)?;
-    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
     let route = route_view(&task, pipelines, dependents)?;
     match json {
         true => println!("{}", serde_json::to_string_pretty(&route)?),
@@ -1363,7 +1363,108 @@ fn validate_batch_undescribed(
 
     untrack_named_groups(&mut tasks, no_tracking)?;
     check_dependencies_set(repo, &mut tasks)?;
+    check_gate_at_runs(repo, pipelines, &tasks)?;
     Ok(tasks)
+}
+
+/// Refuse a `gate_at:` naming a step its task will walk past.
+///
+/// A step that does not run for a task is never written as its stage, so no
+/// report ever comes from it and the `gate_at:` never fires. Which steps are
+/// walked past depends on the open tasks above the task, so this runs once the
+/// whole batch is known, judged against the queue and the batch together.
+/// Each step is judged by [`crate::dispatch::walk_past`], as the gate picker
+/// does through [`gate_steps`].
+///
+/// A task already queued is judged too when the batch puts a task above it,
+/// since that dependent is what can hide a `last:` step the queued task's
+/// `gate_at:` names. The refusal then names the queued task, its step and the
+/// new dependent. A queued task the batch does not sit above is left alone:
+/// whatever was wrong with it before is not this batch's to refuse. So is one
+/// whose gate the queue already strands, whose task is past the gate step, or
+/// whose gate step has already started: only a gate this batch newly strands
+/// is refused.
+fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Result<()> {
+    let queued = repo.tasks().unwrap_or_default();
+    let mut all = queued.clone();
+    all.extend(batch.iter().cloned());
+    let graph = Graph::build(&all, &repo.archive_dir());
+    let queue_graph = Graph::build(&queued, &repo.archive_dir());
+    let judged = batch
+        .iter()
+        .map(|task| (task, None))
+        .chain(queued.iter().filter_map(|task| {
+            let above = batch.iter().find(|b| graph.reaches(b.id(), task.id()))?;
+            Some((task, Some(above)))
+        }));
+    for (task, above) in judged {
+        let Some(gate_at) = task.front.gate_at.as_deref() else {
+            continue;
+        };
+        let Ok(pipeline) = pipelines.for_task(task) else {
+            // A batch task's pipeline was resolved before this runs; a queued
+            // task's missing pipeline is reported where it is dispatched.
+            continue;
+        };
+        let Some(step) = pipeline.step(gate_at) else {
+            continue;
+        };
+        if above.is_some() {
+            // Only a queued gate this batch itself strands is refused. One the
+            // queue already hid, by a dependent already above it or a `skip:`,
+            // was stranded before this batch. One whose task is past the gate
+            // step is no longer this batch's to judge. One on the gate step
+            // fires on that step's report only once the step has started: a
+            // step already working is not walked past, but a task still
+            // waiting on it for a lane slot or its `serial:` turn is.
+            let before = crate::dispatch::same_group_dependents(
+                repo,
+                pipelines,
+                &queued,
+                &queue_graph,
+                task,
+            );
+            let stage = pipeline.steps.iter().position(|s| s.id == task.stage());
+            let gate = pipeline.steps.iter().position(|s| s.id == gate_at);
+            if crate::dispatch::walk_past(step, task, before).is_some()
+                || stage.zip(gate).is_some_and(|(stage, gate)| stage > gate)
+                || (task.stage() == gate_at && crate::dispatch::step_started(repo, step, task))
+            {
+                continue;
+            }
+        }
+        let dependents =
+            crate::dispatch::same_group_dependents(repo, pipelines, &all, &graph, task);
+        if let Some(why) = crate::dispatch::walk_past(step, task, dependents) {
+            let runs = pipeline
+                .steps
+                .iter()
+                .filter(|s| crate::dispatch::walk_past(s, task, dependents).is_none())
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            match above {
+                None => bail!(
+                    "task `{}` has `gate_at: {gate_at}`, but it will never run `{gate_at}`: {}, \
+                     so the gate would never fire. Name a step it does run \
+                     ({runs}), or drop `gate_at:`.",
+                    task.front.id,
+                    why.refusal(),
+                ),
+                Some(above) => bail!(
+                    "task `{}`, already queued, has `gate_at: {gate_at}`, and adding `{}` above \
+                     it would mean it never runs `{gate_at}`: {}, so the gate would never fire. \
+                     Change `gate_at:` on `{}` to a step it does run ({runs}), or leave `{}` out.",
+                    task.front.id,
+                    above.front.id,
+                    why.refusal(),
+                    task.front.id,
+                    above.front.id,
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -5752,7 +5853,7 @@ impl Picked<'_> {
             RowOption::Open => open_highlighted(self.repo, groups, state),
             RowOption::Gate => Mode::Gate {
                 cursor: 0,
-                dependents: gate_dependents(self.repo, groups, state),
+                dependents: gate_dependents(self.repo, self.pipelines, groups, state),
             },
             RowOption::Trial => trial_target(groups, state).map_or(closed, |group| {
                 Mode::Trial(TrialState::new(self.pipelines, group))
@@ -6108,7 +6209,12 @@ fn gate_steps<'a>(
 /// copy, so no id is counted twice. A queue that cannot be read counts as
 /// empty, the way the screen degrades every other read it cannot make,
 /// rather than closing the picker over it.
-fn gate_dependents(repo: &Repo, groups: &[Group], state: &ScreenState) -> usize {
+fn gate_dependents(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    groups: &[Group],
+    state: &ScreenState,
+) -> usize {
     let Some(task) = shown(groups, state)
         .get(state.group_cursor)
         .and_then(|group| group.tasks.get(state.task_cursor))
@@ -6127,7 +6233,7 @@ fn gate_dependents(repo: &Repo, groups: &[Group], state: &ScreenState) -> usize 
         .filter_map(|t| as_submitted(t, &t.doc));
     tasks.extend(pending);
     let graph = Graph::build(&tasks, &repo.archive_dir());
-    crate::dispatch::same_group_dependents(repo, &tasks, &graph, &me)
+    crate::dispatch::same_group_dependents(repo, pipelines, &tasks, &graph, &me)
 }
 
 /// Pending `task`, with text `doc`, as the queue would hold it once
@@ -11577,6 +11683,204 @@ mod tests {
             &[("mine.md".into(), text)],
         )
         .expect("a real step is accepted");
+    }
+
+    /// A `gate_at:` naming a step the task walks past never fires, so it is
+    /// refused naming the task, the step and why — here a `last:` step with a
+    /// dependent in the same batch — and the steps that do run. The same
+    /// `gate_at:` on the task at the top of the chain is accepted. Before the
+    /// check, both were accepted.
+    #[test]
+    fn validate_batch_refuses_a_gate_at_on_a_step_the_task_walks_past() {
+        let (repo, _root_guard) = fixture("gate-at-walked-past");
+        let yaml = "steps:\n  \
+             - id: build\n    run: true\n    on_pass: suite\n  \
+             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let batch = |gated: &str| {
+            vec![
+                (
+                    "low.md".to_string(),
+                    task_text("low", &format!("group: demo\n{gated}"), BODY),
+                ),
+                (
+                    "top.md".to_string(),
+                    task_text("top", "group: demo\ndepends_on: [low]\n", BODY),
+                ),
+            ]
+        };
+
+        let err = validate_batch(
+            &repo,
+            &pipelines,
+            Some("plan/demo"),
+            &batch("gate_at: suite\n"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("task `low`"), "{err}");
+        assert!(err.contains("gate_at: suite"), "{err}");
+        assert!(err.contains("not last in its chain"), "{err}");
+        assert!(err.contains("build"), "names a step it does run: {err}");
+
+        validate_batch(
+            &repo,
+            &pipelines,
+            Some("plan/demo"),
+            &batch("gate_at: build\n"),
+        )
+        .expect("a step it runs is accepted");
+        let top_gated = vec![
+            (
+                "low.md".to_string(),
+                task_text("low", "group: demo\n", BODY),
+            ),
+            (
+                "top.md".to_string(),
+                task_text(
+                    "top",
+                    "group: demo\ndepends_on: [low]\ngate_at: suite\n",
+                    BODY,
+                ),
+            ),
+        ];
+        validate_batch(&repo, &pipelines, Some("plan/demo"), &top_gated)
+            .expect("the top of the chain runs `suite`");
+    }
+
+    /// A batch that puts a task above one already queued is refused when that
+    /// queued task's `gate_at:` names a `last:` step the new dependent would
+    /// hide, naming the queued task, its step and the new dependent. Before
+    /// the check only the batch's own tasks were judged, so the queued gate
+    /// could never fire.
+    #[test]
+    fn validate_batch_refuses_a_dependent_that_strands_a_queued_gate_at() {
+        let (repo, _root_guard) = fixture("gate-at-queued-stranded");
+        let yaml = "steps:\n  \
+             - id: build\n    run: true\n    on_pass: suite\n  \
+             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let low = task_text("low", "group: demo\ngate_at: suite\n", BODY);
+        let tasks = validate_batch(
+            &repo,
+            &pipelines,
+            Some("plan/demo"),
+            &[("low.md".into(), low)],
+        )
+        .expect("alone, `low` is the top and runs `suite`");
+        for task in &tasks {
+            task.save().unwrap();
+        }
+
+        let top = task_text("top", "group: demo\ndepends_on: [low]\n", BODY);
+        let err = validate_batch(
+            &repo,
+            &pipelines,
+            Some("plan/demo"),
+            &[("top.md".into(), top)],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("task `low`, already queued"), "{err}");
+        assert!(err.contains("gate_at: suite"), "{err}");
+        assert!(err.contains("`top`"), "names the new dependent: {err}");
+    }
+
+    /// A queued gate is refused only when the batch is what strands it. A
+    /// queued task on its gate step is left alone once that step has started,
+    /// by a command run or a lane, since a step already working is not walked
+    /// past and its report fires the gate. One only sitting on the step, with
+    /// nothing started, is still walked past, so it is refused. A gate an open
+    /// task above it already stranded is left alone too: that is not this
+    /// batch's doing.
+    #[test]
+    fn validate_batch_leaves_a_queued_gate_at_the_batch_did_not_strand() {
+        let yaml = "steps:\n  \
+             - id: build\n    run: true\n    on_pass: suite\n  \
+             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let add_top = |repo: &Repo, depends: &str| {
+            let top = task_text(
+                "top",
+                &format!("group: demo\ndepends_on: [{depends}]\n"),
+                BODY,
+            );
+            validate_batch(
+                repo,
+                &pipelines,
+                Some("plan/demo"),
+                &[("top.md".into(), top)],
+            )
+        };
+
+        let low_on_suite = |repo: &Repo| {
+            let mut low = parse_submission(
+                "low.md",
+                &task_text("low", "group: demo\ngate_at: suite\n", BODY),
+                Some("plan/demo"),
+            )
+            .unwrap();
+            low.path = repo.queue_dir().join("low.md");
+            low.set_stage("suite", None);
+            low.save().unwrap();
+            low
+        };
+
+        // On the gate step with nothing started yet: the dispatcher walks it
+        // past once `top` is above it, so the gate would never fire.
+        let (repo, _root_guard) = fixture("gate-at-queued-waiting");
+        low_on_suite(&repo);
+        let err = add_top(&repo, "low").unwrap_err().to_string();
+        assert!(err.contains("task `low`, already queued"), "{err}");
+
+        // On the gate step with its command run started: the gate fires on
+        // that run's report.
+        let (repo, _root_guard) = fixture("gate-at-queued-running");
+        let low = low_on_suite(&repo);
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        let key = crate::command_step::Runs::key("suite", low.id());
+        std::fs::write(repo.commands_dir().join(format!("{key}.pid")), "1").unwrap();
+        add_top(&repo, "low").expect("`low`'s `suite` run has started, so its gate still fires");
+
+        // On the gate step with a lane started for it: the same.
+        let (repo, _root_guard) = fixture("gate-at-queued-lane");
+        let low = low_on_suite(&repo);
+        let lane = crate::mux::lane_name("suite", &low);
+        let records = serde_json::json!({
+            lane: { "started_at": 1, "last_progress": 1, "output_hash": 0 }
+        });
+        std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+        add_top(&repo, "low").expect("`low`'s `suite` lane has started, so its gate still fires");
+
+        // Stranded before the batch: `mid` is already above `low`, a state
+        // queued before `queue add` refused it. Written straight to the queue.
+        let (repo, _root_guard) = fixture("gate-at-queued-already-stranded");
+        for (id, extra) in [
+            ("low", "group: demo\ngate_at: suite\n"),
+            ("mid", "group: demo\ndepends_on: [low]\n"),
+        ] {
+            let mut task = parse_submission(
+                &format!("{id}.md"),
+                &task_text(id, extra, BODY),
+                Some("plan/demo"),
+            )
+            .unwrap();
+            task.path = repo.queue_dir().join(format!("{id}.md"));
+            task.save().unwrap();
+        }
+        add_top(&repo, "mid").expect("`low`'s gate was stranded by `mid`, not by this batch");
     }
 
     /// `--base` is as arbitrary a value as a task's own `base:` — a
@@ -21517,7 +21821,7 @@ body\n";
     /// the two must name the same stage. Returns that stage.
     fn route_then_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> String {
         let task = queued(repo, id);
-        let dependents = crate::dispatch::queue_dependents(repo, &task).unwrap();
+        let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task).unwrap();
         let said = route_view(&task, pipelines, dependents)
             .unwrap()
             .resumes_to
@@ -21816,7 +22120,7 @@ body\n";
             let pipelines = hidden_route_pipelines(extra);
             queue_hidden(&repo, rule, "build");
             let task = queued(&repo, "ship");
-            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &pipelines, &task).unwrap();
 
             let route = route_view(&task, &pipelines, dependents).unwrap();
             let text = render_route(&route);
@@ -21865,7 +22169,7 @@ body\n";
             let pipelines = hidden_route_pipelines(extra);
             queue_hidden(&repo, rule, "check");
             let task = queued(&repo, "ship");
-            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &pipelines, &task).unwrap();
 
             let route = route_view(&task, &pipelines, dependents).unwrap();
             assert_eq!(route.at.as_deref(), Some("check"), "{rule}");
@@ -21888,7 +22192,7 @@ body\n";
             let pipelines = hidden_route_pipelines(extra);
             queue_hidden(&repo, "none", "build");
             let task = queued(&repo, "ship");
-            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &pipelines, &task).unwrap();
 
             let text = render_route(&route_view(&task, &pipelines, dependents).unwrap());
             assert!(text.contains("\n  check"), "{rule}: {text}");
@@ -21953,7 +22257,7 @@ body\n";
             pending_hidden(&repo, rule);
             let groups = listed(&repo);
             let mut state = on_pending_task(&groups, "ship");
-            let dependents = gate_dependents(&repo, &groups, &state);
+            let dependents = gate_dependents(&repo, &pipelines, &groups, &state);
 
             let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
                 .unwrap()
@@ -21997,7 +22301,7 @@ body\n";
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let mut state = on_pending_task(&groups, "wire");
-        let picker = (0, gate_dependents(&repo, &groups, &state));
+        let picker = (0, gate_dependents(&repo, &pipelines, &groups, &state));
         let panel = gate_panel(&groups, &pipelines, &state, picker).unwrap();
         assert_eq!(
             panel[panel.len() - 2].trim_matches(['│', ' ']),
@@ -22041,7 +22345,7 @@ body\n";
         pending_hidden(&repo, "skip");
         let groups = listed(&repo);
         let state = on_pending_task(&groups, "ship");
-        let dependents = gate_dependents(&repo, &groups, &state);
+        let dependents = gate_dependents(&repo, &pipelines, &groups, &state);
 
         let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
             .unwrap()
@@ -22059,7 +22363,7 @@ body\n";
             pending_hidden(&repo, "none");
             let groups = listed(&repo);
             let state = on_pending_task(&groups, "ship");
-            let dependents = gate_dependents(&repo, &groups, &state);
+            let dependents = gate_dependents(&repo, &pipelines, &groups, &state);
 
             let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
                 .unwrap()
@@ -22080,7 +22384,7 @@ body\n";
         std::fs::write(repo.queue_dir().join("above.md"), above).unwrap();
         let groups = listed(&repo);
         let state = on_pending_task(&groups, "ship");
-        let dependents = gate_dependents(&repo, &groups, &state);
+        let dependents = gate_dependents(&repo, &pipelines, &groups, &state);
         assert_eq!(dependents, 1);
 
         let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))

@@ -924,7 +924,7 @@ impl Board {
         }
         // Read once, on the key: the picker is a snapshot, not redrawn from
         // the queue every frame.
-        let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+        let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
         self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines, dependents)?);
         Ok(())
     }
@@ -4014,7 +4014,8 @@ fn build_rows(
         let step = pipeline.step(task.stage());
         // Read off the graph this frame already built, for every step NEXT
         // names: the `last:` rule needs the open tasks above this one.
-        let dependents = crate::dispatch::same_group_dependents(repo, tasks, graph, task);
+        let dependents =
+            crate::dispatch::same_group_dependents(repo, pipelines, tasks, graph, task);
         // The step a boot mark names, when there is one. It is what STEP
         // reads for this row: a task coming off `queued` keeps that stage
         // on disk until its boot has returned, and the row should name the
@@ -5356,8 +5357,13 @@ fn off_a_step(
     // stage a report or a command step's exit writes. Compared raw, a move
     // from `test` straight to `document` past a hidden `suite` matches
     // neither route and reads as a bare `left test`.
-    let dependents =
-        crate::dispatch::same_group_dependents(queue.repo, queue.tasks, queue.graph, task);
+    let dependents = crate::dispatch::same_group_dependents(
+        queue.repo,
+        queue.pipelines,
+        queue.tasks,
+        queue.graph,
+        task,
+    );
     let land = |outcome| {
         step.destination(outcome)
             .map(|destination| landed(pipeline, task, destination.to_string(), dependents))
@@ -5445,7 +5451,14 @@ fn off_a_step(
     // No report from `was`. The dispatcher's own walk-past first, asked of
     // the dispatcher itself, since a step walked past follows its `on_pass`
     // exactly as a pass does.
-    if crate::dispatch::walks_past(queue.repo, queue.tasks, queue.graph, step, task) {
+    if crate::dispatch::walks_past(
+        queue.repo,
+        queue.pipelines,
+        queue.tasks,
+        queue.graph,
+        step,
+        task,
+    ) {
         return if raw_pass == Some(stage) {
             Move::Skipped {
                 from,
@@ -13440,7 +13453,7 @@ mod tests {
             caught_at_step(&repo, "t", "suite", "pass");
 
             let task = repo.task("t").unwrap();
-            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &pipelines, &task).unwrap();
             let picker = resume_picker(&task, &pipelines, dependents).unwrap();
             let rows: Vec<(&str, &str)> = picker
                 .rows

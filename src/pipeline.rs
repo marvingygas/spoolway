@@ -588,16 +588,19 @@ pub struct Step {
     /// suite the whole stack has to pass is one run at the top, not one run per
     /// task over a subset somebody above will cover again.
     ///
-    /// The question asked on arrival is **is any task still open above me** —
-    /// another task of the same plan that depends on this one, directly or
-    /// through others. Not "do I have dependents", which is what the retired
-    /// `when: last` asked and why it went: that counted tasks already finished
-    /// and archived, so nothing ever looked last.
+    /// The question asked on arrival is **is any task still open above me that
+    /// will run a `last:` step** — another task of the same plan that depends
+    /// on this one, directly or through others. Not "do I have dependents",
+    /// which is what the retired `when: last` asked and why it went: that
+    /// counted tasks already finished and archived, so nothing ever looked
+    /// last.
     ///
     /// What falls out of asking it that way:
     ///
-    /// - A **chain** names exactly one task, the top, whatever order the rest
-    ///   finished in.
+    /// - A **chain** names exactly one task, the highest whose pipeline has a
+    ///   `last:` step, whatever order the rest finished in. That is the top
+    ///   unless the top task's pipeline has none: a dependent only counts as
+    ///   "above me" when its own pipeline has a `last:` step to run.
     /// - A **fan** names all of them. Nobody depends on anybody, so no branch
     ///   contains another and each pull request stands alone — every one of
     ///   them runs it, which is right rather than a degradation.

@@ -502,7 +502,7 @@ and the dispatcher keeps running while the popup is open.
 
 `r` on a held row opens a picker titled `resume <task>`. It lists the steps of the task's pipeline in pipeline order, except `blocked` and `done`. The line above the list says where the task stopped. A blocked or paused task ends the list with a `done` row.
 
-A step the task walks past is left out: a `first:` step when the task is not its chain's root, a `last:` step when a task in its group still depends on it, and a step its own `skip:` names. `spoolway resume --stage` refuses those steps, so the picker does not offer them. Two hidden steps are still listed. One is the step the task stopped at, so the person sees where the task is. `enter` on that row is refused unless it is also the `(next)` row. The other is the `(next)` row when a plain resume lands on a hidden step, which happens when that step has no `on_pass`.
+A step the task walks past is left out: a `first:` step when the task is not its chain's root, a `last:` step when a task above it in its group runs a `last:` step of its own, and a step its own `skip:` names. `spoolway resume --stage` refuses those steps, so the picker does not offer them. Two hidden steps are still listed. One is the step the task stopped at, so the person sees where the task is. `enter` on that row is refused unless it is also the `(next)` row. The other is the `(next)` row when a plain resume lands on a hidden step, which happens when that step has no `on_pass`.
 
 ```
 paused at review — it passed

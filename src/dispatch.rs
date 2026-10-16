@@ -980,12 +980,15 @@ fn run_step<'p, 'k>(
 /// pipeline itself cannot skip anything except through `last:`, below.
 ///
 /// `last: true` says this step belongs to the chain rather than to any one
-/// task in it, so only the task at the top runs it.
+/// task in it, so only the highest task in its chain that has a `last:` step
+/// runs it.
 ///
 /// The question is whether anything is still open *above* this task, *in its
 /// own group* — an unfinished task that depends on it, at any depth, whose
 /// bare group (see the caller's own use of [`Graph::dependents_where`])
-/// matches this task's own. A finished task is archived out of the open set,
+/// matches this task's own, and whose own pipeline has a `last:` step to run
+/// (see [`runs_a_last_step`]): a dependent with none would leave the chain
+/// without the step. A finished task is archived out of the open set,
 /// so a dependent that counts here is one that has yet to run. That is the
 /// whole difference from the retired `when: last`, which asked whether the
 /// pipeline's *declared* graph gave this task dependents and so found none at
@@ -1149,19 +1152,28 @@ pub(crate) fn land_past_hidden(
 /// [`same_group_dependents`] for a caller that has only the repository: it
 /// reads the open queue and builds the graph itself. For `spoolway report` and
 /// `spoolway resume`, which run outside the dispatcher's pass.
-pub(crate) fn queue_dependents(repo: &Repo, task: &Task) -> Result<usize> {
+pub(crate) fn queue_dependents(repo: &Repo, pipelines: &Pipelines, task: &Task) -> Result<usize> {
     let tasks = repo.tasks()?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
-    Ok(same_group_dependents(repo, &tasks, &graph, task))
+    Ok(same_group_dependents(repo, pipelines, &tasks, &graph, task))
 }
 
-/// How many open tasks above `task` in `graph` share its bare group — the
-/// only dependents that hold a `last:` step back (see [`fall_through`]).
+/// How many open tasks above `task` in `graph` hold its `last:` step back: the
+/// ones that share its bare group and will run a `last:` step themselves
+/// (see [`fall_through`]).
 /// Bare groups are compared the same slug-stripped way
 /// `commands::queue::check_dependencies_set` does, so a task with no group
 /// (its own group of one) never matches a dependent that also has none.
+///
+/// A dependent only takes the chain's `last:` step over if its own pipeline
+/// has one that its `skip:` does not name. Without that test, a chain whose
+/// top task runs a pipeline with no `last:` step would hide
+/// the step from every task below it, and no task would run it. A dependent
+/// whose pipeline cannot be found is counted, as it was before pipelines were
+/// consulted: the hold is kept rather than guessed away.
 pub(crate) fn same_group_dependents(
     repo: &Repo,
+    pipelines: &Pipelines,
     tasks: &[Task],
     graph: &Graph,
     task: &Task,
@@ -1173,9 +1185,23 @@ pub(crate) fn same_group_dependents(
         tasks
             .iter()
             .find(|t| t.id() == dep)
+            .filter(|t| runs_a_last_step(pipelines, t))
             .and_then(|t| crate::commands::bare_group(repo, t))
             .is_some_and(|theirs| theirs == mine)
     })
+}
+
+/// Whether `task` has a `last:` step of its own to run: its pipeline defines
+/// one that its `skip:` list does not name. True when the pipeline cannot be
+/// found, so an unreadable pipeline never lets a `last:` step run twice.
+fn runs_a_last_step(pipelines: &Pipelines, task: &Task) -> bool {
+    match pipelines.for_task(task) {
+        Ok(pipeline) => pipeline
+            .steps
+            .iter()
+            .any(|s| s.last && !task.front.skip.contains(&s.id)),
+        Err(_) => true,
+    }
 }
 
 /// Whether the dispatcher walks `task` past `step` without starting a lane,
@@ -1184,12 +1210,18 @@ pub(crate) fn same_group_dependents(
 /// reader that needs only the answer.
 pub(crate) fn walks_past(
     repo: &Repo,
+    pipelines: &Pipelines,
     tasks: &[Task],
     graph: &Graph,
     step: &Step,
     task: &Task,
 ) -> bool {
-    walk_past(step, task, same_group_dependents(repo, tasks, graph, task)).is_some()
+    walk_past(
+        step,
+        task,
+        same_group_dependents(repo, pipelines, tasks, graph, task),
+    )
+    .is_some()
 }
 
 impl<'a> Dispatcher<'a> {
@@ -1674,7 +1706,8 @@ impl<'a> Dispatcher<'a> {
 
                 // Read before `tasks[index]` is borrowed mutably: a task
                 // leaving `queued` onto a `last:` entry step needs it.
-                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
+                let dependents =
+                    same_group_dependents(self.repo, self.pipelines, tasks, graph, &tasks[index]);
                 let keys = command_keys.get(tasks[index].id()).unwrap_or(&no_keys);
                 match self.route_reserved_stage(
                     &mut tasks[index],
@@ -1716,7 +1749,8 @@ impl<'a> Dispatcher<'a> {
                 // Only a dependent in this task's own group can hold its
                 // `last:` step back — see `fall_through`'s own doc, updated
                 // for groups that may now stack on one another.
-                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
+                let dependents =
+                    same_group_dependents(self.repo, self.pipelines, tasks, graph, &tasks[index]);
 
                 // A step already working for this task is not walked past. A
                 // `last:` or `first:` step starts its lane or command while
@@ -1732,10 +1766,14 @@ impl<'a> Dispatcher<'a> {
                 // leftover would read as live work and start the command
                 // again for a task the step is hidden for. A foreground
                 // step's key is cleared by `reap_stale_runs` once the task is
-                // elsewhere, so one found here belongs to this visit.
+                // elsewhere, so one found here belongs to this visit. `keys`
+                // was read before that reap, so a key on a step that has
+                // become an agent step is not live work either: the reap just
+                // stopped that run.
                 let live_work = owned.iter().any(|(lane_step, lane_task, _)| {
                     *lane_step == this_step.id && lane_task == tasks[index].id()
                 }) || (!this_step.background
+                    && this_step.kind() == StepKind::Command
                     && keys.contains(&crate::command_step::Runs::key(
                         &this_step.id,
                         tasks[index].id(),
@@ -1795,6 +1833,48 @@ impl<'a> Dispatcher<'a> {
             match step.kind() {
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
+                    // A lane left from when this step was an agent step: the
+                    // pipeline was edited across a restart. The command is
+                    // about to run in the same worktree, and nothing would
+                    // ever read that lane's report again, so it is stopped
+                    // first, however busy it is. What the turn spent is banked
+                    // and its record dropped, as every other stop of a lane
+                    // does, so the tokens reach the ledger and no stale record
+                    // outlives the lane.
+                    if let Some(lane) = lane {
+                        match self.mux.stop_lane(&lane.name, &lane.pane_id) {
+                            Ok(()) => {
+                                let ledger = self.ledger();
+                                let record = self.lanes.remove(&lane.name).unwrap_or_else(|| {
+                                    LaneRecord::readopted(
+                                        self.repo,
+                                        &lane.name,
+                                        now_secs(),
+                                        &ledger,
+                                    )
+                                });
+                                self.record_usage(
+                                    &record,
+                                    &id,
+                                    &step.id,
+                                    Some(&tasks[index]),
+                                    &pipeline.name,
+                                );
+                                report.actions.push(format!(
+                                    "{id}: stopped the lane of `{}`, which is a command step now",
+                                    step.id
+                                ));
+                            }
+                            Err(err) => {
+                                report.problems.push(format!(
+                                    "{id}: could not stop the lane of `{}`, which is a command \
+                                     step now, so the command is not started: {err:#}",
+                                    step.id
+                                ));
+                                continue;
+                            }
+                        }
+                    }
                     // Every other task, on any pipeline, for a serial step to
                     // ask whether one of them holds it — see
                     // [`crate::pipeline::Pipelines::serial_peers`]. Owned
@@ -1860,7 +1940,13 @@ impl<'a> Dispatcher<'a> {
                         &pipeline,
                         &tasks[index],
                         destination,
-                        same_group_dependents(self.repo, tasks, graph, &tasks[index]),
+                        same_group_dependents(
+                            self.repo,
+                            self.pipelines,
+                            tasks,
+                            graph,
+                            &tasks[index],
+                        ),
                     );
                     let to_bank = crate::commands::walked_past_budgets(
                         &pipeline,
@@ -5885,7 +5971,8 @@ impl<'a> Dispatcher<'a> {
 
     /// Look after every one of this task's command runs except the one on the
     /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
-    /// and can say more about.
+    /// and can say more about. A run on the step it is sitting on is looked
+    /// after too once that step is no longer a command step.
     ///
     /// A background run is a sidecar: its exit code is never read to route,
     /// so nothing here moves the task. The step that started it walked away
@@ -5928,7 +6015,13 @@ impl<'a> Dispatcher<'a> {
             let Some((step_id, step)) = run_step(pipeline, task.id(), key) else {
                 continue;
             };
-            if step_id == task.stage() {
+            // The run on the step the task sits on is
+            // [`Dispatcher::run_command`]'s to watch, but only while that step
+            // is still a command step. A pipeline edited across a restart can
+            // turn it into an agent step: nothing watches the old run then,
+            // and the lane about to start would work in the same worktree
+            // beside it. So it is reaped like a run the task has left.
+            if step_id == task.stage() && step.kind() == StepKind::Command {
                 continue;
             }
             // A foreground step's run belongs to the visit that started it.
@@ -8548,6 +8641,27 @@ pub(crate) fn live_lane_sessions(repo: &Repo) -> HashSet<String> {
         .map(|record| record.session)
         .filter(|session| !session.is_empty())
         .collect()
+}
+
+/// Whether `task` has already started work on `step`, as far as a process
+/// other than the dispatcher can tell.
+///
+/// This is the saved half of `live_work` in `collect_candidates`: a lane
+/// record for the step that is not kept, or, for a foreground command step, a
+/// run key in `commands/`. A step that has started is not walked past, so a
+/// `gate_at:` naming it still fires. A task that is only sitting on the step,
+/// waiting for a lane slot, its `serial:` turn or the next pass, has started
+/// nothing, and is walked past once a dependent hides the step.
+pub(crate) fn step_started(repo: &Repo, step: &Step, task: &Task) -> bool {
+    let lane = crate::mux::lane_name(&step.id, task);
+    peek_lane_records(repo)
+        .get(&lane)
+        .is_some_and(|record| !record.kept)
+        || (!step.background
+            && step.kind() == StepKind::Command
+            && crate::command_step::Runs::new(&repo.commands_dir())
+                .keys_for_task(task.id())
+                .contains(&crate::command_step::Runs::key(&step.id, task.id())))
 }
 
 /// `lanes.json` as it stands, for a reader that never saves it back: the
@@ -11797,6 +11911,54 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("alone") && a.contains("running `suite`")),
             "a task with no group should have started `suite`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A chain mixing pipelines runs its `last:` step exactly once, on the
+    /// task nearest the top that has one. `low` and `mid` run the pipeline
+    /// with a `last:` step and `top` runs one without: before the fix `top`
+    /// counted as a dependent that held the step back from both of them, and
+    /// nothing in the chain ran it at all.
+    #[test]
+    fn a_chain_whose_top_pipeline_has_no_last_step_still_runs_it_once() {
+        let (repo, _root_guard) = fixture("last-mixed-chain");
+        let mut pipelines = last_pipelines();
+        let plain = crate::pipeline::Pipeline::parse(
+            "plain",
+            "steps:\n  - id: work\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        pipelines.pipelines.insert("plain".into(), plain);
+        let mux = FakeMux::new(vec![]);
+
+        for (id, deps, pipeline, stage) in [
+            ("low", vec![], "default", "suite"),
+            ("mid", vec!["low"], "default", "suite"),
+            ("top", vec!["mid"], "plain", "work"),
+        ] {
+            add_task_with(&repo, id, stage, |f| {
+                f.group = Some("stack".into());
+                f.pipeline = Some(pipeline.into());
+                f.depends_on = deps.iter().map(|d| d.to_string()).collect();
+            });
+        }
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        let ran: Vec<&String> = report
+            .actions
+            .iter()
+            .filter(|a| a.contains("running `suite`"))
+            .collect();
+        assert_eq!(ran.len(), 1, "`suite` runs once: {:?}", report.actions);
+        assert!(ran[0].contains("mid"), "on the tail that has it: {ran:?}");
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("low") && a.contains("not last in its chain")),
+            "`low` walks past it: {:?}",
             report.actions
         );
     }
@@ -25919,6 +26081,113 @@ mod tests {
             report.actions
         );
         assert_eq!(task.stage(), "review");
+    }
+
+    /// A step that was a command step and is an agent step after a restart
+    /// must not leave the old command running beside the new lane: the run on
+    /// the task's own step is reaped when that step is no longer a command.
+    /// Before the fix `reap_stale_runs` skipped every run on the current
+    /// stage, so the command went on in the worktree the agent started in.
+    #[test]
+    fn a_command_run_on_a_step_that_became_an_agent_step_is_stopped() {
+        let (repo, _root_guard) = fixture("command-became-agent");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-kind-change");
+        let commands = pipelines_running(&run_until(&release), false);
+
+        Dispatcher::new(&repo, &commands, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        // The pipeline is edited across a restart: `implement` is an agent.
+        let agents = Pipelines::builtin();
+        let pipeline = agents.pipelines.get("default").unwrap();
+        let mut task = reload(&path);
+        let keys = runs.keys_for_task("demo");
+        Dispatcher::new(&repo, &agents, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut Report::default(),
+            &keys,
+        );
+
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Fresh,
+            "the old command is still going beside the agent step"
+        );
+    }
+
+    /// The other direction: a lane left on a step that is a command step
+    /// after a restart is stopped before the command starts, so only one of
+    /// them works in the worktree. Before the fix the command arm never looked
+    /// at the lane and started beside it.
+    #[test]
+    fn a_lane_on_a_step_that_became_a_command_step_is_stopped_first() {
+        let (repo, _root_guard) = fixture("agent-became-command");
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(idle_lanes(&repo, "implement"));
+        let release = repo.root.join("release-kind-change-lane");
+        let pipelines = pipelines_running(&run_until(&release), false);
+
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        dispatcher
+            .lanes
+            .insert("demo · implement".into(), LaneRecord::adopted(now_secs()));
+        dispatcher.pass(&mut || {}).unwrap();
+
+        assert!(
+            !dispatcher.lanes.contains_key("demo · implement"),
+            "the stopped lane's record was left behind"
+        );
+        assert_eq!(
+            mux.did("stop demo"),
+            vec!["stop demo · implement".to_string()],
+            "the old lane must be stopped: {:?}",
+            mux.calls()
+        );
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        runs.stop(&key);
+    }
+
+    /// A step that became an agent step while its old command's run was
+    /// still going, and that the task now walks past (`skip:` names it), is
+    /// walked past and starts no lane: the run the reap just stopped is not
+    /// live work that keeps the step from being walked past.
+    #[test]
+    fn a_reaped_run_on_a_step_that_became_an_agent_step_does_not_keep_it_from_being_walked_past() {
+        let (repo, _root_guard) = fixture("reaped-run-walked-past");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-reaped-walk");
+        let commands = pipelines_running(&run_until(&release), false);
+        Dispatcher::new(&repo, &commands, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        let mut task = reload(&path);
+        task.front.skip = vec!["implement".to_string()];
+        task.save().unwrap();
+        mux.clear_calls();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(
+            mux.did("start demo · implement").is_empty(),
+            "a lane started on a step the task skips: {:?}",
+            mux.calls()
+        );
     }
 
     /// A foreground command that is still running when its task leaves the

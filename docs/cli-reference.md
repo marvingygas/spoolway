@@ -193,7 +193,7 @@ Over the groups pane it offers these for the highlighted group, and a group with
 
 `gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
-with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
+with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that fails validation is
@@ -404,7 +404,7 @@ spoolway queue route <task> --json
 
 The first line names the pipeline and says where the task stands. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
 
-A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while another open task in its group depends on this one. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
+A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
 ```
 impl_ui — held at look, waiting for a person
