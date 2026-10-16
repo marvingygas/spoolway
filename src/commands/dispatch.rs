@@ -210,8 +210,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // first, but two starts can both pass that look before either has
     // written the file, and the loser must read exactly as one that looked a
     // moment later.
-    let _lock = match crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())
-    {
+    let lock = match crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref()) {
         Ok(lock) => lock,
         Err(err) if err.downcast_ref::<crate::lock::HeldBy>().is_some() => {
             match args.screen {
@@ -281,6 +280,23 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let mut record_error: Option<String> = None;
 
     loop {
+        // Before anything is read or moved: a dispatcher whose lock file was
+        // deleted or re-taken can no longer tell whether it is the only one
+        // working this queue. Stopping here, ahead of the pass, means no task
+        // file is half-written when it does. Lanes already running are left
+        // as they are for the holder to adopt. This does not go through
+        // `stop`: banking their spend and forgiving their launches is the
+        // holder's job now, and writing those records from here would race
+        // the dispatcher that owns them.
+        if !lock.still_held() {
+            let line = crate::lock::lost_line(&repo.lock_file());
+            crate::problem_log::append(repo, &line);
+            match args.screen {
+                true => eprintln!("{line}"),
+                false => println!("  ! {line}"),
+            }
+            return Ok(0);
+        }
         reload_config(&mut live, &mut reload_error, &mut record_error);
         let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref());
 

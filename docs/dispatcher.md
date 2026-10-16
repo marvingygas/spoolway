@@ -68,6 +68,21 @@ still-running lane's spend in the usage ledger and forgives that lane's launch c
 next run does not treat a lane that survived the stop as a failed launch. A second `ctrl-c`
 kills the process at once.
 
+### When the lock file is lost
+
+The run records itself in `dispatch.pid`. At the start of every pass it reads that file again.
+If the file is deleted, or no longer names this run, the run prints one line and exits with code 0:
+
+```
+  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. Stopping, so two dispatchers never work one queue.
+```
+
+The same line goes to the problem log. Under the screen it is printed without the `  ! ` prefix.
+
+The run moves no task and stops no lane before it exits. A dispatcher that holds the lock
+carries the running lanes on. Do not delete `dispatch.pid` while a dispatcher runs. A lock left
+by a process that no longer exists is cleared on the next start.
+
 ## What a pass does
 
 A pass reads two things: each task file's stage, and the list of live lanes. Before it reads the

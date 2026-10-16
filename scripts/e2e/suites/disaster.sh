@@ -228,6 +228,61 @@ fi
 sweep
 forget hang
 
+# ------------------------------------------- a lock file deleted under a dispatcher
+# `dispatch.pid` is removed while its dispatcher runs a lane, and a second
+# dispatcher then starts and takes the lock. Two dispatchers must never work
+# one queue, so the first stops at its next pass. The lane it started is not
+# its to tear down: it keeps running, and the dispatcher now holding the lock
+# adopts it instead of starting another.
+#
+# A unit test cannot reach this: it takes a real lock file, two real
+# dispatcher processes and a detached lane that outlives the one that started
+# it. The line is waited on in the log, never slept for.
+dispatcher_start
+queue_hang lostlock
+LL_PID=$(lane_pid "lostlock · implement" 20)
+if [ -n "$LL_PID" ]; then
+  # The pid file lands before the pass writes its `started` line; the count
+  # is only a baseline once that line is there.
+  poll_until 20 grep -q 'started lostlock · implement' "$E2E_DISPATCH_LOG"
+  LL_STARTS=$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
+  FIRST_HOLDER=$(head -1 "$LOCKFILE" 2>/dev/null)
+  rm -f "$LOCKFILE"
+  LL_SECOND=$(one_shot_start)
+  lock_taken() { [ "$(head -1 "$LOCKFILE" 2>/dev/null)" = "$LL_SECOND" ]; }
+  lock_loss_said() { grep -q 'no longer names this dispatcher' "$E2E_DISPATCH_LOG" 2>/dev/null; }
+  if poll_until 10 lock_taken && poll_until 40 lock_loss_said; then
+    passes_since() {
+      grep -c 'lanes still working' "$E2E_DISPATCH_LOG" 2>/dev/null || true
+    }
+    LL_SEEN=$(passes_since)
+    two_more_passes() { [ "$(passes_since)" -ge "$(( LL_SEEN + 2 ))" ]; }
+    poll_until 40 two_more_passes
+    if kill -0 "$LL_PID" 2>/dev/null \
+       && [ "$(stage_of lostlock)" = implement ] \
+       && [ "$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG")" = "$LL_STARTS" ] \
+       && [ "$(head -1 "$LOCKFILE" 2>/dev/null)" = "$LL_SECOND" ] \
+       && ! kill -0 "$FIRST_HOLDER" 2>/dev/null; then
+      ok "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane"
+    else
+      bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane"
+      printf '        lane alive: %s, stage: %s, starts %s -> %s, lock: %s (second %s), first alive: %s\n' \
+        "$(kill -0 "$LL_PID" 2>/dev/null && echo yes || echo no)" "$(stage_of lostlock)" \
+        "$LL_STARTS" "$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG")" \
+        "$(head -1 "$LOCKFILE" 2>/dev/null)" "$LL_SECOND" \
+        "$(kill -0 "$FIRST_HOLDER" 2>/dev/null && echo yes || echo no)"
+    fi
+  else
+    bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane (no stop line, or the lock was not re-taken)"
+    tail -5 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+  fi
+  one_shot_stop "$LL_SECOND"
+else
+  bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane (the lane never started)"
+fi
+sweep
+forget lostlock
+
 # ------------------------------------------------ a report, nobody listening
 # The claim is about a report that lands with nothing running: the lane says
 # it passed, the dispatcher that started it is gone, and the next dispatcher

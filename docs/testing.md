@@ -134,7 +134,7 @@ with a `// covers:` line.
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
 | `remote-base` | A base branch only `origin` has: a task cut straight from `origin/<base>`, a start branch that exists nowhere pausing its dependent, and a `git fetch` that hangs being stopped while an unrelated task still starts |
 | `forge` | The `gh` test double, including an empty change |
-| `disaster` | A hard kill with lanes live, a kill during a worktree cut, a kill during a worktree removal, a stale lock, a restart over a running lane, a stop with live lanes, retention |
+| `disaster` | A hard kill with lanes live, a kill during a worktree cut, a kill during a worktree removal, a stale lock, a `dispatch.pid` deleted under a live dispatcher and taken by a second one, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
 | `trials` | The `trial` item of the queue screen's options menu, the arms it queues, and their cleanup |
 | `routines` | The routines tab, and the `save as routine` panel on the queue screen |
