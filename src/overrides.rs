@@ -432,7 +432,8 @@ pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) 
 /// validated path `spoolway config set` writes through, so a patch cannot
 /// produce a config that command would have refused. A key the tracked
 /// config would refuse is skipped, reported in the returned [`Ignored`]
-/// list, and every other key still applies.
+/// list, and every other key still applies. A pair of keys valid only
+/// together applies whole; see [`settle`].
 pub(crate) fn apply_config_patch(
     config: Config,
     overrides: &Path,
@@ -449,8 +450,7 @@ pub(crate) fn apply_config_patch(
         bail!("{} must be a table of settings", path.display());
     };
     let mut ignored = Vec::new();
-    let config = apply_config_table(config, &table, &mut String::new(), &mut ignored)
-        .with_context(|| format!("in {}", path.display()))?;
+    let config = apply_config_table(config, &table, &mut ignored);
     Ok((config, ignored))
 }
 
@@ -547,38 +547,79 @@ fn visible_lanes_for_keep_finished(doc: &str) -> Result<String> {
     )
 }
 
+/// Apply every leaf of `table` onto `config`, a key the tracked config would
+/// refuse going to `ignored` with the reason.
+///
+/// Each key is checked against the config the keys before it produced, so a
+/// pair that is valid only together would lose its second half to whichever
+/// key happened to come first: `session_blocked_ctx = 12` is refused under a
+/// tracked `session_reuse_ctx` of 20, then `session_reuse_ctx = 5` applies
+/// and the pair is half there. See [`settle`], which retries the refused keys
+/// once the rest are in.
 fn apply_config_table(
-    mut config: Config,
+    config: Config,
     table: &toml::value::Table,
-    prefix: &mut String,
     ignored: &mut Vec<Ignored>,
-) -> Result<Config> {
-    for (key, value) in table {
-        let mark = prefix.len();
-        if !prefix.is_empty() {
-            prefix.push('.');
-        }
-        prefix.push_str(key);
-        config = match value {
-            toml::Value::Table(nested) => apply_config_table(config, nested, prefix, ignored)?,
-            other => match render_config_leaf(other).and_then(|input| {
-                let (key, input) = current_spelling(prefix, input);
-                crate::confkv::set(&config, &key, &input)
-            }) {
-                Ok(updated) => updated,
-                Err(err) => {
-                    ignored.push(Ignored {
-                        target: crate::config::CONFIG_FILE.to_string(),
-                        fields: prefix.clone(),
-                        reason: format!("{err:#}"),
-                    });
-                    config
-                }
-            },
-        };
-        prefix.truncate(mark);
+) -> Config {
+    let mut leaves = Vec::new();
+    let mut unrenderable = Vec::new();
+    collect_config_leaves(table, &mut String::new(), &mut |key, input| match input {
+        Ok(input) => leaves.push((key.to_string(), input)),
+        Err(err) => unrenderable.push((key.to_string(), err)),
+    });
+    let mut config = config;
+    let refused = settle(&mut config, &leaves, |config, key, input| {
+        let (key, input) = current_spelling(key, input.to_string());
+        crate::confkv::set(config, &key, &input)
+    });
+    for (key, err) in unrenderable.into_iter().chain(refused) {
+        ignored.push(Ignored {
+            target: crate::config::CONFIG_FILE.to_string(),
+            fields: key,
+            reason: format!("{err:#}"),
+        });
     }
-    Ok(config)
+    config
+}
+
+/// Apply `leaves` (dotted key, rendered value) to `state` in order, then
+/// again for the ones that were refused, until a pass applies none more.
+/// Returns what is still refused, in leaf order, with the reason.
+///
+/// A cross-field check such as the one that keeps `session_blocked_ctx` above
+/// `session_reuse_ctx` judges each key against the keys applied before it, so
+/// the order the file happens to list them in decides which half of a valid
+/// pair is refused. Retrying once the others are in makes the outcome the
+/// same in either order. A pair that is wrong together is refused on every
+/// pass and stays in the returned list, so it is still reported rather than
+/// half applied. `apply` must leave `state` as it was when it errs.
+fn settle<S>(
+    state: &mut S,
+    leaves: &[(String, String)],
+    mut apply: impl FnMut(&S, &str, &str) -> Result<S>,
+) -> Vec<(String, anyhow::Error)> {
+    let mut pending: Vec<(&str, &str)> = leaves
+        .iter()
+        .map(|(key, input)| (key.as_str(), input.as_str()))
+        .collect();
+    loop {
+        let before = pending.len();
+        let mut refused = Vec::new();
+        let mut errors = Vec::new();
+        for (key, input) in pending {
+            match apply(state, key, input) {
+                Ok(next) => *state = next,
+                Err(err) => {
+                    refused.push((key, input));
+                    errors.push((key.to_string(), err));
+                }
+            }
+        }
+        if refused.is_empty() || refused.len() == before {
+            return errors;
+        }
+        pending = refused;
+    }
 }
 
 /// `value` as the text [`crate::confkv::set`] expects — the same string a
@@ -842,6 +883,33 @@ pub(crate) fn list_prompt_overrides(overrides: &Path) -> Result<Vec<String>> {
     };
     names.sort();
     Ok(names)
+}
+
+/// Whether `overrides/config.toml` sets `key`, spelled as the config spells
+/// it today: a layer holding the retired `dispatch.keep_finished_lanes` sets
+/// `dispatch.visible_lanes`, since that is the key [`apply_config_table`]
+/// applies it as. `false` when there is no patch.
+pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
+    let path = config_patch_path(overrides);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let toml::Value::Table(table) = parsed else {
+        bail!("{} must be a table of settings", path.display());
+    };
+    let mut sets = false;
+    collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
+        let spelled = match input {
+            Ok(input) => current_spelling(leaf, input).0,
+            Err(_) => leaf.to_string(),
+        };
+        sets |= spelled == key;
+    });
+    Ok(sets)
 }
 
 /// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
@@ -1128,7 +1196,9 @@ pub(crate) fn promote_pipeline_patch(
 /// through the same [`crate::confkv::set`] / `Config::edit_key` pair
 /// `spoolway config set` already writes through — so every comment in
 /// `config.toml` survives, exactly as it would if a person had typed
-/// `config set` once per key by hand.
+/// `config set` once per key by hand. A pair of keys that is valid only
+/// together, such as the two session thresholds, is written whole whichever
+/// order the layer lists it in; see [`settle`].
 ///
 /// All or nothing. Every key is set on an in-memory config and edited into an
 /// in-memory copy of the tracked text, and the file is written once, after
@@ -1153,29 +1223,57 @@ pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>>
     };
 
     let tracked_path = Config::path_in(root);
-    let mut text = match std::fs::read_to_string(&tracked_path) {
+    let text = match std::fs::read_to_string(&tracked_path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => {
             return Err(err).with_context(|| format!("reading {}", tracked_path.display()));
         }
     };
-    let mut config = Config::load_tracked(root)?;
-    let mut changes = Vec::new();
-    for_each_config_leaf(&table, &mut String::new(), &mut |key, input| {
-        config = crate::confkv::set(&config, key, input)?;
-        if let Some(text) = text.as_mut() {
-            *text = config.edit_key(text, key, &tracked_path)?;
-        }
-        changes.push((key.to_string(), input.to_string()));
-        Ok(())
-    })
-    .with_context(|| {
-        format!(
-            "nothing was written to the tracked config; fix or drop the key in {}",
-            path.display()
-        )
-    })?;
+    let mut leaves = Vec::new();
+    collect_config_leaves(&table, &mut String::new(), &mut |key, input| {
+        leaves.push((key.to_string(), input));
+    });
+    let leaves = leaves
+        .into_iter()
+        .map(|(key, input)| {
+            input
+                .map(|input| (key.clone(), input))
+                .with_context(|| format!("`{key}`"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .with_context(|| {
+            format!(
+                "nothing was written to the tracked config; fix or drop the key in {}",
+                path.display()
+            )
+        })?;
+    // A pair that is valid only together is written whole, in either order: see
+    // [`settle`]. Whatever stays refused after that stops the promote before
+    // anything is written.
+    let mut state = (Config::load_tracked(root)?, text);
+    let refused = settle(&mut state, &leaves, |(config, text), key, input| {
+        let (key, input) = current_spelling(key, input.to_string());
+        let next = crate::confkv::set(config, &key, &input)?;
+        let next_text = match text {
+            Some(text) => Some(next.edit_key(text, &key, &tracked_path)?),
+            None => None,
+        };
+        Ok((next, next_text))
+    });
+    if let Some((_, err)) = refused.into_iter().next() {
+        return Err(err).with_context(|| {
+            format!(
+                "nothing was written to the tracked config; fix or drop the key in {}",
+                path.display()
+            )
+        });
+    }
+    let (config, text) = state;
+    let changes = leaves
+        .into_iter()
+        .map(|(key, input)| current_spelling(&key, input))
+        .collect::<Vec<_>>();
 
     match text {
         Some(text) => crate::task::write_atomic(&crate::config::write_target(&tracked_path), &text)
@@ -1185,15 +1283,14 @@ pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>>
     Ok(changes)
 }
 
-/// Call `apply(dotted key, rendered value)` for every leaf of `table`, in
-/// order, and stop at the first error. `confkv::set`'s own error names a key
-/// the tracked config refuses; a value that cannot be rendered as text is
-/// named here, since its error does not.
-fn for_each_config_leaf(
+/// Call `found(dotted key, rendered value)` for every leaf of `table`, in
+/// order. A value that cannot be rendered as text arrives as an error naming
+/// why, since `confkv::set`'s own error would not.
+fn collect_config_leaves(
     table: &toml::value::Table,
     prefix: &mut String,
-    apply: &mut dyn FnMut(&str, &str) -> Result<()>,
-) -> Result<()> {
+    found: &mut dyn FnMut(&str, Result<String>),
+) {
     for (key, value) in table {
         let mark = prefix.len();
         if !prefix.is_empty() {
@@ -1201,16 +1298,11 @@ fn for_each_config_leaf(
         }
         prefix.push_str(key);
         match value {
-            toml::Value::Table(nested) => for_each_config_leaf(nested, prefix, apply)?,
-            other => {
-                let input = render_config_leaf(other).with_context(|| format!("`{prefix}`"))?;
-                let (key, input) = current_spelling(prefix, input);
-                apply(&key, &input)?;
-            }
+            toml::Value::Table(nested) => collect_config_leaves(nested, prefix, found),
+            other => found(prefix, render_config_leaf(other)),
         }
         prefix.truncate(mark);
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1963,5 +2055,137 @@ agent: pi
         let (patched, ignored) = apply_config_patch(tracked, &overrides).unwrap();
         assert!(ignored.is_empty(), "{ignored:?}");
         assert_eq!(patched.agents["claude"].concurrency, 2);
+    }
+
+    /// `tracked` with its `claude` profile at 20/40 and the layer `layer`
+    /// applied on top, for the session-threshold pair tests.
+    fn pair_over_twenty_forty(layer: &str) -> (Config, Vec<Ignored>) {
+        let overrides = crate::scratch::root("overrides-session-pair");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(config_patch_path(&overrides), layer).unwrap();
+        let mut tracked = Config::default();
+        let claude = tracked.agents.get_mut("claude").unwrap();
+        claude.session_reuse_ctx = 20;
+        claude.session_blocked_ctx = 40;
+        apply_config_patch(tracked, &overrides).unwrap()
+    }
+
+    /// A pair that is valid as a pair applies whole. The layer is a sorted
+    /// table, so the walk always reaches `session_blocked_ctx` first and the
+    /// order the file lists them in cannot matter; there, 12 was refused under
+    /// a reuse of 20 and the layer applied the reuse half only.
+    #[test]
+    fn a_session_pair_valid_together_applies_whole() {
+        let (config, ignored) = pair_over_twenty_forty(
+            "[agents.claude]\nsession_blocked_ctx = 12\nsession_reuse_ctx = 5\n",
+        );
+        assert!(ignored.is_empty(), "{ignored:?}");
+        let claude = &config.agents["claude"];
+        assert_eq!(
+            (claude.session_reuse_ctx, claude.session_blocked_ctx),
+            (5, 12)
+        );
+    }
+
+    /// [`settle`] gives the same result whichever of the two keys it is handed
+    /// first: the blocked ceiling first is refused until the reuse threshold
+    /// is in, and the reuse threshold first is not refused at all.
+    #[test]
+    fn settle_applies_a_session_pair_in_either_order() {
+        let reuse = (
+            "agents.claude.session_reuse_ctx".to_string(),
+            "5".to_string(),
+        );
+        let blocked = (
+            "agents.claude.session_blocked_ctx".to_string(),
+            "12".to_string(),
+        );
+        for (first, leaves) in [
+            ("reuse", vec![reuse.clone(), blocked.clone()]),
+            ("blocked", vec![blocked, reuse]),
+        ] {
+            let mut config = Config::default();
+            let claude = config.agents.get_mut("claude").unwrap();
+            claude.session_reuse_ctx = 20;
+            claude.session_blocked_ctx = 40;
+            let refused = settle(&mut config, &leaves, |config, key, input| {
+                crate::confkv::set(config, key, input)
+            });
+            assert!(refused.is_empty(), "{first} first: {refused:?}");
+            let claude = &config.agents["claude"];
+            assert_eq!(
+                (claude.session_reuse_ctx, claude.session_blocked_ctx),
+                (5, 12),
+                "{first} first"
+            );
+        }
+    }
+
+    /// A pair that is wrong together is still refused, and still reported:
+    /// settling retries what was refused, it does not waive the check.
+    #[test]
+    fn a_session_pair_wrong_together_is_still_ignored_with_its_note() {
+        let (config, ignored) = pair_over_twenty_forty(
+            "[agents.claude]\nsession_reuse_ctx = 30\nsession_blocked_ctx = 10\n",
+        );
+        assert_eq!(ignored.len(), 1, "{ignored:?}");
+        assert_eq!(ignored[0].fields, "agents.claude.session_blocked_ctx");
+        assert!(ignored[0].reason.contains("must be above"), "{ignored:?}");
+        assert_eq!(config.agents["claude"].session_blocked_ctx, 40);
+    }
+
+    /// `override promote` writes the same pair the layer applies, where it
+    /// refused the whole layer before.
+    #[test]
+    fn promote_config_patch_writes_a_session_pair_valid_together() {
+        let root = crate::scratch::root("overrides-promote-pair");
+        let home = crate::scratch::root("overrides-promote-pair-home");
+        let _ = std::fs::remove_dir_all(&root);
+        crate::scratch::stamped(&root);
+        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        std::fs::write(
+            Config::path_in(&root),
+            "[agents.claude]\nsession_reuse_ctx = 20\nsession_blocked_ctx = 40\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                config_patch_path(&overrides),
+                "[agents.claude]\nsession_reuse_ctx = 5\nsession_blocked_ctx = 12\n",
+            )
+            .unwrap();
+
+            let changes = promote_config_patch(&root).unwrap();
+            assert_eq!(changes.len(), 2, "{changes:?}");
+            let claude = &Config::load_tracked(&root).unwrap().agents["claude"];
+            assert_eq!(
+                (claude.session_reuse_ctx, claude.session_blocked_ctx),
+                (5, 12)
+            );
+        });
+    }
+
+    /// A layer written for an older release sets `visible_lanes` through the
+    /// retired `keep_finished_lanes`, and a models glob with a dot in it is
+    /// spelled as the key a person types; both are found by their current key.
+    #[test]
+    fn config_patch_sets_reads_a_key_as_the_layer_applies_it() {
+        let overrides = crate::scratch::root("overrides-patch-sets");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        assert!(!config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
+        std::fs::write(
+            config_patch_path(&overrides),
+            "[dispatch]\nkeep_finished_lanes = true\n[models.\"gpt-5.1\"]\ncompact_ctx = 50\n",
+        )
+        .unwrap();
+        assert!(config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
+        assert!(!config_patch_sets(&overrides, "dispatch.keep_finished_lanes").unwrap());
+        assert!(config_patch_sets(&overrides, "models.gpt-5.1.compact_ctx").unwrap());
+        assert!(!config_patch_sets(&overrides, "dispatch.lane_quiet").unwrap());
     }
 }

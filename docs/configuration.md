@@ -41,9 +41,10 @@ profile that has no row for its glob. See [`[models."<glob>"]`](#modelsglob--wha
 A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
 points at. If the link points at a file that does not exist yet, `config set` creates that file.
 
-Parallel `config set` calls in one project run one after another, and each saves its key. A
-call waits up to ten seconds for the one before it. After that it exits 1, names the process that
-holds the lock, and writes nothing. Run it again.
+Parallel `config set` calls in one project run one after another, and each saves its key. So do
+`spoolway sync` and `spoolway override promote config.toml`: each is ordered with `config set`,
+and none of them loses a key another wrote. A call waits up to ten seconds for the one before it.
+After that it exits 1, names the process that holds the lock, and writes nothing. Run it again.
 
 In the main checkout, `config set` writes `.spoolway/config.toml` there. In a linked worktree that
 has its own `.spoolway/` on a branch, it loads, checks and saves that worktree's `config.toml`.
@@ -143,6 +144,10 @@ dispatch.lane_quiet = 20m
 note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quiet`, so the value in effect is 5m.
   Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
 ```
+
+When the value in effect differs from the one just set and no layer key sets it, the note says
+that another change to the config landed after this one. It does not name the layer file.
+Run `spoolway config get <key>` to see what the key holds.
 
 ### Wrong values written by hand
 
@@ -264,8 +269,11 @@ stale entry is left out of the merge. The step stays exactly as the tracked file
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
 applied. A wrong value already in the tracked config does not stop a layer key from applying; see
-[Wrong values written by hand](#wrong-values-written-by-hand). A prompt override for a prompt the
-checkout no longer has is left out too. A pipeline
+[Wrong values written by hand](#wrong-values-written-by-hand). A `session_reuse_ctx` and a
+`session_blocked_ctx` that are valid as a pair both apply, whichever the file lists first. For
+example, `5` and `12` over tracked `20` and `40` read as `5` and `12`. A pair that is wrong
+together, such as `30` and `10`, leaves out the key that fails and applies the other. A prompt
+override for a prompt the checkout no longer has is left out too. A pipeline
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
@@ -301,7 +309,7 @@ command that removes it. `spoolway override drop` removes the file, so a bare dr
 is the file that does not parse, `doctor` names that file instead.
 
 `spoolway override promote config.toml` writes every key of the layer into the tracked file,
-or none. A key the tracked config refuses stops the promote with an error naming that key. The
+or none. A session pair that is valid together is written as a pair. A key the tracked config refuses stops the promote with an error naming that key. The
 tracked file stays as it was, and the layer keeps all its keys.
 
 `spoolway override promote` in a linked worktree that has its own `.spoolway/` writes that

@@ -1141,9 +1141,11 @@ the lock at `<home>/archive-index.lock` before they change `archive/`. They wait
 for it. A reader of the index waits three seconds, then reads the task files without writing the
 index.
 
-`spoolway config set` and `spoolway pipeline override --set` take the lock at `<home>/edit.lock`
-while they read and write their file. They wait up to ten seconds for it. A lock left by a
-crashed command is removed, so the next call saves.
+`spoolway config set`, `spoolway pipeline override --set`, `spoolway sync`, `spoolway override
+promote` of a pipeline or of `config.toml`, and `spoolway init --tracker` on an existing project
+take the lock at `<home>/edit.lock` while they read and write their file. They wait up to ten
+seconds for it. A `config set` that runs beside a `sync` or a promote is ordered with it, so its
+key is not lost. A lock left by a crashed command is removed, so the next call saves.
 
 ### Trial arms
 

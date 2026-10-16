@@ -1263,6 +1263,11 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // two keys the tracker question settles are edited into it directly,
     // the same narrow edit `spoolway config set` itself makes.
     if already_initialized && answers.tracker_touched {
+        // Held from the load to the saves, as `config set` holds it: a `set`
+        // that lands between them is saved over by this load-then-save.
+        let _lock = crate::lock::EditLock::acquire(&crate::lock::EditLock::path_in(
+            &crate::mux::project_home(root)?,
+        ))?;
         let existing = Config::load_tracked(root)?;
         let updated = crate::confkv::set(
             &existing,
@@ -2236,6 +2241,38 @@ mod tests {
             "a repeat --tracker with no --project-key and nobody to ask must keep the \
              project's own key instead of blanking it: {config}"
         );
+    }
+
+    /// A repeat `init --tracker` waits for the edit lock a `config set`
+    /// holds, since it loads the tracked config and saves two keys back.
+    #[test]
+    fn a_repeat_tracker_answer_waits_for_the_edit_lock() {
+        let root = scaffold("tracker-edit-lock", &confirmed());
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            let lock_path =
+                crate::lock::EditLock::path_in(&crate::mux::project_home(&root).unwrap());
+            let held = crate::lock::EditLock::acquire(&lock_path).unwrap();
+            let started = std::time::Instant::now();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    drop(held);
+                });
+                init(
+                    &root,
+                    &InitArgs {
+                        tracker: Some("github".into()),
+                        project_key: Some("acme/app".into()),
+                        ..confirmed()
+                    },
+                )
+                .unwrap();
+            });
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(250),
+                "init saved the tracker while the edit lock was held"
+            );
+        });
     }
 
     /// A repeat `init` with no `--provider` and a missing `pipelines/`

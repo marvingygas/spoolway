@@ -235,6 +235,15 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
         );
     }
 
+    // Held from the first read of the tracked files to the last write, and
+    // taken here once: `scan` reads the config and `config set` rewrites it,
+    // so a `set` that landed in between is rebuilt away by this run's own
+    // write while its caller has already been told it succeeded. Nothing
+    // below takes this lock again, and the confirm panel of
+    // [`run_asking`] sits outside this function so a person reading it holds
+    // nobody up.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
+
     if !args.replace.is_empty() {
         return replace(repo, args);
     }
@@ -2557,6 +2566,30 @@ mod tests {
             },
             root,
         )
+    }
+
+    /// `sync` waits for the edit lock a `config set` holds, then writes: the
+    /// config it rebuilds is read after that `set` has saved, not before.
+    #[test]
+    fn sync_waits_for_the_edit_lock() {
+        let (repo, _root) = fixture("edit-lock");
+        let held = crate::lock::EditLock::acquire(&repo.edit_lock_path()).unwrap();
+        let args = SyncArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                drop(held);
+            });
+            run(&repo, &args).unwrap();
+        });
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(250),
+            "sync ran while the edit lock was held"
+        );
     }
 
     /// A checkout in home mode: it has no `.spoolway/` folder, and a

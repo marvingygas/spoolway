@@ -454,6 +454,72 @@ says "setting the layered key says the layer still sets it" \
 has "and writes the new value to the tracked file" "lane_quiet = \"20m\"" "$TRACKED_CONFIG"
 must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
 
+# ------------------------------- a session pair that is valid as a pair
+# The layer was applied one key at a time, each against the partly merged
+# config, so a reuse of 5 and a blocked of 12 over the tracked 20/40 applied
+# the reuse half and dropped the blocked half, and `override promote` refused
+# the whole layer.
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[agents.claude]\nsession_reuse_ctx = 5\nsession_blocked_ctx = 12\n' > "$CONFIG_LAYER"
+says "config get reads the layer's reuse threshold" \
+  "5" \
+  "$SPOOLWAY" config get agents.claude.session_reuse_ctx
+says "and the layer's blocked ceiling beside it" \
+  "12" \
+  "$SPOOLWAY" config get agents.claude.session_blocked_ctx
+silent_about "neither key is listed as ignored" \
+  "ignored" \
+  "$SPOOLWAY" override list
+works "override promote writes the pair" "$SPOOLWAY" override promote config.toml
+has "the tracked file holds the reuse threshold" "session_reuse_ctx = 5" "$TRACKED_CONFIG"
+has "and the blocked ceiling" "session_blocked_ctx = 12" "$TRACKED_CONFIG"
+
+# ------------------------------- config set races sync and override promote
+# `sync` and `override promote` rewrote the tracked config without the edit
+# lock, so a `config set` landing between their read and their write was lost
+# while it printed success.
+# Takes the key prefix and a base number, and sets each model's `input` price
+# to `<i>.<base>`, so the two races write keys and values the other left
+# nowhere: a set lost to a rewrite must read as missing, not as the same value.
+race_sets() {
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    "$SPOOLWAY" config set "models.$1-$i.input" "$i.$2" >/dev/null 2>&1 &
+  done
+}
+race_kept() {
+  local i kept=0
+  for i in 1 2 3 4 5 6 7 8; do
+    if [ "$("$SPOOLWAY" config get "models.$1-$i.input" 2>/dev/null)" = "$i.$2" ]; then
+      kept=$((kept + 1))
+    fi
+  done
+  echo "$kept"
+}
+# An empty `prompt_cache_ttl` row is the shape an older release wrote, and
+# `sync` rewrites it as a comment. A project this binary just configured has
+# nothing for `sync` to rewrite, and the race would pass whether or not `sync`
+# took the lock.
+must "give sync an older config row to rewrite" \
+  sh -c 'printf "\n[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n" >> "$1"' _ "$TRACKED_CONFIG"
+says "sync has the tracked config to rewrite" \
+  "would write  .spoolway/config.toml" \
+  "$SPOOLWAY" sync --dry-run
+race_sets e2e-sync-race 5
+"$SPOOLWAY" sync </dev/null >/dev/null 2>&1
+wait
+works "all eight parallel config sets survive a sync" \
+  test "$(race_kept e2e-sync-race 5)" = 8
+lacks "and the sync rewrote the row" 'prompt_cache_ttl = ""' "$TRACKED_CONFIG"
+mkdir -p "$(dirname "$CONFIG_LAYER")"
+printf '[dispatch]\nlane_quiet = "9m"\n' > "$CONFIG_LAYER"
+race_sets e2e-promote-race 7
+"$SPOOLWAY" override promote config.toml >/dev/null 2>&1
+wait
+works "and all eight survive an override promote" \
+  test "$(race_kept e2e-promote-race 7)" = 8
+has "the promote itself landed" "lane_quiet = \"9m\"" "$TRACKED_CONFIG"
+
 # ------------------------------------ a broken layer, and a refused promote
 # A layer that does not parse used to stop `override drop` before it ran, and
 # `doctor` named the tracked file for it. A layer holding a key the tracked

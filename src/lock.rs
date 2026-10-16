@@ -609,6 +609,13 @@ impl EditLock {
     /// holder still in it after that has stalled.
     const WAIT: Duration = Duration::from_secs(10);
 
+    /// The lock file for the project whose state lives under `home`: the one
+    /// [`crate::repo::Repo::edit_lock_path`] names, for a caller that has a
+    /// project home and no `Repo`.
+    pub fn path_in(home: &Path) -> PathBuf {
+        home.join("edit.lock")
+    }
+
     pub fn acquire(path: &Path) -> Result<EditLock> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

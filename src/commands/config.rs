@@ -141,13 +141,15 @@ fn follow_up_lines(
     Ok(lines)
 }
 
-/// The note `config set` prints when the override layer decides the value in
-/// effect for `key` once the set is saved, or `None` when it does not.
+/// The note `config set` prints when the value in effect for `key` once the
+/// set is saved is not the one just set, or `None` when it is. It blames the
+/// override layer only when `overrides/config.toml` exists and holds `key`.
 ///
-/// Compares the `merged` config with `updated` rather than reading which keys
-/// `overrides/config.toml` carries: a layer value that fails to apply (a
-/// cross-field pair it breaks, for one) is dropped on load, so a key the file
-/// names can still take the value just set. The advice starts with the
+/// Compares the `merged` config with `updated` to decide whether to speak,
+/// rather than reading which keys `overrides/config.toml` carries: a layer
+/// value that fails to apply (a cross-field pair it breaks, for one) is
+/// dropped on load, so a key the file names can still take the value just
+/// set. The file's keys only choose the wording. The advice starts with the
 /// one-key route because `override drop` and `override promote` act on the
 /// whole config layer: `drop` deletes every key in a file that lives outside
 /// git, and `promote` writes all of them into the tracked file, overwriting
@@ -158,14 +160,28 @@ fn shadow_note(
     updated: &Config,
     merged: &Config,
 ) -> Result<Option<String>> {
-    let Some(overrides) = crate::overrides::dir_if_identified(root)? else {
-        return Ok(None);
-    };
     let effective = crate::confkv::get(merged, key)?;
     if effective == crate::confkv::get(updated, key)? {
         return Ok(None);
     }
-    let path = crate::overrides::config_patch_path(&overrides);
+    let overrides = crate::overrides::dir_if_identified(root)?;
+    // The mismatch has a second possible cause: a write that landed after
+    // this one and replaced it. Naming a layer file that is not there, or
+    // does not hold the key, sends the person to fix the wrong place.
+    let layer_file = match overrides {
+        Some(dir) if crate::overrides::config_patch_sets(&dir, key)? => {
+            Some(crate::overrides::config_patch_path(&dir))
+        }
+        _ => None,
+    };
+    let Some(path) = layer_file else {
+        return Ok(Some(format!(
+            "note: the value in effect for `{key}` is {effective}, not the value just set, \
+             and no override sets it. Another change to the config landed after this one; \
+             run `spoolway config get {key}` to see what it holds, and set it again if \
+             that is not what you want."
+        )));
+    };
     Ok(Some(format!(
         "note: {} still sets `{key}`, so the value in effect is {effective}.\n  \
          Remove `{key}` from that file to let the value just set apply. \
@@ -1206,6 +1222,77 @@ mod tests {
                         .unwrap(),
                     None
                 );
+            },
+        );
+    }
+
+    /// A value that differs from what was just set, with no layer file at all,
+    /// is not the layer's doing: the note must not name `overrides/config.toml`.
+    /// Here the tracked file is changed behind the set, as a lost write is.
+    #[test]
+    fn shadow_note_does_not_name_an_overrides_file_that_is_not_there() {
+        with_layer(
+            "shadow-note-no-file",
+            "[dispatch]\nlane_quiet = \"5m\"\n",
+            "",
+            |root| {
+                let overrides = crate::overrides::dir_if_identified(root).unwrap().unwrap();
+                std::fs::remove_file(crate::overrides::config_patch_path(&overrides)).unwrap();
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "dispatch.lane_quiet", "20m").unwrap();
+                // Not saved: the file still says 5m, as after a lost write.
+                let merged = Config::load(root).unwrap();
+                let note = shadow_note(root, "dispatch.lane_quiet", &updated, &merged)
+                    .unwrap()
+                    .expect("5m is in effect, not the 20m just set");
+                assert!(!note.contains("overrides"), "{note}");
+                assert!(
+                    note.contains("value in effect for `dispatch.lane_quiet` is 5m"),
+                    "{note}"
+                );
+            },
+        );
+    }
+
+    /// A layer written for an older release sets `visible_lanes` through the
+    /// retired `keep_finished_lanes`: that is still the layer's doing, so the
+    /// note names the file rather than blaming another change.
+    #[test]
+    fn shadow_note_names_a_layer_that_sets_the_key_by_its_retired_spelling() {
+        with_layer(
+            "shadow-note-retired",
+            "[dispatch]\nvisible_lanes = 5\n",
+            "[dispatch]\nkeep_finished_lanes = false\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "dispatch.visible_lanes", "3").unwrap();
+                let merged = Config::load(root).unwrap();
+                let note = shadow_note(root, "dispatch.visible_lanes", &updated, &merged)
+                    .unwrap()
+                    .expect("the layer's 1 is in effect, not the 3 just set");
+                assert!(
+                    note.contains("still sets `dispatch.visible_lanes`"),
+                    "{note}"
+                );
+            },
+        );
+    }
+
+    /// A layer file that exists but holds other keys is not named either.
+    #[test]
+    fn shadow_note_does_not_name_a_layer_file_that_lacks_the_key() {
+        with_layer(
+            "shadow-note-other-key",
+            "[dispatch]\nlane_quiet = \"5m\"\n",
+            "[dispatch]\nauto_commit = false\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "dispatch.lane_quiet", "20m").unwrap();
+                let merged = Config::load(root).unwrap();
+                let note = shadow_note(root, "dispatch.lane_quiet", &updated, &merged)
+                    .unwrap()
+                    .expect("5m is in effect, not the 20m just set");
+                assert!(!note.contains("config.toml"), "{note}");
             },
         );
     }
