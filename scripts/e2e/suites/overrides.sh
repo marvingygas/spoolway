@@ -415,6 +415,27 @@ says "doctor still fails a tracked permission_mode a layer key corrects" \
   "\`agents.claude.permission_mode\`: " \
   "$SPOOLWAY" doctor --no-live
 
+# A `compact_ctx` over 100 on a model row is the same kind of value: Claude
+# Code ignores it, and it used to fail every `config set` and drop every key of
+# the layer while `doctor` passed it.
+printf '[agents.claude]\nconcurrency = 2\n' > "$CONFIG_LAYER"
+must "make a model row's compact_ctx wrong by hand" \
+  sh -c 'printf "\n[models.\"e2e-wrong-compact\"]\ncompact_ctx = 150\n" >> "$1"' _ "$TRACKED_CONFIG"
+works "config set of an unrelated key succeeds beside the bad compact_ctx" \
+  "$SPOOLWAY" config set dispatch.lane_quiet 6m
+says "the override key beside it still applies" \
+  "agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+silent_about "and is not listed as ignored" \
+  "ignored  agents.claude.concurrency" \
+  "$SPOOLWAY" override list
+says "doctor fails one check for the value" \
+  "FAIL  models.\"e2e-wrong-compact\" holds a valid value" \
+  "$SPOOLWAY" doctor --no-live
+says "naming the value and the range" \
+  "\`compact_ctx\` (150) must be between 1 and 100" \
+  "$SPOOLWAY" doctor --no-live
+
 # ------------------------------------- config set beside an active layer
 # `config set` used to build from the override-merged config, so with a layer
 # key present it refused every other key, and for the layer's own key it

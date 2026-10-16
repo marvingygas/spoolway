@@ -431,7 +431,7 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
             // holds it.
             let problems = crate::confkv::value_problems(&Config::load_tracked(checkout)?);
             if !problems.is_empty() {
-                let all: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+                let all: Vec<String> = problems.iter().map(|p| p.named()).collect();
                 bail!(
                     "{} parses, but holds {} value(s) spoolway cannot run on: {} — reopen it \
                      with `spoolway config edit`",

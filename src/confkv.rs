@@ -782,19 +782,6 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         config.migrate();
     }
 
-    // Not a cross-field check, and not exempted by the comparison further down: a file
-    // edited by hand to a `compact_ctx` over 100 still loads, so `set` refuses
-    // it on the next edit rather than writing it back out.
-    for (glob, price) in &config.models {
-        if price.compact_ctx > 100 {
-            bail!(
-                "`models.{glob}.compact_ctx` must be between 1 and 100 (1..=100), got {}; \
-                 `spoolway config set` cannot unset a key, so correct the line with \
-                 `spoolway config edit`, or delete it to keep the agent's own default",
-                price.compact_ctx
-            );
-        }
-    }
     // Cross-field checks serde cannot make, at the one moment a person is
     // typing the value and can fix it. Only a problem this edit introduced
     // refuses it: one already in the file, written there by hand, would
@@ -806,7 +793,7 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         .into_iter()
         .find(|problem| !before.contains(problem))
     {
-        bail!("{}", problem.message);
+        bail!("{}", problem.named());
     }
 
     Ok(config)
@@ -829,9 +816,10 @@ pub struct ValueProblem {
 /// Every value in `config` that serde accepts but spoolway cannot run on.
 ///
 /// A permission mode is only wrong relative to the `kind` beside it, and a
-/// reuse threshold only relative to the ceiling. [`set`] refuses an edit that
-/// adds one of these, while `doctor` and `config edit` report the ones a
-/// hand-written file already holds.
+/// reuse threshold only relative to the ceiling. A model's `compact_ctx` over
+/// 100 loads fine and is sent to the lane as written, which Claude Code then
+/// ignores. [`set`] refuses an edit that adds one of these, while `doctor`
+/// and `config edit` report the ones a hand-written file already holds.
 pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
     let mut problems = Vec::new();
     for (name, profile) in &config.agents {
@@ -894,7 +882,41 @@ pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
             );
         }
     }
+    for (glob, price) in &config.models {
+        if price.compact_ctx > 100 {
+            problems.push(ValueProblem {
+                scope: format!("models.\"{glob}\""),
+                field: "compact_ctx",
+                message: format!(
+                    "`compact_ctx` ({}) must be between 1 and 100",
+                    price.compact_ctx
+                ),
+            });
+        }
+    }
     problems
+}
+
+impl ValueProblem {
+    /// The message with its table in front when the message does not name it
+    /// already, for a caller that prints it without `doctor`'s row label.
+    pub fn named(&self) -> String {
+        if self.message.contains(&self.scope) {
+            self.message.clone()
+        } else {
+            format!("{}: {}", self.scope, self.message)
+        }
+    }
+
+    /// The sentence `doctor` and the dispatcher print for this problem: what
+    /// is wrong, where the file is, and the command that corrects it.
+    pub fn report(&self, path: &std::path::Path) -> String {
+        format!(
+            "{} (in {}; correct it with `spoolway config edit`)",
+            self.message,
+            path.display()
+        )
+    }
 }
 
 /// Refuse a value a person typed that can never be right, naming what is
@@ -980,8 +1002,8 @@ fn zero_rate_note(config: &Config, key: &str) -> Option<String> {
     if parts.len() == 4 {
         let Some(tier) = row.tier else {
             // The empty tier was dropped before saving (see `set`), so the
-            // row carries none, and `overlay` takes the table's tier only
-            // when the row sets no base rate of its own.
+            // row carries none, and `overlay` takes the table's tier for any
+            // row that does not write its own.
             let answer = crate::models::resolve(&config.models, glob).price?;
             let from = if answer.tier == table.and_then(|price| price.tier) {
                 "the price table's"
@@ -1812,23 +1834,6 @@ mod tests {
         for typed in ["1", "30", "100"] {
             check_typed(key, typed).unwrap();
         }
-        // A file edited by hand to 101 is refused the next time `set` runs.
-        let mut config = Config::default();
-        config.models.insert(
-            "m".to_string(),
-            crate::usage::ModelPrice {
-                compact_ctx: 101,
-                ..Default::default()
-            },
-        );
-        let err = set(&config, "models.m.input", "1.0")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("compact_ctx") && err.contains("between 1 and 100"),
-            "{err}"
-        );
-
         let config = set(&Config::default(), key, "30").unwrap();
         assert_eq!(config.models["claude-opus-5"].compact_ctx, 30);
         assert_eq!(get(&config, key).unwrap(), "30");
@@ -1838,6 +1843,47 @@ mod tests {
         let unset = set(&Config::default(), "models.claude-opus-5.input", "5.0").unwrap();
         let written = toml::to_string(&unset).unwrap();
         assert!(!written.contains("compact_ctx"), "{written}");
+    }
+
+    /// A `compact_ctx` over 100 written by hand is `doctor`'s to report, so an
+    /// unrelated `set` still lands. An edit that itself writes one is refused.
+    // covers: models.<glob>.compact_ctx — a hand-written value over 100 does not block another key
+    #[test]
+    fn a_hand_written_compact_ctx_over_a_hundred_does_not_block_another_key() {
+        let mut config = Config::default();
+        config.models.insert(
+            "m".to_string(),
+            crate::usage::ModelPrice {
+                compact_ctx: 150,
+                ..Default::default()
+            },
+        );
+        let problems = value_problems(&config);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].scope, "models.\"m\"");
+        assert_eq!(
+            problems[0].message,
+            "`compact_ctx` (150) must be between 1 and 100"
+        );
+
+        let updated = set(&config, "dispatch.auto_commit", "false").unwrap();
+        assert!(!updated.dispatch.auto_commit);
+        assert_eq!(updated.models["m"].compact_ctx, 150);
+        set(&config, "models.m.input", "1.0").unwrap();
+
+        // An edit that itself writes one is still refused, and the sentence
+        // names the row. `set` runs no range check on the typed value before
+        // this one, so a value that reaches it this way is refused only here.
+        let mut fixed = config.clone();
+        fixed.models.get_mut("m").unwrap().compact_ctx = 30;
+        assert!(value_problems(&fixed).is_empty());
+        let err = set(&fixed, "models.m.compact_ctx", "120")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("models.\"m\"") && err.contains("(120) must be between 1 and 100"),
+            "{err}"
+        );
     }
 
     /// `[models]` ships empty, so — like `[pricing]` before it — a glob is

@@ -830,11 +830,7 @@ fn hand_written_value_checks(
         .map(|problem| {
             Finding::Check(
                 format!("{} holds a valid value", problem.scope),
-                Err(anyhow::anyhow!(
-                    "{} (in {}; correct it with `spoolway config edit`)",
-                    problem.message,
-                    path.display()
-                )),
+                Err(anyhow::anyhow!(problem.report(path))),
             )
         })
         .collect()
@@ -3024,6 +3020,32 @@ mod tests {
         assert_eq!(
             hand_written_value_checks(Path::new("/p"), &config, &config, &["codex"]).len(),
             1
+        );
+    }
+
+    /// A `compact_ctx` over 100 written by hand is one failed check, labelled
+    /// by its row, since nothing else in `doctor` reads it. Fails before
+    /// `value_problems` knows the rule, when the value passes.
+    #[test]
+    fn a_compact_ctx_over_a_hundred_fails_one_check_naming_its_row() {
+        let mut config = Config::default();
+        config.models.insert(
+            "claude-haiku-5-5".into(),
+            crate::usage::ModelPrice {
+                compact_ctx: 150,
+                ..Default::default()
+            },
+        );
+        let findings =
+            hand_written_value_checks(Path::new("/p/config.toml"), &config, &config, &["claude"]);
+        let [Finding::Check(label, Err(err))] = findings.as_slice() else {
+            panic!("expected one failed check: {findings:?}");
+        };
+        assert_eq!(label, "models.\"claude-haiku-5-5\" holds a valid value");
+        assert_eq!(
+            format!("{err:#}"),
+            "`compact_ctx` (150) must be between 1 and 100 (in /p/config.toml; correct it \
+             with `spoolway config edit`)"
         );
     }
 

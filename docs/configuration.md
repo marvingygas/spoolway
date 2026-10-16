@@ -147,7 +147,8 @@ note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quie
 ### Wrong values written by hand
 
 A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
-on. This covers the three agent-profile values above. Two commands report each such value:
+on. This covers the three agent-profile values above. It also covers a model's `compact_ctx`
+over `100`. Two commands report each such value:
 
 | Command | What it shows |
 |---|---|
@@ -156,6 +157,9 @@ on. This covers the three agent-profile values above. Two commands report each s
 
 Both read the tracked `config.toml`, not the file merged with the overrides layer. A layer key
 that corrects the value does not hide it.
+
+The dispatcher refuses to start a step that uses such a value. The step's lane does not start.
+See [Compaction threshold](agents.md#compaction-threshold).
 
 ```
 $ spoolway doctor --no-live
@@ -787,15 +791,20 @@ left as it is.
 | `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. `init` and `sync` write a commented example for `claude-*` and `gpt-*`. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it. |
-| `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. |
+| `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. A value over `100` written by hand is a wrong value, as in [Wrong values written by hand](#wrong-values-written-by-hand). |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a
 threshold. The tier is a sub-table named `above_<N>k_tokens` with the five rate keys above.
+A row that sets its own base prices keeps the price table's tier for the model. A row that
+wants other tier rates writes its own `above_<N>k_tokens` table.
 
 ```toml
 [models."claude-haiku-5-5".above_100k_tokens]
 input = 0.50
 output = 2.50
+cache_read = 0.05
+cache_write_5m = 0.625
+cache_write_1h = 1.00
 ```
 
 A sub-table with any other name loads with a note and is left out, as described in [Unknown

@@ -7756,6 +7756,40 @@ fn prepare_boot(
             step.id
         );
     }
+    // A value that loads but cannot be run on, on the profile or the model row
+    // this step uses. Neither `config set` nor the loader refuses a
+    // hand-written one, so without this a lane starts with a `compact_ctx`
+    // Claude Code ignores, or a `permission_mode` its binary rejects, several
+    // passes into a run. Each refusal carries the error text `doctor` fails
+    // the same value with: `agent_checks`' for the mode, which is the row
+    // `doctor` shows for a step's agent, and `hand_written_value_checks`' for
+    // the model row.
+    let checkout_config = crate::config::Config::path_in(&repo.checkout);
+    if crate::agent::adapter(&profile.kind).is_some()
+        && let Err(err) = profile.permission_mode_status()
+    {
+        anyhow::bail!(
+            "pipeline `{}` step `{}`: `agents.{}.permission_mode` in {}: {err:#}",
+            pipeline.name,
+            step.id,
+            step.agent.as_deref().unwrap_or_default(),
+            checkout_config.display()
+        );
+    }
+    if let Some(glob) = crate::models::resolved_row(&repo.config.models, &model) {
+        let scope = format!("models.\"{glob}\"");
+        if let Some(problem) = crate::confkv::value_problems(&repo.config)
+            .into_iter()
+            .find(|problem| problem.field == "compact_ctx" && problem.scope == scope)
+        {
+            anyhow::bail!(
+                "pipeline `{}` step `{}`: {scope}: {}",
+                pipeline.name,
+                step.id,
+                problem.report(&checkout_config)
+            );
+        }
+    }
     // The backstop for `doctor`'s per-step compaction check, in the same
     // words: a lane started anyway would be blocked before it compacts, or
     // run without the threshold its model names.
@@ -27980,6 +28014,59 @@ mod tests {
             "{:?}",
             report.actions
         );
+    }
+
+    /// A hand-written `compact_ctx` over 100, or a `permission_mode` the
+    /// profile's kind does not accept, does not start a lane. The notice
+    /// carries the error text `doctor` fails the value with. Fails before the
+    /// refusal exists, when the lane starts.
+    // covers: models.<glob>.compact_ctx — the dispatcher refuses a step whose model row holds a value over 100
+    #[test]
+    fn a_step_carrying_a_value_doctor_fails_refuses_to_start_a_lane() {
+        for (case, want) in [
+            (
+                "compact",
+                "models.\"*\": `compact_ctx` (150) must be between 1 and 100 (in",
+            ),
+            ("mode", "`agents.claude.permission_mode` in"),
+        ] {
+            let (mut repo, _root_guard) = fixture(&format!("bad-value-{case}"));
+            if case == "compact" {
+                repo.config.models.insert(
+                    "*".to_string(),
+                    crate::usage::ModelPrice {
+                        compact_ctx: 150,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                repo.config
+                    .agents
+                    .get_mut("claude")
+                    .unwrap()
+                    .permission_mode = "no-such-mode".into();
+            }
+            let worktree = a_checkout(&format!("dispatch-bad-value-{case}"));
+            add_task_with(&repo, "demo", "review", |f| {
+                f.workspace_id = Some("w1".into());
+                f.tab_id = Some("w1:t1".into());
+                f.pane_id = Some("w1:p1".into());
+                f.worktree_path = Some(worktree.to_path_buf());
+            });
+            let mux = FakeMux::new(vec![]);
+
+            let report = run_pass(&repo, &mux);
+
+            assert!(mux.did("start").is_empty(), "{case}: {:?}", mux.calls());
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(want) && a.contains("pipeline `")),
+                "{case}: {:?}",
+                report.actions
+            );
+        }
     }
 
     // --------------------------------------------------------- issue_tracking

@@ -253,6 +253,15 @@ The dispatcher refuses to start the same step with the same words and runs no la
   FAIL  pipeline `default` step `implement`: agents.claude.session_blocked_ctx = 40 is at or below models."claude-opus-5".compact_ctx = 50, so the lane is blocked before it ever compacts. Lower models."claude-opus-5".compact_ctx below 40, or raise agents.claude.session_blocked_ctx above 50. Setting session_blocked_ctx = 0 also clears it, but leaves no brake if compaction fails.
 ```
 
+The dispatcher also refuses a step whose model row holds a `compact_ctx` over `100`. It refuses a
+step whose agent profile holds a `permission_mode` that the profile's `kind` does not accept.
+Each refusal uses the words `spoolway doctor` fails the same value with. No lane starts.
+
+```
+pipeline `default` step `implement`: models."claude-opus-5": `compact_ctx` (150) must be between 1 and 100 (in .spoolway/config.toml; correct it with `spoolway config edit`)
+pipeline `default` step `implement`: `agents.claude.permission_mode` in .spoolway/config.toml: `no-such-mode` is not a mode `claude` accepts — pick one of: …
+```
+
 A model with no `compact_ctx` is never refused. `session_blocked_ctx = 0` skips the order
 check only. `session_reuse_ctx` may sit on either side of `compact_ctx`.
 
