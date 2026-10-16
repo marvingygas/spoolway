@@ -1006,6 +1006,13 @@ fails, the start fails with a message that says to run `git worktree prune` in t
 resume the task. The new worktree uses the task's own branch, and `base_commit` keeps the value it
 had.
 
+A worktree deleted while a step is running is not cut again. For an agent step, the dispatcher stops
+the lane and moves the task to `blocked`. For a command step, it does this when the command exits,
+whatever the exit code, and ignores the step's `on_pass` and `on_fail`. The reason names the vanished worktree. A `spoolway report` that lands first
+is read as `--block`. Changes the step had not committed are lost. Its commits stay on the task's
+branch. Resuming the task runs the step again in a fresh worktree. In an unattended run whose
+pipeline has no `blocked` step, an agent step runs again at once instead of waiting on `blocked`.
+
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
 In an unattended run the `blocked` lane meets the same failure, and the task then stops on
@@ -1052,7 +1059,8 @@ running and lists the git hooks it could have been.
 
 The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
 afresh. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
-failure gives `git worktree remove --force --force <path>` to run before the task is resumed.
+failure gives the by-hand command shown under [A removal that was stopped or
+failed](#a-removal-that-was-stopped-or-failed). Run it before the task is resumed.
 The failure counts toward the launch-failure ceiling described under [Restarts, laps and
 escalation](#restarts-laps-and-escalation).
 
@@ -1123,12 +1131,14 @@ The worktree counts as not removed when any of these is true:
 The dispatcher then prints this problem and keeps the task at `done`:
 
 ```
-! <task>: its worktree <path> could not be removed. To do it by hand, run `git worktree remove --force --force <path>` and delete the folder if it is still there
+! <task>: its worktree <path> could not be removed. To do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
 ! <task>: stays at `done`; cleanup removes its worktree again on the next pass
 ```
 
-The task is archived on the first pass after the worktree is gone. Removing a worktree deletes
-the folder directly only when it sits under `worktrees/`.
+The dispatcher makes read-only folders inside the worktree writable before it deletes them, so a
+step that leaves a read-only tree does not hold the task on `done`. The task is archived on the
+first pass after the worktree is gone. Removing a worktree deletes the folder directly only when it
+sits under `worktrees/`.
 
 `spoolway queue unqueue --force` prints the first message on standard error and carries the task
 to `pending`. It does not try again.

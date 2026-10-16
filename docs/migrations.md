@@ -177,8 +177,8 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   command, not its `on_pass`.
 - Allow for a task held on `done`. A `background: true` command step with `on_fail` now holds its
   task, its `done` hook and its dependents until the check ends, up to its `timeout:`. A task whose
-  worktree cannot be removed also stays on `done`, and its message names the
-  `git worktree remove --force --force <path>` that clears it. Leave the new `removing/` folder in
+  worktree cannot be removed also stays on `done`, and its message gives the command that clears
+  it. Leave the new `removing/` folder in
   the project home alone.
 - Start long-lived services outside spoolway. Background processes a blocking `run:` line starts
   are now stopped at the step's next arrival, at cleanup and by `queue unqueue --force`. Keep

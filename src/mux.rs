@@ -2815,9 +2815,9 @@ fn cut_worktree_within(
     // if this call made it, so the retry cuts afresh and fails visibly again
     // if the hook is still hung.
     //
-    // The removal can fail: a hook that ran `go mod download` leaves
-    // read-only directories that neither git nor a plain delete can remove.
-    // The checkout then stays, and with the lock gone the retry would adopt
+    // The removal can fail: [`remove_worktree`] makes the checkout's own
+    // folders writable, but not the one it sits in, which a hook may have made
+    // read-only. The checkout then stays, and with the lock gone the retry would adopt
     // it all the same. So an entry git still lists is locked as
     // `initializing` again, which is what `ensure_workspace` reads as
     // unfinished: it tries the removal itself and, if that fails too, stops
@@ -2842,8 +2842,8 @@ fn cut_worktree_within(
                 );
                 bail!(
                     "{stopped} The worktree it left half set up at {path_arg} could not be \
-                     removed ({removal:#}). Run `git worktree remove --force --force {path_arg}`, \
-                     then resume the task."
+                     removed ({removal:#}). Run `{}`, then resume the task.",
+                    remove_by_hand_command(repo, path)
                 );
             }
         }
@@ -2856,6 +2856,28 @@ fn cut_worktree_within(
         )
     })?;
     Ok(())
+}
+
+/// The command a person can run to take a worktree away by hand when
+/// [`remove_worktree`] could not.
+///
+/// `git worktree remove` is no use here: git drops its entry before it deletes
+/// the folder, so a delete that fails leaves a folder git no longer lists, and
+/// the command then refuses it. The steps are separate commands, run whatever
+/// the one before said, so that each half still works when the other has
+/// nothing to do: making the tree writable fails on a folder already gone, and
+/// unlocking fails on an entry that is not locked, while the prune that
+/// follows is still needed. The unlock is there because the half-set-up
+/// worktrees are locked as `initializing`, which `git worktree prune` skips.
+/// Both paths are quoted, because either can hold a space, and git is pointed
+/// at the repository so the command runs from wherever the person is standing.
+pub(crate) fn remove_by_hand_command(repo: &Path, path: &Path) -> String {
+    let path = crate::platform::quote(&path.display().to_string());
+    let repo = crate::platform::quote(&repo.display().to_string());
+    format!(
+        "chmod -R u+w {path} 2>/dev/null; rm -rf {path}; \
+         git -C {repo} worktree unlock {path} 2>/dev/null; git -C {repo} worktree prune"
+    )
 }
 
 /// Take a worktree away with git, whatever state it was left in.
@@ -2904,6 +2926,7 @@ pub(crate) fn remove_worktree(repo: &Path, worktree_root: &Path, path: &Path) ->
                 worktree_root.display()
             )));
         }
+        make_writable(path);
         std::fs::remove_dir_all(path).with_context(|| {
             format!("git could not remove the worktree at {path_arg} ({first:#}), and neither could deleting it")
         })?;
@@ -2913,6 +2936,43 @@ pub(crate) fn remove_worktree(repo: &Path, worktree_root: &Path, path: &Path) ->
     })?;
     Ok(())
 }
+
+/// Give the owner write access to every directory under `root`, so that
+/// deleting the tree cannot be refused for a read-only folder.
+///
+/// A step can leave one behind: the Go module cache is read-only by design.
+/// Deleting a file needs write access to the folder holding it, so one such
+/// folder fails the whole delete, and `git worktree remove` has by then
+/// already dropped the worktree's entry.
+///
+/// Symlinks are never followed, and their targets are never touched. A link
+/// inside the worktree may point at a read-only folder somewhere else, and
+/// changing that folder's mode is not this function's to do. Failures are
+/// ignored here: the delete that follows reports whatever is still in the way.
+#[cfg(unix)]
+fn make_writable(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(root) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    // Owner read, write and search: write to delete entries, and the other two
+    // to list and enter the folder so the walk can reach what is inside.
+    if mode & 0o700 != 0o700 {
+        let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode | 0o700));
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            make_writable(&entry.path());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_writable(_root: &Path) {}
 
 /// The reason a cut failed, with the fetch's part in it when it was stopped.
 ///
@@ -5054,10 +5114,11 @@ mod tests {
     /// adopted: the error says what to run, and an entry git still lists is
     /// held under `initializing` again so the dispatcher treats it as
     /// unfinished. (Git may already have dropped the entry, leaving only the
-    /// folder, which the next cut refuses to land in.) A
-    /// `go mod download` in a hook leaves read-only directories that no
-    /// removal can delete, which this stands in for. A test running as root
-    /// could delete them anyway, so it stops there.
+    /// folder, which the next cut refuses to land in.) The hook makes the
+    /// folder the checkout sits in read-only, so the checkout cannot be
+    /// unlinked from it. Read-only directories inside the checkout no longer
+    /// do this, because [`remove_worktree`] makes them writable first. A test
+    /// running as root could delete it anyway, so it stops there.
     #[test]
     fn a_stopped_cut_that_cannot_be_removed_is_not_left_to_be_adopted() {
         use std::os::unix::fs::PermissionsExt;
@@ -5076,11 +5137,7 @@ mod tests {
         .unwrap();
         let hook = work.join(".git/hooks/post-checkout");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(
-            &hook,
-            "#!/bin/sh\nmkdir -p cache/deep\ntouch cache/deep/file\nchmod 555 cache/deep\nexec sleep 300\n",
-        )
-        .unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nchmod 555 ..\nexec sleep 300\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = work.join("worktrees").join("task-new");
 
@@ -5090,7 +5147,7 @@ mod tests {
         let said = format!("{err:#}");
         assert!(said.contains("could not be removed"), "{said}");
         assert!(
-            said.contains("git worktree remove --force --force"),
+            said.contains("chmod -R u+w") && said.contains("worktree prune"),
             "{said}"
         );
         assert!(path.exists(), "the premise: the removal failed");
@@ -5100,7 +5157,120 @@ mod tests {
             "git lists the leftover as a finished checkout: {listing}"
         );
         std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    /// The command printed for a removal by hand quotes a path with a space,
+    /// and works from anywhere on a folder that is already gone while git
+    /// still lists the entry, locked as `initializing` or not.
+    #[test]
+    fn the_by_hand_removal_command_clears_what_is_left_whatever_half_it_is() {
+        let said = remove_by_hand_command(Path::new("/my repo"), Path::new("/my repo/w t"));
+        assert!(
+            said.contains("'/my repo/w t'") && said.contains("-C '/my repo'"),
+            "{said}"
+        );
+
+        for lock in [false, true] {
+            let work = crate::scratch::root(&format!("mux-by-hand-{lock}"));
+            std::fs::create_dir_all(&work).unwrap();
+            crate::scratch::git_init(&work, &["-b", "main"]);
+            run(
+                &work,
+                "git",
+                &["commit", "--allow-empty", "-q", "-m", "seed"],
+            )
+            .unwrap();
+            let path = work.join("worktrees").join("task new");
+            cut_worktree(&work, &path, "task/new", "main").unwrap();
+            if lock {
+                run(
+                    &work,
+                    "git",
+                    &[
+                        "worktree",
+                        "lock",
+                        "--reason",
+                        "initializing",
+                        &path.display().to_string(),
+                    ],
+                )
+                .unwrap();
+            }
+            std::fs::remove_dir_all(&path).unwrap();
+
+            let command = remove_by_hand_command(&work, &path);
+            let status = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .current_dir(std::env::temp_dir())
+                .status()
+                .unwrap();
+
+            assert!(status.success(), "{command}");
+            assert!(
+                !run(&work, "git", &["worktree", "list"])
+                    .unwrap()
+                    .contains("task new"),
+                "git still lists the worktree after: {command}"
+            );
+        }
+    }
+
+    /// A step that leaves a read-only directory in the worktree, as a Go
+    /// module cache does, no longer keeps the worktree from being removed.
+    /// The walk that makes it writable does not follow a symlink, so a
+    /// read-only directory outside the worktree keeps its mode.
+    #[test]
+    fn a_read_only_directory_in_a_worktree_is_removed_without_touching_a_link_target() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the process's own id and has no failure.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let work = crate::scratch::root("mux-remove-read-only");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        let root = work.join("worktrees");
+        let path = root.join("task-new");
+        cut_worktree(&work, &path, "task/new", "main").unwrap();
+        let outside = work.join("outside");
+        std::fs::create_dir_all(outside.join("inner")).unwrap();
+        std::fs::write(outside.join("inner/file"), "x").unwrap();
+        std::fs::set_permissions(
+            outside.join("inner"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, path.join("link")).unwrap();
+        std::fs::create_dir_all(path.join("cache/deep")).unwrap();
+        std::fs::write(path.join("cache/deep/file"), "x").unwrap();
+        std::fs::set_permissions(
             path.join("cache/deep"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::set_permissions(path.join("cache"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        remove_worktree(&work, &root, &path).unwrap();
+
+        assert!(!path.exists(), "the worktree was left on disk");
+        let mode = std::fs::metadata(outside.join("inner"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o555, "a link target was made writable");
+        std::fs::set_permissions(
+            outside.join("inner"),
             std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();

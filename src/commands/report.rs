@@ -197,6 +197,29 @@ pub fn report(
     // `docs/concepts.md`'s Reach section.
     let unattended = repo.unattended();
 
+    // A lane can report from outside a worktree that was deleted under it,
+    // for instance by running `spoolway report` from the repository. Its
+    // `--pass` would carry the step on as though its work had survived, so
+    // the report is read as a `--block` instead, with the vanished worktree
+    // as the reason. `--block` is left alone, and so is `blocked`, whose
+    // lane is the one clearing a block. The dispatcher makes the same
+    // judgement for a lane it finds still running.
+    let outcome = match task.front.worktree_path.as_deref() {
+        Some(vanished)
+            if !vanished.is_dir()
+                && current != crate::pipeline::BLOCKED
+                && matches!(outcome, Outcome::Pass | Outcome::Fail) =>
+        {
+            let reason = crate::dispatch::vanished_worktree_reason(&current, vanished);
+            task.append_to_section("## Blocker", &format!("- {reason}\n"));
+            task.log_status(&format!(
+                "`{current}` reported `{outcome}`, but its worktree is gone — read as `--block`"
+            ));
+            Outcome::Block
+        }
+        _ => outcome,
+    };
+
     let dependents = crate::dispatch::queue_dependents(repo, &task)?;
     let routed = route(
         &mut task,
@@ -3615,6 +3638,26 @@ mod tests {
             started_for,
         )
         .unwrap();
+    }
+
+    /// A `--pass` from a lane whose worktree was deleted under it is read as
+    /// a `--block` naming the vanished folder, not routed on as a pass.
+    #[test]
+    fn a_pass_from_a_lane_whose_worktree_is_gone_blocks_the_task() {
+        let (repo, _root_guard) = fixture("report-vanished-worktree");
+        add(&repo, "gone", &[]);
+        let pipelines = work_pipelines();
+        let mut task = queued(&repo, "gone");
+        task.set_stage("work", None);
+        task.front.worktree_path = Some(repo.root.join("no-such-worktree"));
+        task.save().unwrap();
+
+        report_outcome_from(&repo, &pipelines, "gone", Outcome::Pass, Some("work"));
+
+        let task = queued(&repo, "gone");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        let blocker = task.section("## Blocker").unwrap_or_default();
+        assert!(blocker.contains("no-such-worktree"), "{blocker}");
     }
 
     /// A lane reports on the step it was started for, and on no other.
