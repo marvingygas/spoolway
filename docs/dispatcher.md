@@ -309,7 +309,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, or the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -364,8 +364,8 @@ A cause in brackets follows when the route alone does not explain the move.
 | `left <step>, moved to <step>` | The task file does not say how the task left the step. |
 | `passed <step>, moved to paused (gate)` | The step has `gate: true`. |
 | `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
-| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, or was killed three times in a row. |
-| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, or was killed three times in a row. |
+| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
+| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
 | `stopped on <step>, moved to paused (manually)` | A person picked `pause` from the board's options menu, or pressed Escape in the lane's pane. |
 | `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
 | `stopped on <step>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
@@ -795,6 +795,7 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past and a failed launch count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
+| Hook time limit | An issue hook that runs 10 minutes without exiting is stopped. A `queued`, `started` or `done` hook pauses the task. | `spoolway resume` on the paused task. |
 | Reminder loop | Three answered reminders. A silent lane is reminded again and never counted. | Anything the lane writes to its transcript. On a claude lane, a turn the model wrote. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
@@ -1033,6 +1034,31 @@ On the task's next start, the dispatcher looks at a checkout of the task's branc
 
 A checkout under `worktrees/` is never marked `borrowed` for a task that has started before. A
 checkout that a person locked for another reason is never removed.
+
+### Git hooks in a cut
+
+The dispatcher runs `git worktree add` with your repository's own git hooks, such as a
+`post-checkout` that installs packages. It does not skip them. A git hook that is still running
+after 10 minutes is stopped together with the processes it started. The cut fails and the
+failure names the hook and the limit:
+
+```
+`git worktree add <path> task/cart-totals` was stopped after 10m because its `post-checkout` git hook was still running. spoolway does not skip a repository's git hooks: make that hook exit, then run this again.
+```
+
+When the dispatcher cannot tell which hook was running, the failure says the call was still
+running and lists the git hooks it could have been.
+
+The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
+afresh. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
+failure gives `git worktree remove --force --force <path>` to run before the task is resumed.
+The failure counts toward the launch-failure ceiling described under [Restarts, laps and
+escalation](#restarts-laps-and-escalation).
+
+The commit that saves leftover work when a task reaches `done` runs the `pre-commit`,
+`prepare-commit-msg`, `commit-msg` and `post-commit` hooks under the same 10-minute limit. When
+one is stopped, the task is held on `blocked` and the dispatcher prints the hook and the limit
+beside `uncommitted work could not be recorded before cleanup`.
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 

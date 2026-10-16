@@ -212,9 +212,17 @@ impl<'a> Dispatcher<'a> {
                     Some("uncommitted work could not be recorded before cleanup"),
                 );
                 task.save()?;
+                // The reason travels with the line: a commit stopped by a
+                // hung git hook is otherwise named only in the task's
+                // `## Status Log`, and the dispatcher printed no cause.
                 report.problems.push(format!(
-                    "{}: held at `blocked` — uncommitted work could not be recorded before cleanup",
-                    task.id()
+                    "{}: held at `blocked` — uncommitted work could not be recorded before \
+                     cleanup{}",
+                    task.id(),
+                    outcome
+                        .note()
+                        .map(|why| format!(": {why}"))
+                        .unwrap_or_default()
                 ));
                 return Ok(false);
             }

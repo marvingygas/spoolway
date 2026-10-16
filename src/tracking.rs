@@ -14,6 +14,9 @@
 //! itself on these real events alone — there is no `check` event asking it
 //! to prove itself ahead of time; a failing event already pauses the task
 //! with the reason named (see `crate::dispatch::Dispatcher::tracking_gate`).
+//! No hook runs unbounded: `open` and `fetch` stop at [`OPEN_FETCH_TIMEOUT`],
+//! every event that fires on a task — `queued`, `started`, `done`, `blocked`
+//! and `paused` — at [`LIFECYCLE_TIMEOUT`], both fixed.
 //!
 //! This reuses [`crate::command_step::Runs`] rather than reinventing a second
 //! way to spawn something detached and read its exit code back on a later
@@ -33,8 +36,8 @@
 //! `done` pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
 //! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
 //! next pass's [`fire`] starts the hook over rather than reading the same
-//! stale exit code forever. [`open_ticket`] needs none of that: `queue add`
-//! is the only caller there ever is, and it means "run this now" every time
+//! stale exit code forever. [`open_ticket`] needs none of that: its callers are
+//! `queue add` and a job firing a routine, and each means "run this now" every time
 //! it calls at all — a task already naming a `ticket:` is what its own
 //! caller, `queue::open_tickets`, reads as "already open" and skips before
 //! this is ever reached.
@@ -55,6 +58,113 @@ pub const TRACKING_DIR: &str = "tracking";
 
 fn runs(repo: &Repo) -> Runs {
     Runs::new(&repo.tracking_dir())
+}
+
+/// How long an `open` or `fetch` hook may run. Both are waited on inside a
+/// command that has a person or the dispatcher's pass behind it, and they
+/// ask one tracker one question, so a minute is far past a healthy answer.
+/// Fixed, like [`LOGIN_TIMEOUT`], and with no setting: a limit a project
+/// could raise is a limit a project would raise until the hang came back.
+pub const OPEN_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a `queued`, `started`, `done`, `blocked` or `paused` hook may
+/// run. Longer than [`OPEN_FETCH_TIMEOUT`] because nobody waits at a prompt
+/// for these and a project may do real work in one, such as syncing a board.
+/// Past it the task pauses (or, for `blocked` and `paused`, the stop is
+/// recorded) rather than waiting for ever on a hook that will not exit.
+pub const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// A duration in whole minutes, or seconds under a minute: `2m`, `10m`, `45s`.
+/// The one wording the queue row and the pause reason share, so the limit
+/// reads the same where a person sees it twice.
+pub fn minutes(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m", secs / 60)
+    }
+}
+
+/// The error `queue add` fails with when the `open` hook ran past
+/// [`OPEN_FETCH_TIMEOUT`]. Its own type so a job firing can record the minute
+/// as failed instead of trying again on the next pass.
+#[derive(Debug)]
+pub struct OpenTimedOut(pub String);
+
+impl std::fmt::Display for OpenTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OpenTimedOut {}
+
+/// Poll `key` until its run settles, or `limit` has passed, in which case the
+/// run's whole process group is killed and `None` comes back.
+///
+/// The deadline is measured from this call, not off the run's files: the
+/// caller started the run a moment ago, and a stale pid file from an earlier
+/// run cannot make a fresh one look overdue.
+fn wait_settled(runs: &Runs, key: &str, limit: Duration) -> Option<RunState> {
+    let started = std::time::Instant::now();
+    loop {
+        match runs.state(key) {
+            RunState::Fresh | RunState::Running => {
+                if started.elapsed() >= limit {
+                    // `stop` signals the group the run leads, so a child the
+                    // hook backgrounded dies with it, and clears the files.
+                    runs.stop(key);
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            settled => return Some(settled),
+        }
+    }
+}
+
+/// The exit code recorded for a `blocked` or `paused` hook stopped at its
+/// limit: `124`, the code `timeout(1)` uses for the same thing.
+const TIMED_OUT_CODE: i32 = 124;
+
+/// Whether the `event` hook for `task` has outlived [`LIFECYCLE_TIMEOUT`]; if
+/// so, kill it and answer how long it ran, so the dispatcher can say so.
+/// `None` for a run that is not going, or is still inside its limit.
+///
+/// For `queued`, `started` and `done` the caller pauses the task and the
+/// run's files are left cleared. A `blocked` or `paused` hook holds nothing,
+/// so nothing pauses; it is recorded as exited [`TIMED_OUT_CODE`] instead,
+/// the way a non-zero exit is, so [`fire`] does not start it again and
+/// [`failures`] names it.
+pub fn stop_if_overdue(repo: &Repo, task: &Task, event: &str) -> Option<Duration> {
+    let key = Runs::key(event, task.id());
+    let runs = runs(repo);
+    if runs.state(&key) != RunState::Running {
+        return None;
+    }
+    let ran = runs.elapsed(&key)?;
+    if ran < LIFECYCLE_TIMEOUT {
+        return None;
+    }
+    // The log is kept — `stop` clears the pid and exit files only — so the
+    // pause can still quote what the hook printed before it hung.
+    runs.stop(&key);
+    if !PAUSING_EVENTS.contains(&event) {
+        let _ = runs.record_exit(&key, TIMED_OUT_CODE);
+    }
+    Some(ran)
+}
+
+/// The lifecycle hook `task` is waiting on right now and how long it has
+/// run, for the queue row. `None` when no hook of the task is going.
+pub fn running_hook(repo: &Repo, task: &Task) -> Option<(&'static str, Duration)> {
+    let runs = runs(repo);
+    ["queued", "started", "done"].into_iter().find_map(|event| {
+        let key = Runs::key(event, task.id());
+        (runs.state(&key) == RunState::Running)
+            .then(|| (event, runs.elapsed(&key).unwrap_or_default()))
+    })
 }
 
 /// The hook script this project has named, resolved inside `.spoolway/hooks/`
@@ -158,19 +268,24 @@ pub enum OpenResult {
     /// The hook exited non-zero, or ended without a code at all — the same
     /// [`RunState::Interrupted`] a command step's own run can end in.
     Failed { exit_code: Option<i32> },
+    /// The hook was still running after [`OPEN_FETCH_TIMEOUT`] and was
+    /// killed. `queue add` fails the whole add, as it does for any failing
+    /// `open` hook, and a job firing fails that minute's firing.
+    TimedOut,
 }
 
 /// Run the `open` hook for one task, synchronously, and return what it said.
 ///
 /// Unlike [`fire`] this never checks [`RunState::Fresh`] first and never
-/// leaves a process running past this call: `queue add` is the only caller,
-/// it always means "run this now", and it needs the answer before it can
-/// decide whether to queue anything at all — so this starts the run and
-/// blocks on it rather than firing detached and leaving a later pass to
-/// notice. `group_size` and `group_epic` become `SPOOLWAY_GROUP_SIZE` and
-/// `SPOOLWAY_EPIC`; `depends_tickets` becomes `SPOOLWAY_DEPENDS_TICKETS`,
-/// already resolved by the caller — see `queue::open_tickets`, which is what
-/// walks a submission in the order that makes that possible at all.
+/// leaves a process running past this call: its callers are `queue add` and a
+/// job firing a routine, each means "run this now", and it needs the answer
+/// before it can decide whether to queue anything at all — so this starts the
+/// run and blocks on it, for at most [`OPEN_FETCH_TIMEOUT`], rather than
+/// firing detached and leaving a later pass to notice. `group_size` and
+/// `group_epic` become `SPOOLWAY_GROUP_SIZE` and `SPOOLWAY_EPIC`;
+/// `depends_tickets` becomes `SPOOLWAY_DEPENDS_TICKETS`, already resolved by
+/// the caller — see `queue::open_tickets`, which is what walks a submission
+/// in the order that makes that possible at all.
 pub fn open_ticket(
     repo: &Repo,
     task: &Task,
@@ -208,14 +323,11 @@ pub fn open_ticket(
     // `queue add` is a one-shot command, not a dispatch pass — there is no
     // later turn to come back and check this on, so this blocks until the
     // hook is actually done rather than answering `Fresh`/`Running` back to
-    // a caller with nothing useful to do with either.
-    let state = loop {
-        match runs.state(&key) {
-            RunState::Fresh | RunState::Running => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            settled => break settled,
-        }
+    // a caller with nothing useful to do with either. A job firing calls
+    // this from inside the dispatcher's pass, so the wait has a deadline: a
+    // hook that never exits would otherwise freeze the dispatcher with it.
+    let Some(state) = wait_settled(&runs, &key, OPEN_FETCH_TIMEOUT) else {
+        return Ok(OpenResult::TimedOut);
     };
 
     Ok(match state {
@@ -412,6 +524,9 @@ pub enum FetchResult {
     /// The hook exited non-zero, or ended without a code at all — the same
     /// [`RunState::Interrupted`] a command step's own run can end in.
     Failed { exit_code: Option<i32> },
+    /// The hook was still running after [`OPEN_FETCH_TIMEOUT`] and was
+    /// killed, so nothing was read.
+    TimedOut,
 }
 
 /// Every variable [`fetch_env`] adds beyond [`COMMON_EVENT_VARS`], plus
@@ -482,8 +597,9 @@ fn fetch_key(reference: &str) -> String {
 /// what it wrote to `SPOOLWAY_OUT` — `spoolway issue show`'s whole
 /// implementation, shaped after [`open_ticket`] for the same reason: there is
 /// no later pass to come back and check a detached run on, so this blocks
-/// until the hook is actually done rather than answering `Fresh`/`Running`
-/// back to a caller with nothing useful to do with either.
+/// until the hook is actually done, or [`OPEN_FETCH_TIMEOUT`] has passed,
+/// rather than answering `Fresh`/`Running` back to a caller with nothing
+/// useful to do with either.
 ///
 /// Unlike every other event this one has no task behind it at all — it runs
 /// before any task naming this issue even exists — so its tracking files
@@ -518,15 +634,10 @@ pub fn fetch_issue(repo: &Repo, reference: &str) -> Result<FetchResult> {
     let runs = runs(repo);
     runs.start(&key, &run_line, &repo.root, &env)?;
 
-    // Same block as `open_ticket`'s own: `issue show` is a one-shot command
+    // Same wait as `open_ticket`'s own: `issue show` is a one-shot command
     // too, with no later turn to come back and poll this on.
-    let state = loop {
-        match runs.state(&key) {
-            RunState::Fresh | RunState::Running => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            settled => break settled,
-        }
+    let Some(state) = wait_settled(&runs, &key, OPEN_FETCH_TIMEOUT) else {
+        return Ok(FetchResult::TimedOut);
     };
 
     Ok(match state {
@@ -1247,6 +1358,72 @@ mod tests {
             .flatten()
             .collect();
         assert!(left.is_empty(), "files left behind: {left:?}");
+    }
+
+    /// The wait `open` and `fetch` share stops a hook that never exits, and
+    /// takes its children with it. Before the deadline existed the loop
+    /// polled for ever, so a hung `open` hook froze `queue add` and the
+    /// dispatcher's pass with it.
+    #[test]
+    fn a_wait_past_its_limit_kills_the_hook_and_its_children() {
+        let (repo, _root_guard) = fixture("wait-limit");
+        let runs = runs(&repo);
+        let child_pid = repo.root.join("child.pid");
+        let line = format!("sleep 300 & echo $! >'{}'; wait", child_pid.display());
+        runs.start("open-demo", &line, &repo.root, &BTreeMap::new())
+            .unwrap();
+
+        let began = std::time::Instant::now();
+        let settled = wait_settled(&runs, "open-demo", Duration::from_secs(5));
+
+        assert_eq!(settled, None);
+        assert!(began.elapsed() < Duration::from_secs(20));
+        let child: u32 = std::fs::read_to_string(&child_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !crate::headless::alive(child),
+            "the child outlived the kill"
+        );
+    }
+
+    /// A hook that exits inside its limit is answered as it always was.
+    #[test]
+    fn a_wait_inside_its_limit_returns_the_exit() {
+        let (repo, _root_guard) = fixture("wait-inside");
+        let runs = runs(&repo);
+        runs.start("open-demo", "exit 3", &repo.root, &BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            wait_settled(&runs, "open-demo", Duration::from_secs(30)),
+            Some(RunState::Exited(3))
+        );
+    }
+
+    /// A lifecycle hook still inside its limit is left running and is not
+    /// reported as overdue.
+    #[test]
+    fn a_young_hook_is_not_overdue() {
+        let (mut repo, _root_guard) = fixture("not-overdue");
+        with_hook(&mut repo, "slow.sh", "sleep 60");
+        let t = task("demo", |_| {});
+        fire(&repo, &t, crate::pipeline::QUEUED, 1).unwrap();
+
+        assert_eq!(stop_if_overdue(&repo, &t, crate::pipeline::QUEUED), None);
+        let (event, _) = running_hook(&repo, &t).expect("the hook is still running");
+        assert_eq!(event, "queued");
+        stop_and_reclaim(&repo, t.id());
+    }
+
+    /// Durations read in whole minutes, or seconds under a minute.
+    #[test]
+    fn durations_are_written_in_minutes() {
+        assert_eq!(minutes(Duration::from_secs(45)), "45s");
+        assert_eq!(minutes(Duration::from_secs(60)), "1m");
+        assert_eq!(minutes(Duration::from_secs(125)), "2m");
+        assert_eq!(minutes(LIFECYCLE_TIMEOUT), "10m");
     }
 
     /// A hook something kills every time it starts — `systemd-oomd`, a

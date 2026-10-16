@@ -323,7 +323,7 @@ unauthorized: ...`. At a terminal it waits for `enter` to
 queue with `tracking: off` written onto every task, or `esc` to back out. With no terminal it
 proceeds the same way without waiting. Otherwise it opens a ticket per task. It calls no `open`
 hook for a task that sets `tracking: off` itself. A batch's other tasks still call it, and a
-failure there refuses the whole batch. See
+failure there, or a hook still running after 60 seconds, refuses the whole batch and queues nothing. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 `--no-tracking` gives the queue screen's issue question from the command line. `--no-tracking
@@ -631,7 +631,7 @@ spoolway issue show <reference>
 ```
 
 The reference is passed to the hook as `SPOOLWAY_REF`, exactly as typed. Refused when no hook
-is configured or the hook has no `fetch` branch. See
+is configured or the hook has no `fetch` branch, and fails when the hook runs past 60 seconds. See
 [`fetch`](configuration.md#fetch--a-sixth-event-run-by-spoolway-issue-show).
 
 ### `spoolway jobs`

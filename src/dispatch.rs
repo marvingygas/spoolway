@@ -908,7 +908,8 @@ enum TrackingGate {
     Pending,
     /// The hook exited clean.
     Clean,
-    /// The hook exited nonzero, or was killed without an exit code
+    /// The hook exited nonzero, ran past [`crate::tracking::LIFECYCLE_TIMEOUT`],
+    /// or was killed without an exit code
     /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row — with the reason
     /// the task is paused under.
     Failed(String),
@@ -2285,6 +2286,22 @@ impl<'a> Dispatcher<'a> {
                     task.id()
                 )),
             }
+            // `blocked` and `paused` hooks hold nothing, so no gate below
+            // reads them and nothing would ever end one that hangs: the task
+            // sits there already, and a hook run that stays `Running` is not
+            // fired again for the task's next pause. Stopped here at the same
+            // limit and said once.
+            if (stage == crate::pipeline::BLOCKED || stage == crate::pipeline::PAUSED)
+                && let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage)
+            {
+                report.problems.push(format!(
+                    "{}: issue_tracking hook on `{stage}` ran {} and was stopped at the limit \
+                     of {}",
+                    task.id(),
+                    crate::tracking::minutes(ran),
+                    crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+                ));
+            }
         }
         if stage == crate::pipeline::QUEUED {
             let id = task.id().to_string();
@@ -2305,7 +2322,7 @@ impl<'a> Dispatcher<'a> {
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(reason) => {
-                    self.pause_for_hook_failure(task, stage, &reason)?;
+                    self.pause_for_hook_failure(task, stage, &reason, report)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2358,7 +2375,12 @@ impl<'a> Dispatcher<'a> {
                 match self.tracking_gate(task, crate::pipeline::STARTED) {
                     TrackingGate::Inactive | TrackingGate::Clean => {}
                     TrackingGate::Failed(reason) => {
-                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, &reason)?;
+                        self.pause_for_hook_failure(
+                            task,
+                            crate::pipeline::STARTED,
+                            &reason,
+                            report,
+                        )?;
                         return Ok(Routed::NextTask);
                     }
                     TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2457,7 +2479,7 @@ impl<'a> Dispatcher<'a> {
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(reason) => {
-                    self.pause_for_hook_failure(task, stage, &reason)?;
+                    self.pause_for_hook_failure(task, stage, &reason, report)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2538,6 +2560,17 @@ impl<'a> Dispatcher<'a> {
                 "issue_tracking hook was killed {kills} times in a row without an exit code"
             ));
         }
+        // A hook that has run past its limit is killed here, on the pass that
+        // notices, and the task pauses with the hook and the limit named. The
+        // alternative is the task waiting on `Pending` for ever behind a hook
+        // that will never exit.
+        if let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage) {
+            return TrackingGate::Failed(format!(
+                "issue_tracking hook `{stage}` ran {} and was stopped at the limit of {}",
+                crate::tracking::minutes(ran),
+                crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+            ));
+        }
         match crate::tracking::exit_code(self.repo, task, stage) {
             Some(0) => TrackingGate::Clean,
             Some(code) => TrackingGate::Failed(format!("issue_tracking hook exited {code}")),
@@ -2546,8 +2579,9 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Pause `task` at `stage` (`queued`, `started` or `done`) over a hook
-    /// that failed for `reason` — a non-zero exit, or too many runs killed
-    /// without one (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
+    /// that failed for `reason` — a non-zero exit, a run stopped at
+    /// [`crate::tracking::LIFECYCLE_TIMEOUT`], or too many runs killed
+    /// without an exit code (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
@@ -2566,7 +2600,13 @@ impl<'a> Dispatcher<'a> {
     /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
     /// under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
-    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, reason: &str) -> Result<()> {
+    fn pause_for_hook_failure(
+        &mut self,
+        task: &mut Task,
+        stage: &str,
+        reason: &str,
+        report: &mut Report,
+    ) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
         let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
@@ -2583,6 +2623,14 @@ impl<'a> Dispatcher<'a> {
         task.front.hook_paused = Some(stage.to_string());
         task.set_stage(crate::pipeline::PAUSED, Some(reason));
         self.persist(task)?;
+        // The pause is silent on its own: a dispatcher whose only news is a
+        // paused task printed `nothing to do`. Said once, on the pass that
+        // pauses it, the way `pause_for_missing_start_branch` says its own.
+        report.moved = true;
+        report.problems.push(format!(
+            "paused `{}`: {reason}. Fix the hook, then resume.",
+            task.id()
+        ));
         Ok(())
     }
 
@@ -28419,6 +28467,150 @@ exit 0"#,
             );
             assert!(mux.did("start").is_empty(), "{event}: no lane may start");
         }
+    }
+
+    /// A hook that has run past its limit is killed and the task pauses with
+    /// the hook and the limit named, and the pass says so on a problem line:
+    /// without one the dispatcher printed `nothing to do` over a held task.
+    /// Before this a hung hook was `Pending` for ever. The run is backdated
+    /// through its pid file's timestamp, which is what `elapsed` reads, so
+    /// the test does not wait out the real limit.
+    #[test]
+    fn a_hook_past_its_limit_is_killed_and_pauses_the_task() {
+        let (mut repo, _root_guard) = fixture("hook-timeout");
+        write_hook(&repo, "hang.sh", "exec sleep 300");
+        repo.config.issue_tracking.hook = "hang.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(crate::pipeline::QUEUED, "demo");
+
+        for _ in 0..200 {
+            run_pass(&repo, &mux);
+            if runs.state(&key) == crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        assert_eq!(reload(&path).stage(), crate::pipeline::QUEUED);
+
+        let pid = runs.read_pid(&key).unwrap();
+        let eleven_minutes_ago = std::time::SystemTime::now() - Duration::from_secs(11 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(eleven_minutes_ago)
+            .unwrap();
+
+        let report = run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.hook_paused.as_deref(), Some("queued"));
+        let problem = report
+            .problems
+            .iter()
+            .find(|p| p.contains("paused `demo`"))
+            .unwrap_or_else(|| panic!("no problem line: {:?}", report.problems));
+        assert!(
+            problem.contains("`queued`") && problem.contains("11m") && problem.contains("10m"),
+            "{problem}"
+        );
+        assert!(
+            !crate::headless::group_alive(pid),
+            "the hook's process group must be gone"
+        );
+    }
+
+    /// A `paused` hook that hangs is stopped at the same limit and recorded
+    /// as a failed run, so it is not started a second time and `doctor` names
+    /// it. Nothing pauses: the task is already stopped for a person. Before
+    /// this, only the hooks a gate reads were bounded, and a `paused` hook
+    /// that hung stayed `Running` for ever.
+    #[test]
+    fn a_paused_hook_past_its_limit_is_stopped_and_recorded() {
+        let (mut repo, _root_guard) = fixture("hook-paused-timeout");
+        write_hook(&repo, "hang.sh", "exec sleep 300");
+        repo.config.issue_tracking.hook = "hang.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::PAUSED);
+        let mux = FakeMux::new(vec![]);
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(crate::pipeline::PAUSED, "demo");
+
+        for _ in 0..200 {
+            run_pass(&repo, &mux);
+            if runs.state(&key) == crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60))
+            .unwrap();
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("hook on `paused`") && p.contains("11m") && p.contains("10m")),
+            "{:?}",
+            report.problems
+        );
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(124),
+            "the stop is recorded, so the hook is not started again"
+        );
+        assert!(
+            crate::tracking::failures(&repo)
+                .iter()
+                .any(|f| f.event == "paused" && f.exit_code == 124)
+        );
+        let quiet = run_pass(&repo, &mux);
+        assert!(
+            quiet
+                .problems
+                .iter()
+                .all(|p| !p.contains("hook on `paused`")),
+            "said again: {:?}",
+            quiet.problems
+        );
+    }
+
+    /// A hook that exits non-zero pauses the task and the pass says so:
+    /// the pause alone printed nothing, and the dispatcher read `nothing to
+    /// do` over a task it had just stopped.
+    #[test]
+    fn a_failing_hook_adds_a_problem_line() {
+        let (mut repo, _root_guard) = fixture("hook-problem-line");
+        write_hook(&repo, "fail.sh", "exit 7");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+
+        let mut problems = Vec::new();
+        for _ in 0..200 {
+            problems.extend(run_pass(&repo, &mux).problems);
+            if reload(&path).stage() != crate::pipeline::QUEUED {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("paused `demo`") && p.contains("exited 7")),
+            "{problems:?}"
+        );
     }
 
     /// A hook failing on `blocked` or `paused` only ever records the

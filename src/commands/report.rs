@@ -1286,7 +1286,19 @@ pub fn auto_commit(
     // request can tell spoolway's backstop commits from the ones a lane wrote on
     // purpose, and so `spoolway stack` can squash them without reading each one.
     let message = format!("wip({task}): {step}");
-    if let Err(e) = crate::repo::run(worktree, "git", &["commit", "-q", "-m", &message]) {
+    // Bounded: the commit runs the person's commit hooks, and a hung one
+    // would hold the dispatcher's pass at this teardown for ever.
+    if let Err(e) = crate::repo::run_git_hooked(
+        worktree,
+        &["commit", "-q", "-m", &message],
+        &[],
+        &[
+            "pre-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+        ],
+    ) {
         return AutoCommit::Unrecorded(format!(
             "could not commit {files} file(s) the `{step}` step left: {e}"
         ));

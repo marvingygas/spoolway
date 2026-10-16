@@ -675,6 +675,19 @@ pub fn fire_due(
                 // that submission's copy once saved and skips as still
                 // queued, or fires if the copy never landed.
             }
+            Err(err)
+                if err
+                    .downcast_ref::<crate::tracking::OpenTimedOut>()
+                    .is_some() =>
+            {
+                // The `open` hook hung and was stopped at its limit. That
+                // minute's firing fails and is recorded as such, so the
+                // passes left in the same minute do not each wait out the
+                // limit again; the next due minute tries once more.
+                record.skipped_minute = Some(minute.clone());
+                dirty = true;
+                problems.push(format!("job {}: {err:#}", job.name));
+            }
             Err(err) => {
                 // Only a base problem is recorded like the unknown-key case:
                 // a job with no base it can resolve fails the same way on

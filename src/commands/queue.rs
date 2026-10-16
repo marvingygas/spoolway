@@ -2705,7 +2705,8 @@ fn open_tickets(
                 );
                 log.row("task issue", "created", &ticket, tasks[i].id());
             }
-            crate::tracking::OpenResult::Failed { exit_code } => {
+            failed @ (crate::tracking::OpenResult::Failed { .. }
+            | crate::tracking::OpenResult::TimedOut) => {
                 log.row("task issue", "FAILED", "—", tasks[i].id());
                 // The group's winning slug onto every task first, so the
                 // ids written back carry the dependency-order decision — not
@@ -2713,9 +2714,22 @@ fn open_tickets(
                 // otherwise let win the re-run.
                 stamp_group_slugs(tasks, &group_slug);
                 let written_back = write_back_ids(submitted, tasks)?;
-                let code = exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "no code".to_string());
+                // A hook that ran past its limit fails the add the same way
+                // one that exited non-zero does: all or nothing, with the
+                // limit named so a person knows the hook was stopped.
+                let timed_out = matches!(failed, crate::tracking::OpenResult::TimedOut);
+                let what = match failed {
+                    crate::tracking::OpenResult::Failed { exit_code } => format!(
+                        "exited {}",
+                        exit_code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "no code".to_string())
+                    ),
+                    _ => format!(
+                        "was still running after {} and was stopped",
+                        crate::tracking::minutes(crate::tracking::OPEN_FETCH_TIMEOUT)
+                    ),
+                };
                 // `opened` and `ids` rows carry what this batch actually
                 // did, so they are left out entirely when nothing had been
                 // opened yet — there is nothing to resume from, and running
@@ -2744,10 +2758,18 @@ fn open_tickets(
                     rows.push_str(&format!("    {:<9}{ids}\n", "ids"));
                 }
                 rows.push_str(&format!("    {:<9}{log}", "log"));
-                bail!(
-                    "the open hook exited {code} for `{}` — nothing was queued.\n\n{rows}",
+                let message = format!(
+                    "the open hook {what} for `{}` — nothing was queued.\n\n{rows}",
                     tasks[i].id(),
                 );
+                // Typed so a job firing can tell a hang from a failure: a
+                // job retries a failure on the next pass, and a hook that
+                // hangs would cost the dispatcher its full limit again on
+                // every pass of the same minute.
+                if timed_out {
+                    return Err(crate::tracking::OpenTimedOut(message).into());
+                }
+                bail!("{message}");
             }
         }
     }
