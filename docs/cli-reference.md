@@ -275,7 +275,7 @@ spoolway queue add --from <PATH> --base <BRANCH>
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
+| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. A directory skips dotfiles and links that point nowhere, and names each on standard error. Repeatable. Every task is validated together and written all or none |
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 | `--no-tracking [<GROUP>]` | | Queue a group with `tracking: off` and call no `open` hook for it. Repeatable, once per group. With no group, it covers every group in the batch |
@@ -312,6 +312,11 @@ routines tab follow the same rule. An add that cannot take the id's lock within 
 When several adds of root tasks into one group run at the same moment, one queues its root and
 the others are refused. The message names the group and both roots. An add that cannot take the
 group's lock within three seconds is refused with `could not lock group`. Run it again.
+
+A task that sets a key spelt like a field of the task contract in another case or with `-` for
+`_`, such as `gate-at:`, `depends-on:` or `ID:`, refuses the whole batch. The message names the
+field. For a field spoolway sets itself, it says to remove the key. See [The frontmatter is
+spoolway's](tasks.md#the-frontmatter-is-spoolways).
 
 A task body that still holds its skeleton's `[[…]]` placeholder text refuses the whole batch. The
 message names the section. See [One constraint no key can express](tasks.md#one-constraint-no-key-can-express).
@@ -884,7 +889,7 @@ spoolway task edit <task> --section Mockup --from -
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--section <NAME>` | | The `##` heading to rewrite, named without its `##` |
+| `--section <NAME>` | | The `##` heading to rewrite, named without its `##`. A `##` line inside a code fence stays in the section |
 | `--from <PATH>` | | The section's new content: a file path, or `-` for standard input |
 
 See [The stop is yours to work in](tasks.md#the-stop-is-yours-to-work-in).

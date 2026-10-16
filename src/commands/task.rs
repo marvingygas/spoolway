@@ -96,7 +96,35 @@ const IGNORED_KEYS: &[&str] = &[
 ];
 
 /// What a task does with a key none of the four groups above name.
-const PASSTHROUGH: &str = "any key not named here survives untouched, for a project's own metadata";
+const PASSTHROUGH: &str = "any key not named here survives untouched, for a project's own \
+     metadata — except one that reads as a named key with its case or its hyphens \
+     changed (`gate-at`, `ID`), which is refused with the key it means";
+
+/// The named key `key` is a misspelling of, if it is one, and whether that
+/// key is one a task may set.
+///
+/// A misspelling is the same key in another case, or with `-` where it has
+/// `_`: `gate-at` and `Gate_At` are both `gate_at`. Left alone they land in
+/// the task's passthrough metadata and the intent behind them is lost
+/// without a word. A key spelt exactly right, or one that reads as none of
+/// the four groups, gives `None`, so a project's own metadata key is never
+/// refused.
+///
+/// Built from the same four groups the contract prints, so the check cannot
+/// know a key the contract does not name.
+pub(crate) fn misspelt_key(key: &str) -> Option<(&'static str, bool)> {
+    let folded = key.to_ascii_lowercase().replace('-', "_");
+    let named = |group: &'static [&'static str], settable: bool| {
+        group
+            .iter()
+            .find(|known| **known == folded && **known != key)
+            .map(|known| (*known, settable))
+    };
+    named(REQUIRED_KEYS, true)
+        .or_else(|| named(OPTIONAL_KEYS, true))
+        .or_else(|| named(super::queue::RESERVED_KEYS, false))
+        .or_else(|| named(IGNORED_KEYS, false))
+}
 
 /// One sentence per settable key — [`REQUIRED_KEYS`] and [`OPTIONAL_KEYS`],
 /// together — on how to fill it. Nothing here about sizing, non-goals or

@@ -224,7 +224,8 @@ fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
     front_str(yaml, "starts_from").or_else(|| front_str(yaml, "cut_from"))
 }
 
-/// Every `.md` file directly inside `dir`, filename order — the listing
+/// Every `.md` file directly inside `dir` that is a task file, not an
+/// editor's dotfile or dangling lock link, filename order — the listing
 /// [`list_groups_and_skipped`] runs the same way over all three of its own sources.
 fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -232,6 +233,7 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter(|path| super::queue::not_a_task_file(path).is_none())
         .collect();
     paths.sort();
     Ok(paths)
@@ -355,7 +357,7 @@ pub(crate) fn list_groups_in(
 
     for path in md_files(&dir)? {
         // A file that will not read — held open under an exclusive lock on
-        // Windows, a broken symlink — is skipped like an unparsable one, not
+        // Windows — is skipped like an unparsable one, not
         // propagated: one bad task must not fail the whole listing. It goes
         // into `skipped`, which is how the queue tab names it.
         //
@@ -1159,6 +1161,22 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["garbage.md", "no-group.md"], "{names:?}");
+    }
+
+    /// An editor's dotfile and a dangling lock link in the pending directory
+    /// are not tasks, so the tab does not name them as unreadable ones —
+    /// `queue add --from` skips the same files.
+    #[test]
+    fn editor_files_are_not_listed_as_skipped_tasks() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-editor-files");
+        write(&repo, "good.md", &doc("good", "issue-42", ""));
+        std::fs::write(repo.pending_dir().join(".pa.md"), "swap").unwrap();
+        std::os::unix::fs::symlink("user@host.1", repo.pending_dir().join(".#pa.md")).unwrap();
+        std::os::unix::fs::symlink("gone.md", repo.pending_dir().join("dangling.md")).unwrap();
+
+        let (groups, skipped) = list_groups_and_skipped(&repo).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     /// The screen only says anything about skipped tasks when there is

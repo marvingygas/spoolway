@@ -12,6 +12,8 @@ the flow is a file edit.
 
 The file name is the pipeline name. There is no `name:` key.
 
+A UTF-8 byte order mark at the top of a pipeline file is ignored.
+
 ```
 .spoolway/pipelines/
   default.yml        # implement, review, document

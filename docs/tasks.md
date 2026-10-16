@@ -79,7 +79,9 @@ as JSON.
 | `skip`, `trial`, `trial_group` | the queue screen's `trial` menu item | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
 
-Keys not in this table are kept as they are, so a project can add its own metadata.
+Keys not in this table are kept as they are, so a project can add its own metadata. A key that
+is a field of this table spelt in another case or with `-` for `_`, such as `gate-at`,
+`depends-on` or `ID`, is refused. The message names the field it means.
 
 ### What a task may set
 
@@ -219,7 +221,7 @@ add`](cli-reference.md#spoolway-queue-add).
 ```
 spoolway queue add --from task.md               # one file
 spoolway queue add --from a.md --from b.md      # several
-spoolway queue add --from tasks/                # every *.md in a directory
+spoolway queue add --from tasks/                # every *.md in a directory, except dotfiles and broken links
 spoolway queue add --from -                     # a `---`-separated stream on stdin
 ```
 
@@ -228,8 +230,13 @@ directory and `.spoolway/routines/`. See [Queueing a plan](planning.md#queueing-
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
-A body may not contain a line that is exactly `---`. The task starts on its pipeline's first
-step.
+A directory skips each editor leftover, such as `.pa.md` or an Emacs lock link `.#pa.md` that
+points nowhere, and names it on standard error. The queue screen does not list these files
+either.
+
+A task file's body may contain a line that is exactly `---`. Only a stream on standard input
+(`--from -`) may not, because `---` is what separates its tasks. The task starts on its
+pipeline's first step.
 
 ### Read the queue
 
@@ -429,6 +436,11 @@ spoolway task edit <task> --section Mockup --from -   # read the new content fro
 `--section` names a `##` heading without its `##`. The heading must already exist in the body.
 The whole section's content is replaced, the way editing the file by hand would. Run against a
 task that is neither `paused` nor `blocked`, it is refused.
+
+A `##` line inside a fenced code block stays part of the section. A `##` line outside a fence
+in the new content is written as `\## …`, so it stays text and does not start a section. New
+content that opens a fence and does not close it is refused. The file keeps its line endings:
+a task saved with CRLF stays CRLF, frontmatter included.
 
 Every choice a stop offers is printed key first, then the command that does the same thing:
 

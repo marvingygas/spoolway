@@ -946,7 +946,9 @@ fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
 }
 
 /// Every task named by `--from`, in the order it names them: a directory
-/// expands to its `*.md` files in filename order, `-` reads a
+/// expands to its `*.md` files in filename order, minus the dotfiles and
+/// dangling links an editor leaves there, each named on standard error as it
+/// is skipped (see [`not_a_task_file`]); `-` reads a
 /// `---`-separated stream from standard input, and anything else is one
 /// file. Each entry is named for the errors below — a path, or `<stdin>#N`
 /// for a stream's Nth task — and holds the raw, unparsed task text.
@@ -976,6 +978,10 @@ pub(crate) fn gather_tasks(from: &[String]) -> Result<Vec<(String, String)>> {
                 .collect();
             entries.sort();
             for entry in entries {
+                if let Some(why) = not_a_task_file(&entry) {
+                    eprintln!("skipping {}: {why}", entry.display());
+                    continue;
+                }
                 gather_one(&entry, &mut tasks)?;
             }
         } else {
@@ -983,6 +989,30 @@ pub(crate) fn gather_tasks(from: &[String]) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(tasks)
+}
+
+/// Why a `*.md` entry of a `--from` directory is not a task file, if it is
+/// not one.
+///
+/// An editor leaves files here that merely look like tasks: a dotfile such
+/// as `.pa.md`, and Emacs's lock link `.#pa.md`, which points at
+/// `user@host.pid` and so at nothing. Reading either would fail the whole
+/// batch over a file the person never meant to queue. The queue tab's
+/// listing of the pending directory asks the same question, so the board
+/// and `queue add` agree about which files are tasks.
+pub(crate) fn not_a_task_file(path: &std::path::Path) -> Option<&'static str> {
+    let hidden = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'));
+    if hidden {
+        return Some("a dotfile, which an editor leaves behind");
+    }
+    // `exists` follows links, so a link to nothing is false here.
+    if !path.exists() {
+        return Some("a link that points nowhere");
+    }
+    None
 }
 
 /// One `--from` entry that is neither a directory nor `-`.
@@ -1019,7 +1049,7 @@ fn split_stream(input: &str) -> Vec<String> {
             // part of the fence, any more than it is to `split_fence`: left
             // in, that fence goes uncounted and the stream is cut one fence
             // late, running one task's front matter into the one before.
-            let fence = line.strip_prefix('\u{feff}').unwrap_or(line);
+            let fence = crate::task::without_bom(line);
             if fence.trim_end() == "---" {
                 fences += 1;
                 if fences == 3 {
@@ -1077,6 +1107,26 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                 "{name} sets `{key}:`, which spoolway sets on every task itself — \
                  remove it from the task"
             );
+        }
+    }
+
+    // `gate-at:` or `ID:` is not `gate_at:` or `id:`, so it would pass as
+    // passthrough metadata and the person's intent would vanish. Only a
+    // spelling that folds to a key the contract names is refused; any other
+    // key stays the project's own.
+    for key in mapping.keys().filter_map(|k| k.as_str()) {
+        match super::task::misspelt_key(key) {
+            Some((known, true)) => bail!(
+                "{name} sets `{key}:`, which spoolway does not read — it means `{known}:`. \
+                 Rename it to `{known}:`."
+            ),
+            // Renaming would only walk into the refusal or the silent drop
+            // of the key itself, so the advice is to take it out.
+            Some((known, false)) => bail!(
+                "{name} sets `{key}:`, which is `{known}:` spelt another way — a key \
+                 spoolway sets itself or throws away. Remove it from the task."
+            ),
+            None => {}
         }
     }
 
@@ -6444,7 +6494,7 @@ fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     // `split_fence` accepts a leading byte order mark, so a routine saved
     // with one reaches here too. `trim` does not count it as whitespace, so
     // left on, the fence would not be found and the id would go unminted.
-    let doc = doc.strip_prefix('\u{feff}').unwrap_or(doc);
+    let doc = crate::task::without_bom(doc);
     let Some(nl) = doc.find('\n') else {
         return doc.to_string();
     };
@@ -12066,6 +12116,54 @@ mod tests {
         assert_eq!(docs.len(), 2, "{docs:?}");
         assert!(docs[0].0.ends_with("a.md"), "{docs:?}");
         assert!(docs[1].0.ends_with("b.md"), "{docs:?}");
+    }
+
+    /// A dotfile and a link that points nowhere, both ending `.md`, are left
+    /// out of a `--from` directory rather than failing the batch.
+    #[test]
+    fn a_directory_skips_dotfiles_and_dangling_links() {
+        let (repo, _root_guard) = fixture("from-dir-editor-files");
+        let dir = repo.root.join("tasks");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), task_text("a", "group: demo\n", BODY)).unwrap();
+        std::fs::write(dir.join(".b.md"), "swap").unwrap();
+        std::os::unix::fs::symlink("user@host.123", dir.join(".#a.md")).unwrap();
+        std::os::unix::fs::symlink("gone.md", dir.join("c.md")).unwrap();
+
+        let docs = gather_tasks(&[dir.display().to_string()]).unwrap();
+
+        assert_eq!(docs.len(), 1, "{docs:?}");
+        assert!(docs[0].0.ends_with("a.md"), "{docs:?}");
+    }
+
+    /// A key that folds to a key spoolway reads is refused by name, and one
+    /// that folds to nothing it reads is left alone.
+    #[test]
+    fn a_misspelt_known_key_is_refused_and_a_project_key_is_not() {
+        for (key, known) in [
+            ("gate-at", "gate_at"),
+            ("depends-on", "depends_on"),
+            ("ID", "id"),
+        ] {
+            let raw = task_text("a", &format!("group: demo\n{key}: x\n"), BODY);
+            let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(&format!("`{known}:`")), "{message}");
+        }
+        // A reserved or ignored key is told to go, not to be renamed into
+        // the refusal or the silent drop that follows.
+        for (key, known) in [("Stage", "stage"), ("Worktree-Path", "worktree_path")] {
+            let raw = task_text("a", &format!("group: demo\n{key}: x\n"), BODY);
+            let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(&format!("`{known}:`")), "{message}");
+            assert!(message.contains("Remove it"), "{message}");
+            assert!(!message.contains("Rename"), "{message}");
+        }
+        let raw = task_text("a", "group: demo\nTracking: off\n", BODY);
+        assert!(parse_submission("a.md", &raw, Some("main")).is_err());
+        let raw = task_text("a", "group: demo\nowner-team: x\n", BODY);
+        parse_submission("a.md", &raw, Some("main")).unwrap();
     }
 
     // ------------------------------------------------------------- the screen
