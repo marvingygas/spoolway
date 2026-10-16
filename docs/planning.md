@@ -207,7 +207,7 @@ Running the trial queues one full copy of the whole group per ticked pipeline. E
 its own group, named `<group>-<pipeline>`, or `<group>-<pipeline>-2` (then `-3`, and so on) when
 that name is already in the queue or the archive. Copies are minted in the order the pipeline
 list ticks them, and each task keeps its own id across copies: a task `alpha` becomes `alpha-1`
-in the first ticked pipeline's copy, `alpha-2` in the second's, and so on. A copy keeps the
+in the first ticked pipeline's copy, `alpha-2` in the second's, and so on. A number whose id is held by a queue file, an archive file, a `task/<id>` branch or a routine name is passed over. A copy keeps the
 source chain: a task's `depends_on` on another task in the group points at that task's own
 minted id in the same copy. All arms, across every copy, share one trial id. A step ticked to
 skip on the second screen is skipped by every arm of that pipeline's own copy. The source tasks
@@ -275,7 +275,7 @@ because a live copy could be hiding in it. The popup names each such file and it
 The tab reads the routine folders again each time you switch to it, so a routine saved with
 `save as routine` a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 
-Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
+Every queued copy gets a fresh id, so a routine can run again. The id is the lowest `<id>-N` that no queue file, archive file, `task/<id>-N` branch or routine name holds. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.
 
 Each copy also carries `routine: <id>`, the `id:` of the routine file it was copied from. The

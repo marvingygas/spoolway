@@ -365,8 +365,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         }
 
         match repo.tasks_and_problems() {
-            // Not for a queue holding a file that will not parse: that file
-            // is a task nobody has finished, and this pass already named it.
+            // Not for a queue holding a skipped file: one that will not parse
+            // is a task nobody has finished, and a duplicate of an id is a
+            // file a person still has to rename or delete. This pass already
+            // named it, and stopping would stop naming it.
             Ok((tasks, problems)) if tasks.is_empty() && problems.is_empty() => {
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.

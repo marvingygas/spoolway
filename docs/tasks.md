@@ -200,7 +200,7 @@ a file of its own.
 tasks in one call are checked together and written all or none. The queue screen leaves out a
 task whose start branch does not exist and queues the rest. See [A start branch that does not
 exist](#a-start-branch-that-does-not-exist). A task id that is already in the queue or the
-archive is refused, also when several adds of that id run at once. See [`spoolway queue
+archive is refused, as is a task id that is the name of a routine, also when several adds of that id run at once. See [`spoolway queue
 add`](cli-reference.md#spoolway-queue-add).
 
 ```
@@ -230,8 +230,11 @@ step.
 | `spoolway queue resume <task>` | Same as `r` on the board. |
 | `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
 
-A queue file that does not parse is skipped. The board names it in amber, `spoolway queue list`
-names it with its reason, and the dispatcher keeps running while it is in the queue. A pending file
+A queue file that does not parse is skipped. A queue file that holds an id another file holds is
+skipped too, as is a queue file whose id is already in the archive. The file whose name is the id
+runs, and the other is left untouched. The board names a skipped file in amber, `spoolway queue
+list` names it with its reason, `spoolway doctor` fails a duplicate, and the dispatcher keeps
+running while it is in the queue. A pending file
 that does not parse is named on the queue screen. See [`spoolway queue list`](cli-reference.md#spoolway-queue-list).
 
 ## Expressing order

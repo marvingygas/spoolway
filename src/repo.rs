@@ -818,7 +818,7 @@ impl Repo {
     /// failing the whole read — see [`task::load_dir`]. Callers that want to
     /// name the bad file reach for [`Repo::tasks_and_problems`] instead.
     pub fn tasks(&self) -> Result<Vec<Task>> {
-        Ok(task::load_dir(&self.queue_dir())?.0)
+        Ok(self.tasks_and_problems()?.0)
     }
 
     /// Every active task in id order, together with the queue files that
@@ -828,8 +828,13 @@ impl Repo {
     /// The board reads the queue through `status::cached_queue` instead, a
     /// per-file cache over the same [`task::load_dir`] that skips reparsing a
     /// file whose bytes have not moved since the last frame.
+    ///
+    /// A queue task whose id the archive already holds is skipped and named
+    /// too — see [`task::skip_archived_ids`].
     pub fn tasks_and_problems(&self) -> Result<(Vec<Task>, Vec<task::LoadProblem>)> {
-        task::load_dir(&self.queue_dir())
+        let (tasks, mut problems) = task::load_dir(&self.queue_dir())?;
+        let tasks = task::skip_archived_ids(tasks, &mut problems, &self.archive_dir());
+        Ok((tasks, problems))
     }
 
     /// The id of every task file currently in `queue/`, read from the file
@@ -4516,6 +4521,35 @@ mod tests {
         let (home, home_guard) = scratch_home("registered");
         let repo = crate::platform::test_home::with_home(&home, || Repo::discover(start))?;
         Ok((repo, home_guard))
+    }
+
+    /// The dispatcher pass, `queue list` and `doctor` all read the queue
+    /// through here. A copy whose id the archive holds must come back as a
+    /// duplicate problem and no task, or `dd1` would run a second time once
+    /// the first run archives.
+    #[test]
+    fn tasks_and_problems_skips_a_queue_file_whose_id_is_archived() {
+        let base = crate::scratch::root("repo-archived-id-skipped");
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config: Config::default(),
+            home: base.join(".home"),
+        };
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(repo.queue_dir().join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(repo.archive_dir().join("dd1.md"), doc).unwrap();
+
+        let (tasks, problems) = repo.tasks_and_problems().unwrap();
+
+        assert!(tasks.is_empty());
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].duplicate);
+        assert!(problems[0].path.ends_with("dd1 - Copy.md"));
+        assert!(repo.tasks().unwrap().is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A bare "origin", a checkout wired to it, and spoolway state in the

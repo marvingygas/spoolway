@@ -1591,6 +1591,26 @@ fn writer_pid(file_name: &str) -> Option<u32> {
 pub struct LoadProblem {
     pub path: PathBuf,
     pub error: String,
+    /// The file parsed, but its `id:` is already held by another queue file —
+    /// see [`skip_duplicate_ids`]. `doctor` fails these and nothing else here,
+    /// since a file that will not parse has no id to collide.
+    pub duplicate: bool,
+}
+
+impl LoadProblem {
+    /// What a person reads for this file in a list of skipped ones: a
+    /// duplicate parsed fine, so it is not said not to.
+    pub fn skipped_line(&self) -> String {
+        if self.duplicate {
+            format!("{} {}", self.path.display(), self.error)
+        } else {
+            format!(
+                "{} did not parse and was skipped: {}",
+                self.path.display(),
+                self.error
+            )
+        }
+    }
 }
 
 /// Load every `*.md` task file in a directory, sorted by id for stable
@@ -1602,7 +1622,8 @@ pub struct LoadProblem {
 /// hand-edit left without its closing `---` froze the whole pipeline with
 /// the only trace in `~/.spoolway/logs/<project>.log`. The bad file is now
 /// skipped and returned in the second half of the pair, for the caller to
-/// name where a person will see it.
+/// name where a person will see it. A second file holding an id another file
+/// already holds is skipped the same way — see [`skip_duplicate_ids`].
 pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     let mut tasks = Vec::new();
     let mut problems = Vec::new();
@@ -1623,13 +1644,97 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
             Err(e) => problems.push(LoadProblem {
                 path,
                 error: format!("{e:#}"),
+                duplicate: false,
             }),
         }
     }
 
-    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
+    let tasks = skip_duplicate_ids(tasks, &mut problems);
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems))
+}
+
+/// Keep one task per `id:` and turn every other file holding it into a
+/// [`LoadProblem`], then sort the survivors by id.
+///
+/// Two queue files with one id, such as a Windows Explorer copy
+/// `dd1 - Copy.md` beside `dd1.md`, used to load as two tasks. Both ran the
+/// same steps against the same branch and both saved over the same task
+/// file, so the dispatcher relaunched them hundreds of times a minute and the
+/// task never archived. The file whose stem equals the id is the one a person
+/// queued, so it wins. When none does, the first by path wins, so the choice
+/// is the same on every pass. The others are named, never deleted.
+///
+/// Shared by [`load_dir`] and the board's cached reader, so the dispatcher,
+/// `queue list` and the board agree on which file is the task.
+pub fn skip_duplicate_ids(mut tasks: Vec<Task>, problems: &mut Vec<LoadProblem>) -> Vec<Task> {
+    // Stem match first, then path, so the kept file does not depend on the
+    // order `read_dir` happened to list the directory in.
+    let stem_is_id =
+        |task: &Task| task.path.file_stem().and_then(|s| s.to_str()) == Some(task.id());
+    tasks.sort_by(|a, b| {
+        a.front
+            .id
+            .cmp(&b.front.id)
+            .then(stem_is_id(b).cmp(&stem_is_id(a)))
+            .then(a.path.cmp(&b.path))
+    });
+    let mut kept: Vec<Task> = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match kept.last() {
+            Some(first) if first.id() == task.id() => problems.push(LoadProblem {
+                error: format!(
+                    "holds the id `{id}`, which {first} already holds, so it was skipped. \
+                     Two files with one id would run the same task twice; rename this \
+                     file's `id:` or delete the file",
+                    id = task.id(),
+                    first = first.path.display(),
+                ),
+                path: task.path,
+                duplicate: true,
+            }),
+            _ => kept.push(task),
+        }
+    }
+    kept
+}
+
+/// Drop every queue task whose id already has a record in `archive_dir`,
+/// naming each as a [`LoadProblem`].
+///
+/// [`skip_duplicate_ids`] only compares queue files with each other, so once
+/// `dd1.md` finishes and moves to the archive, a leftover `dd1 - Copy.md`
+/// would stop being a duplicate and run `dd1` a second time. It would then
+/// archive over the first run's record, or sit blocked on a branch the first
+/// run left. `queue add` already refuses an id the archive holds, so no
+/// legitimate queue file shares one. Archiving renames the queue file in one
+/// step, so a task's own file is never in both places at once.
+pub fn skip_archived_ids(
+    tasks: Vec<Task>,
+    problems: &mut Vec<LoadProblem>,
+    archive_dir: &Path,
+) -> Vec<Task> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let archived = archive_dir.join(format!("{}.md", task.id()));
+        if archived.exists() {
+            problems.push(LoadProblem {
+                error: format!(
+                    "holds the id `{}`, which {} already finished, so it was skipped. \
+                     Running it would archive over that record; rename this file's `id:` \
+                     or delete the file",
+                    task.id(),
+                    archived.display(),
+                ),
+                path: task.path,
+                duplicate: true,
+            });
+        } else {
+            kept.push(task);
+        }
+    }
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    kept
 }
 
 /// The unprefixed branch name for a task: `task/<id>`. The one place this
@@ -2461,6 +2566,67 @@ mod tests {
         assert_eq!(tasks[0].id(), "good");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].path.ends_with("broken.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two queue files holding one id load as one task: the file named for
+    /// the id. The other is a problem, named and flagged as a duplicate. Two
+    /// loaded tasks made the dispatcher run the same steps over and over.
+    #[test]
+    fn load_dir_keeps_the_file_named_for_the_id_and_names_the_copy() {
+        let dir = crate::scratch::root("load-dir-duplicate-id");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(dir.join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(dir.join("dd1.md"), doc).unwrap();
+
+        let (tasks, problems) = load_dir(&dir).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].path.ends_with("dd1.md"));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].path.ends_with("dd1 - Copy.md"));
+        assert!(problems[0].duplicate);
+        assert!(
+            problems[0].error.contains("dd1.md"),
+            "{}",
+            problems[0].error
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Once `dd1` has archived, a leftover `dd1 - Copy.md` is no longer a
+    /// duplicate of any queue file. It still must not run: the archive holds
+    /// the id, and a second run would archive over the first one's record.
+    #[test]
+    fn a_queue_task_whose_id_is_archived_is_skipped_and_named() {
+        let dir = crate::scratch::root("skip-archived-id");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (queue, archive) = (dir.join("queue"), dir.join("archive"));
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(archive.join("dd1.md"), doc).unwrap();
+        std::fs::write(queue.join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(
+            queue.join("other.md"),
+            "---\nid: other\nstage: queued\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+
+        let (tasks, mut problems) = load_dir(&queue).unwrap();
+        let tasks = skip_archived_ids(tasks, &mut problems, &archive);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id(), "other");
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].duplicate);
+        let line = problems[0].skipped_line();
+        assert!(line.contains("dd1 - Copy.md"), "{line}");
+        assert!(!line.contains("did not parse"), "{line}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

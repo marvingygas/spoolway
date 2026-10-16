@@ -266,6 +266,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
     report.record_all(cheap_branch_checks(repo, &tasks));
+    report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
     report.record(Finding::Check(
         "git identity".into(),
@@ -471,6 +472,7 @@ pub fn doctor(
     report.record_all(orphaned_home_note());
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
+    report.record_all(queue_id_checks(repo));
     report.record_all(branch_and_forge_checks(
         repo,
         &tasks,
@@ -2475,6 +2477,54 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     findings
 }
 
+/// Queue ids that cannot work: a second queue file holding an id another file
+/// already holds, and a queued task whose id is a routine's name.
+///
+/// The first is the Windows Explorer copy `dd1 - Copy.md` beside `dd1.md`.
+/// The dispatcher skips the copy and names it on every pass, but only a
+/// failure here tells a person before they start a run. The second is a task
+/// whose lanes would be named like the routine's, so the two would take over
+/// each other's panes. Queueing one is refused, but a routine added after
+/// the task was queued is only caught here.
+fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
+    let (tasks, problems) = repo.tasks_and_problems().unwrap_or_default();
+
+    let duplicates: Vec<String> = problems
+        .iter()
+        .filter(|problem| problem.duplicate)
+        .map(|problem| format!("{} {}", problem.path.display(), problem.error))
+        .collect();
+    let unique = if duplicates.is_empty() {
+        Ok(None)
+    } else {
+        Err(anyhow::anyhow!("{}", duplicates.join("; ")))
+    };
+
+    let routines = super::queue::routine_names(repo);
+    let clashing: Vec<String> = tasks
+        .iter()
+        .filter(|task| routines.contains(task.id()))
+        .map(|task| {
+            format!(
+                "`{id}` is the name of routine `{id}`, whose copies' lanes are named \
+                 `{id}{}<step>`; give the task another id",
+                crate::mux::LANE_NAME_SEPARATOR,
+                id = task.id()
+            )
+        })
+        .collect();
+    let unrouted = if clashing.is_empty() {
+        Ok(None)
+    } else {
+        Err(anyhow::anyhow!("{}", clashing.join("; ")))
+    };
+
+    vec![
+        Finding::Check("queue ids are unique".into(), unique),
+        Finding::Check("no queued task is named like a routine".into(), unrouted),
+    ]
+}
+
 /// Cron jobs: one whose table carries a key no job reads, one that names a
 /// routine that is gone, one whose expression will not parse, one whose
 /// pipeline is not defined, one whose `base` is not a branch this repository
@@ -3854,6 +3904,34 @@ mod tests {
             },
             checkout,
         )
+    }
+
+    /// A second queue file with an id already held, and a queued task named
+    /// like a routine, each fail their own row.
+    #[test]
+    fn queue_id_checks_fail_a_duplicate_file_and_a_routine_named_task() {
+        let (repo, _scratch) = scratch_repo("queue-id-checks");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        let doc = |id: &str| format!("---\nid: {id}\nstage: queued\n---\n## Goal\nok\n");
+        std::fs::write(repo.queue_dir().join("dd1.md"), doc("dd1")).unwrap();
+        std::fs::write(repo.queue_dir().join("dd1 - Copy.md"), doc("dd1")).unwrap();
+        std::fs::write(repo.queue_dir().join("nite.md"), doc("nite")).unwrap();
+        let folder = repo.routines_dir().join("nightly");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("nite.md"), doc("nite")).unwrap();
+
+        let findings = queue_id_checks(&repo);
+
+        let why = |label: &str| {
+            findings.iter().find_map(|finding| match finding {
+                Finding::Check(name, Err(err)) if name == label => Some(format!("{err:#}")),
+                _ => None,
+            })
+        };
+        let duplicate = why("queue ids are unique").expect("a failed row");
+        assert!(duplicate.contains("dd1 - Copy.md"), "{duplicate}");
+        let routine = why("no queued task is named like a routine").expect("a failed row");
+        assert!(routine.contains("routine `nite`"), "{routine}");
     }
 
     /// `doctor`'s note names the file that failed: the override layer's

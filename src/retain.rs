@@ -69,9 +69,10 @@
 //! see [`crate::commands::queue::check_dependencies_set`], which says so
 //! when it refuses one. An archived task that a task in `queue/` still names
 //! in `depends_on` is spared whatever its age, because that dependent could
-//! never start without it. The sweep also removes a swept task's line from
-//! `archive/index.jsonl` in the same pass, and never sweeps that file itself
-//! — see [`crate::archive_index`].
+//! never start without it. So is the record of an id a queue file holds, or a
+//! leftover copy of the finished task would run it again. The sweep also
+//! removes a swept task's line from `archive/index.jsonl` in the same pass,
+//! and never sweeps that file itself — see [`crate::archive_index`].
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -204,28 +205,37 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     removed
 }
 
-/// The `archive/` file names a task still in `queue/` names in `depends_on`.
+/// The `archive/` file names the queue still needs: each one a task in
+/// `queue/` names in `depends_on`, and each one named for the id a queue
+/// file holds.
 ///
 /// A dependent whose dependency file has been swept waits forever: nothing
 /// can satisfy it, and the dispatcher reports "nothing to do". Archive
 /// entries are named `<id>.md`, which [`crate::mux::lane_task`] leaves whole,
 /// so these names go straight into [`sweep_dir`]'s guard.
 ///
+/// The second kind guards a leftover copy such as `dd1 - Copy.md`. While
+/// `archive/dd1.md` exists the copy is skipped, because its id is finished.
+/// Sweep that record and the copy would load again and run `dd1` a second
+/// time. `queue/` is read with [`crate::task::load_dir`], which has no archive
+/// skip, so the copy's id is among the ids spared here.
+///
 /// `None` when the queue cannot be read in full: the directory errors, or a
 /// queue file does not parse, so its `depends_on` is unknown. The caller then
 /// skips the archive sweep for this pass. Sweeping anyway could delete the
 /// dependency of the unreadable task, which would still be missing after the
 /// file is repaired. This is the same fail-toward-keeping rule as
-/// [`max_age`].
+/// [`max_age`]. A duplicate of another file's id parsed, so its `depends_on`
+/// is known and it does not stop the sweep.
 fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
     let (tasks, problems) = crate::task::load_dir(&repo.queue_dir()).ok()?;
-    if !problems.is_empty() {
+    if problems.iter().any(|problem| !problem.duplicate) {
         return None;
     }
     Some(
         tasks
             .iter()
-            .flat_map(|task| task.front.depends_on.iter())
+            .flat_map(|task| task.front.depends_on.iter().chain([&task.front.id]))
             .map(|id| format!("{id}.md"))
             .collect(),
     )
@@ -240,11 +250,12 @@ fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
 /// `spared` is `Some` for `scratch/`, `headless/` (and its `logs/`),
 /// `commands/`, `tracking/` and `archive/`. An entry whose name, cut at its
 /// first lane separator by [`crate::mux::lane_task`], is in that set is never
-/// swept, however old it reads. For every one but `archive/` the set holds the ids of queued
-/// tasks, so the entry is a live task's. For `headless/` it also holds their
-/// routines' names, since a routine copy's lane is named for its routine. For `archive/` it holds the
-/// `<id>.md` file names of finished tasks a queued task depends on, which
-/// `lane_task` leaves whole. `None` for `system-prompts/`.
+/// swept, however old it reads. For every one but `archive/` the set holds
+/// the ids of queued tasks, so the entry is a live task's. For `headless/` it
+/// also holds their routines' names, since a routine copy's lane is named for
+/// its routine. For `archive/` it holds the `<id>.md` file names of finished
+/// tasks a queued task depends on or shares an id with, which `lane_task`
+/// leaves whole. `None` for `system-prompts/`.
 ///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes
@@ -730,6 +741,85 @@ mod tests {
         assert!(
             !repo.archive_dir().join("unrelated.md").exists(),
             "an archived task nothing depends on should have gone"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A leftover `dd1 - Copy.md` is skipped only while `archive/dd1.md`
+    /// exists, so the sweep keeps that record however old it reads.
+    #[test]
+    fn the_archive_sweep_keeps_the_record_of_an_id_a_queue_copy_holds() {
+        let base = crate::scratch::root("retain-archive-duplicate-copy");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.archive_retention_days = 30;
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("dd1 - Copy.md"),
+            "---\nid: dd1\nstage: queued\n---\n",
+        )
+        .unwrap();
+        for id in ["dd1", "unrelated"] {
+            let file = repo.archive_dir().join(format!("{id}.md"));
+            std::fs::write(&file, format!("---\nid: {id}\nstage: done\n---\n")).unwrap();
+            age(&file, 60 * SECS_PER_DAY);
+        }
+
+        sweep_now(&repo);
+
+        assert!(
+            repo.archive_dir().join("dd1.md").exists(),
+            "the record of an id a queue copy holds was swept"
+        );
+        assert!(
+            !repo.archive_dir().join("unrelated.md").exists(),
+            "a skipped copy should not stop the sweep of other archive files"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Two queue files holding one id parsed, so the second does not hide a
+    /// `depends_on` and the archive sweep still runs: an old archive file
+    /// nothing needs is swept beside them.
+    #[test]
+    fn the_archive_sweep_runs_while_a_queue_file_duplicates_an_id() {
+        let base = crate::scratch::root("retain-archive-duplicate-queue-files");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.archive_retention_days = 30;
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        for name in ["ee.md", "ee - Copy.md"] {
+            std::fs::write(
+                repo.queue_dir().join(name),
+                "---\nid: ee\nstage: queued\n---\n",
+            )
+            .unwrap();
+        }
+        let file = repo.archive_dir().join("unrelated.md");
+        std::fs::write(&file, "---\nid: unrelated\nstage: done\n---\n").unwrap();
+        age(&file, 60 * SECS_PER_DAY);
+
+        sweep_now(&repo);
+
+        assert!(
+            !file.exists(),
+            "a duplicate queue file should not stop the archive sweep"
         );
         std::fs::remove_dir_all(&base).ok();
     }

@@ -51,6 +51,7 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
                 .map(|problem| serde_json::json!({
                     "path": problem.path.display().to_string(),
                     "error": problem.error,
+                    "duplicate": problem.duplicate,
                 }))
                 .collect::<Vec<_>>(),
         });
@@ -78,16 +79,28 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
         if !rows.is_empty() {
             println!();
         }
-        println!(
-            "{} in the queue did not parse, so the dispatcher skips {}:",
-            plural(problems.len(), "file"),
-            match problems.len() {
-                1 => "it",
-                _ => "them",
+        // A duplicate parsed fine, so it is not said not to: it is skipped
+        // because another file already holds its id.
+        let (duplicates, unparsed): (Vec<_>, Vec<_>) =
+            problems.iter().partition(|problem| problem.duplicate);
+        for (group, reason) in [
+            (unparsed, "did not parse"),
+            (duplicates, "holds an id already in use"),
+        ] {
+            if group.is_empty() {
+                continue;
             }
-        );
-        for problem in &problems {
-            println!("  {} — {}", problem.path.display(), problem.error);
+            let (them, reason) = match group.len() {
+                1 => ("it", reason.to_string()),
+                _ => ("them", reason.replace("holds", "hold")),
+            };
+            println!(
+                "{} in the queue {reason}, so the dispatcher skips {them}:",
+                plural(group.len(), "file"),
+            );
+            for problem in group {
+                println!("  {} — {}", problem.path.display(), problem.error);
+            }
         }
         println!("Fix the file, or move it out of the queue directory.");
     }
@@ -1333,6 +1346,9 @@ fn validate_batch_undescribed(
         crate::mux::check_task_id(&task.front.id)?;
 
         task.path = repo.queue_dir().join(format!("{}.md", task.front.id));
+        if let Some(refusal) = routine_name_refusal(repo, &task.front.id) {
+            bail!("{refusal}");
+        }
         if let Some(existing) = existing_task_path(repo, &task.front.id) {
             bail!(
                 "task `{}` already exists at {}",
@@ -1459,6 +1475,10 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
 /// repeat submission — and a trial's own mint, below — both need to be true
 /// before a name is safe to use: a queued collision fails at once, and an
 /// archived one would be silently overwritten the moment this task finished.
+///
+/// A queue file holds an id under any name, not only `<id>.md`: a copy such
+/// as `dd1 - Copy.md` still says `id: dd1`, and a second task saved under
+/// that id would run beside it. So the queue is read for its ids as well.
 fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
     for dir in [repo.queue_dir(), repo.archive_dir()] {
         let path = dir.join(format!("{id}.md"));
@@ -1466,13 +1486,58 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
             return Some(path);
         }
     }
-    None
+    queued_id_paths(repo).remove(id)
 }
 
-/// The lowest-numbered `<id>-N` free in both the queue and the archive — see
-/// [`existing_task_path`] — and not already claimed earlier in the same
-/// trial, since a batch of arms is minted before any of them is saved and
-/// so cannot see each other on disk yet.
+/// The path of every queue file that parses, by the `id:` it holds. A file
+/// that will not parse has no id to hold and is left out; one hiding a
+/// duplicate of an id is left out too, because the file that holds the id is
+/// the one named.
+fn queued_id_paths(repo: &Repo) -> BTreeMap<String, std::path::PathBuf> {
+    let (tasks, _) = repo.tasks_and_problems().unwrap_or_default();
+    tasks
+        .into_iter()
+        .map(|task| (task.front.id.clone(), task.path))
+        .collect()
+}
+
+/// The ids of every task file under `.spoolway/routines/`: the names routine
+/// copies are numbered from and their lanes are drawn under.
+pub(crate) fn routine_names(repo: &Repo) -> std::collections::BTreeSet<String> {
+    super::routines::list_routines(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|folder| folder.tasks)
+        .map(|task| task.id)
+        .collect()
+}
+
+/// The refusal for an id that is a routine's name, or `None` when it is not.
+///
+/// A routine's copies are numbered (`nite-1`), but their lanes are named for
+/// the routine (`nite · implement`). An ordinary task with the id `nite`
+/// would be given the same lane name, and the two would take over each
+/// other's panes.
+fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
+    routine_names(repo).contains(id).then(|| {
+        format!(
+            "task id `{id}` is the name of routine `{id}`, whose copies' lanes are named \
+             `{id}{}<step>`. Give this task another id; nothing was queued.",
+            crate::mux::LANE_NAME_SEPARATOR
+        )
+    })
+}
+
+/// The lowest-numbered `<id>-N` held by no queue file, archive file,
+/// `task/<id>` branch or routine name — see [`existing_task_path`] — and not
+/// already claimed earlier in the same trial, since a batch of arms is minted
+/// before any of them is saved and so cannot see each other on disk yet.
+///
+/// The branch is checked because archive retention deletes an old task's
+/// file but not its branch. Minting the freed id again would hand dispatch a
+/// task whose first cut refuses the branch it finds already there, and the
+/// copy would sit blocked on every later window. Each candidate costs one
+/// `git show-ref`, the same lookup the first-cut guard makes.
 ///
 /// Starts at 1: an ordinary submission already reaches the queue under the
 /// task's own bare id (see [`parse_submission`]), so the first minted
@@ -1485,6 +1550,10 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
 /// the base is cut short, by as much as the suffix needs, before the suffix
 /// goes on.
 fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String>) -> String {
+    // Read once, not per candidate: the queue and the routines folder are
+    // parsed in full to answer, and a long-lived base id tries many numbers.
+    let queued = queued_id_paths(repo);
+    let routines = routine_names(repo);
     let mut n = 1usize;
     loop {
         let suffix = format!("-{n}");
@@ -1493,11 +1562,30 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
         // hyphen left at the cut would double up against the suffix.
         let base = base_id.get(..room).unwrap_or(base_id).trim_end_matches('-');
         let candidate = format!("{base}{suffix}");
-        if !taken.contains(&candidate) && existing_task_path(repo, &candidate).is_none() {
+        if !taken.contains(&candidate)
+            && !queued.contains_key(&candidate)
+            && !routines.contains(&candidate)
+            && [repo.queue_dir(), repo.archive_dir()]
+                .iter()
+                .all(|dir| !dir.join(format!("{candidate}.md")).exists())
+            && !branch_exists(repo, &candidate)
+        {
             return candidate;
         }
         n += 1;
     }
+}
+
+/// Whether `task/<id>` is a local branch.
+fn branch_exists(repo: &Repo, id: &str) -> bool {
+    let branch = crate::task::default_branch(id);
+    repo.git(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{branch}"),
+    ])
+    .is_ok()
 }
 
 /// The base a task ends up with — a task's own `base:`, or the
@@ -8928,6 +9016,9 @@ fn claim_routines<'a>(
         }
     }
     let (tasks, problems) = repo.tasks_and_problems()?;
+    // A skipped duplicate parsed fine and never runs, so it cannot be a live
+    // copy; only a file whose `routine:` cannot be read refuses the batch.
+    let problems: Vec<_> = problems.into_iter().filter(|p| !p.duplicate).collect();
     if !problems.is_empty() {
         bail!("{}", unreadable_refusal(&problems, &names));
     }
@@ -15553,8 +15644,8 @@ mod tests {
         );
     }
 
-    /// The same pair of directories a repeat submission is refused against —
-    /// see `existing_task_path` — is what a trial mints around too, so an
+    /// The same places a repeat submission is refused against — see
+    /// `existing_task_path` — are what a trial mints around too, so an
     /// id already queued or already archived is skipped over rather than
     /// collided with.
     #[test]
@@ -15606,6 +15697,78 @@ mod tests {
 
         // A short base keeps its whole name.
         assert_eq!(mint_id(&repo, "solo", &Default::default()), "solo-1");
+    }
+
+    /// A copy such as `dd1 - Copy.md` still holds `id: dd1`. Queueing `dd1`
+    /// again used to pass, because only `dd1.md` was looked for, and the two
+    /// files then ran the same task twice.
+    #[test]
+    fn an_id_held_by_a_queue_file_under_any_name_is_refused() {
+        let (repo, _root_guard) = fixture("add-id-any-file-name");
+        std::fs::write(
+            repo.queue_dir().join("dd1 - Copy.md"),
+            "---\nid: dd1\ntitle: dd1\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        let submitted = vec![("dd1.md".to_string(), task_text("dd1", "group: g\n", BODY))];
+
+        let err = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+            .unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(text.contains("already exists"), "{text}");
+        assert!(text.contains("dd1 - Copy.md"), "{text}");
+    }
+
+    /// A routine's copies are numbered but their lanes carry the routine's
+    /// name, so an ordinary task with that id would share its lane names.
+    #[test]
+    fn an_id_equal_to_a_routine_name_is_refused() {
+        let (repo, _root_guard) = fixture("add-id-routine-name");
+        let folder = repo.routines_dir().join("nightly");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("nite.md"), task_text("nite", "", BODY)).unwrap();
+        let submitted = vec![("nite.md".to_string(), task_text("nite", "group: g\n", BODY))];
+
+        let err = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains(
+                "task id `nite` is the name of routine `nite`, whose copies' lanes are \
+                 named `nite · <step>`. Give this task another id; nothing was queued."
+            ),
+            "{err:#}"
+        );
+        // The id the routine's own copies are minted under is still free.
+        assert_eq!(mint_id(&repo, "nite", &Default::default()), "nite-1");
+    }
+
+    /// Archive retention removes `archive/ping-1.md` and keeps the branch
+    /// `task/ping-1`. Minting `ping-1` again blocked the copy at its first
+    /// cut, on every window after.
+    #[test]
+    fn a_minted_id_skips_one_whose_task_branch_exists() {
+        let (repo, _root_guard) = fixture("mint-id-branch");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["branch", "task/ping-1"]);
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
+    }
+
+    /// A routine named `ping-1` holds that name too, since its lanes are
+    /// drawn under it.
+    #[test]
+    fn a_minted_id_skips_a_routine_name() {
+        let (repo, _root_guard) = fixture("mint-id-routine-name");
+        let folder = repo.routines_dir().join("pings");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("ping-1.md"), task_text("ping-1", "", BODY)).unwrap();
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
     }
 
     /// An arm forked from a task already in the archive gets its own
@@ -17616,7 +17779,15 @@ mod tests {
             "bugfix",
         )
         .unwrap();
-        add(&repo, "audit-docs", &[]);
+        // Dropped into the queue by hand: `queue add` now refuses an id that
+        // is a routine's name, so only a file already there, or one queued
+        // before the routine was added, can be in this state.
+        std::fs::write(
+            repo.queue_dir().join("audit-docs.md"),
+            "---\nid: audit-docs\ntitle: audit-docs\ngroup: demo\npipeline: default\n\
+             stage: queued\n---\n## Goal\n\nDo the thing.\n",
+        )
+        .unwrap();
         put_at(&repo, "audit-docs", crate::pipeline::PAUSED);
 
         // `nightly` sorts second, below `maintenance`.

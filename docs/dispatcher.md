@@ -123,7 +123,7 @@ weights. The footer counts lanes by the same rule.
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
 from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
-[A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse is skipped and named under the board. See [When it stops](#when-it-stops).
+[A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse, or that holds an id another file holds, is skipped and named under the board. See [When it stops](#when-it-stops).
 
 ## What runs next
 

@@ -290,10 +290,18 @@ written. A `base:` that exists only on `origin` is accepted; the worktree is cut
 both places.
 
 A task whose id is already in the queue or the archive refuses the whole batch and writes
-nothing:
+nothing. A queue file holds an id under any name, so `dd1 - Copy.md` holds `dd1` as much as
+`dd1.md` does:
 
 ```
 task `cart-totals` already exists at /home/me/.spoolway/proj-ab12cd34/queue/cart-totals.md
+```
+
+A task whose id is the name of a routine is refused too, because the lanes of the routine's
+copies take the routine's name. Nothing is queued:
+
+```
+task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. Give this task another id; nothing was queued.
 ```
 
 When several adds of one id run at the same moment, exactly one is queued and the others are
@@ -371,8 +379,12 @@ pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 On a paused or blocked row, STEP and the `--json` `stage` name the step the stop came from, so a
 script that finds paused or blocked tasks matches `state`, not `stage`.
 
-A file in the queue that does not parse has no row. Under the table, the text output lists each
-such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
+A file in the queue that does not parse has no row. A file that holds an id another file holds,
+such as `dd1 - Copy.md` beside `dd1.md`, has no row either. The dispatcher skips both. Under the
+table, the text output lists the files that do not parse under one heading, and the files that
+hold an id already in use under another. Each file is listed with its reason. In `--json`, each
+entry of `unparseable` has a `path`, an `error` and a `duplicate` boolean, which is `true` for a
+file that holds an id already in use.
 
 ### `spoolway queue show <task>`
 
@@ -1649,6 +1661,10 @@ seconds, as below. The warnings screen shown before dispatching never runs it.
 ```
   FAIL  jira.sh login: `acli jira auth status` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate. Log in again with `acli jira auth login`, then re-run `spoolway doctor`.
 ```
+
+A `FAIL` row labelled `queue ids are unique` names each queue file that holds an id another file
+holds. A `FAIL` row labelled `no queued task is named like a routine` names each queued task whose
+id is the name of a routine.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.
