@@ -662,6 +662,11 @@ pub struct Dispatcher<'a> {
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
     ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
+    /// The lines this pass appended to the ledger after `ledger` was loaded.
+    /// The unattended ceilings add them to the snapshot's sum, so the lane a
+    /// pass has just banked counts toward the brake it may have crossed; every
+    /// other reader of the snapshot is deliberately left without them.
+    banked_this_pass: Vec<crate::usage::Entry>,
     /// A fingerprint of each task's whole rendered file, as this pass first
     /// read it, by task id — not `last_report.at` alone: a key typed on the
     /// board mid-pass (`pause`, `unqueue` or `r` — see `status::on_key`) writes
@@ -1204,6 +1209,7 @@ impl<'a> Dispatcher<'a> {
             unattended: repo.unattended(),
             usage_banked: None,
             ledger: None,
+            banked_this_pass: Vec::new(),
             file_seen: HashMap::new(),
             pending_command_forget: None,
             pending_command_result: None,
@@ -3433,6 +3439,18 @@ impl<'a> Dispatcher<'a> {
         // record for `busy_s`'s sake (see that field's own doc) reads this
         // and does not zero accrued time a write never actually banked.
         let appended = crate::usage::append(self.repo, &entry).is_ok();
+        // The pass's ledger snapshot was loaded at the top of this function,
+        // or earlier in the pass, before this line existed, so the ceiling
+        // checks would sum a ledger missing the very lane just banked and
+        // start more lanes over a brake already passed. The line is kept in
+        // `banked_this_pass` for them rather than pushed into the snapshot:
+        // the snapshot is shared, and pushing would copy the whole ledger
+        // whenever a caller still held it, and would change which session a
+        // later start in this pass carries. Only when the write landed: a
+        // line that is not on disk is not in the next run's sum either.
+        if appended {
+            self.banked_this_pass.push(entry.clone());
+        }
         // Folded into the running total immediately, so a second lane banked
         // against this same carried session later in the same pass sees this
         // entry without a fresh read of the file. Already populated by the
@@ -4664,6 +4682,27 @@ impl<'a> Dispatcher<'a> {
                 panes,
                 commands: command_closes,
             } = self.take_for_limit(task, &lane, &pipeline.name, kept_panes, owned, &commands);
+            // Banking a finished lane is what puts its spend in the ledger,
+            // and these are the places a pass does it for a lane that is
+            // leaving — after the ceiling check `pass` made before any lane
+            // started. Looked at again here, so the lane that takes the run
+            // over its brake is the last one to cost anything. Nothing was
+            // closed or booted yet: the records go back as a failed boot puts
+            // them, banked and with no busy time left to bank twice.
+            if let Some(ceiling) = self
+                .over_output_ceiling()
+                .or_else(|| self.over_cost_ceiling())
+            {
+                claims.release(task.id());
+                if let Some(mut previous) = previous.filter(|p| p.kept) {
+                    previous.busy_s = 0;
+                    self.lanes.insert(lane, previous);
+                }
+                put_back_lanes(&mut self.lanes, taken_over, kept_panes, |_| true);
+                report.actions.push(ceiling.note.clone());
+                report.ceiling = Some(ceiling);
+                break;
+            }
             // With a limit of 1 the old pane is the tab's last. Closing it
             // before the split would empty the tab, and herdr closes a
             // workspace with its last tab's last pane.
@@ -6305,6 +6344,7 @@ impl<'a> Dispatcher<'a> {
         let ledger = self.ledger();
         let spent: u64 = ledger
             .iter()
+            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6350,6 +6390,7 @@ impl<'a> Dispatcher<'a> {
         let ledger = self.ledger();
         let spent: f64 = ledger
             .iter()
+            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6363,11 +6404,17 @@ impl<'a> Dispatcher<'a> {
         }
         Some(Ceiling {
             note: format!(
-                "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — \
+                "this run has spent ${} against a max_cost_usd of ${} — \
                  starting nothing further. Lanes still open will finish, and the queue keeps its \
-                 place for the next run"
+                 place for the next run",
+                crate::fmt::usd_exact(spent),
+                crate::fmt::usd_exact(ceiling),
             ),
-            reached: format!("unattended.max_cost_usd reached: ${spent:.2} of ${ceiling:.2}"),
+            reached: format!(
+                "unattended.max_cost_usd reached: ${} of ${}",
+                crate::fmt::usd_exact(spent),
+                crate::fmt::usd_exact(ceiling)
+            ),
         })
     }
 }
@@ -14663,6 +14710,93 @@ mod tests {
         let line = lines.pop().expect("the lane was not banked");
         assert_eq!(lines.len(), usize::from(seeded.is_some()), "banked once");
         line
+    }
+
+    /// An unattended run starts no lane once the spend it has banked reaches
+    /// `max_cost_usd`, and that includes the spend of a lane the very same
+    /// pass frees. The note says what the ledger holds and prints the ceiling
+    /// as it was written.
+    #[test]
+    fn the_pass_that_banks_a_lane_over_the_cost_ceiling_starts_no_other_lane() {
+        let (mut repo, _root_guard) = unattended_fixture("brake-counts-this-pass");
+        repo.config.dispatch.visible_lanes = crate::config::VisibleLanes::Count(1);
+        repo.config.unattended.max_cost_usd = 0.015;
+        repo.config.models.insert(
+            "claude-tiered".to_string(),
+            crate::usage::ModelPrice {
+                input: 1.0,
+                output: 10.0,
+                cache_read: 0.1,
+                ..Default::default()
+            },
+        );
+        let worktree = a_checkout("dispatch-brake-counts-this-pass");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let waiting = add_task(&repo, "waiting", "queued");
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind: "claude".into(),
+                agent: "claude".into(),
+                model: "claude-tiered".into(),
+                ..kept_record("brake-lane", 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        // One request worth $0.02 at the prices above, over the $0.015 ceiling.
+        let home = crate::scratch::root("dispatch-brake-counts-this-pass-home");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("brake-lane.jsonl"),
+            "{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\
+             \"model\":\"claude-tiered\",\"usage\":{\"input_tokens\":20000,\
+             \"output_tokens\":1,\"cache_read_input_tokens\":0,\
+             \"cache_creation_input_tokens\":0}}}\n",
+        )
+        .unwrap();
+
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Working,
+            "w1:p7",
+        )]);
+        let report = with_home(&home, || run_pass(&repo, &mux));
+
+        let spent: f64 = crate::usage::read(&repo)
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.cost_usd)
+            .sum();
+        assert!(spent >= 0.015, "the freed lane was not banked: {spent}");
+        assert!(
+            mux.did("start").is_empty(),
+            "a lane started after the ceiling was reached: {:?}",
+            mux.calls()
+        );
+        assert!(
+            reload(&waiting).front.workspace_id.is_none(),
+            "the queued task was given a workspace"
+        );
+        let ceiling = report.ceiling.expect("the ceiling was not reported");
+        assert!(
+            ceiling
+                .note
+                .contains(&format!("${} against", crate::fmt::usd_exact(spent))),
+            "{ceiling:?}"
+        );
+        assert!(
+            ceiling.note.contains("max_cost_usd of $0.015"),
+            "{ceiling:?}"
+        );
     }
 
     /// `record_usage` is the path every torn-down lane is banked through. Its

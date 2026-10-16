@@ -28,6 +28,21 @@ pub(crate) fn money(cost: Option<f64>) -> String {
     }
 }
 
+/// A dollar amount written to the precision it was set or earned at, never
+/// fewer than two places.
+///
+/// A ceiling of `0.015` must read back as `0.015`: rounding it to cents printed
+/// `$0.01` beside a spend of `$0.02`, which read as the brake firing late, with
+/// the run already at twice its ceiling. Six places is the precision chosen;
+/// anything finer rounds away. Trimming the zeros keeps `5.0` as `5.00` and a
+/// float sum's `0.030000000000000002` as `0.03`.
+pub(crate) fn usd_exact(amount: f64) -> String {
+    let fixed = format!("{amount:.6}");
+    let (whole, frac) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    let frac = frac.trim_end_matches('0');
+    format!("{whole}.{frac:0<2}")
+}
+
 /// The same rounding rule as [`money`], with no `$` — for `spoolway eval`,
 /// which names the currency once in a `USD`/`COST USD` column header rather
 /// than repeating it in every cell.
@@ -86,6 +101,15 @@ mod tests {
         assert_eq!(money_plain(Some(45.409)), "45.41");
         assert_eq!(money_plain(Some(0.0)), "0");
         assert_eq!(money_plain(None), "—");
+    }
+
+    #[test]
+    fn usd_exact_keeps_the_precision_it_was_given_and_never_fewer_than_cents() {
+        assert_eq!(usd_exact(0.015), "0.015");
+        assert_eq!(usd_exact(5.0), "5.00");
+        assert_eq!(usd_exact(7.5), "7.50");
+        assert_eq!(usd_exact(0.010 + 0.020), "0.03");
+        assert_eq!(usd_exact(0.0117), "0.0117");
     }
 
     #[test]
