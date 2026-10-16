@@ -2216,7 +2216,9 @@ fn refuse_if_archived(repo: &Repo, task: &Task) -> Result<()> {
 /// An unattended run staffs `blocked` with a lane that reads why the task
 /// stopped and reports its verdict. Resuming the task under it would start a
 /// second lane in the same worktree and throw that verdict away. The way to
-/// take the task from the unblocker is to pause the task first.
+/// take the task from the unblocker is to pause the task, then resume it with
+/// `--stage` naming the step it blocked on: a bare resume of that park puts it
+/// back on `blocked` under a second unblocker.
 ///
 /// A task the dispatcher has claimed is refused as well. The claim is written
 /// before the unblocker's lane exists, and a resume in that gap would move the
@@ -2235,10 +2237,16 @@ fn refuse_if_unblocker_live(repo: &Repo, pipelines: &Pipelines, task: &Task) -> 
     if crate::claim::live(repo).contains_key(task.id())
         || crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx)
     {
+        let step = pipelines
+            .for_task(task)
+            .map(|pipeline| resume_target(task, pipeline))
+            .unwrap_or_else(|_| "<step>".to_string());
         bail!(
             "task `{id}` is blocked and has a live unblocker lane — resuming it now would \
              start a second lane in the same worktree and lose the unblocker's verdict. To \
-             take it from the unblocker, run `spoolway queue pause {id}` first.",
+             take it from the unblocker, run `spoolway queue pause {id}`, then \
+             `spoolway resume {id} --stage {step}`. A resume without `--stage` would put \
+             it back on `blocked`.",
             id = task.front.id
         );
     }
@@ -2593,6 +2601,10 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
 ///
 /// Whatever lane the task owns is ended first, [`restart_with`] explains how.
 /// The worktree is left exactly as it is.
+///
+/// With `--step`, the restart happens only if the task is on that step now.
+/// A restart typed a moment late would otherwise start whatever step the task
+/// had just moved to.
 pub fn restart(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2656,6 +2668,16 @@ pub(crate) fn restart_with(
     let mut task = repo.task(&args.task)?;
     let pipeline = pipelines.for_task(&task)?;
     let step = restart_step(&task, pipeline)?;
+    if let Some(wanted) = args.step.as_deref()
+        && wanted != step
+    {
+        bail!(
+            "{id} is on `{step}` now, not `{wanted}`; nothing was restarted. Run \
+             `spoolway restart {id} --step {step}` to restart `{step}`, or look at it first \
+             with `spoolway queue route {id}`.",
+            id = args.task
+        );
+    }
     let mut seen = std::collections::HashMap::from([(
         task.front.id.clone(),
         crate::dispatch::file_fingerprint(&task),
@@ -2691,12 +2713,22 @@ pub(crate) fn restart_with(
     // A stop's marks are spent by a restart as by a resume: left set, they
     // would describe a stop the task is no longer in.
     task.front.parked_by_stop = false;
-    task.mark_blocker_cleared();
     task.front.missing_start_branch = None;
     task.front.paused_at = None;
     task.front.paused_by = None;
     task.front.parked_from = None;
-    task.front.blocked_from = None;
+    // The unblocker's own restart stays on `blocked`, so the block is still
+    // standing: `blocked_from` is the only record of where a pass from it
+    // goes, and `## Blocker` is what the fresh unblocker session reads. Cleared,
+    // `resume_target` falls back to the last report's step, which after an
+    // unblocker's own report is `blocked` and skipped, so to the pipeline's
+    // entry, and the steps already passed run again. Marking the entries past
+    // would tell that session the very block it was started for is over. Any
+    // other step is a fresh run of the step itself, which has no block to keep.
+    if step != crate::pipeline::BLOCKED {
+        task.mark_blocker_cleared();
+        task.front.blocked_from = None;
+    }
     task.front.escalated = false;
     // `restart` supersedes `resume`: both set would name a continuation and an
     // abandonment for the same launch.
@@ -8149,6 +8181,7 @@ mod tests {
     fn restart_args(task: &str) -> crate::cli::RestartArgs {
         crate::cli::RestartArgs {
             task: task.into(),
+            step: None,
             message: None,
         }
     }
@@ -8256,6 +8289,7 @@ mod tests {
 
         let args = crate::cli::RestartArgs {
             task: "stuck".into(),
+            step: None,
             message: Some("the conversation looped".into()),
         };
         restart_with(&repo, &Pipelines::builtin(), &args, &mux).unwrap();
@@ -8522,6 +8556,154 @@ mod tests {
             assert_eq!(task.front.paused_at, None, "{id}");
             assert!(!task.front.escalated, "{id}");
         }
+    }
+
+    fn idle_restart_mux() -> RestartMux {
+        RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        }
+    }
+
+    /// A task parked from its unblocker restarts the unblocker, and keeps the
+    /// step the block came from, and its `## Blocker` entries stay unmarked,
+    /// since the block is still standing. Cleared, the unblocker's pass would
+    /// resolve to the pipeline's entry, `implement`, and carry the task on to
+    /// `review`, which had already run, instead of `look`.
+    #[test]
+    fn restarting_a_parked_unblocker_keeps_where_the_task_stopped() {
+        let (repo, _root_guard) = unattended_fixture("restart-parked-unblocker");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.blocked_from = Some("review".into());
+        task.front.parked_from = Some(crate::pipeline::BLOCKED.into());
+        task.front.escalated = true;
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "paused");
+        task.append_to_section("## Blocker", "- `review` failed: the build is red\n");
+        task.save().unwrap();
+
+        restart_with(
+            &repo,
+            &pipelines,
+            &restart_args("stuck"),
+            &idle_restart_mux(),
+        )
+        .unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(
+            !task.section("## Blocker").unwrap().contains("Cleared"),
+            "the unblocker's fresh session must still read the block as standing"
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("review"));
+        assert_eq!(task.front.parked_from, None);
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "look");
+    }
+
+    /// A pass held by `gate_at: blocked` restarts the unblocker too, and the
+    /// resume that follows still lands on the stopped step's road.
+    #[test]
+    fn restarting_a_held_unblocker_pass_keeps_where_the_task_stopped() {
+        let (repo, _root_guard) = unattended_fixture("restart-held-unblocker");
+        add(&repo, "stuck", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.blocked_from = Some("review".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.front.paused_at = Some(crate::pipeline::BLOCKED.into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "gate");
+        task.save().unwrap();
+
+        restart_with(
+            &repo,
+            &pipelines,
+            &restart_args("stuck"),
+            &idle_restart_mux(),
+        )
+        .unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.paused_at, None);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("review"));
+        assert_eq!(
+            resume_target(&task, pipelines.for_task(&task).unwrap()),
+            "review",
+            "not the entry or `queued`, which would run `implement` again"
+        );
+    }
+
+    /// The way out the live-unblocker refusal advises: a task paused off
+    /// `blocked` and resumed with `--stage` lands on that step, with no second
+    /// unblocker. A bare resume of the same park goes back onto `blocked`,
+    /// which is why the refusal names `--stage`.
+    #[test]
+    fn a_stage_resume_of_a_paused_unblocker_leaves_blocked() {
+        let (repo, _root_guard) = fixture("resume-stage-off-park");
+        add(&repo, "stuck", &[]);
+        let pipelines = Pipelines::builtin();
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = Some("implement".into());
+        task.front.parked_from = Some(crate::pipeline::BLOCKED.into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "paused");
+        task.save().unwrap();
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            crate::pipeline::BLOCKED
+        );
+
+        resume(
+            &repo,
+            &pipelines,
+            &resume_args("stuck", Some("implement")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "stuck").stage(), "implement");
+    }
+
+    /// `--step` restarts the step the task is on and nothing else. Naming
+    /// another step is refused with the step the task is on, and the task
+    /// file is untouched. Before `--step` existed the flag was not accepted.
+    #[test]
+    fn restarting_with_a_step_refuses_a_task_that_moved_on() {
+        let (repo, _root_guard) = fixture("restart-step-guard");
+        add(&repo, "r1", &[]);
+        let mut task = queued(&repo, "r1");
+        task.set_stage("review", None);
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut args = restart_args("r1");
+        args.step = Some("implement".into());
+
+        let err = restart_with(&repo, &pipelines, &args, &idle_restart_mux()).unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("r1 is on `review` now, not `implement`"),
+            "{said}"
+        );
+        assert!(said.contains("nothing was restarted"), "{said}");
+        assert!(said.contains("restart r1 --step review"), "{said}");
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+
+        args.step = Some("review".into());
+        restart_with(&repo, &pipelines, &args, &idle_restart_mux()).unwrap();
+        assert_eq!(queued(&repo, "r1").front.restart.as_deref(), Some("review"));
     }
 
     /// A hook-held task has no step to start over. It is refused, and nothing

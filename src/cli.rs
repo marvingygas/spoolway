@@ -1117,6 +1117,12 @@ pub struct RestartArgs {
     /// Task id whose current step to start over.
     pub task: String,
 
+    /// Restart only if the task is on this step, and otherwise restart
+    /// nothing. Guards a late restart against a task that has already moved
+    /// on to the next step.
+    #[arg(long, value_name = "STEP")]
+    pub step: Option<String>,
+
     /// Note recorded in the task's status log.
     #[arg(long, short = 'm')]
     pub message: Option<String>,

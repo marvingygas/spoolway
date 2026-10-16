@@ -10972,6 +10972,7 @@ mod tests {
 
         let said = format!("{err:#}");
         assert!(said.contains("queue pause stuck"), "{said}");
+        assert!(said.contains("resume stuck --stage implement"), "{said}");
         assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
     }
 
@@ -10997,6 +10998,7 @@ mod tests {
 
         let said = format!("{err:#}");
         assert!(said.contains("queue pause stuck"), "{said}");
+        assert!(said.contains("resume stuck --stage implement"), "{said}");
         assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
     }
 

@@ -1215,6 +1215,7 @@ impl Board {
                             &routed,
                             &crate::cli::RestartArgs {
                                 task: confirm.id.clone(),
+                                step: None,
                                 message: None,
                             },
                             None,

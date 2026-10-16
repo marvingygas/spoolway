@@ -774,7 +774,7 @@ These tasks are refused, each with a message that names the reason and what to d
 |---|---|---|
 | On `queued` | Always | It starts on its own, so there is nothing to resume |
 | On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
-| On `blocked` while its unblocker lane is live or starting | Always | Run `spoolway queue pause <task>` to take the task from the unblocker first |
+| On `blocked` while its unblocker lane is live or starting | Always | Run `spoolway queue pause <task>` to take the task from the unblocker, then `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage` puts the task back on `blocked` |
 | Archived | Always, with or without `--stage` | There is nothing to resume. Run `spoolway queue add` to queue a new task |
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
@@ -809,7 +809,7 @@ Start the step a task is on over. On an agent step, the step's conversation is d
 
 The command writes the task first, then ends the lane on the step it restarts. A blocked task owns its unblocker lane, so that lane is ended too. A lane that is working or waiting on a prompt is interrupted first, and each is stopped, whichever terminal backend runs it. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. The task goes back to the same step with `attempts` at zero. An agent step also gets `restart: <step>` set. A command step gets no `restart:` key. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
 
-A `paused` task restarts the step it was parked or gated on. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
+A `paused` task restarts the step it was parked or gated on. A task parked from an escalated unblocker, or held by `gate_at: blocked`, restarts on `blocked` and keeps the step it stopped on. Its next pass or resume goes on from that step. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
 
 | Task | What the message says to do |
 |---|---|
@@ -818,12 +818,24 @@ A `paused` task restarts the step it was parked or gated on. The command accepts
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
 
+With `--step <step>`, the command restarts only while the task is on that step. When the task has moved on, it exits 1 and restarts nothing:
+
+```
+spoolway: r1 is on `review` now, not `implement`; nothing was restarted. Run `spoolway restart r1 --step review` to restart `review`, or look at it first with `spoolway queue route r1`.
+```
+
 The command is refused when run from inside a lane. It is also refused when a `spoolway report` changed the task file first. In that case it touches no lane and asks you to run it again.
 
 ```
 spoolway restart <task>
 spoolway restart <task> -m "the conversation looped"
+spoolway restart <task> --step review
 ```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--step <STEP>` | | Restart only if the task is on this step |
+| `-m`, `--message <WORDS>` | | Note for the status log |
 
 The output names each lane it tore down, the session it abandoned and the step it sent the task to:
 
