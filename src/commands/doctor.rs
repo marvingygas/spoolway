@@ -2081,10 +2081,9 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
 fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     crate::models::unrouted(pipelines, &config.models)
         .into_iter()
-        // The blank `prompt_cache_ttl` row `init` and `sync` write for a hosted
-        // agent kind is there to be seen and filled in, not a row a rename
-        // left behind, so a row with no other key is not noted. Whatever it
-        // gains besides the lifetime makes it count again.
+        // A row holding only a `prompt_cache_ttl` is a choice of cache
+        // lifetime, not a row a rename left behind, so it is not noted.
+        // Whatever it gains besides the lifetime makes it count again.
         .filter(|glob| {
             !config
                 .models
@@ -2297,8 +2296,8 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
 /// config layer or any glob counts, and a model that resolves as `local` is
 /// never named.
 ///
-/// Keyed by the row a person would edit, and by the model's own name when no
-/// row covers it: two models under one glob are one fix, and a line per
+/// Keyed by the row a person would edit, else by the hosted glob a profile's
+/// example stands over (`claude-*`, `gpt-*`), else by the model's own name: two models under one glob are one fix, and a line per
 /// model would say the same fix several times. A `BTreeSet` also keeps the
 /// order fixed, since the popup's "hide until these change" is keyed on its
 /// text.
@@ -2315,6 +2314,9 @@ fn unset_lifetime_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
             .filter_map(|step| step.model.as_deref())
             .filter(|model| !model.trim().is_empty())
     });
+    // With no row covering a hosted model, the fix is the glob the commented
+    // example in `config.toml` shows, not a row per model.
+    let hosted = config.cache_hint_globs();
     let rows: std::collections::BTreeSet<&str> = named
         .chain(blocked)
         .filter(|model| *model != crate::models::PLACEHOLDER)
@@ -2322,7 +2324,16 @@ fn unset_lifetime_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
             let resolved = crate::models::resolve(&config.models, model);
             resolved.lifetime.is_none() && !resolved.price.is_some_and(|price| price.local)
         })
-        .map(|model| crate::models::resolved_row(&config.models, model).unwrap_or(model))
+        .map(|model| {
+            crate::models::resolved_row(&config.models, model)
+                .or_else(|| {
+                    hosted
+                        .iter()
+                        .copied()
+                        .find(|glob| crate::usage::glob_match(glob, model))
+                })
+                .unwrap_or(model)
+        })
         .collect();
     rows.into_iter()
         .map(|row| {
@@ -3441,8 +3452,8 @@ mod tests {
         assert!(!notes[0].contains("Ornith"), "{}", notes[0]);
     }
 
-    /// The blank `prompt_cache_ttl` row `init` and `sync` write is not a row a
-    /// rename left behind, so it is not noted, whether blank or filled in. A
+    /// A row holding only a `prompt_cache_ttl` is not a row a rename left
+    /// behind, so it is not noted, whether blank or filled in. A
     /// row that sets anything else is still noted.
     #[test]
     fn a_row_holding_only_prompt_cache_ttl_is_not_noted_as_unrouted() {
@@ -3510,12 +3521,15 @@ mod tests {
             .collect()
     }
 
-    /// Two hosted models under one blank glob are one note, naming the row a
-    /// person edits. Fails before the note exists: there is none.
+    /// Two hosted models no row covers are one note, naming the glob a person
+    /// sets, also when an older file's blank `claude-*` row was dropped on
+    /// load. Fails before the note is keyed by glob: it names each model.
     #[test]
-    fn a_blank_prompt_cache_ttl_row_is_noted_once_for_every_model_under_it() {
-        let config: Config = toml::from_str("[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n")
+    fn two_hosted_models_with_no_row_are_noted_once_under_their_glob() {
+        let mut config: Config = toml::from_str("[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n")
             .expect("a blank prompt_cache_ttl loads");
+        config.migrate();
+        assert!(config.models.is_empty());
         assert_eq!(
             unset_lifetime_texts(&["claude-opus-5-5", "claude-sonnet-5-5"], &config),
             [
@@ -3599,7 +3613,7 @@ mod tests {
         assert_eq!(
             notes(&config),
             [
-                "models.'claude-opus-5'.prompt_cache_ttl is not set; set it to your provider's \
+                "models.'claude-*'.prompt_cache_ttl is not set; set it to your provider's \
                  cache TTL (highly recommended)"
             ]
         );

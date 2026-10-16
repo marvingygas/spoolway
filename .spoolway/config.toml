@@ -94,13 +94,14 @@ kind = "pi"
 session_reuse_ctx = 40
 session_blocked_ctx = 0
 
+# How long a session's prompt cache is trusted to stay warm.
+# Unset means no limit. Uncomment a row to choose one.
+# [models."claude-*"]
+# prompt_cache_ttl = "1h"
+# [models."gpt-*"]
+# prompt_cache_ttl = "1h"
+
 [models."Ornith-1.5-35B-A3B"]
 context_window = 100096
 slots = 2
 local = true
-
-[models."claude-*"]
-prompt_cache_ttl = ""
-
-[models."gpt-*"]
-prompt_cache_ttl = ""

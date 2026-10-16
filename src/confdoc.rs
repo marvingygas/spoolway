@@ -131,7 +131,10 @@ pub fn set(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<
         place_new_tables(&mut doc, &template, path, from);
     }
 
-    Ok(doc.to_string())
+    // The cache-lifetime example is a comment, not a table, so none of the
+    // placing above moves it: it stays above the row it stood over, which is
+    // not the first row any more when the new one sorts before it.
+    crate::config::settle_cache_hint(&doc.to_string(), rendered)
 }
 
 /// Stand the tables `set` just created, `path[from..]`, where the rendering

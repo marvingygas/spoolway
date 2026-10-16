@@ -589,8 +589,7 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
         let refreshed = refreshed_price(model);
         let base = refreshed.or_else(|| builtin().get(model).copied());
         if sets_only_a_lifetime(&row) {
-            // The row `init` and `sync` write for a hosted agent kind, or one
-            // a person filled in with just a lifetime. It prices nothing, so
+            // A row a person filled in with just a lifetime. It prices nothing, so
             // it must not turn a model the tables know into a "config" price
             // or a model they do not know into a free one: the first keeps
             // the table it came from as its source, and the second stays
@@ -1507,9 +1506,10 @@ mod tests {
         });
     }
 
-    /// The blank row `init` and `sync` write over `claude-*` or `gpt-*` is no
-    /// price: a model the tables know keeps their source and prices, and one
-    /// they do not know stays unknown instead of becoming a free "config" one.
+    /// A row holding only a blank lifetime, as earlier releases wrote one over
+    /// `claude-*` or `gpt-*`, is no price: a model the tables know keeps their
+    /// source and prices, and one they do not know stays unknown instead of
+    /// becoming a free "config" one.
     #[test]
     fn a_blank_lifetime_row_neither_prices_nor_hides_an_unknown_model() {
         let home = fixture_home("models-blank-lifetime-row");

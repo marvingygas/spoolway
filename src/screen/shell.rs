@@ -1600,14 +1600,15 @@ mod tests {
         assert!(again.panel().join("\n").contains("prompt `another-prompt`"));
     }
 
-    /// A blank `prompt_cache_ttl` row the pipelines' hosted models resolve to
+    /// The hosted glob the pipelines' models resolve to, with no row for it,
     /// is one note under `settings`, wrapped at the popup's width. Hiding the
     /// popup hides it like any other note, and once the row has a value the
     /// note is gone. Fails before the note exists: the popup does not name
     /// the row.
     #[test]
-    fn the_warnings_popup_names_a_blank_prompt_cache_ttl_row_until_it_is_set() {
+    fn the_warnings_popup_names_the_hosted_glob_until_its_lifetime_is_set() {
         let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-ttl");
+        // An older file's blank row, as a load leaves it: dropped.
         repo.config.models.insert(
             "claude-*".into(),
             crate::usage::ModelPrice {
@@ -1615,6 +1616,8 @@ mod tests {
                 ..Default::default()
             },
         );
+        repo.config.migrate();
+        assert!(repo.config.models.is_empty());
         let dir = Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(

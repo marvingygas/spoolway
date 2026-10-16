@@ -503,7 +503,9 @@ pub struct ModelPrice {
     ///
     /// `spoolway sync` rewrites `config.toml` whole from the loaded config, and
     /// a `None` is skipped on write, so without this flag the next sync would
-    /// delete the blank a person was shown and asked to fill in. Set only by
+    /// delete a blank that sits on a row with other settings. A row holding
+    /// nothing else is dropped on load instead, see
+    /// [`ModelPrice::is_blank_lifetime_only`]. Set only by
     /// the hand-written `Deserialize` below, which takes the blank out of the
     /// table before the shared duration parser, so no other duration key ever
     /// accepts an empty string. Written only while `prompt_cache_ttl` is
@@ -719,6 +721,16 @@ impl<'de> Deserialize<'de> for ModelPrice {
         price.tier = tier;
         price.prompt_cache_ttl_blank = blank;
         Ok(price)
+    }
+}
+
+impl ModelPrice {
+    /// A row that holds nothing but a blank `prompt_cache_ttl`: the reminder
+    /// earlier releases wrote, and no setting of anyone's.
+    pub(crate) fn is_blank_lifetime_only(&self) -> bool {
+        self.prompt_cache_ttl_blank
+            && self.prompt_cache_ttl.is_none()
+            && crate::models::sets_only_a_lifetime(self)
     }
 }
 

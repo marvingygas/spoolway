@@ -86,10 +86,11 @@ file's modified time instead.
 The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model.
 There is no default. A model that sets none has no limit, whether or not it is marked
 `local = true`, and that includes a model with no `[models]` entry at all. Writing
-`prompt_cache_ttl = ""` means the same as leaving it out. It records that you have not chosen
-yet. `spoolway init` and `spoolway sync` write that blank row for `claude-*` when the project
-has a `claude` profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that
-is already there, with its value.
+`prompt_cache_ttl = ""` means the same as leaving it out. A row that holds only that blank value
+is dropped when the config loads, so it takes no part in model matching. `spoolway init`
+and `spoolway sync` write a commented example for `claude-*` when the project has a `claude`
+profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that is already there,
+with its value.
 
 While a hosted model has no value, `spoolway doctor` and the "before dispatching" popup show
 `models.'<row>'.prompt_cache_ttl is not set; set it to your provider's cache TTL (highly

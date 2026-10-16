@@ -1189,9 +1189,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // that makes the first answer sufficient to understand every agent name
     // written below. The defaults contain this profile by construction.
     config.agents.retain(|name, _| name == profile);
-    // A hosted provider shows `prompt_cache_ttl` from the first file on, so a
-    // person sees the cache lifetime is theirs to choose. `pi` adds nothing.
-    config.add_blank_cache_ttl_rows();
     config.unattended.blocked_agent = profile.to_string();
     // An unblocker is an agent step too. Leaving both knobs blank avoids
     // silently choosing more for it than init chooses for declared steps.
@@ -2008,10 +2005,11 @@ mod tests {
         );
     }
 
-    /// A hosted provider's `config.toml` shows `prompt_cache_ttl` blank under
-    /// that provider's model glob, and `pi` writes no `[models]` row at all.
+    /// A hosted provider's `config.toml` shows `prompt_cache_ttl` as a comment
+    /// under that provider's model glob, with no `[models]` row, so a release
+    /// that refuses a blank lifetime still loads it. `pi` writes no example.
     #[test]
-    fn init_writes_a_blank_prompt_cache_ttl_row_for_a_hosted_provider() {
+    fn init_writes_the_cache_lifetime_as_a_comment_for_a_hosted_provider() {
         for (provider, glob) in [
             (PlanningAgent::Claude, Some("claude-*")),
             (PlanningAgent::Codex, Some("gpt-*")),
@@ -2027,13 +2025,17 @@ mod tests {
             let text = std::fs::read_to_string(Config::path_in(&root)).unwrap();
             match glob {
                 Some(glob) => assert!(
-                    text.contains(&format!("[models.\"{glob}\"]\nprompt_cache_ttl = \"\"\n")),
+                    text.contains(&format!(
+                        "# Unset means no limit. Uncomment a row to choose one.\n\
+                         # [models.\"{glob}\"]\n# prompt_cache_ttl = \"1h\"\n"
+                    )),
                     "{text}"
                 ),
-                None => assert!(!text.contains("[models."), "{text}"),
+                None => assert!(!text.contains("# [models."), "{text}"),
             }
-            let config = Config::load(&root).unwrap();
-            assert_eq!(config.models.len(), usize::from(glob.is_some()));
+            assert!(!text.contains("prompt_cache_ttl = \"\""), "{text}");
+            assert!(!text.lines().any(|line| line.starts_with("[models.")));
+            assert!(Config::load(&root).unwrap().models.is_empty());
         }
     }
 

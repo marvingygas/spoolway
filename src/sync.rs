@@ -1074,12 +1074,6 @@ fn rewritten_config(
     // neither is `sync`'s to delete. `doctor` and every load name them.
     let unknown = crate::config::unknown_keys(text);
 
-    // A hosted profile's blank `prompt_cache_ttl` row is added to what is
-    // rendered and compared, not pasted into the text afterwards, so the check
-    // below still holds the rewrite to the config it came from. A row the file
-    // already has is left as it is.
-    let mut current = current.clone();
-    current.add_blank_cache_ttl_rows();
     let (rewritten, kept) = crate::confdoc::keep(text, &current.render()?, &unknown)?;
 
     // Its own work, checked. A rewrite may not change a single value — every one
@@ -1091,6 +1085,39 @@ fn rewritten_config(
         )));
     }
     Ok(Ok((rewritten, kept)))
+}
+
+/// The rows of `text` that hold nothing but an empty `prompt_cache_ttl`, as the
+/// dotted key a rewrite drops and the glob it sat under.
+///
+/// Read from the text, not the loaded config, because the load already
+/// dropped them (see `Config::migrate`); `compare` then lists their key as
+/// gone, and this is how the report tells that apart from a retired setting.
+fn blank_lifetime_only_rows(text: &str) -> Vec<(String, String)> {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for models in ["models", "pricing"] {
+        let Some(globs) = table.get(models).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (glob, row) in globs {
+            let Some(row) = row.as_table().filter(|row| row.len() == 1) else {
+                continue;
+            };
+            for key in ["prompt_cache_ttl", "session_reuse_idle", "cache_ttl"] {
+                if row
+                    .get(key)
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|raw| raw.trim().is_empty())
+                {
+                    rows.push((format!("{models}.{glob}.{key}"), glob.clone()));
+                }
+            }
+        }
+    }
+    rows
 }
 
 /// The config file: rewritten whole, except for what you set it to.
@@ -1141,11 +1168,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
             // values, not this one's — the same reason `templates` below
             // seeds a missing skeleton from `skeleton.shipped` rather than
             // from anything read out of the main checkout.
-            //
-            // With the blank cache-lifetime rows a rewrite would add, so a
-            // second sync has nothing left to change.
-            let mut shipped = crate::config::Config::default();
-            shipped.add_blank_cache_ttl_rows();
+            let shipped = crate::config::Config::default();
             acts.push(Act::write(
                 crate::config::write_target(&path),
                 &shown,
@@ -1318,9 +1341,14 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     // the only ones that were removed — reporting a renamed price as deleted
     // would tell a person their prices are gone.
     let now = crate::confdoc::leaf_paths(&rewritten)?;
+    // An earlier release's row holding nothing but a blank `prompt_cache_ttl`
+    // is dropped on load, and the key is no retired one: it is reported on its
+    // own, below, in words that do not tell a person the setting is gone.
+    let blank_rows = blank_lifetime_only_rows(&text);
     let removed: Vec<String> = refresh
         .dropped
         .iter()
+        .filter(|key| !blank_rows.iter().any(|(dropped, _)| dropped == *key))
         .filter(|key| {
             let key = key
                 .strip_prefix("pricing.")
@@ -1335,6 +1363,39 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         })
         .cloned()
         .collect();
+    let (commented, bare): (Vec<_>, Vec<_>) = blank_rows
+        .iter()
+        .filter(|(dropped, _)| refresh.dropped.contains(dropped))
+        .partition(|(_, glob)| rewritten.contains(&format!("# [models.\"{glob}\"]\n")));
+    if !commented.is_empty() {
+        let names: Vec<&str> = commented.iter().map(|(_, glob)| glob.as_str()).collect();
+        outcomes.push(Outcome::migrated(
+            &shown,
+            format!(
+                "the empty `prompt_cache_ttl` row for {} is now the commented cache-lifetime \
+                 example: an older spoolway refuses an empty lifetime, and the row outranked \
+                 your own model rows",
+                names.join(", ")
+            ),
+            format!(
+                "empty prompt_cache_ttl row now a comment: {}",
+                names.join(", ")
+            ),
+        ));
+    }
+    if !bare.is_empty() {
+        let names: Vec<&str> = bare.iter().map(|(_, glob)| glob.as_str()).collect();
+        outcomes.push(Outcome::migrated(
+            &shown,
+            format!(
+                "the `[models]` row holding only an empty `prompt_cache_ttl` was dropped for {}: \
+                 it set nothing, and an older spoolway refuses an empty lifetime. Write \
+                 `prompt_cache_ttl = \"1h\"` under the model to choose one",
+                names.join(", ")
+            ),
+            format!("dropped empty prompt_cache_ttl row: {}", names.join(", ")),
+        ));
+    }
     if !removed.is_empty() {
         // A `Migrated`, not a `Wrote`: a `Wrote`'s detail is never printed, and
         // a rewrite that removes a setting without saying which one is the
@@ -3082,8 +3143,7 @@ mod tests {
     #[test]
     fn a_sync_leaves_a_config_that_config_set_gave_a_concurrency_as_it_is() {
         let (repo, _root_guard) = fixture("config-set-concurrency");
-        let mut written = Config::default();
-        written.add_blank_cache_ttl_rows();
+        let written = Config::default();
         written.save(&repo.root).unwrap();
         let loaded = Config::load(&repo.root).unwrap();
         let updated = crate::confkv::set(&loaded, "agents.claude.concurrency", "2").unwrap();
@@ -3107,13 +3167,67 @@ mod tests {
         );
     }
 
+    /// A file an earlier release wrote, with its blank `prompt_cache_ttl`
+    /// rows, has them turned into the commented example, and a second sync
+    /// leaves that file as it is: the comment is there exactly once.
+    #[test]
+    fn a_sync_turns_the_blank_cache_lifetime_rows_into_one_comment() {
+        let (repo, _root_guard) = fixture("blank-cache-ttl-rows");
+        let mut written = Config::default();
+        written.agents.retain(|_, profile| profile.kind == "claude");
+        let old = format!(
+            "{}\n[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n\n\
+             [models.\"hand-*\"]\nprompt_cache_ttl = \"\"\n\n\
+             [models.\"*haiku*\"]\nslots = 2\n",
+            written.render().unwrap().replace("\n[models]\n", "\n")
+        );
+        let path = Config::path_in(&repo.root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &old).unwrap();
+
+        let mut first = Vec::new();
+        config(&repo, &args(), &mut first).unwrap();
+        let said = outcome_lines(&first).join("\n");
+        assert!(!said.contains("retired"), "{said}");
+        assert!(
+            said.contains("empty `prompt_cache_ttl` row for claude-* is now the commented"),
+            "{said}"
+        );
+        assert!(
+            said.contains("holding only an empty `prompt_cache_ttl` was dropped for hand-*"),
+            "{said}"
+        );
+        let once = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            once.matches("# [models.\"claude-*\"]\n").count(),
+            1,
+            "{once}"
+        );
+        assert!(
+            once.contains("# prompt_cache_ttl = \"1h\"\n\n[models.\"*haiku*\"]"),
+            "{once}"
+        );
+        assert!(!once.contains("\nprompt_cache_ttl = \"\""), "{once}");
+        assert!(!once.lines().any(|line| line == "[models.\"claude-*\"]"));
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), once);
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .all(|line| !line.starts_with("wrote") && !line.starts_with("migrated")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
     /// The same holds for a `[models."<glob>"]` field `config set` creates:
     /// `sync` leaves the file as it is.
     #[test]
     fn a_sync_leaves_a_config_that_config_set_gave_a_models_row_as_it_is() {
         let (repo, _root_guard) = fixture("config-set-models");
-        let mut written = Config::default();
-        written.add_blank_cache_ttl_rows();
+        let written = Config::default();
         written.save(&repo.root).unwrap();
         let loaded = Config::load(&repo.root).unwrap();
         let updated = crate::confkv::set(&loaded, "models.foo-model.input", "5.0").unwrap();
@@ -4759,42 +4873,47 @@ mod tests {
         assert!(why.contains(crate::assets::PIPELINE_KEYS_END), "{why}");
     }
 
-    /// A blank `prompt_cache_ttl` is a value the project wrote, so the rewrite
-    /// `sync` does keeps it rather than dropping the key with the other
-    /// unset ones.
+    /// A blank `prompt_cache_ttl` on a row that holds another setting is kept
+    /// by the rewrite `sync` does, rather than dropped with the other unset
+    /// keys, because only a row holding nothing else is the old reminder.
     #[test]
-    fn a_rewritten_config_keeps_a_blank_prompt_cache_ttl() {
-        let text = "[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n";
+    fn a_rewritten_config_keeps_a_blank_prompt_cache_ttl_on_a_row_with_a_price() {
+        let text = "[models.\"keep\"]\ninput = 1.0\nprompt_cache_ttl = \"\"\n";
         let current: crate::config::Config = toml::from_str(text).unwrap();
         let (rewritten, _) = rewritten_config(&current, text).unwrap().unwrap();
-        assert!(rewritten.contains("prompt_cache_ttl = \"\""), "{rewritten}");
+        assert!(
+            rewritten.contains("input = 1.0\nprompt_cache_ttl = \"\"\n"),
+            "{rewritten}"
+        );
     }
 
-    /// A `claude` or `codex` profile with no row for its glob gets a blank
-    /// `prompt_cache_ttl` row, a row the file already has is left with its
-    /// value, and rewriting the result again changes nothing.
+    /// A `claude` or `codex` profile with no row for its glob gets the
+    /// commented example, a row the file already has is left with its value
+    /// and brings no example, and rewriting the result again changes nothing.
     #[test]
-    fn a_rewritten_config_adds_a_missing_blank_row_and_keeps_an_existing_one() {
+    fn a_rewritten_config_adds_the_cache_lifetime_comment_and_keeps_an_existing_row() {
         let mut current = crate::config::Config::default();
         current.agents.retain(|_, profile| profile.kind == "claude");
-        let text = current.render().unwrap();
-        assert!(!text.contains("[models."), "{text}");
+        let text = "[dispatch]\nlane_quiet = \"15m\"\n";
 
-        let (added, _) = rewritten_config(&current, &text).unwrap().unwrap();
-        assert!(
-            added.contains("[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n"),
+        let (added, _) = rewritten_config(&current, text).unwrap().unwrap();
+        assert_eq!(
+            added.matches("# [models.\"claude-*\"]\n").count(),
+            1,
             "{added}"
         );
         assert!(!added.contains("gpt-*"), "{added}");
+        assert!(!added.contains("\nprompt_cache_ttl"), "{added}");
 
         let reloaded: crate::config::Config = toml::from_str(&added).unwrap();
         let (again, _) = rewritten_config(&reloaded, &added).unwrap().unwrap();
         assert_eq!(again, added);
 
-        let chosen = added.replace("prompt_cache_ttl = \"\"", "prompt_cache_ttl = \"1h\"");
+        let chosen = format!("{text}\n[models.\"claude-*\"]\nprompt_cache_ttl = \"1h\"\n");
         let reloaded: crate::config::Config = toml::from_str(&chosen).unwrap();
         let (kept, _) = rewritten_config(&reloaded, &chosen).unwrap().unwrap();
-        assert_eq!(kept, chosen);
+        assert!(!kept.contains("# [models.\"claude-*\"]"), "{kept}");
+        assert!(kept.contains("[models.\"claude-*\"]\nprompt_cache_ttl = \"1h\"\n"));
     }
 
     /// For `config.toml` `--replace` rewrites the file as `sync` does, so a
