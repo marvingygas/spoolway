@@ -45,9 +45,20 @@ the merge to one more agent.
      agents links only their sign-in files into that home, such as `~/.claude/.credentials.json`
      or `~/.codex/auth.json`, and never runs with the real `HOME` itself.
    - Use the headless backend only: `dispatch.backend headless` with `SPOOLWAY_TEST_BACKEND=1`.
-     Never open herdr panes in the person's session.
+     Never open herdr panes in the person's session. The session shell may carry
+     `HERDR_ENV` and a herdr socket, so every command runs with each `HERDR_*` variable
+     unset. `SPOOLWAY_TEST_BACKEND=1` only allows headless and does not force it, so the
+     tester checks each scratch repo's config says `headless` before it starts a dispatcher.
    - Prefer command steps and stub agents, which cost no tokens. Real agents use the cheapest
      model at low effort, with a small cap on lanes.
+   - Every pipeline step that runs a claude agent names `model: claude-haiku-5-5` and
+     `effort: low`. The scratch project's `config.toml` sets
+     `[models."claude-haiku-5-5"]` with `context_window = 1000000` and `compact_ctx = 9`.
+     Lanes then compact at about 88,000 tokens, below the 100k tier where Haiku 5.5's rates
+     go up fivefold. `compact_ctx` takes whole percents only. Compaction runs between
+     turns, so one turn of many parallel reads can still send a request past the tier.
+     Real-agent tasks keep their reads small. A test that needs another
+     model or threshold says why in its findings file.
    - Only the end-to-end tester may use the local llama.cpp models (see
      `~/dev/tools/local-llm`). It must not start, restart or reconfigure the router.
    - No pushes to GitHub and no real pull requests. Use a stub `gh` on `PATH`.
