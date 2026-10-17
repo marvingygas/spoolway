@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.11.0 to 0.12.0 | A model with no `prompt_cache_ttl` has no age limit; a task keeps its five newest lanes and `keep_finished_lanes` is retired; command steps run without a pane; herdr lanes are named `<step>-<tag>`; step ids are limited to 26 characters; resuming a caught `--fail` goes down `on_fail`; issue and git hooks have fixed time limits; `queue add` refuses misspelt keys, placeholders, ids in use and unreachable `gate_at:`; four commands refuse `--json`; `queue list --json` `stage` names the stopped step; deleting `dispatch.pid` stops the dispatcher; `doctor` fails more settings. | Run `spoolway sync`, set `prompt_cache_ttl`, rename long step ids and quoted `[models]` tables, set `visible_lanes` or `hide_commands` to taste, add `# spoolway-login:` to tracker hooks, update scripts that read lane names, `--json` or `stage`, and clear what `spoolway doctor` fails. |
 | 0.10.0 to 0.11.0 | A background step with `on_fail` is refused when the pipeline loads and its exit never moves the task; `sync`, `init` and `install` refuse a file that matches no copy spoolway has shipped and delete the version marker; the issue question is a checklist of groups and its popups changed; `queue add` calls no `open` hook for a `tracking: off` task; a routine runs one copy at a time and reads by its name on the board, the lane, the workspace and `eval`; `routine:` is refused in a task file; `eval --by task` writes WHEN with the time; `open` reads `~/.spoolway/editor.toml` and falls back to `vim`. | Fix every background step with `on_fail`, run `spoolway sync` and `spoolway sync --replace` for each refused file, commit the deleted marker, update scripts that drive the issue popups, find routine panes by id or read `eval`'s `when`, and rename a `routine:` key of your own. |
 | 0.9.0 to 0.10.0 | Row actions move behind `o` and popups take no letter answers; a job with no `base` never fires; `sync` writes a version marker older binaries refuse to overwrite; long task and step ids are refused; `--json` is refused where a command has no JSON form; `pipeline check` reads the live queue; resuming an archived task fails; silent lanes are reminded instead of escalated; agent launch failures go to `blocked`; a gated command reruns after an unblocker pass; background checks and failed removals hold a task on `done`; `eval` and the ledger carry command steps; `[models]` globs match more names; requeued tasks fire their hooks again; `doctor` fails more settings. | Learn the options menu, add `base` to every job, commit `.spoolway/spoolway-version`, shorten long ids, drop `--json` where refused, update scripts that read `eval`, the ledger or `queue list`, and clear what `spoolway doctor` fails. |
 | 0.8.0 to 0.9.0 | A job table with an unknown key never fires; a first cut refuses a leftover `task/<id>` branch; no command prints the update or sync notice; hook failures leave the board and make `doctor` exit non-zero; a partial `[models]` row keeps the price table's rates and window; `slots` caps a whole row; recorded costs include subagents and Claude Code's own total; `blocked.*` overrides apply; config reloads every pass; unknown keys load with a note; unattended escalations go to `blocked`; `openrouter/` models leave the price table. | Fix unknown job keys, clear leftover task branches, run `spoolway sync` in each project, review cost and session limits, read `spoolway doctor` and `spoolway override list`, and set `context_window` for `openrouter/` models. |
@@ -51,6 +52,88 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.11.0 to 0.12.0
+
+Run `spoolway sync` in each project and commit what it writes. It rewrites the settings reference in
+`config.toml`, drops a `dispatch.keep_finished_lanes` value in favour of `dispatch.visible_lanes`,
+adds a commented cache-lifetime example, and takes the new `spoolway-plan` and `spoolway-tasks`
+skills and pipeline key blocks. Then read the notes and failures `spoolway doctor` prints, work
+through the list, and restart the dispatcher.
+
+- Set `prompt_cache_ttl` for your hosted models. 0.11.0 held every model not marked `local` to five
+  minutes; a model with no value now resumes its session however long it has been idle, and
+  `spoolway doctor` notes ``models.'claude-*'.prompt_cache_ttl is not set``. Run
+  `spoolway config set 'models."claude-*".prompt_cache_ttl' 5m` to keep 0.11.0's limit, or
+  uncomment the example `sync` wrote and set your provider's own. Do the same for `gpt-*` on a
+  `codex` profile. `local` no longer changes the limit.
+- Rename every `[models.'"<glob>"']` table in `config.toml` to `[models."<glob>"]`. 0.11.0's
+  `spoolway config set 'models."<glob>".<key>'` wrote the quote marks into the table's name, so
+  the row matches no model and its values apply to nothing. This release leaves such a table as it
+  is.
+- Choose how many lanes a task keeps open. A task now keeps its five newest, and each new agent
+  step closes the oldest finished ones; 0.11.0 kept every lane until the task was done. Run
+  `spoolway config set dispatch.visible_lanes all` to keep them all. `dispatch.keep_finished_lanes`
+  is retired: a value in the file loads as `visible_lanes`, `false` as `1`, until `sync` rewrites
+  it, and `spoolway config get` and `set` refuse the old key. See
+  [Finished lanes keep their pane](dispatcher.md#finished-lanes-keep-their-pane).
+- Expect command steps to run without a pane. Their output is still in
+  `commands/<task> · <step>.log` in the project home. Run
+  `spoolway config set dispatch.hide_commands false` to give each command a pane again; unlike
+  0.11.0's, it stays open after the command exits and counts toward `visible_lanes`.
+- Update scripts that find a lane in herdr by its old name. A lane is now named `<step>-<tag>`, such
+  as `review-spec-5f2`, where 0.11.0 used `<task>__<step>` or an `l<hex>` alias. `lane_aliases.json`
+  in the project home records every name. Lanes 0.11.0 started are still found.
+- Rename every pipeline step id longer than 26 characters. A lane's herdr name is its step plus a
+  short task tag, and herdr refuses a name past 32 characters, so the limit fell from 64 to 26.
+  `spoolway pipeline check`, `spoolway doctor` and the dispatcher refuse a longer id
+  with ``step id `<id>` is <n> characters long, and the limit is 26``. The longest step id in a
+  shipped pipeline is 15 characters. The task id limit stays 100.
+- Pick the `on_pass` row to wave a caught failure through. Resuming a task whose gate caught an agent
+  step's `--fail` now goes down that step's `on_fail`, or to `blocked`, where 0.11.0 went down
+  `on_pass`. The `on_pass` step is one key down in the board's resume popup, and
+  `spoolway resume <task> --stage <step>` names it from a shell.
+- Make slow hooks return within their limit. Issue hooks are stopped after 1 minute for `fetch` and
+  `open` and after 10 minutes for the lifecycle events, and a `post-checkout` git hook during a
+  worktree cut or a commit hook on the leftover-work commit after 10 minutes. 0.11.0 waited for
+  ever. No key changes the limits.
+- Add a `# spoolway-login:` line to each tracker hook, such as
+  `# spoolway-login: gh auth status`, or run `spoolway sync --replace .spoolway/hooks/<hook>.sh`.
+  `sync` does not rewrite hooks, and `spoolway doctor` notes a hook without the line. Once it is
+  there, a queue add with no terminal, such as a job firing, queues a batch whose login has lapsed
+  with `tracking: off` instead of refusing it.
+- Fix task files `queue add` now refuses: a key spelt like a contract key with another case or a
+  `-`, such as `gate-at:`; a section still holding the skeleton's `[[…]]` placeholder; an id
+  another queue file holds or a routine is named; an id whose `task/<id>` branch or worktree is
+  still on disk; and a `gate_at:` on a step the task walks past. Each refusal names its fix.
+- Drop `--json` from scripts that call `spoolway queue show`, `spoolway prompt show`,
+  `spoolway whats-new` or `spoolway queue add --from`. They now exit 1 with it.
+- Update scripts that read `spoolway queue list --json`. On a paused row, or a blocked row no
+  unblocker is working, `stage` is the step the task stopped at, not `paused` or `blocked`; match
+  `state` instead. A task naming a missing pipeline is an `unknown` row, and the command exits 0.
+- Do not delete `dispatch.pid` to start a second dispatcher. The running one now stops at its next
+  pass when the file is gone or names another. With a `jobs.toml` that does not parse,
+  `spoolway dispatch` keeps running instead of exiting 3 on an empty queue, so a supervisor that
+  restarts on exit 3 waits. In a home-mode workspace a project job fires once per workspace.
+- Expect a task whose worktree was deleted mid-step to block. 0.11.0 cut a fresh worktree and
+  routed the lost result. Resume the task to run the step again. The advice for a worktree that
+  cannot be removed is now a `chmod`, `rm` and `git worktree prune` line.
+- Know where a write lands in a linked worktree. Inside one with its own `.spoolway/` on a branch,
+  `spoolway config set`, `spoolway override promote` and `spoolway pipeline promote` now write that
+  worktree's files. The dispatcher keeps the main checkout's copy until the branch merges.
+- Replace a zero `dispatch.lane_child_ceiling` or `dispatch.lane_quiet` with a duration such as `1h`
+  or `15m`. `config set` refuses zero, and `spoolway doctor` fails one already in the file.
+- Clear what `spoolway doctor` now fails: a `compact_ctx` outside 1 to 100, a `permission_mode` the
+  agent does not accept, a hook script with CRLF line endings or no exec bit, a `prompt:` that
+  starts with `/` or holds `..`, a missing `task_template:`, duplicate queue ids, a queued task
+  named like a routine, a job whose routine cannot be queued, and a deleted task's leftover
+  worktree or branch. The dispatcher refuses a step with a bad `compact_ctx` or permission mode.
+- Expect higher cost figures on `[models]` rows with their own base rates. They now keep the price
+  table's `above_<N>k_tokens` tier, so `spoolway eval` and `unattended.max_cost_usd` count large
+  turns at the tier rate. Set `compact_ctx` on a model rather than exporting
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`; a lane no longer inherits it.
+- Expect a `last:` step to run once in a chain that mixes pipelines. 0.11.0 skipped it for the whole
+  chain when any task above it walked past.
 
 ## 0.10.0 to 0.11.0
 
