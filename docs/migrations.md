@@ -97,11 +97,6 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   as its id. A job skips its window instead and says ``job <name> · due now · skipped, <routine> is
   still in the queue, at step <step>``. Resume, restart or unqueue a stopped copy to free the
   routine. See [Routines](planning.md#routines).
-- Rename every pipeline step id longer than 26 characters. A lane's herdr name is its step plus a
-  short task tag, and herdr refuses a name past 32 characters, so the limit fell from 64 to 26.
-  `spoolway pipeline check`, `spoolway doctor` and the dispatcher refuse a longer id
-  with ``step id `<id>` is <n> characters long, and the limit is 26``. The longest step id in a
-  shipped pipeline is 15 characters. The task id limit stays 100.
 - Rename a `routine:` key in your own task files. spoolway sets it on every queued copy of a
   routine, so `spoolway queue add` refuses a task file that sets it.
 - Update scripts that find a routine copy by its numbered id. Its lane is now named
@@ -177,8 +172,8 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   command, not its `on_pass`.
 - Allow for a task held on `done`. A `background: true` command step with `on_fail` now holds its
   task, its `done` hook and its dependents until the check ends, up to its `timeout:`. A task whose
-  worktree cannot be removed also stays on `done`, and its message gives the command that clears
-  it. Leave the new `removing/` folder in
+  worktree cannot be removed also stays on `done`, and its message names the
+  `git worktree remove --force --force <path>` that clears it. Leave the new `removing/` folder in
   the project home alone.
 - Start long-lived services outside spoolway. Background processes a blocking `run:` line starts
   are now stopped at the step's next arrival, at cleanup and by `queue unqueue --force`. Keep
@@ -339,7 +334,7 @@ dispatcher keeps routing on the pipelines it loaded when it started.
   nothing now, and `spoolway sync` drops it without a note.
 - Expect one idle agent process per agent step a task has run. Each step keeps its pane until the
   task is done. To have each new agent step close the last one's pane instead, run
-  `spoolway config set dispatch.visible_lanes 1`.
+  `spoolway config set dispatch.keep_finished_lanes false`.
 - Re-check `loop:` on steps a task reaches by a resume, a cleared block, a command step's exit or a
   walk-past. `loop:` now counts every move onto a step, not only a lane's report, so a task 0.7.1
   let return more often may now block with the step and the count named. Raise that `loop:` if it
