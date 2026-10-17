@@ -575,10 +575,26 @@ screen_dispatch() {
 # The last frame the open screen drew — everything after the last frame start
 # code [`screen_frames`] counts — which is what is on screen now. A frame still
 # being written reads short, and the next poll reads it whole.
+#
+# Found by byte offset and read with `tail -c`, never by loading the log into
+# a shell variable and stripping `${log##*"$start"}`. The log is appended to
+# for a suite's whole life and reaches tens of megabytes by board-pause's
+# last screen, and bash's `##*` strip is far worse than linear in the
+# string: one call measured 42–51 seconds on a 9 MB log, and slower still on
+# a CI runner. `screen_dispatch` makes up to three of them per start, and
+# board-pause starts the screen seven times — 311 of its 470 seconds in a
+# local run, and the reason the suite ran anywhere from eight to thirty minutes in CI
+# and was killed by run.sh's watchdog at the end of the slow ones. `grep -b`
+# names every frame start's offset in one pass, in a few milliseconds.
 screen_last_frame() {
-  local log start=$'\x1b[?2026h\x1b[H'
-  log=$(<"$E2E_SCREEN_LOG")
-  printf '%s' "${log##*"$start"}"
+  local start=$'\x1b[?2026h\x1b[H' at
+  at=$(grep -aboF -- "$start" "$E2E_SCREEN_LOG" 2>/dev/null | tail -n 1)
+  at=${at%%:*}
+  if [ -z "$at" ]; then
+    cat "$E2E_SCREEN_LOG" 2>/dev/null
+    return 0
+  fi
+  tail -c "+$((at + ${#start} + 1))" "$E2E_SCREEN_LOG"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and

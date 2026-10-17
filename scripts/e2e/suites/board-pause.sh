@@ -124,23 +124,136 @@ board_start() {
 
 board_stop() { screen_stop; }
 
-# pick_item <downs>
+# ------------------------------------------------------- what is on screen now
 #
-# Open the options menu on the cursor's row and take the item `downs` rows
-# under the first. Which item that is depends on the row: pause is 1 down
-# on a running or queued row, restart is 2 on a running or queued-then-started
-# one and 1 on a paused one, unqueue is 2 on a queued one. A frame is waited
-# for between the keys, because esc or `o` followed at once by an arrow key
-# is read as one sequence.
-pick_item() {
-  local downs=$1 i
-  press o
-  next_frame
-  for ((i = 0; i < downs; i++)); do
-    press $'\x1b[B'
-    next_frame
+# Every key below is sent only once the screen shows the state the key before
+# it left — never on the strength of "a frame was drawn since". The board
+# draws for reasons of its own (a lane's TIME ticking, a reading landing a
+# moment after a key asked for it), so "some frame landed after the key" is
+# not proof the key was read: a frame queued just before it satisfies the wait
+# too. A key sent on that false proof lands in whatever the earlier key opens
+# a moment later — a `↓` meant for the board moves a picker's cursor instead,
+# off the row it preselected. Waiting for the frame that *shows* the result
+# makes each key's effect a fact before the next one is typed, and costs only
+# as long as the board takes to draw it rather than a frame's worth of polling
+# bound per key.
+
+# The frame on screen now, ANSI stripped: the last *complete* frame in the
+# log. A frame is written in more than one piece, so the very last one may
+# still be arriving; it is complete once it carries the frame writer's own
+# closing code (`src/screen/frame_writer.rs`'s `FRAME_END`), and until then
+# the one before it is what is on screen. Found by byte offset, for the reason
+# `screen_last_frame` in lib.sh gives.
+_frame_now() {
+  local start=$'\x1b[?2026h\x1b[H' end=$'\x1b[?2026l' offs n from frame
+  mapfile -t offs < <(grep -aboF -- "$start" "$BOARD_LOG" 2>/dev/null | cut -d: -f1)
+  n=${#offs[@]}
+  [ "$n" -gt 0 ] || return 0
+  from=${offs[n - 1]}
+  frame=$(tail -c "+$((from + 1))" "$BOARD_LOG")
+  if [[ $frame != *"$end"* ]] && [ "$n" -gt 1 ]; then
+    from=${offs[n - 2]}
+    frame=$(tail -c "+$((from + 1))" "$BOARD_LOG" | head -c "$((offs[n - 1] - from))")
+  fi
+  printf '%s\n' "$frame" | _strip_ansi
+}
+_now_says()    { grep -qF -- "$1" < <(_frame_now); }
+_now_matches() { grep -qE -- "$1" < <(_frame_now); }
+
+# Wait until the screen shows `want` now, up to `secs` seconds.
+shows() { poll_until "${2:-20}" _now_says "$1"; }
+
+# `draws`, for the screen as it stands rather than anything the log has ever
+# held — a panel that has to *still* be up, not merely to have been drawn.
+draws_now() {
+  local what=$1 want=$2 secs=${3:-20}
+  if shows "$want" "$secs"; then ok "$what"
+  else bad "$what (the screen does not show \"$want\")"; _frame_now | sed 's/^/        /'; fi
+}
+
+# The frame on screen once it shows `want`, waited for up to `secs` seconds,
+# for a caller with more than one thing to read off that same frame.
+frame_showing() {
+  local want=$1 secs=${2:-20} i frame
+  for ((i = 0; i < secs * 10; i++)); do
+    frame=$(_frame_now)
+    if grep -qF -- "$want" <<<"$frame"; then
+      printf '%s\n' "$frame"
+      return 0
+    fi
+    sleep 0.1
   done
-  press $'\r'
+  _frame_now
+  return 1
+}
+
+# The task the board's cursor sits on now — the row its gutter marks with
+# `▸` (`src/status/view.rs`'s `CURSOR_MARK`).
+_cursor() {
+  local at
+  at=$(grep -oE '│ ▸ [^ ]+' < <(_frame_now) | head -1)
+  printf '%s' "${at#│ ▸ }"
+}
+_cursor_left() { [ "$(_cursor)" != "$1" ]; }
+
+# cursor_to <task>
+#
+# Walk the board's cursor onto `task`'s row, one arrow at a time, each sent
+# only once the screen shows the last one moved the cursor. The direction is
+# read off the frame each time round, so a row order that changes under the
+# walk — a resume re-sorting a group — only costs it a step. Returns 1, with
+# the cursor wherever it got to, if the row is not on the board.
+cursor_to() {
+  local want=$1 i frame cur at to
+  for ((i = 0; i < 40; i++)); do
+    frame=$(_frame_now)
+    cur=$(grep -oE '│ ▸ [^ ]+' <<<"$frame" | head -1)
+    cur=${cur#│ ▸ }
+    [ "$cur" = "$want" ] && return 0
+    at=$(grep -nF '│ ▸ ' <<<"$frame" | head -1 | cut -d: -f1)
+    to=$(grep -nE "│ (▸ |  )$want " <<<"$frame" | head -1 | cut -d: -f1)
+    if [ -z "$at" ] || [ -z "$to" ]; then
+      sleep 0.1
+      continue
+    fi
+    if [ "$to" -gt "$at" ]; then press $'\x1b[B'; else press $'\x1b[A'; fi
+    poll_until 10 _cursor_left "$cur" || return 1
+  done
+  printf '  \033[31mlost\033[0m    the cursor never reached %s\n' "$want" >&2
+  return 1
+}
+
+# The item the open options menu's cursor is on.
+_menu_choice() {
+  local at
+  at=$(grep -oE '│  > [a-z]+ ' < <(_frame_now) | head -1)
+  at=${at#│  > }
+  printf '%s' "${at% }"
+}
+_menu_left() { [ "$(_menu_choice)" != "$1" ]; }
+
+# pick_item <item>
+#
+# Open the options menu on the cursor's row and take `item` — open, pause,
+# restart or unqueue — off it by name. Which items a menu lists depends on
+# the row, so the walk down it reads the menu's own cursor rather than
+# counting. Each key waits for the screen to show the last one landed, which
+# also keeps `o` and the arrow behind it from being read as one sequence.
+pick_item() {
+  local item=$1 i sel
+  press o
+  poll_until 10 _now_says "│  > open " || return 1
+  for ((i = 0; i < 4; i++)); do
+    sel=$(_menu_choice)
+    if [ "$sel" = "$item" ]; then
+      press $'\r'
+      return 0
+    fi
+    press $'\x1b[B'
+    poll_until 10 _menu_left "$sel" || return 1
+  done
+  printf '  \033[31mlost\033[0m    the menu offered no %s\n' "$item" >&2
+  return 1
 }
 
 # One keystroke into the board. `\x1b` for esc and `\r` for enter are what a
@@ -203,18 +316,19 @@ settle_frames() {
 }
 
 # The other half: a real change repaints the board at once, so "it stopped
-# saying that" means the frames drawn *from here on* do not say it — whether
-# or not the board is still drawing anything at all while it waits. Two real
-# waits' worth of pacing, then read only what landed after the first of them.
+# saying that" is the screen as it stands no longer saying it. Every caller
+# sends its key with the thing in question on screen — the panel was waited
+# for before it was answered — so the frame that drops it can only be one
+# drawn after the key was read. It used to take two frames' worth of pacing
+# and read whatever landed after the first, which on an idle board was two
+# whole `next_frame` bounds spent on a panel that had closed at once.
 stops_drawing() {
-  local what=$1 unwanted=$2 mark
-  settle_frames 1
-  mark=$(wc -l < "$BOARD_LOG")
-  settle_frames 1
-  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
+  local what=$1 unwanted=$2
+  if poll_while 20 _now_says "$unwanted"; then ok "$what"
+  else
     bad "$what (the board is still drawing \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
-  else ok "$what"; fi
+  fi
 }
 
 # And the same shape for a panel that must never have opened at all: nothing
@@ -351,7 +465,6 @@ draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "the task file is untouched while the menu is open" mid-turn implement
 press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"
-next_frame
 
 # ------------------------------------------- open with a missing editor
 # An `editor.toml` naming a program that is not on `PATH` refuses the open,
@@ -360,20 +473,22 @@ next_frame
 mkdir -p "$HOME/.spoolway"
 printf '[editor]\ncommand = "notepd.exe"\n' > "$HOME/.spoolway/editor.toml"
 OPEN_MARK=$(wc -l < "$BOARD_LOG")
-pick_item 0
+pick_item open
 draws_since_waited "a refused open shows a popup titled open task" \
   "╭─ open task ─" "$OPEN_MARK"
 draws_since "naming the program that is not on PATH" \
   "\`notepd.exe\` is not on PATH" "$OPEN_MARK"
 draws_since "and how to fix it" "~/.spoolway/editor.toml" "$OPEN_MARK"
-# The key row is read only off frames drawn once the popup is up. The options
-# menu `pick_item` opened after OPEN_MARK draws `[enter] confirm   [esc] close`
-# itself, so a check reaching back that far would pass for a popup with an
-# `esc` key or no key row at all.
-POPUP_MARK=$(wc -l < "$BOARD_LOG")
-settle_frames 1
-draws_since "closed with enter" "[enter] confirm" "$POPUP_MARK"
-draws_since_not "and enter alone" "[esc] close" "$POPUP_MARK"
+# The key row is read only off the frame on screen with the popup up. The
+# options menu `pick_item` opened after OPEN_MARK draws `[enter] confirm
+# [esc] close` itself, so a check reaching back that far would pass for a
+# popup with an `esc` key or no key row at all.
+POPUP_FRAME=$(frame_showing "╭─ open task ─")
+if grep -qF -- "[enter] confirm" <<<"$POPUP_FRAME"; then ok "closed with enter"
+else bad "closed with enter (the popup on screen has no \"[enter] confirm\")"; sed 's/^/        /' <<<"$POPUP_FRAME"; fi
+if grep -qF -- "[esc] close" <<<"$POPUP_FRAME"; then
+  bad "and enter alone (the board drew \"[esc] close\")"; sed 's/^/        /' <<<"$POPUP_FRAME"
+else ok "and enter alone"; fi
 # Read only off frames drawn after `esc`, so this also proves the board
 # keeps redrawing under the popup.
 ESC_MARK=$(wc -l < "$BOARD_LOG")
@@ -387,9 +502,8 @@ press $'\r'
 stops_drawing "enter closes the popup" "╭─ open task ─"
 stage_stays "and the task is where it was" mid-turn implement
 rm "$HOME/.spoolway/editor.toml"
-next_frame
 
-pick_item 1
+pick_item pause
 
 draws "picking pause over a live lane opens a panel naming the task" "pause mid-turn"
 draws "the panel names the step and calls it an agent turn" "implement    agent"
@@ -402,15 +516,21 @@ if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
 # A letter does not answer anything — not `s`, which once scheduled — so
-# it leaves the panel open and acts on nothing.
+# it leaves the panel open and acts on nothing. Keys are read in the order
+# they are sent, so the panel's own cursor moving down and back after them is
+# proof both letters have been read, and the task file can be read for what
+# they did rather than for what they have not got round to yet.
 press x
 press s
-settle_frames 2
+press $'\x1b[B'
+shows "> pause when implement finishes" 10
+press $'\x1b[A'
+shows "> pause now" 10
 stage_stays "a stray key over the panel changes nothing" mid-turn implement
 if grep -qF "gate_at:" "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"; then
   bad "and \`s\` no longer schedules a pause"
 else ok "and \`s\` no longer schedules a pause"; fi
-draws "and the panel is still up" "pause mid-turn"
+draws_now "and the panel is still up" "╭─ pause mid-turn"
 
 press $'\x1b'
 stops_drawing "esc closes the panel" "pause mid-turn"
@@ -421,8 +541,8 @@ else bad "and leaves the lane running"; fi
 # The second answer leaves the turn running and writes a schedule instead of
 # an interrupt — the NEXT column carries it, and the task's own file gains
 # `gate_at`.
-pick_item 1
-next_frame
+pick_item pause
+shows "╭─ pause mid-turn"
 press $'\x1b[B'
 press $'\r'
 stops_drawing "the second answer closes the panel without aborting anything" "pause mid-turn"
@@ -436,8 +556,8 @@ else bad "and the lane is still running"; fi
 # Answering it again, over a fresh panel on the same still-live step, clears
 # the schedule it just wrote: the answer now reads `cancel the scheduled
 # pause`.
-pick_item 1
-next_frame
+pick_item pause
+shows "╭─ pause mid-turn"
 draws "the second answer reads as a cancel while a schedule stands" \
   "cancel the scheduled pause"
 press $'\x1b[B'
@@ -446,8 +566,8 @@ stops_drawing "answering it again closes the panel too" "pause mid-turn"
 lacks "and clears the schedule it named" "gate_at:" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
 
-pick_item 1
-next_frame
+pick_item pause
+shows "╭─ pause mid-turn"
 press $'\r'
 stage_reaches "enter parks the task" mid-turn paused 25
 if poll_while 15 kill -0 "$LANE_PID"; then ok "and the turn it named is over"
@@ -513,10 +633,12 @@ MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
 draws_since_waited "\`enter\` asks again" "No new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
+# `i` first, then the popup's own `↓`: once the screen shows the cursor moved,
+# `i` has been read too, so the task file says what it did.
 press i
-settle_frames 2
-stage_stays "\`i\` no longer answers the stop popup" busy implement
 press $'\x1b[B'
+shows "> interrupt them now" 10
+stage_stays "\`i\` no longer answers the stop popup" busy implement
 press $'\r'
 stage_reaches "interrupt them now parks the task it interrupted" busy paused 25
 if poll_while 15 kill -0 "$BUSY_PID"; then ok "and the turn it interrupted is over"
@@ -552,24 +674,22 @@ lacks "and a park by hand carries no stop mark" "parked_by_stop:" \
   "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
 must "pausing behind by hand" "$SPOOLWAY" queue pause behind
 queue_idle late behind
-next_frame
 must "pausing late by hand" "$SPOOLWAY" queue pause late
 
 # ----------------------------------------------- a paused row is a no-op
 MARK=$(wc -l < "$BOARD_LOG")
 press o
-settle_frames 2
+shows "│  > open " 10
 draws_since "the menu on an already-paused row opens" "> open" "$MARK"
 draws_since "and offers restart" "  restart" "$MARK"
 never_draws "but offers no pause to pick" "    pause    " "$MARK"
 press $'\x1b'
-next_frame
+poll_while 10 _now_says "│  > open "
 
 # ------------------------------- pausing a task that never started at all
 # Nothing live, nothing declared for `queued` in any pipeline, so this parks
 # on the spot — the one thing worth checking here is the record it leaves.
 queue_idle never-run late
-next_frame
 must "pausing a task that never started" "$SPOOLWAY" queue pause never-run
 stage_reaches "pausing a task that never started parks it at once" never-run paused 25
 lacks "and writes no \`parked_from\` for a task that was still \`queued\`" \
@@ -591,11 +711,16 @@ lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 # it. `U` on the board opens nothing and writes nothing; the command still
 # carries both back to pending.
 queue_idle stalled never-run
-next_frame
 MARK=$(wc -l < "$BOARD_LOG")
+# `U`, then `o`, whose menu is drawn only once every key before it has been
+# read: a panel `U` opened would be on screen by then, and in the log since
+# the mark. The menu is closed again before anything else is typed.
 press U
-settle_frames 2
+press o
+shows "│  > open " 10
 never_draws "\`U\` opens no unqueue-all panel" "tasks have not started:" "$MARK"
+press $'\x1b'
+poll_while 10 _now_says "│  > open "
 stage_stays "and writes nothing" stalled queued
 stage_stays "to any queued task" never-run queued
 
@@ -623,8 +748,8 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 # to make it `Done`, `chain-head` never becomes ready, and is still
 # genuinely `queued` — not already off running its own pipeline — when unqueue
 # is picked. The cursor already opens on `chain-gate`, the first row of its
-# own fresh group; `chain-gate` sorts above `chain-head` within it, so it
-# takes one `down` rather than two to reach the row this section picks on.
+# own fresh group; `chain-gate` sorts above `chain-head` within it, so
+# `cursor_to` takes one `down` to reach the row this section picks on.
 board_stop
 mkdir -p "$CTL"
 echo hang > "$CTL/chain-gate"
@@ -643,9 +768,8 @@ if [ -n "$CHAIN_GATE_PID" ]; then ok "the gate lane is really mid-turn"
 else bad "the gate lane is really mid-turn"; fi
 draws "the board draws the chain" "chain-tail"
 
-press $'\x1b[B'
-next_frame
-pick_item 2
+cursor_to chain-head
+pick_item unqueue
 
 draws "unqueue on the chain's head opens a panel naming both" "unqueue chain-head"
 draws "the dependent, marked with what it depends on" \
@@ -712,7 +836,8 @@ refuses "\`spoolway queue resume\` refuses it too" \
 if [ "$(cat "$STUCK_FILE")" = "$STUCK_BEFORE" ]; then ok "the refused resumes left the task file alone"
 else bad "the refused resumes left the task file alone"; fi
 
-pick_item 1
+cursor_to stuck
+pick_item pause
 
 draws "pause over the blocked row opens a panel naming the task" "pause stuck"
 draws "the panel names the blocked step and calls it an agent turn" "blocked    agent"
@@ -797,48 +922,37 @@ must "the restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause 
 # fresh one a new id. So the last id in the log, before and after, is the
 # proof the step came back on a new session rather than its old one.
 #
-# The suite does not track which row the cursor is on, so it walks the rows
-# from the top the way the `r` section below does. The menu is titled with the
-# task, so a row that is not `stuck` is closed with `esc` and nothing is touched.
-# `stuck` is parked, so its menu is open and restart, and restart is one down.
+# The cursor is walked onto `stuck`'s own row — found by the board's cursor
+# mark, not by opening every row's menu on the way — and restart is taken off
+# its menu by name. The panel's text is read off the frame on screen with the
+# panel up.
+#
+# The restart panel has one answer, so no key short of `enter` and `esc`
+# shows anything for having been read. A stray `s` is proven read by the
+# `esc` behind it closing the panel — keys are read in the order they are
+# sent — and the panel is opened again for the `enter` that restarts.
 OLD_SESSION=$(last_session)
 OLD_LAUNCHES=$(launches)
 if [ -n "$OLD_SESSION" ]; then ok "the parked lane's session is in its log before the restart"
 else bad "the parked lane's session is in its log before the restart"; fi
 
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
-next_frame 3
 SAW_RESTART=""
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  MARK=$(wc -l < "$BOARD_LOG")
-  press o
-  next_frame 3
-  SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-  if grep -qF -- "╭─ stuck ─" <<<"$SINCE"; then
-    press $'\x1b[B'
-    next_frame 3
-    press $'\r'
-    next_frame 3
-    SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-    SAW_RESTART=stuck
-    for want in "╭─ restart stuck ─" "step      implement" "lane      stuck · implement" \
-      "is briefed from" "> restart" "[enter] confirm   [esc] close"; do
-      if grep -qF -- "$want" <<<"$SINCE"; then ok "the restart panel says: $want"
-      else bad "the restart panel says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-    done
-    press s
-    next_frame 3
-    stage_stays "a stray \`s\` over the restart panel restarts nothing" stuck paused
-    press $'\r'
-    next_frame 3
-    break
-  else
-    press $'\x1b'
-    next_frame 3
-  fi
-  press $'\x1b[B'
-  next_frame 3
-done
+if cursor_to stuck && pick_item restart \
+  && RESTART_FRAME=$(frame_showing "╭─ restart stuck ─" 10); then
+  SAW_RESTART=stuck
+  for want in "╭─ restart stuck ─" "step      implement" "lane      stuck · implement" \
+    "is briefed from" "> restart" "[enter] confirm   [esc] close"; do
+    if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the restart panel says: $want"
+    else bad "the restart panel says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
+  done
+  press s
+  press $'\x1b'
+  poll_while 10 _now_says "╭─ restart stuck ─"
+  stage_stays "a stray \`s\` over the restart panel restarts nothing" stuck paused
+  pick_item restart
+  shows "╭─ restart stuck ─" 10
+  press $'\r'
+fi
 if [ "$SAW_RESTART" = stuck ]; then ok "restart in the parked row's menu opens the restart panel"
 else bad "restart in the parked row's menu opens the restart panel"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 stage_reaches "enter on the panel's restart sends the task back to the step it held" stuck implement 25
@@ -883,47 +997,26 @@ if poll_until 60 test -s "$BUILD_RUNS"; then ok "the command step is running"
 else bad "the command step is running"; fi
 BUILD_FIRST=$(head -n1 "$BUILD_RUNS" 2>/dev/null)
 
-# Walked from the top as the section above does. `build-cmd` is running, so
-# its menu is open, pause and restart, and restart is two down.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
-next_frame 3
+# Reached the way the section above reaches `stuck`. `build-cmd` is running,
+# so its menu is open, pause and restart.
 SAW_RESTART=""
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  MARK=$(wc -l < "$BOARD_LOG")
-  press o
-  next_frame 3
-  SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-  if grep -qF -- "╭─ build-cmd ─" <<<"$SINCE"; then
-    press $'\x1b[B'
-    next_frame 3
-    press $'\x1b[B'
-    next_frame 3
-    press $'\r'
-    next_frame 3
-    SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-    SAW_RESTART=build-cmd
-    for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
-      "The command's process is ended and \`build\` runs again" \
-      "from the start. Its log is kept as the previous log." "> restart" \
-      "[enter] confirm   [esc] close"; do
-      if grep -qF -- "$want" <<<"$SINCE"; then ok "the command form says: $want"
-      else bad "the command form says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-    done
-    for unwanted in "lane      build-cmd" "session   "; do
-      if grep -qF -- "$unwanted" <<<"$SINCE"; then
-        bad "the command form names no $unwanted"; tail -30 "$BOARD_LOG" | sed 's/^/        /'
-      else ok "the command form names no $unwanted"; fi
-    done
-    press $'\r'
-    next_frame 3
-    break
-  else
-    press $'\x1b'
-    next_frame 3
-  fi
-  press $'\x1b[B'
-  next_frame 3
-done
+if cursor_to build-cmd && pick_item restart \
+  && RESTART_FRAME=$(frame_showing "╭─ restart build-cmd ─" 10); then
+  SAW_RESTART=build-cmd
+  for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
+    "The command's process is ended and \`build\` runs again" \
+    "from the start. Its log is kept as the previous log." "> restart" \
+    "[enter] confirm   [esc] close"; do
+    if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the command form says: $want"
+    else bad "the command form says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
+  done
+  for unwanted in "lane      build-cmd" "session   "; do
+    if grep -qF -- "$unwanted" <<<"$RESTART_FRAME"; then
+      bad "the command form names no $unwanted"; sed 's/^/        /' <<<"$RESTART_FRAME"
+    else ok "the command form names no $unwanted"; fi
+  done
+  press $'\r'
+fi
 if [ "$SAW_RESTART" = build-cmd ]; then ok "restart in a command step's menu opens the command form"
 else bad "restart in a command step's menu opens the command form"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 build_ran_again() { [ "$(wc -l < "$BUILD_RUNS")" -ge 2 ]; }
@@ -1031,42 +1124,50 @@ has "and the stdin content lands on disk" "read from stdin" \
 # — `behind` directly, `late` through `behind` — and neither has a finished
 # dependency. `gate-edit` is still paused too, a real gate, so `r` there
 # opens the step picker with the cursor on the step a plain resume goes to,
-# and `enter` takes that road. `mid-turn` and `busy` come back onto
-# `implement` the same way, so their `hang`-mode lanes are running again
-# once this section ends — the pass-race section after this one queues six
-# more of its own regardless, since nothing in this fixture caps
-# `agents.<profile>.concurrency` or a model's `slots` (both default to `0`,
-# uncapped — `src/config.rs`), so there is no worker-slot budget here for a
-# later section to run short of.
+# and `enter` takes that road.
 #
-# The suite does not track which row the cursor is on. It walks the cursor
-# from the top, pressing `r` on every row: a row that is not paused opens
-# nothing, a queued park resumes at once, and a picker is answered with
-# `enter`. The one thing it does count is the gate, whose picker must have
-# been drawn.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
-next_frame 3
+# `r` is pressed on those three rows and nowhere else, each reached by
+# `cursor_to`, and every key waits for the screen to show the one before it
+# landed. This used to walk the cursor down from the top pressing `r` on
+# every row and pacing each key on "a frame was drawn since", which a frame
+# already on its way satisfied as readily as the one the key caused: a `↓`
+# sent before a picker had opened then moved the picker's cursor off its
+# preselected row instead of moving the board's.
+#
+# What `enter` did is read off the gate's own record, not off `stage:`
+# alone. Once resumed, `gate-edit` runs on through `review` and `document` to
+# `handover`, which fails here for want of a forge, and the unattended
+# unblocker sends it back there until the run gives up and parks it on
+# `paused` again — several passes, but no person in the loop, so the whole
+# round trip can be over before anything looks. Watching for "not `paused`"
+# then waited its full bound on a task that had already left and come back,
+# and failed. The Status Log line the gate's release writes stays put
+# whatever the task does next, and names the step the preselected row did.
 SAW_PICKER=""
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  MARK=$(wc -l < "$BOARD_LOG")
+cursor_to late && press r
+cursor_to behind && press r
+if cursor_to gate-edit; then
   press r
-  next_frame 3
-  if grep -qF -- "╭─ resume " < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
-    grep -qF -- "resume gate-edit" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG") && SAW_PICKER=gate-edit
-    press $'\r'
-    next_frame 3
-  fi
-  press $'\x1b[B'
-  next_frame 3
-done
+  if shows "╭─ resume gate-edit ─" 10; then SAW_PICKER=gate-edit; fi
+fi
 if [ "$SAW_PICKER" = gate-edit ]; then ok "\`r\` on the real gate opens the step picker"
-else bad "\`r\` on the real gate opens the step picker"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+else bad "\`r\` on the real gate opens the step picker"; _frame_now | sed 's/^/        /'; fi
+if [ "$SAW_PICKER" = gate-edit ] && poll_until 10 _now_matches '│  > [a-z-]+ .*\(next\)'; then
+  press $'\r'
+fi
 stage_reaches "a row parked off \`queued\` goes back to \`queued\`, dependency or not" \
   late queued 25
 stage_reaches "and every other queued park along with it" behind queued 25
-_left_paused() { [ "$(stage_of "$1")" != paused ]; }
-if poll_until 25 _left_paused gate-edit; then ok "\`enter\` on the picker's preselected row resumes the gate"
-else bad "\`enter\` on the picker's preselected row resumes the gate"; fi
+_gate_released() {
+  grep -qF -- "→ \`review\`: \`implement\` released at the gate" \
+    "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md" "$SPOOLWAY_PROJECT_HOME/archive/gate-edit.md" 2>/dev/null
+}
+if poll_until 25 _gate_released; then ok "\`enter\` on the picker's preselected row resumes the gate"
+else
+  bad "\`enter\` on the picker's preselected row resumes the gate (gate-edit is at $(stage_of gate-edit))"
+  sed -n '/^## Status Log/,$p' "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md" 2>/dev/null | sed 's/^/        /'
+  _frame_now | sed 's/^/        /'
+fi
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
