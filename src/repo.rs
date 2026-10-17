@@ -8350,9 +8350,14 @@ mod tests {
 
         assert!(began.elapsed() < std::time::Duration::from_secs(60));
         assert!(err.downcast_ref::<GitTimedOut>().is_some(), "{err:#}");
-        let said = format!("{err:#}");
-        assert!(said.contains("its `post-checkout` git hook"), "{said}");
-        assert!(said.contains("was stopped after"), "{said}");
+        // Naming the hook reads `/proc`, which only Linux has; elsewhere the
+        // message lists the hooks it could have been.
+        #[cfg(target_os = "linux")]
+        {
+            let said = format!("{err:#}");
+            assert!(said.contains("its `post-checkout` git hook"), "{said}");
+            assert!(said.contains("was stopped after"), "{said}");
+        }
         let child: u32 = std::fs::read_to_string(&child_pid)
             .unwrap()
             .trim()
@@ -8366,9 +8371,10 @@ mod tests {
 
     /// A hook directory set with `core.hooksPath` is where the hook is looked
     /// for. Husky 9 sets it to `.husky/_`, whose stub runs the real hook, so a
-    /// match on a directory called `hooks` never named it.
+    /// match on a directory called `hooks` never named it. Linux only: naming
+    /// a hook reads `/proc`.
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn a_hook_under_core_hooks_path_is_named() {
         let root = hooked_repo("git-hook-hooks-path");
         run(&root, "git", &["config", "core.hooksPath", ".husky/_"]).unwrap();
