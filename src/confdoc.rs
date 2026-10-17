@@ -40,11 +40,38 @@ pub fn at<'v>(value: &'v Value, parts: &[&str]) -> Option<&'v Value> {
     Some(cursor)
 }
 
+/// `text` with LF line endings, and whether it had CRLF ones to give back.
+///
+/// Only a file whose every line ends in CRLF is converted, which a Windows
+/// editor on WSL produces. Every edit here writes the lines it adds with LF,
+/// so an edit made on the converted text and handed to [`restore_endings`]
+/// leaves the file with one ending throughout, and the lines it did not touch
+/// are the same bytes they were. A file that already mixes the two has no
+/// ending to keep, and is edited as it stands.
+pub fn lf_endings(text: &str) -> (String, bool) {
+    let crlf = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
+    match crlf {
+        true => (text.replace("\r\n", "\n"), true),
+        false => (text.to_string(), false),
+    }
+}
+
+/// The inverse of [`lf_endings`]: `text` with CRLF endings again if the file
+/// it came from had them.
+pub fn restore_endings(text: String, crlf: bool) -> String {
+    match crlf {
+        true => text.replace('\n', "\r\n"),
+        false => text,
+    }
+}
+
 /// Set one key in the document, leaving every other byte where it was except
 /// where a key the file never had is placed, as described below.
 ///
 /// A key already in the file keeps its comment: what is being changed is a
-/// value, and the note above it is as true afterwards as it was before.
+/// value, and the note above it and the one trailing it on the line are as
+/// true afterwards as they were before. A value that already means what it is
+/// set to is not rewritten at all. A key of an inline table is set inside it.
 ///
 /// A key the file never had is written where `rendered` — the config as
 /// [`crate::config::Config::render`] writes it — would have put it: after the
@@ -53,12 +80,24 @@ pub fn at<'v>(value: &'v Value, parts: &[&str]) -> Option<&'v Value> {
 /// rewrites a file from that same rendering, so a key added anywhere else, or
 /// with a note the rendering does not carry, would leave a file `sync` and
 /// `doctor` call behind although nothing in it is out of date.
+///
+/// A file whose every line ends in CRLF stays that way: see [`lf_endings`].
 pub fn set(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<String> {
+    let (lf, crlf) = lf_endings(text);
+    Ok(restore_endings(set_lf(&lf, parts, value, rendered)?, crlf))
+}
+
+/// [`set`] on text that ends its lines with LF.
+fn set_lf(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<String> {
     let mut doc: DocumentMut = text.parse().context("this file is not valid TOML")?;
     let template: DocumentMut = rendered
         .parse()
         .context("the rendered config is not valid TOML")?;
     let (leaf, path) = parts.split_last().context("a config key cannot be empty")?;
+
+    if set_in_inline(&mut doc, path, leaf, value)? {
+        return crate::config::settle_cache_hint(&doc.to_string(), rendered);
+    }
 
     // Tables that held nothing before this key arrived: a rendering writes no
     // header for a table that holds only tables, so once one of these has a
@@ -82,22 +121,8 @@ pub fn set(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<
         }
     }
 
-    // Read before the write, because inserting replaces the whole entry —
-    // the key, its decor and the comment standing in that decor included.
-    let existing = table
-        .key(leaf)
-        .and_then(|key| key.leaf_decor().prefix())
-        .and_then(|prefix| prefix.as_str())
-        .map(str::to_string);
-    let had_it = table.contains_key(leaf);
-
-    if had_it {
-        table.insert(leaf, item(value)?);
-        if let Some(prefix) = existing
-            && let Some(mut key) = table.key_mut(leaf)
-        {
-            key.leaf_decor_mut().set_prefix(prefix);
-        }
+    if table.contains_key(leaf) {
+        replace_value(table, leaf, item(value)?);
     } else {
         let template = path.iter().try_fold(template.as_table(), |table, part| {
             table.get(part).and_then(Item::as_table)
@@ -131,7 +156,124 @@ pub fn set(text: &str, parts: &[&str], value: &Value, rendered: &str) -> Result<
         place_new_tables(&mut doc, &template, path, from);
     }
 
-    Ok(doc.to_string())
+    // The cache-lifetime example is a comment, not a table, so none of the
+    // placing above moves it: it stays above the row it stood over, which is
+    // not the first row any more when the new one sorts before it.
+    crate::config::settle_cache_hint(&doc.to_string(), rendered)
+}
+
+/// Set `leaf` where the file already holds an inline table on `path`, as
+/// `"claude-haiku-5-5" = { context_window = 200000 }` does under `[models]`.
+/// Returns whether it did.
+///
+/// An inline table is a value, not a table, so the walk in [`set`] that
+/// creates missing tables would refuse it with "is not a table". The edit is
+/// made inside it and it stays inline, with the other keys in it untouched.
+/// A path that never meets an inline table is left to [`set`].
+fn set_in_inline(doc: &mut DocumentMut, path: &[&str], leaf: &str, value: &Value) -> Result<bool> {
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    let mut inline = false;
+    for (depth, part) in path.iter().enumerate() {
+        if !table.contains_key(part) {
+            if !inline {
+                return Ok(false);
+            }
+            // A table below an inline one is inline as well: a header could
+            // not be written inside `{ … }`. It is made with the key in it.
+            let mut nested = toml_edit::InlineTable::new();
+            let mut at = &mut nested;
+            for part in &path[depth + 1..] {
+                at.insert(*part, toml_edit::Value::InlineTable(Default::default()));
+                at = at
+                    .get_mut(part)
+                    .and_then(toml_edit::Value::as_inline_table_mut)
+                    .context("an inline table was just inserted")?;
+            }
+            at.insert(leaf, scalar_item(value)?);
+            nested.fmt();
+            append_inline(table, part, Item::Value(nested.into()));
+            return Ok(true);
+        }
+        let Some(next) = table.get_mut(part) else {
+            return Ok(false);
+        };
+        inline |= next.is_value();
+        let Some(next) = next.as_table_like_mut() else {
+            return Ok(false);
+        };
+        table = next;
+    }
+    if !inline {
+        return Ok(false);
+    }
+    if table.contains_key(leaf) {
+        replace_value(table, leaf, item(value)?);
+    } else {
+        append_inline(table, leaf, item(value)?);
+    }
+    Ok(true)
+}
+
+/// Add `key` as the last entry of an inline `table`.
+///
+/// The space before the closing brace sits on the last value, so a key
+/// appended after it would leave `1 , key = 2 }`. The space moves to the new
+/// last value.
+fn append_inline(table: &mut dyn toml_edit::TableLike, key: &str, mut new: Item) {
+    let closing = table
+        .iter()
+        .last()
+        .and_then(|(_, last)| last.as_value())
+        .and_then(|last| last.decor().suffix().cloned());
+    if let Some(last) = table
+        .iter_mut()
+        .last()
+        .and_then(|(_, last)| last.as_value_mut())
+    {
+        last.decor_mut().set_suffix("");
+    }
+    if let (Some(closing), Item::Value(new)) = (closing, &mut new) {
+        new.decor_mut().set_suffix(closing);
+    }
+    table.insert(key, new);
+}
+
+/// Bring the key `leaf`, which `table` has, to `new`, keeping the line it is
+/// on as it was.
+///
+/// Inserting would replace the whole entry: the key's decor and the value's
+/// own, which holds a trailing comment (`update_check = true # keep on`), would
+/// all be lost, and so would the spelling of a value that already says the
+/// right thing. A value that already means `new` is left alone, so setting a
+/// key to what it holds changes no byte. Otherwise only the value's text
+/// changes, in the entry that is already there.
+fn replace_value(table: &mut dyn toml_edit::TableLike, leaf: &str, mut new: Item) {
+    let Some(old) = table.get_mut(leaf) else {
+        return;
+    };
+    if let (Item::Value(old_value), Item::Value(new_value)) = (&*old, &mut new) {
+        if same_value(old_value, new_value) {
+            return;
+        }
+        *new_value.decor_mut() = old_value.decor().clone();
+    }
+    *old = new;
+}
+
+/// Whether two values say the same thing, however they are spelled: `'1h'` and
+/// `"1h"` are one string.
+fn same_value(old: &toml_edit::Value, new: &toml_edit::Value) -> bool {
+    use toml_edit::Value as V;
+    match (old, new) {
+        (V::String(a), V::String(b)) => a.value() == b.value(),
+        (V::Integer(a), V::Integer(b)) => a.value() == b.value(),
+        (V::Float(a), V::Float(b)) => a.value() == b.value(),
+        (V::Boolean(a), V::Boolean(b)) => a.value() == b.value(),
+        (V::Array(a), V::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| same_value(a, b))
+        }
+        _ => false,
+    }
 }
 
 /// Stand the tables `set` just created, `path[from..]`, where the rendering
@@ -291,7 +433,15 @@ fn insert_in_render_order(table: &mut Table, leaf: &str, value: Item, template: 
 /// rather than written, so setting one back to zero has to delete the line and
 /// not write `= 0`. Removing a key the file does not have is not an error —
 /// the document already says what it was asked to say.
+///
+/// A file whose every line ends in CRLF stays that way: see [`lf_endings`].
 pub fn remove(text: &str, parts: &[&str]) -> Result<String> {
+    let (lf, crlf) = lf_endings(text);
+    Ok(restore_endings(remove_lf(&lf, parts)?, crlf))
+}
+
+/// [`remove`] on text that ends its lines with LF.
+fn remove_lf(text: &str, parts: &[&str]) -> Result<String> {
     let mut doc: DocumentMut = text.parse().context("this file is not valid TOML")?;
     let (leaf, path) = parts.split_last().context("a config key cannot be empty")?;
 
@@ -862,5 +1012,131 @@ lane_quiet = \"10m\"
         assert!(rewritten.contains("lane_quiet = \"45m\""));
         assert!(rewritten.contains("auto_commit = false"));
         assert!(!rewritten.contains("[sandbox]"));
+    }
+
+    /// `config set` as the CLI runs it, on `text`: validated by `confkv::set`,
+    /// then written into the document by `edit_key`.
+    fn config_set(text: &str, key: &str, input: &str) -> String {
+        let config: Config = toml::from_str(text).unwrap();
+        let changed = crate::confkv::set(&config, key, input).unwrap();
+        changed
+            .edit_key(text, key, std::path::Path::new("config.toml"))
+            .unwrap()
+    }
+
+    /// A CRLF file stays CRLF and exactly one line changes.
+    ///
+    /// Before, the document was re-serialised with LF, so one `config set`
+    /// rewrote every line of a file a Windows editor had saved.
+    #[test]
+    fn setting_a_key_in_a_crlf_file_changes_one_line() {
+        let lf = Config::default().render().unwrap();
+        let before = lf.replace('\n', "\r\n");
+
+        let after = config_set(&before, "dispatch.lane_quiet", "45m");
+
+        assert_eq!(
+            after,
+            before.replace("lane_quiet = \"15m\"", "lane_quiet = \"45m\"")
+        );
+        assert_eq!(after.matches('\n').count(), after.matches("\r\n").count());
+    }
+
+    /// A key the file never had is written with the file's own ending, so the
+    /// file does not end up with a mix.
+    #[test]
+    fn a_key_added_to_a_crlf_file_is_written_with_crlf() {
+        let before = "[dispatch]\r\nauto_commit = true\r\n";
+
+        let after = config_set(before, "dispatch.lane_quiet", "45m");
+
+        assert!(after.contains("lane_quiet = \"45m\""), "{after:?}");
+        assert_eq!(after.matches('\n').count(), after.matches("\r\n").count());
+    }
+
+    /// A comment trailing the value belongs to the line, not to the value.
+    #[test]
+    fn a_trailing_comment_survives_a_set() {
+        let before = "[housekeeping]\nupdate_check = true # keep on\n";
+
+        let after = config_set(before, "housekeeping.update_check", "false");
+
+        assert_eq!(after, "[housekeeping]\nupdate_check = false # keep on\n");
+    }
+
+    /// Setting a key to what it already holds changes no byte, whatever the
+    /// spelling of the value: a single-quoted string stays single-quoted.
+    #[test]
+    fn setting_a_key_to_its_current_value_keeps_its_bytes() {
+        let before = "[dispatch]\nlane_quiet = '15m'   # as is\n";
+
+        let after = config_set(before, "dispatch.lane_quiet", "15m");
+
+        assert_eq!(after, before);
+    }
+
+    /// An inline row under `[models]` is edited where it stands.
+    ///
+    /// Before, the walk down to the key refused it with "is not a table".
+    #[test]
+    fn a_key_of_an_inline_models_row_is_updated_in_place() {
+        let before = "[models]\n\"claude-haiku-5-5\" = { context_window = 100000, input = 1.0 }\n";
+
+        let after = config_set(before, "models.claude-haiku-5-5.context_window", "200000");
+
+        assert_eq!(
+            after,
+            "[models]\n\"claude-haiku-5-5\" = { context_window = 200000, input = 1.0 }\n"
+        );
+    }
+
+    /// A key the inline row lacks is added inside it, and it stays inline.
+    #[test]
+    fn a_new_key_goes_inside_an_inline_models_row() {
+        let before = "[models]\n\"claude-haiku-5-5\" = { context_window = 100000 }\n";
+
+        let after = config_set(before, "models.claude-haiku-5-5.input", "1.0");
+
+        assert!(
+            after.contains("\"claude-haiku-5-5\" = { context_window = 100000,"),
+            "{after}"
+        );
+        assert!(after.contains("input = 1.0"), "{after}");
+        assert!(!after.contains("[models.claude-haiku-5-5]"), "{after}");
+    }
+
+    /// A tier key of an inline row is written inside the row as a nested inline
+    /// table. Before, the walk found no `above_200k_tokens` below the inline
+    /// row and refused with "is not a table".
+    #[test]
+    fn a_tier_key_goes_inside_an_inline_models_row() {
+        let before = "[models]\n\"claude-haiku-5-5\" = { context_window = 100000 }\n";
+
+        let after = config_set(
+            before,
+            "models.claude-haiku-5-5.above_200k_tokens.input",
+            "2.0",
+        );
+
+        assert!(after.contains("context_window = 100000,"), "{after}");
+        assert!(
+            after.contains("above_200k_tokens = { input = 2.0 }"),
+            "{after}"
+        );
+        assert!(!after.contains("[models.claude-haiku-5-5"), "{after}");
+    }
+
+    /// `set` and `remove` keep CRLF themselves, for the callers that do not go
+    /// through `Config::edit_key`, such as the override-layer migration.
+    #[test]
+    fn set_and_remove_keep_crlf_called_directly() {
+        let before = "a = 1\r\nb = 2\r\n";
+        let rendered = "a = 1\nb = 2\n";
+
+        let set_text = set(before, &["a"], &Value::Integer(5), rendered).unwrap();
+        let removed = remove(before, &["b"]).unwrap();
+
+        assert_eq!(set_text, "a = 5\r\nb = 2\r\n");
+        assert_eq!(removed, "a = 1\r\n");
     }
 }

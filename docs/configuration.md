@@ -22,9 +22,15 @@ spoolway config set models.claude-opus-5.input 5.0
 ```
 
 The top of the file holds a table of every key, its values and its default. `config set`
-changes one key and leaves every other byte alone. It refuses a key the file does not already
-hold, with two exceptions: a `[models."<glob>"]` field and `agents.<profile>.concurrency` are
-created on first write.
+changes one key and leaves every other byte alone. A file with CRLF line endings keeps them, so
+one `config set` changes one line. A comment after the value stays. Setting a key to the value it
+already holds changes no byte. A key of a `[models]` row written as an inline table, such as
+`"claude-haiku-5-5" = { context_window = 200000 }`, is changed inside that row.
+
+`config set` refuses a key the file does not already hold, with two exceptions: a
+`[models."<glob>"]` field and `agents.<profile>.concurrency` are created on first write.
+A model glob may be quoted in the key, as in `spoolway config set
+'models."claude-haiku-5-5".context_window' 200000`. It names the same row as the unquoted glob.
 
 `spoolway sync` rewrites the table when it matches a table an older spoolway shipped. It refuses a
 table that matches none, and `spoolway sync --replace .spoolway/config.toml` rewrites the file and
@@ -35,15 +41,16 @@ above it. The keys after it move down. The first `[models."<glob>"]` row also re
 `[models]` header. A file that only `config set` has changed is therefore not behind, and `sync`
 leaves it as it is.
 
-`spoolway sync` also adds the blank `prompt_cache_ttl` row for each `claude` or `codex` profile
-that has no row for its glob. See [`[models."<glob>"]`](#modelsglob--what-a-model-costs-and-how-big-its-window-is).
+`spoolway sync` also writes the commented `prompt_cache_ttl` example for each `claude` or `codex`
+profile that has no row for its glob. See [`[models."<glob>"]`](#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 A `config.toml` that is a symlink stays one. `config set` writes the new value into the file the link
 points at. If the link points at a file that does not exist yet, `config set` creates that file.
 
-Parallel `config set` calls in one project run one after another, and each saves its key. A
-call waits up to ten seconds for the one before it. After that it exits 1, names the process that
-holds the lock, and writes nothing. Run it again.
+Parallel `config set` calls in one project run one after another, and each saves its key. So do
+`spoolway sync` and `spoolway override promote config.toml`: each is ordered with `config set`,
+and none of them loses a key another wrote. A call waits up to ten seconds for the one before it.
+After that it exits 1, names the process that holds the lock, and writes nothing. Run it again.
 
 In the main checkout, `config set` writes `.spoolway/config.toml` there. In a linked worktree that
 has its own `.spoolway/` on a branch, it loads, checks and saves that worktree's `config.toml`.
@@ -83,6 +90,7 @@ These keys are refused:
 | `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
 | `models.<glob>.input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`, and the same rates under an `above_<N>k_tokens` tier | The value is negative, `inf` or `NaN` | A finite number of dollars per million tokens, 0 or more |
 | `unattended.max_cost_usd` | The value is negative, `inf` or `NaN` | A finite number of dollars, 0 or more |
+| `dispatch.lane_quiet`, `dispatch.lane_child_ceiling` | The value is `0`, `0s` or any other zero duration | A duration above zero, such as `15m` or `1h` |
 
 Warnings come from the same checks `doctor` runs. They cover only the keys you set:
 
@@ -90,6 +98,8 @@ Warnings come from the same checks `doctor` runs. They cover only the keys you s
 |---|---|
 | `unattended.blocked_agent` | The name has no profile in `[agents]` |
 | `unattended.*` | `unattended.enabled` is on and `unattended.blocked_model` is blank |
+| `unattended.enabled`, `unattended.blocked_agent`, `unattended.blocked_model` | `unattended.enabled` is on and the `blocked` step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
+| `unattended.enabled`, `unattended.blocked_prompt` | `unattended.enabled` is on and the prompt file of the `blocked` step is missing |
 | `issue_tracking.*` | Any issue-tracking check of `doctor` fails, such as a missing hook script or a blank `project_key` beside a hook |
 | `models.<glob>.compact_ctx`, `agents.<profile>.session_blocked_ctx` | A pipeline step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
 
@@ -144,10 +154,15 @@ note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quie
   Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
 ```
 
+When the value in effect differs from the one just set and no layer key sets it, the note says
+that another change to the config landed after this one. It does not name the layer file.
+Run `spoolway config get <key>` to see what the key holds.
+
 ### Wrong values written by hand
 
 A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
-on. This covers the three agent-profile values above. Two commands report each such value:
+on. This covers the three agent-profile values above. It also covers a model's `compact_ctx`
+over `100`, and a `dispatch.lane_quiet` or `dispatch.lane_child_ceiling` of zero. Two commands report each such value:
 
 | Command | What it shows |
 |---|---|
@@ -156,6 +171,9 @@ on. This covers the three agent-profile values above. Two commands report each s
 
 Both read the tracked `config.toml`, not the file merged with the overrides layer. A layer key
 that corrects the value does not hide it.
+
+The dispatcher refuses to start a step that uses such a value. The step's lane does not start.
+See [Compaction threshold](agents.md#compaction-threshold).
 
 ```
 $ spoolway doctor --no-live
@@ -260,8 +278,11 @@ stale entry is left out of the merge. The step stays exactly as the tracked file
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
 applied. A wrong value already in the tracked config does not stop a layer key from applying; see
-[Wrong values written by hand](#wrong-values-written-by-hand). A prompt override for a prompt the
-checkout no longer has is left out too. A pipeline
+[Wrong values written by hand](#wrong-values-written-by-hand). A `session_reuse_ctx` and a
+`session_blocked_ctx` that are valid as a pair both apply, whichever the file lists first. For
+example, `5` and `12` over tracked `20` and `40` read as `5` and `12`. A pair that is wrong
+together, such as `30` and `10`, leaves out the key that fails and applies the other. A prompt
+override for a prompt the checkout no longer has is left out too. A pipeline
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
@@ -297,7 +318,7 @@ command that removes it. `spoolway override drop` removes the file, so a bare dr
 is the file that does not parse, `doctor` names that file instead.
 
 `spoolway override promote config.toml` writes every key of the layer into the tracked file,
-or none. A key the tracked config refuses stops the promote with an error naming that key. The
+or none. A session pair that is valid together is written as a pair. A key the tracked config refuses stops the promote with an error naming that key. The
 tracked file stays as it was, and the layer keeps all its keys.
 
 `spoolway override promote` in a linked worktree that has its own `.spoolway/` writes that
@@ -335,10 +356,10 @@ auto_commit = true
 | Key | Default | What it controls |
 |---|---|---|
 | `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
-| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
+| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. Zero is refused. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
-| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
+| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. Zero is refused. |
 | `visible_lanes` | `5` | How many of a task's most recent lanes stay open in its tab, or `all`. Each new agent step, and each shown command step, first closes the task's oldest finished lanes until the tab, with the new lane in it, holds this many, then opens where the spiral puts it. The oldest lane keeps the biggest area and the newest the smallest. A running lane and a pane held for you on `blocked` or `paused` are never closed, so a tab can go over its limit until they end. A limit of `1` opens the new pane first and closes the old one after, so the tab is never empty. `0` is refused. Five is a new default: a task that used to keep every pane now keeps its five newest. Set `visible_lanes = "all"` to keep every pane until the task is done, as before. |
 | `hide_commands` | `true` | Whether a command step runs detached with no pane, so it never takes a place in its task's tab. Its output still goes to the same log file. Set to `false` and a command opens a pane that stays open after the command exits. It then counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose command is still running is never closed by the limit. |
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
@@ -807,10 +828,16 @@ so a row only corrects a price or describes a local model. A row that sets only
 `prompt_cache_ttl` prices nothing. An unpriced model is reported as unpriced, not counted as
 free. See [Cost accounting](cost.md).
 
-`spoolway init` and `spoolway sync` add a blank row for each hosted agent profile. A `claude`
-profile brings `[models."claude-*"]` and a `codex` profile brings `[models."gpt-*"]`. Each row
-holds `prompt_cache_ttl = ""`, which shows that the cache lifetime is yours to choose. A `pi`
-profile brings no row. A row that already exists is left as it is.
+`spoolway init` and `spoolway sync` write a commented-out example for each hosted agent profile.
+A `claude` profile brings `# [models."claude-*"]` and a `codex` profile brings
+`# [models."gpt-*"]`, each above a commented `prompt_cache_ttl = "1h"`. The comment sits above the
+first `[models."<glob>"]` row, or at the end of the file when there is none. It shows that the
+cache lifetime is yours to choose. A `pi` profile brings none. A glob that already has a row
+brings no example. A row that holds nothing but
+`prompt_cache_ttl = ""` is dropped whenever the config loads, so it takes no part in model
+matching, and `spoolway sync` writes the comment in its place. A glob that no hosted profile
+brings gets no comment, and `sync` names the dropped row. A row that holds any other setting is
+left as it is.
 
 | Key | Default | What it controls |
 |---|---|---|
@@ -820,18 +847,23 @@ profile brings no row. A row that already exists is left as it is.
 | `cache_read` | table entry, else `0` | USD per million cached input tokens read. |
 | `cache_write_5m` | table entry, else `0` | USD per million tokens written to a five-minute cache. |
 | `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
-| `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. `init` and `sync` write `""` on the `claude-*` and `gpt-*` rows. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
+| `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. `init` and `sync` write a commented example for `claude-*` and `gpt-*`. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it. |
-| `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. |
+| `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. A value over `100` written by hand is a wrong value, as in [Wrong values written by hand](#wrong-values-written-by-hand). |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a
 threshold. The tier is a sub-table named `above_<N>k_tokens` with the five rate keys above.
+A row that sets its own base prices keeps the price table's tier for the model. A row that
+wants other tier rates writes its own `above_<N>k_tokens` table.
 
 ```toml
 [models."claude-haiku-5-5".above_100k_tokens]
 input = 0.50
 output = 2.50
+cache_read = 0.05
+cache_write_5m = 0.625
+cache_write_1h = 1.00
 ```
 
 A sub-table with any other name loads with a note and is left out, as described in [Unknown
@@ -853,7 +885,8 @@ sets only `prompt_cache_ttl`.
 ```
 
 The note appears once per row, however many models the row matches. A hosted model that no row
-covers is named by its own name. Any value ends the note, including `"0"`. A model with
+covers is named by its hosted glob, `claude-*` or `gpt-*`. Any other model with no row is named by
+its own name. Any value ends the note, including `"0"`. A model with
 `local = true` is never named. The models checked are those that agent steps name in any
 pipeline, and `unattended.blocked_model` while `unattended.enabled` is on. The "before
 dispatching" popup shows the same note under `settings`, and `hide until these change` hides it

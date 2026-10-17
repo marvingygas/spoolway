@@ -108,8 +108,8 @@ Which project does it file into?
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching. With `claude`,
-`config.toml` also gets `[models."claude-*"]` with `prompt_cache_ttl = ""`. With `codex`, it gets
-`[models."gpt-*"]` with the same blank value. With `pi`, it gets no `[models]` row.
+`config.toml` also gets a commented `[models."claude-*"]` example with `prompt_cache_ttl = "1h"`.
+With `codex`, it gets the same comment for `[models."gpt-*"]`. With `pi`, it gets no example.
 
 An established project keeps its own provider: a repeat `init` run with `--provider` left off
 takes the project's already-chosen provider rather than falling back to `claude`, whether run
@@ -391,7 +391,7 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. A `claude` or `codex` profile with no `[models]` row for its glob gets a row with `prompt_cache_ttl = ""`. |
+| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. A `claude` or `codex` profile with no `[models]` row for its glob gets a commented `prompt_cache_ttl` example. A row holding only `prompt_cache_ttl = ""` is dropped. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, when it matches an older shipped copy. A key reference that matches no shipped copy is refused. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that matches an older shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. A skill file that matches no shipped copy is refused. The project's own folder is skipped in home mode; only the user folder is refreshed there. |

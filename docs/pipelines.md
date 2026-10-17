@@ -271,6 +271,10 @@ lane without a session, set `blocked_session = false` in the config.
 - `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
   or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
+- `spoolway doctor` and `spoolway pipeline check` judge the `blocked` step only while unattended
+  is on. That means `enabled = true`, or a run started with `spoolway dispatch --unattended`.
+  While it is off, the step's compaction pairing and its unblocker prompt raise no `FAIL`. A
+  project made with `spoolway init --no-examples` and command-only steps then passes both.
 - `spoolway pipeline show` marks where each pipeline's `blocked` step comes from.
 
 The shipped `unblocker` prompt clears whatever is in the way. It never merges, stops the

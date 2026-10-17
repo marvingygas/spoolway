@@ -570,9 +570,9 @@ pub struct Resolved {
 /// stay zero. A row that sets only `prompt_cache_ttl` prices nothing: over a
 /// model a table knows it keeps that table as the source, and over a model no
 /// table knows it leaves the model unpriced, with just the lifetime in
-/// [`Resolved::lifetime`]. Two fields are exceptions to "every unset field":
-/// the higher price tier and `cache_write_1h`. See [`overlay`] for when each
-/// is and is not carried over.
+/// [`Resolved::lifetime`]. One field is an exception to "every unset field":
+/// `cache_write_1h`. See [`overlay`] for when it is carried over. A row's own
+/// higher price tier replaces the table's whole.
 ///
 /// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
@@ -589,8 +589,7 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
         let refreshed = refreshed_price(model);
         let base = refreshed.or_else(|| builtin().get(model).copied());
         if sets_only_a_lifetime(&row) {
-            // The row `init` and `sync` write for a hosted agent kind, or one
-            // a person filled in with just a lifetime. It prices nothing, so
+            // A row a person filled in with just a lifetime. It prices nothing, so
             // it must not turn a model the tables know into a "config" price
             // or a model they do not know into a free one: the first keeps
             // the table it came from as its source, and the second stays
@@ -643,15 +642,12 @@ pub(crate) fn sets_only_a_lifetime(row: &ModelPrice) -> bool {
 /// cache-write rate keeps its own hourly rate even at zero: zero there means
 /// "price an hour cache like the five-minute one" (see `Rates::apply`), and
 /// filling it from the table would charge a config that predates the split
-/// at a rate it never wrote. The tier comes along only when
-/// the row sets none of the five rates: a row that writes its own `input`
-/// beside the base's higher tier would charge the two against each other.
+/// at a rate it never wrote. The table's tier comes along unless the row
+/// writes its own: a row that sets only a base price still pays the table's
+/// rate for a large request, since dropping the tier banked a 150,000-token
+/// turn at the base rates. A row that wants other tier rates writes its own
+/// `above_<N>k_tokens` table.
 fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
-    let sets_a_rate = row.input != 0.0
-        || row.output != 0.0
-        || row.cache_read != 0.0
-        || row.cache_write_5m != 0.0
-        || row.cache_write_1h != 0.0;
     let or = |set: f64, fallback: f64| if set == 0.0 { fallback } else { set };
     ModelPrice {
         context_window: if row.context_window == 0 {
@@ -671,11 +667,7 @@ fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
         prompt_cache_ttl: row.prompt_cache_ttl.or(base.prompt_cache_ttl),
         slots: row.slots,
         local: row.local || base.local,
-        tier: if sets_a_rate {
-            row.tier
-        } else {
-            row.tier.or(base.tier)
-        },
+        tier: row.tier.or(base.tier),
         ..row
     }
 }
@@ -730,7 +722,11 @@ pub fn compaction_problem(
     model: &str,
 ) -> Option<String> {
     let price = resolve(config_models, model).price?;
-    if price.compact_ctx == 0 {
+    // A value over 100 is `confkv::value_problems`' to report, as a wrong
+    // hand-written value, and the dispatcher refuses the step on those words.
+    // Saying it a second time here, as an order problem, would fail the same
+    // line twice.
+    if price.compact_ctx == 0 || price.compact_ctx > 100 {
         return None;
     }
     let compact = price.compact_ctx;
@@ -1388,8 +1384,8 @@ mod tests {
     }
 
     #[test]
-    fn a_row_that_sets_a_rate_does_not_inherit_the_tables_tier() {
-        let home = fixture_home("models-row-drops-tier");
+    fn a_row_that_sets_a_rate_keeps_the_tables_tier() {
+        let home = fixture_home("models-row-keeps-tier");
         crate::platform::test_home::with_home(&home, || {
             let config = BTreeMap::from([(
                 "claude-haiku-5-5".to_string(),
@@ -1400,7 +1396,27 @@ mod tests {
             )]);
             let price = resolve(&config, "claude-haiku-5-5").price.unwrap();
             assert_eq!(price.input, 0.2);
-            assert!(price.tier.is_none());
+            assert_eq!(price.tier, builtin()["claude-haiku-5-5"].tier);
+            assert_eq!(price.tier.map(|tier| tier.above_k), Some(100));
+
+            // A row that writes its own tier is priced by it, not the table's.
+            let own = crate::usage::PriceTier {
+                above_k: 50,
+                rates: crate::usage::Rates {
+                    input: 0.9,
+                    ..Default::default()
+                },
+            };
+            let config = BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    input: 0.2,
+                    tier: Some(own),
+                    ..Default::default()
+                },
+            )]);
+            let price = resolve(&config, "claude-haiku-5-5").price.unwrap();
+            assert_eq!(price.tier, Some(own));
         });
     }
 
@@ -1507,9 +1523,10 @@ mod tests {
         });
     }
 
-    /// The blank row `init` and `sync` write over `claude-*` or `gpt-*` is no
-    /// price: a model the tables know keeps their source and prices, and one
-    /// they do not know stays unknown instead of becoming a free "config" one.
+    /// A row holding only a blank lifetime, as earlier releases wrote one over
+    /// `claude-*` or `gpt-*`, is no price: a model the tables know keeps their
+    /// source and prices, and one they do not know stays unknown instead of
+    /// becoming a free "config" one.
     #[test]
     fn a_blank_lifetime_row_neither_prices_nor_hides_an_unknown_model() {
         let home = fixture_home("models-blank-lifetime-row");

@@ -86,10 +86,11 @@ file's modified time instead.
 The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model.
 There is no default. A model that sets none has no limit, whether or not it is marked
 `local = true`, and that includes a model with no `[models]` entry at all. Writing
-`prompt_cache_ttl = ""` means the same as leaving it out. It records that you have not chosen
-yet. `spoolway init` and `spoolway sync` write that blank row for `claude-*` when the project
-has a `claude` profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that
-is already there, with its value.
+`prompt_cache_ttl = ""` means the same as leaving it out. A row that holds only that blank value
+is dropped when the config loads, so it takes no part in model matching. `spoolway init`
+and `spoolway sync` write a commented example for `claude-*` when the project has a `claude`
+profile and for `gpt-*` when it has a `codex` profile. `sync` keeps a row that is already there,
+with its value.
 
 While a hosted model has no value, `spoolway doctor` and the "before dispatching" popup show
 `models.'<row>'.prompt_cache_ttl is not set; set it to your provider's cache TTL (highly
@@ -236,11 +237,15 @@ compacts earlier, so a value above its default of about 95 changes nothing. Code
 token count. spoolway sends `compact_ctx` percent of the model's `context_window`, rounded
 down. With `context_window = 100096` and `compact_ctx = 60`, codex gets `60057`. A codex lane
 on a model with no `context_window` gets nothing. A model with no `compact_ctx` sends nothing.
-Both backends, herdr and headless, send the same value. See
+Both backends, herdr and headless, send the same value for a model that sets `compact_ctx`.
+A headless lane on a model with no `compact_ctx` starts without `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+even when the dispatcher's shell exports it. See
 [`compact_ctx`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 `spoolway doctor` prints one `FAIL` row for each pipeline step that cannot take the threshold.
 The dispatcher refuses to start the same step with the same words and runs no lane for it.
+The `blocked` step is judged only while `unattended.enabled` is on, or for a run started with
+`spoolway dispatch --unattended`. An attended run never staffs it.
 
 | Step | Why it is refused | What to change |
 |---|---|---|
@@ -250,6 +255,15 @@ The dispatcher refuses to start the same step with the same words and runs no la
 
 ```
   FAIL  pipeline `default` step `implement`: agents.claude.session_blocked_ctx = 40 is at or below models."claude-opus-5".compact_ctx = 50, so the lane is blocked before it ever compacts. Lower models."claude-opus-5".compact_ctx below 40, or raise agents.claude.session_blocked_ctx above 50. Setting session_blocked_ctx = 0 also clears it, but leaves no brake if compaction fails.
+```
+
+The dispatcher also refuses a step whose model row holds a `compact_ctx` over `100`. It refuses a
+step whose agent profile holds a `permission_mode` that the profile's `kind` does not accept.
+Each refusal uses the words `spoolway doctor` fails the same value with. No lane starts.
+
+```
+pipeline `default` step `implement`: models."claude-opus-5": `compact_ctx` (150) must be between 1 and 100 (in .spoolway/config.toml; correct it with `spoolway config edit`)
+pipeline `default` step `implement`: `agents.claude.permission_mode` in .spoolway/config.toml: `no-such-mode` is not a mode `claude` accepts — pick one of: …
 ```
 
 A model with no `compact_ctx` is never refused. `session_blocked_ctx = 0` skips the order

@@ -768,7 +768,7 @@ impl Repo {
     /// so every worktree of one project contends for the same file, and not
     /// inside `overrides/`, whose absence is how "no overrides" is spelled.
     pub fn edit_lock_path(&self) -> PathBuf {
-        self.home.join("edit.lock")
+        crate::lock::EditLock::path_in(&self.home)
     }
 
     /// The private layer's own directory — see [`crate::local`]. Under

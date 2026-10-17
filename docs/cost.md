@@ -182,7 +182,9 @@ In a glob, `*` matches any run of characters, and the glob has to match the whol
 
 A model can carry one higher tier: the rates a request pays once its prompt passes a
 threshold. The tier is a sub-table named `above_<N>k_tokens`, the way litellm names it, and
-holds the same five rate keys in USD per 1M tokens:
+holds the same five rate keys in USD per 1M tokens. A row that sets its own base prices keeps
+the price table's tier for the model. A row that wants other tier rates writes its own
+`above_<N>k_tokens` table:
 
 ```toml
 [models."claude-haiku-5-5".above_100k_tokens]

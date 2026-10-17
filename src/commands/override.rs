@@ -487,6 +487,10 @@ pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
 }
 
 fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
+    // Held from the read of the patch to its removal: a `pipeline override
+    // --set` that lands in between is deleted with the patch, after this
+    // promote has printed that it wrote the file.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let overrides_dir = repo.overrides_dir();
     let patch = crate::overrides::read_pipeline_patch(&overrides_dir, name)?
         .filter(|p| !p.steps.is_empty() || p.description.is_some() || p.task_template.is_some())
@@ -520,6 +524,10 @@ fn promote_prompt(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
 }
 
 fn promote_config(repo: &Repo, write_root: &Path) -> Result<()> {
+    // Held from the read of the tracked file to its write, so a parallel
+    // `config set` is not overwritten by the text this promote read before
+    // it landed.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let changes = crate::overrides::promote_config_patch(write_root)?;
     crate::overrides::remove_config_patch(&repo.overrides_dir())?;
 
@@ -1176,6 +1184,57 @@ mod tests {
             let tracked_config = std::fs::read_to_string(Config::path_in(&repo.root)).unwrap();
             assert!(tracked_config.contains("blocked_agent = \"promoted\""));
             assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).is_file());
+        });
+    }
+
+    /// A promote waits for the edit lock a `config set` holds, so the tracked
+    /// file it reads is the one that `set` has finished writing. Without the
+    /// lock it ran at once and wrote over whatever landed meanwhile.
+    #[test]
+    fn override_promote_of_the_config_waits_for_the_edit_lock() {
+        with_repo("promote-config-lock", |repo| {
+            write_atomic(
+                &crate::overrides::config_patch_path(&repo.overrides_dir()),
+                "[unattended]\nblocked_agent = \"promoted\"\n",
+            )
+            .unwrap();
+            let held = crate::lock::EditLock::acquire(&repo.edit_lock_path()).unwrap();
+            // The promote runs on this thread, which is the one the scratch
+            // home is swapped on; another thread releases the lock.
+            let started = std::time::Instant::now();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    drop(held);
+                });
+                override_promote(repo, "config.toml").unwrap();
+            });
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(250),
+                "the promote ran while the edit lock was held"
+            );
+        });
+    }
+
+    /// A pipeline promote waits for the edit lock a `pipeline override --set`
+    /// holds, so a `--set` mid-way is not deleted with the patch it landed in.
+    #[test]
+    fn override_promote_of_a_pipeline_waits_for_the_edit_lock() {
+        with_repo("promote-pipeline-lock", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            let held = crate::lock::EditLock::acquire(&repo.edit_lock_path()).unwrap();
+            let started = std::time::Instant::now();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    drop(held);
+                });
+                override_promote(repo, "demo").unwrap();
+            });
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(250),
+                "the promote ran while the edit lock was held"
+            );
         });
     }
 

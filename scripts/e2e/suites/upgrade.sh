@@ -357,10 +357,14 @@ has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml
 
 # The fixture's project has a `claude` profile and no `[models]` row, so the
-# sync adds the blank cache-lifetime row the hosted kind brings.
-has "sync added a claude-* row for the fixture's claude profile" \
-  '[models."claude-*"]' .spoolway/config.toml
-has "and wrote its prompt_cache_ttl blank" \
+# sync writes the cache-lifetime example as a comment. A row holding a blank
+# `prompt_cache_ttl` is refused by every release before this one, so none may
+# be written.
+has "sync wrote the claude-* cache-lifetime example as a comment" \
+  '# [models."claude-*"]' .spoolway/config.toml
+works "and wrote no claude-* row of its own" \
+  bash -c '! grep -q "^\[models\.\"claude-\*\"\]" .spoolway/config.toml'
+lacks "and wrote no blank prompt_cache_ttl" \
   'prompt_cache_ttl = ""' .spoolway/config.toml
 
 # Every release through 0.6.0 had `init` write `key_in_names = false`, its

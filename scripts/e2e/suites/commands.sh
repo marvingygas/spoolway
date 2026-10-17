@@ -439,6 +439,18 @@ works "pipelines, prompts and templates are empty folders" \
 works "none writes no hooks folder" test ! -e "$INITDIR/bare/.spoolway/hooks"
 works "and no workflow" test ! -e "$INITDIR/bare/.github"
 
+# A command-only pipeline in that bare project is attended: nothing staffs the
+# `blocked` step the pipeline carries, so no unblocker prompt is missing and
+# neither `pipeline check` nor `doctor` fails over it.
+printf 'steps:\n  - id: build\n    run: "true"\n    on_pass: done\n' \
+  > "$INITDIR/bare/.spoolway/pipelines/default.yml"
+BARE_CHECK="$INITDIR/bare-check.out"
+works "pipeline check passes a command-only pipeline with no unblocker prompt" \
+  env -C "$INITDIR/bare" "$SPOOLWAY" pipeline check
+env -C "$INITDIR/bare" "$SPOOLWAY" doctor >"$BARE_CHECK" 2>&1 || true
+has "and doctor ran through to its summary" "checks passed" "$BARE_CHECK"
+lacks "and doctor names no unblocker prompt" "unblocker" "$BARE_CHECK"
+
 # `spoolway sync` never touches a hook `init` has already written — the
 # same rule a prompt or a task skeleton already follows once a project has
 # made a file its own.

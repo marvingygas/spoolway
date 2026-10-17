@@ -878,6 +878,12 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
             if step.kind() != StepKind::Agent {
                 continue;
             }
+            // `blocked` is assembled from `[unattended]` even for an attended
+            // run, where it is a parking state and starts no lane. Its
+            // unblocker prompt, like its model below, is only needed once
+            // unattended mode turns that synthetic step into a lane.
+            let unstaffed_blocked =
+                step.id == crate::pipeline::BLOCKED && !config.unattended.enabled;
             // A name that leaves the directory is reported on its own, and the
             // existence check is skipped: the file it points at may well be
             // there, and "missing" would send the person to write a second one.
@@ -887,7 +893,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
                 problems.push(format!("`{}`/`{}`: {problem}", pipeline.name, step.id));
             }
             let prompt = crate::prompt::path_for(repo, step.prompt_name());
-            if escapes.is_none() && !prompt.exists() {
+            if !unstaffed_blocked && escapes.is_none() && !prompt.exists() {
                 problems.push(crate::prompt::missing_prompt_message(
                     repo,
                     pipeline.private_file.is_some(),
@@ -901,12 +907,8 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
             // names blank, has nothing to launch.
             let model_is_blank = step.model.as_deref().is_some_and(|m| m.trim().is_empty());
             let model_is_missing = step.model.is_none();
-            // `blocked` is assembled from `[unattended]` even for an attended
-            // run, where it is a parking state and starts no lane. Its blank
-            // model becomes a real staffing error only when unattended mode
-            // turns that synthetic step into a lane.
-            let unstaffed_blocked =
-                step.id == crate::pipeline::BLOCKED && !config.unattended.enabled;
+            // Its blank model becomes a real staffing error only when
+            // unattended mode turns the synthetic `blocked` step into a lane.
             if !unstaffed_blocked && (model_is_missing || model_is_blank) {
                 problems.push(format!(
                     "`{}`/`{}` names no model — set `model:` on it",

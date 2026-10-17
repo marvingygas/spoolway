@@ -503,7 +503,9 @@ pub struct ModelPrice {
     ///
     /// `spoolway sync` rewrites `config.toml` whole from the loaded config, and
     /// a `None` is skipped on write, so without this flag the next sync would
-    /// delete the blank a person was shown and asked to fill in. Set only by
+    /// delete a blank that sits on a row with other settings. A row holding
+    /// nothing else is dropped on load instead, see
+    /// [`ModelPrice::is_blank_lifetime_only`]. Set only by
     /// the hand-written `Deserialize` below, which takes the blank out of the
     /// table before the shared duration parser, so no other duration key ever
     /// accepts an empty string. Written only while `prompt_cache_ttl` is
@@ -719,6 +721,16 @@ impl<'de> Deserialize<'de> for ModelPrice {
         price.tier = tier;
         price.prompt_cache_ttl_blank = blank;
         Ok(price)
+    }
+}
+
+impl ModelPrice {
+    /// A row that holds nothing but a blank `prompt_cache_ttl`: the reminder
+    /// earlier releases wrote, and no setting of anyone's.
+    pub(crate) fn is_blank_lifetime_only(&self) -> bool {
+        self.prompt_cache_ttl_blank
+            && self.prompt_cache_ttl.is_none()
+            && crate::models::sets_only_a_lifetime(self)
     }
 }
 
@@ -5426,6 +5438,40 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Writing a price for a model must not drop the table's tier: a
+    /// 150,000-token Haiku turn is banked at the tier's $0.50 per million
+    /// input tokens ($0.075), and the turn lands in `tier_tokens`. Before the
+    /// tier was kept, the same turn was banked at $0.015.
+    #[test]
+    fn a_row_that_writes_a_price_still_banks_a_large_turn_at_the_tier_rate() {
+        let session = "0198e2c0-2222-4000-8000-000000000041";
+        let transcript = r#"{"type":"assistant","requestId":"req_1","uuid":"b","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":150000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+"#;
+        let home = home_with("claude", session, transcript);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let config = BTreeMap::from([(
+            "claude-haiku-5-5".to_string(),
+            ModelPrice {
+                input: 0.10,
+                ..ModelPrice::default()
+            },
+        )]);
+        let prices = crate::platform::test_home::with_home(&home, || {
+            BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                crate::models::resolve(&config, "claude-haiku-5-5")
+                    .price
+                    .unwrap(),
+            )])
+        });
+
+        let harvest = harvest_file("claude", &path, &prices).expect("nothing harvested");
+
+        let cost = harvest.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - 0.075).abs() < 1e-12, "{cost}");
+        assert_eq!(harvest.tier_tokens.input, 150_000);
     }
 
     /// The split `spoolway eval` re-prices from: only the turn over the

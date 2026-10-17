@@ -578,7 +578,15 @@ fn render_scalar(value: &Value) -> String {
 /// asking what a setting currently is deserves the answer rather than "no such
 /// key", which is what a genuine typo gets.
 pub fn get(config: &Config, key: &str) -> Result<String> {
-    if let Some(entry) = entries(config)?.into_iter().find(|entry| entry.key == key) {
+    // Entries are named by the glob as the file holds it, so a quoted glob is
+    // looked up by its name. Left as typed it matches no entry and falls
+    // through to the unset answer, which reads 0 for a row that holds a value.
+    let canonical = split_models_key(key).map(|parts| parts.join("."));
+    let looked_up = canonical.as_deref().unwrap_or(key);
+    if let Some(entry) = entries(config)?
+        .into_iter()
+        .find(|entry| entry.key == looked_up)
+    {
         return Ok(entry.value);
     }
     if let Some(unset) = unset_value(config, key) {
@@ -782,19 +790,6 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         config.migrate();
     }
 
-    // Not a cross-field check, and not exempted by the comparison further down: a file
-    // edited by hand to a `compact_ctx` over 100 still loads, so `set` refuses
-    // it on the next edit rather than writing it back out.
-    for (glob, price) in &config.models {
-        if price.compact_ctx > 100 {
-            bail!(
-                "`models.{glob}.compact_ctx` must be between 1 and 100 (1..=100), got {}; \
-                 `spoolway config set` cannot unset a key, so correct the line with \
-                 `spoolway config edit`, or delete it to keep the agent's own default",
-                price.compact_ctx
-            );
-        }
-    }
     // Cross-field checks serde cannot make, at the one moment a person is
     // typing the value and can fix it. Only a problem this edit introduced
     // refuses it: one already in the file, written there by hand, would
@@ -806,7 +801,7 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         .into_iter()
         .find(|problem| !before.contains(problem))
     {
-        bail!("{}", problem.message);
+        bail!("{}", problem.named());
     }
 
     Ok(config)
@@ -829,9 +824,10 @@ pub struct ValueProblem {
 /// Every value in `config` that serde accepts but spoolway cannot run on.
 ///
 /// A permission mode is only wrong relative to the `kind` beside it, and a
-/// reuse threshold only relative to the ceiling. [`set`] refuses an edit that
-/// adds one of these, while `doctor` and `config edit` report the ones a
-/// hand-written file already holds.
+/// reuse threshold only relative to the ceiling. A model's `compact_ctx` over
+/// 100 loads fine and is sent to the lane as written, which Claude Code then
+/// ignores. [`set`] refuses an edit that adds one of these, while `doctor`
+/// and `config edit` report the ones a hand-written file already holds.
 pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
     let mut problems = Vec::new();
     for (name, profile) in &config.agents {
@@ -894,7 +890,64 @@ pub fn value_problems(config: &Config) -> Vec<ValueProblem> {
             );
         }
     }
+    // Zero is "off" for most durations, but these two read it as "at once": a
+    // ceiling of 0 s escalates a lane at the first pass that sees a child
+    // process, and a quiet time of 0 s reminds it on every pass.
+    for (field, value, suggestion) in [
+        ("lane_quiet", config.dispatch.lane_quiet, "15m"),
+        (
+            "lane_child_ceiling",
+            config.dispatch.lane_child_ceiling,
+            "1h",
+        ),
+    ] {
+        if value.is_zero() {
+            problems.push(ValueProblem {
+                scope: "dispatch".to_string(),
+                field,
+                message: format!(
+                    "`dispatch.{field}` cannot be 0: it does not mean off here, it means a \
+                     lane is acted on at the first pass that looks, however briefly it has \
+                     been running\n  set a duration such as `{suggestion}` instead"
+                ),
+            });
+        }
+    }
+    for (glob, price) in &config.models {
+        if price.compact_ctx > 100 {
+            problems.push(ValueProblem {
+                scope: format!("models.\"{glob}\""),
+                field: "compact_ctx",
+                message: format!(
+                    "`compact_ctx` ({}) must be between 1 and 100",
+                    price.compact_ctx
+                ),
+            });
+        }
+    }
     problems
+}
+
+impl ValueProblem {
+    /// The message with its table in front when the message does not name it
+    /// already, for a caller that prints it without `doctor`'s row label.
+    pub fn named(&self) -> String {
+        if self.message.contains(&self.scope) {
+            self.message.clone()
+        } else {
+            format!("{}: {}", self.scope, self.message)
+        }
+    }
+
+    /// The sentence `doctor` and the dispatcher print for this problem: what
+    /// is wrong, where the file is, and the command that corrects it.
+    pub fn report(&self, path: &std::path::Path) -> String {
+        format!(
+            "{} (in {}; correct it with `spoolway config edit`)",
+            self.message,
+            path.display()
+        )
+    }
 }
 
 /// Refuse a value a person typed that can never be right, naming what is
@@ -980,8 +1033,8 @@ fn zero_rate_note(config: &Config, key: &str) -> Option<String> {
     if parts.len() == 4 {
         let Some(tier) = row.tier else {
             // The empty tier was dropped before saving (see `set`), so the
-            // row carries none, and `overlay` takes the table's tier only
-            // when the row sets no base rate of its own.
+            // row carries none, and `overlay` takes the table's tier for any
+            // row that does not write its own.
             let answer = crate::models::resolve(&config.models, glob).price?;
             let from = if answer.tier == table.and_then(|price| price.tier) {
                 "the price table's"
@@ -1101,19 +1154,32 @@ pub fn parts<'a>(config: &Config, key: &'a str) -> Vec<&'a str> {
 /// field that reads as a tier name is taken as the tier, not as the end of
 /// the glob. Every caller that addresses a models row by a dotted key goes
 /// through here, so how such a key is split changes in one place.
+///
+/// A glob written as a TOML quoted key, `models."claude-haiku-5-5".input`, is
+/// the name inside the quotes. Left as typed it would be a glob whose name
+/// holds the quote marks, and the edit would write a table nothing reads while
+/// reporting success.
 pub(crate) fn split_models_key(key: &str) -> Option<Vec<&str>> {
     let rest = key.strip_prefix("models.")?;
     let (head, field) = rest.rsplit_once('.')?;
     let parts = match head.rsplit_once('.') {
         Some((glob, tier)) if crate::usage::PriceTier::threshold_in(tier).is_some() => {
-            vec!["models", glob, tier, field]
+            vec!["models", unquoted(glob), tier, field]
         }
-        _ => vec!["models", head, field],
+        _ => vec!["models", unquoted(head), field],
     };
     if parts[1].is_empty() {
         return None;
     }
     Some(parts)
+}
+
+/// `name` without the matching pair of quotes TOML allows around a key.
+fn unquoted(name: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|quote| name.strip_prefix(*quote)?.strip_suffix(*quote))
+        .unwrap_or(name)
 }
 
 /// [`split_models_key`], for a key whose field `ModelPrice` actually has.
@@ -1812,23 +1878,6 @@ mod tests {
         for typed in ["1", "30", "100"] {
             check_typed(key, typed).unwrap();
         }
-        // A file edited by hand to 101 is refused the next time `set` runs.
-        let mut config = Config::default();
-        config.models.insert(
-            "m".to_string(),
-            crate::usage::ModelPrice {
-                compact_ctx: 101,
-                ..Default::default()
-            },
-        );
-        let err = set(&config, "models.m.input", "1.0")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("compact_ctx") && err.contains("between 1 and 100"),
-            "{err}"
-        );
-
         let config = set(&Config::default(), key, "30").unwrap();
         assert_eq!(config.models["claude-opus-5"].compact_ctx, 30);
         assert_eq!(get(&config, key).unwrap(), "30");
@@ -1838,6 +1887,47 @@ mod tests {
         let unset = set(&Config::default(), "models.claude-opus-5.input", "5.0").unwrap();
         let written = toml::to_string(&unset).unwrap();
         assert!(!written.contains("compact_ctx"), "{written}");
+    }
+
+    /// A `compact_ctx` over 100 written by hand is `doctor`'s to report, so an
+    /// unrelated `set` still lands. An edit that itself writes one is refused.
+    // covers: models.<glob>.compact_ctx — a hand-written value over 100 does not block another key
+    #[test]
+    fn a_hand_written_compact_ctx_over_a_hundred_does_not_block_another_key() {
+        let mut config = Config::default();
+        config.models.insert(
+            "m".to_string(),
+            crate::usage::ModelPrice {
+                compact_ctx: 150,
+                ..Default::default()
+            },
+        );
+        let problems = value_problems(&config);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].scope, "models.\"m\"");
+        assert_eq!(
+            problems[0].message,
+            "`compact_ctx` (150) must be between 1 and 100"
+        );
+
+        let updated = set(&config, "dispatch.auto_commit", "false").unwrap();
+        assert!(!updated.dispatch.auto_commit);
+        assert_eq!(updated.models["m"].compact_ctx, 150);
+        set(&config, "models.m.input", "1.0").unwrap();
+
+        // An edit that itself writes one is still refused, and the sentence
+        // names the row. `set` runs no range check on the typed value before
+        // this one, so a value that reaches it this way is refused only here.
+        let mut fixed = config.clone();
+        fixed.models.get_mut("m").unwrap().compact_ctx = 30;
+        assert!(value_problems(&fixed).is_empty());
+        let err = set(&fixed, "models.m.compact_ctx", "120")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("models.\"m\"") && err.contains("(120) must be between 1 and 100"),
+            "{err}"
+        );
     }
 
     /// `[models]` ships empty, so — like `[pricing]` before it — a glob is
@@ -2279,5 +2369,84 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].scope, "agents.claude");
         assert!(problems[0].message.contains("(15) must be above"));
+    }
+
+    /// A model glob typed as a TOML quoted key is the name inside the quotes.
+    ///
+    /// Before, the quote marks were part of the glob, so the edit reported
+    /// success and wrote a table named `'"claude-haiku-5-5"'` that no model
+    /// ever matched.
+    #[test]
+    fn a_quoted_model_glob_is_split_to_its_name() {
+        assert_eq!(
+            split_models_key("models.\"claude-haiku-5-5\".context_window").unwrap(),
+            ["models", "claude-haiku-5-5", "context_window"]
+        );
+        assert_eq!(
+            split_models_key("models.'gpt-4.1-*'.above_200k_tokens.input").unwrap(),
+            ["models", "gpt-4.1-*", "above_200k_tokens", "input"]
+        );
+    }
+
+    /// The quoted key writes the row the unquoted one would.
+    #[test]
+    fn a_quoted_model_glob_writes_that_models_table() {
+        let config = Config::default();
+
+        let changed = set(
+            &config,
+            "models.\"claude-haiku-5-5\".context_window",
+            "200000",
+        )
+        .unwrap();
+
+        assert_eq!(changed.models["claude-haiku-5-5"].context_window, 200000);
+        assert_eq!(changed.models.len(), 1);
+    }
+
+    /// Zero is refused for the two durations that would read it as "at once".
+    #[test]
+    fn a_zero_lane_duration_is_refused() {
+        let config = Config::default();
+        for key in ["dispatch.lane_child_ceiling", "dispatch.lane_quiet"] {
+            for zero in ["0", "0s", "0m"] {
+                let err = set(&config, key, zero).unwrap_err().to_string();
+                assert!(err.contains("cannot be 0"), "{key} {zero}: {err}");
+            }
+        }
+    }
+
+    /// Reading a row by its quoted key answers with the row's value, not the
+    /// zero an unset field reads as.
+    #[test]
+    fn a_quoted_model_glob_is_read_back() {
+        let config = set(
+            &Config::default(),
+            "models.claude-haiku-5-5.context_window",
+            "200000",
+        )
+        .unwrap();
+
+        assert_eq!(
+            get(&config, "models.\"claude-haiku-5-5\".context_window").unwrap(),
+            "200000"
+        );
+    }
+
+    /// A hand-written zero lane duration is reported, so `doctor` and
+    /// `config edit` say what the dispatcher will do with it.
+    #[test]
+    fn value_problems_names_a_zero_lane_duration() {
+        let mut config = Config::default();
+        assert!(value_problems(&config).is_empty());
+        config.dispatch.lane_quiet = std::time::Duration::ZERO;
+        config.dispatch.lane_child_ceiling = std::time::Duration::ZERO;
+
+        let fields: Vec<_> = value_problems(&config)
+            .iter()
+            .map(|problem| problem.field)
+            .collect();
+
+        assert_eq!(fields, ["lane_quiet", "lane_child_ceiling"]);
     }
 }

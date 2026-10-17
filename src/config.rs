@@ -2247,18 +2247,18 @@ impl Config {
         }
     }
 
-    /// Give each hosted agent kind in `agents` a `[models]` row for its glob
-    /// that says `prompt_cache_ttl = ""`: `claude-*` for a `claude` profile,
-    /// `gpt-*` for a `codex` one. A `pi` profile brings no row.
+    /// The commented-out example `render` writes for each hosted agent kind
+    /// whose glob has no `[models]` row yet: `claude-*` for a `claude`
+    /// profile, `gpt-*` for a `codex` one. A `pi` profile brings none.
     ///
-    /// The blank is how a person sees that the cache lifetime is theirs to
-    /// choose, now that no value is assumed for them. A row already there is
-    /// left exactly as it is, so a value the person set is never replaced, and
-    /// a second call changes nothing. Called by `init` and by `spoolway sync`
-    /// before the config is rendered, so the row is part of what the rewrite
-    /// renders and `agrees_with` compares like with like.
-    pub(crate) fn add_blank_cache_ttl_rows(&mut self) {
-        let globs: Vec<&'static str> = self
+    /// It shows a person that the cache lifetime is theirs to choose, now that
+    /// no value is assumed for them. It is a comment and not a row holding a
+    /// blank `prompt_cache_ttl`, because the blank is refused by every release
+    /// before this one, and because a row of its own takes part in model
+    /// matching: `claude-*` outranks a person's `*haiku*` row and silences it.
+    /// A row already there means the choice is made, so it brings no example.
+    pub(crate) fn cache_hint_globs(&self) -> Vec<&'static str> {
+        let mut globs: Vec<&'static str> = self
             .agents
             .values()
             .filter_map(|profile| match profile.kind.as_str() {
@@ -2266,15 +2266,23 @@ impl Config {
                 "codex" => Some("gpt-*"),
                 _ => None,
             })
+            .filter(|glob| !self.models.contains_key(*glob))
             .collect();
-        for glob in globs {
-            self.models
-                .entry(glob.to_string())
-                .or_insert_with(|| crate::usage::ModelPrice {
-                    prompt_cache_ttl_blank: true,
-                    ..Default::default()
-                });
-        }
+        globs.sort_unstable();
+        globs.dedup();
+        globs
+    }
+
+    /// Drop every `[models]` row that holds nothing but a blank
+    /// `prompt_cache_ttl`.
+    ///
+    /// Earlier releases wrote such a row for a hosted profile as a reminder.
+    /// It prices nothing and limits nothing, yet it took part in glob matching
+    /// and, being a literal prefix, beat a person's own `*haiku*` row, whose
+    /// `compact_ctx`, `slots` and `context_window` then stopped applying. A row
+    /// that holds any other value is left alone, blank lifetime and all.
+    fn drop_blank_lifetime_rows(&mut self) {
+        self.models.retain(|_, row| !row.is_blank_lifetime_only());
     }
 
     /// Fill in what a loaded config must never hold blank, and clear what it
@@ -2302,6 +2310,7 @@ impl Config {
     /// it. `doctor` fails its kind check instead, and a lane that names it
     /// refuses to start.
     pub(crate) fn migrate(&mut self) {
+        self.drop_blank_lifetime_rows();
         // The retired `keep_finished_lanes` only stands in for a limit the
         // file did not set itself. A `visible_lanes` that differs from the
         // default is the person's own choice and wins; one that holds the
@@ -2356,6 +2365,7 @@ impl Config {
     pub fn render(&self) -> Result<String> {
         let rendered = toml::to_string_pretty(self).context("serialising config")?;
         let rendered = annotate_watch_dirs(&rendered)?;
+        let rendered = annotate_cache_hint(&rendered, &self.cache_hint_globs())?;
         Ok(format!("{}{rendered}", crate::confkv::reference_table()))
     }
 
@@ -2377,8 +2387,10 @@ impl Config {
     /// achieves it: the one key's value is replaced in the document, or the key
     /// is added where [`Config::render`] would put it if the file never had it,
     /// and the rest — every comment, every blank line, the order of everything —
-    /// is copied through unread. A new key moves the keys that follow it down,
-    /// and a table header the rendering would not write is dropped.
+    /// is copied through unread, line endings included: a file that ends every
+    /// line in CRLF is still CRLF throughout afterwards. A new key moves the
+    /// keys that follow it down, and a table header the rendering would not
+    /// write is dropped.
     ///
     /// The result is parsed back and compared against `self` before it lands,
     /// so a document edit that somehow did not mean what the struct means is a
@@ -2418,7 +2430,10 @@ impl Config {
         }
 
         let rendered = self.render()?;
-        let mut edited = text.to_string();
+        // Edited as LF and given its endings back at the end: the edits write
+        // the lines they add with LF, and the cache-hint settling below looks
+        // for `\n`.
+        let (mut edited, crlf) = crate::confdoc::lf_endings(text);
         for key in &keys {
             let parts = crate::confkv::parts(self, key);
             // Absent from the serialised config means this key was just set
@@ -2446,6 +2461,10 @@ impl Config {
             edited = crate::confdoc::remove(&edited, &["dispatch", "keep_finished_lanes"])
                 .with_context(|| format!("editing {}", path.display()))?;
         }
+
+        let edited = settle_cache_hint(&edited, &rendered)
+            .with_context(|| format!("editing {}", path.display()))?;
+        let edited = crate::confdoc::restore_endings(edited, crlf);
 
         self.agrees_with(&edited).with_context(|| {
             format!(
@@ -2597,6 +2616,119 @@ fn annotate_watch_dirs(rendered: &str) -> Result<String> {
         key.leaf_decor_mut().set_prefix(comment_block(note));
     }
     Ok(doc.to_string())
+}
+
+/// The two lines that open the cache-lifetime example, and so how
+/// [`settle_cache_hint`] recognises one already in a file.
+const CACHE_HINT_HEADER: &str = "# How long a session's prompt cache is trusted to stay warm.\n\
+     # Unset means no limit. Uncomment a row to choose one.\n";
+
+/// The cache-lifetime example for `globs`: the header, then a commented row
+/// for each glob.
+fn cache_hint(globs: &[&str]) -> String {
+    let mut hint = String::from(CACHE_HINT_HEADER);
+    for glob in globs {
+        hint.push_str(&format!(
+            "# [models.\"{glob}\"]\n# prompt_cache_ttl = \"1h\"\n"
+        ));
+    }
+    hint
+}
+
+/// Where the cache-lifetime example stands in `text`, as a byte range.
+fn find_cache_hint(text: &str) -> Option<std::ops::Range<usize>> {
+    let start = text.find(CACHE_HINT_HEADER)?;
+    let after = start + CACHE_HINT_HEADER.len();
+    let rows: usize = text[after..]
+        .split_inclusive('\n')
+        .take_while(|line| {
+            line.starts_with("# [models.\"") || line.starts_with("# prompt_cache_ttl = ")
+        })
+        .map(str::len)
+        .sum();
+    Some(start..after + rows)
+}
+
+/// `text` with its cache-lifetime example, if it has one, taken out and
+/// stood again where `rendered` stands it, or left out if `rendered` has none.
+///
+/// `config set` copies a file through unread and adds a new `[models]` row
+/// where the rendering would put it, which is not always where the example
+/// stands: the first row is now another one, or the example was at the end of
+/// a file that has a row now. Left alone, `spoolway sync` would find a file
+/// that differs from its rendering by nothing but the example. A file with no
+/// example is returned as it is, since `config set` is not the moment to add
+/// one.
+pub(crate) fn settle_cache_hint(text: &str, rendered: &str) -> Result<String> {
+    let Some(found) = find_cache_hint(text) else {
+        return Ok(text.to_string());
+    };
+    // The blank line after an example that stands over a row goes with it, or
+    // it would pile up on top of the one the row has of its own.
+    let end = found.end + usize::from(text[found.end..].starts_with('\n'));
+    let mut without = format!("{}{}", &text[..found.start], &text[end..]);
+    // The blank line that stood before an example at the end of the file
+    // would otherwise trail the file.
+    without.truncate(without.trim_end().len());
+    without.push('\n');
+    match find_cache_hint(rendered) {
+        Some(wanted) => place_cache_hint(&without, &rendered[wanted]),
+        None => Ok(without),
+    }
+}
+
+/// Stand the cache-lifetime example in `rendered`, above the first
+/// `[models]` row with a blank line between them, or at the end of the file
+/// when it has none.
+///
+/// One comment block however many `globs` there are, and none when there are
+/// none. It is written from the config on every render, so `spoolway sync`
+/// finds it exactly once however often it runs: it never reads the old one,
+/// and a person who uncomments an example turns it into a row that the next
+/// render no longer needs an example for.
+fn annotate_cache_hint(rendered: &str, globs: &[&str]) -> Result<String> {
+    if globs.is_empty() {
+        return Ok(rendered.to_string());
+    }
+    place_cache_hint(rendered, &cache_hint(globs))
+}
+
+/// `hint` in `text`, as [`annotate_cache_hint`] places it.
+fn place_cache_hint(text: &str, hint: &str) -> Result<String> {
+    let mut doc: DocumentMut = text.parse().context("re-parsing rendered config")?;
+    // A row held only as its price tier, `[models.x.above_100k_tokens]`, is an
+    // implicit table that prints no header and so no comment: the example goes
+    // on the tier table, the first header the file really has.
+    let mut first_row = doc
+        .get_mut("models")
+        .and_then(Item::as_table_mut)
+        .and_then(|models| models.iter_mut().find_map(|(_, row)| row.as_table_mut()));
+    while let Some(row) = first_row.take_if(|row| row.is_implicit()) {
+        first_row = row.iter_mut().find_map(|(_, child)| child.as_table_mut());
+    }
+    if let Some(row) = first_row {
+        // In front of whatever already stands above the row, never in place
+        // of it: `config set` reaches this with a file a person has been
+        // writing in, and a note of theirs above their first row is theirs.
+        let own = row
+            .decor()
+            .prefix()
+            .and_then(|prefix| prefix.as_str())
+            .unwrap_or_default()
+            .trim_start_matches('\n')
+            .to_string();
+        row.decor_mut().set_prefix(format!("\n{hint}\n{own}"));
+        return Ok(doc.to_string());
+    }
+    let mut text = doc.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(hint);
+    Ok(text)
 }
 
 /// One note, as the comment lines that stand above its key.
@@ -4282,6 +4414,7 @@ mod tests {
                 &repo,
                 &crate::pipeline::Pipelines::builtin(),
                 &repo.config,
+                false,
             )
             .into_iter()
             .map(|warning| match warning {
@@ -4481,6 +4614,113 @@ mod tests {
 
         let other = toml::from_str::<Config>("[dispatch]\nlane_quiet = \"\"\n");
         assert!(other.is_err(), "a blank must stay refused on other keys");
+    }
+
+    /// A fresh render carries the cache-lifetime example as a comment and no
+    /// `[models]` row, so a release that refuses a blank lifetime loads it.
+    #[test]
+    fn a_rendered_config_shows_the_cache_lifetime_as_a_comment_not_a_row() {
+        let rendered = Config::default().render().unwrap();
+        let body = rendered.split("\n[dispatch]").nth(1).unwrap();
+        assert_eq!(body.matches("# [models.\"claude-*\"]\n").count(), 1);
+        assert_eq!(body.matches("# [models.\"gpt-*\"]\n").count(), 1);
+        assert!(!body.contains("prompt_cache_ttl = \"\""), "{body}");
+        let parsed: Config = toml::from_str(&rendered).unwrap();
+        assert!(parsed.models.is_empty());
+
+        let mut pi_only = Config::default();
+        pi_only.agents.retain(|_, profile| profile.kind == "pi");
+        assert!(!pi_only.render().unwrap().contains("# [models."));
+    }
+
+    /// A glob that already has a row has made the choice, so the example for
+    /// it is not written, and the example for the other one stands above the
+    /// first row.
+    #[test]
+    fn the_cache_lifetime_example_skips_a_glob_that_has_a_row() {
+        let mut config = Config::default();
+        config.models.insert(
+            "claude-*".to_string(),
+            toml::from_str("prompt_cache_ttl = \"5m\"").unwrap(),
+        );
+        let rendered = config.render().unwrap();
+        assert!(
+            !rendered.contains("# [models.\"claude-*\"]\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("# prompt_cache_ttl = \"1h\"\n\n[models.\"claude-*\"]"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("# [models.\"gpt-*\"]\n"), "{rendered}");
+    }
+
+    /// A row holding only a blank lifetime, as earlier releases wrote it, is
+    /// dropped on load, so it no longer outranks a person's `*haiku*` row for
+    /// `claude-haiku-5-5`. A row that holds anything else keeps its blank.
+    #[test]
+    fn a_blank_lifetime_only_row_stops_taking_part_in_model_matching() {
+        let raw = "[models.\"claude-*\"]\nprompt_cache_ttl = \"\"\n\n\
+                   [models.\"*haiku*\"]\ncompact_ctx = 9\nslots = 2\n\
+                   context_window = 1000000\n\n\
+                   [models.\"keep\"]\ninput = 1.0\nprompt_cache_ttl = \"\"\n";
+        let mut config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            crate::models::resolved_row(&config.models, "claude-haiku-5-5"),
+            Some("claude-*"),
+            "the blank row wins before the load drops it"
+        );
+        config.migrate();
+        assert_eq!(
+            crate::models::resolved_row(&config.models, "claude-haiku-5-5"),
+            Some("*haiku*")
+        );
+        assert!(!config.models.contains_key("claude-*"));
+        assert!(config.models["keep"].prompt_cache_ttl_blank);
+    }
+
+    /// `config set` adding a row ahead of the example, or after it in a file
+    /// that had none, leaves the example where a render stands it: above the
+    /// first row.
+    #[test]
+    fn a_new_models_row_leaves_the_cache_lifetime_example_above_the_first_row() {
+        let config = Config::default();
+        let rendered = config.render().unwrap();
+        let before = rendered.clone();
+        let trailing = before.replace(
+            "\n[models]\n",
+            "\n[models]\n\n[models.\"aaa\"]\ninput = 1.0\n",
+        );
+        let settled = settle_cache_hint(&trailing, &rendered).unwrap();
+        let hint_at = settled.find(CACHE_HINT_HEADER).unwrap();
+        assert!(
+            hint_at < settled.find("[models.\"aaa\"]").unwrap(),
+            "{settled}"
+        );
+        assert_eq!(settled.matches(CACHE_HINT_HEADER).count(), 1);
+        assert_eq!(settle_cache_hint(&settled, &rendered).unwrap(), settled);
+        assert_eq!(settle_cache_hint("[a]\n", &rendered).unwrap(), "[a]\n");
+    }
+
+    /// A comment of a person's own above the first `[models]` row survives
+    /// `config set` re-seating the example, and a second pass changes nothing.
+    #[test]
+    fn re_seating_the_cache_lifetime_example_keeps_a_comment_above_the_first_row() {
+        let rendered = Config::default().render().unwrap();
+        let text = rendered.replacen(
+            "\n[models]\n",
+            "\n[models]\n\n# my note about the box\n[models.\"zz-box\"]\nlocal = true\n",
+            1,
+        );
+        assert!(text.contains("# my note about the box"), "{text}");
+        let settled = settle_cache_hint(&text, &rendered).unwrap();
+        assert!(
+            settled.contains(
+                "# prompt_cache_ttl = \"1h\"\n\n# my note about the box\n[models.\"zz-box\"]"
+            ),
+            "{settled}"
+        );
+        assert_eq!(settle_cache_hint(&settled, &rendered).unwrap(), settled);
     }
 
     /// A model with no `prompt_cache_ttl` at all writes none back, so a
