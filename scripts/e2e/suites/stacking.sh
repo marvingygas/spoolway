@@ -38,7 +38,7 @@
 #
 # The chain is also what `last:` is about, so the second half of this suite adds
 # a step carrying it and asks which of the two tasks actually ran the command.
-# covers: step.last — only the top of a chain runs it; the task below walks past without starting the command
+# covers: step.last — the highest task in a chain whose pipeline has a last: step runs it; the tasks below walk past without starting the command
 #
 # `first:` asks the opposite question of the same chain, read off a task's own
 # `depends_on` rather than the graph: the bottom of the stack declares none, so

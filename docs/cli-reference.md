@@ -193,7 +193,7 @@ Over the groups pane it offers these for the highlighted group, and a group with
 
 `gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
-with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
+with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that fails validation is
@@ -415,6 +415,21 @@ hold an id already in use under another. Each file is listed with its reason. In
 entry of `unparseable` has a `path`, an `error` and a `duplicate` boolean, which is `true` for a
 file that holds an id already in use.
 
+A task whose pipeline is missing still has a row, and the other rows are drawn as usual. The row
+reads `unknown`, and NEXT says why. The command still exits 0, and `spoolway pipeline check` names
+the task.
+
+| NEXT reads | When |
+|---|---|
+| ``names pipeline `<name>`, which is missing — restore it or run `spoolway pipeline check` `` | The task's `pipeline:` names a pipeline that does not exist. |
+| ``has no pipeline — set `pipeline:` in the task file`` | The task file has no `pipeline:`. |
+| ``` `<id>` is not a task — fix `depends_on` ``` | A queued task depends on an id with no task in the queue and no task in the archive. |
+| ``` `<a>`, `<b>` are not tasks — fix `depends_on` ``` | The same, for several ids. |
+| `→ <step>` | A command step has exited non-zero. The step is the destination of its failure: its `on_fail`, or `blocked` when it has none, or the exit of a `loop:` that is spent. |
+
+A dependency whose queue file does not parse is still a task. A task waiting on it reads
+`waiting on: <id>`.
+
 ### `spoolway queue show <task>`
 
 Print one task file.
@@ -430,7 +445,7 @@ spoolway queue route <task> --json
 
 The first line names the pipeline and says where the task stands. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
 
-A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while another open task in its group depends on this one. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
+A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
 ```
 impl_ui — held at look, waiting for a person
@@ -802,7 +817,7 @@ transcript.
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A failing exit of a command step goes to that step's `on_fail`. A task an [issue-tracking
+it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
 hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
 `queued`, and one paused on `done` resumes straight back to `done`. A task paused because its
@@ -815,7 +830,7 @@ These tasks are refused, each with a message that names the reason and what to d
 |---|---|---|
 | On `queued` | Always | It starts on its own, so there is nothing to resume |
 | On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
-| On `blocked` while its unblocker lane is live or starting | Always | Run `spoolway queue pause <task>` to take the task from the unblocker first |
+| On `blocked` while its unblocker lane is live or starting | Always, except `--stage done` with a live lane, which stops the lane | Run `spoolway queue pause <task>` to take the task from the unblocker, then `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage` puts the task back on `blocked` |
 | Archived | Always, with or without `--stage` | There is nothing to resume. Run `spoolway queue add` to queue a new task |
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
@@ -835,11 +850,15 @@ While a dispatcher runs, the destination comes from the pipelines it loaded at s
 ```
 spoolway resume <task>
 spoolway resume <task> --stage review -m "send it back round"
+spoolway resume <task> --stage done -m "work already on main"
 ```
+
+`--stage done` prints `<task>: -> done (skipped: <steps>)` and stops a lane still working on the
+task. See [Closing a stuck task](tasks.md#closing-a-stuck-task).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--stage <STEP>` | | Resume at this step instead |
+| `--stage <STEP>` | | Resume at this step instead. `done` closes a `blocked` or `paused` task, skipping every step it has left |
 | `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).
@@ -850,7 +869,7 @@ Start the step a task is on over. On an agent step, the step's conversation is d
 
 The command writes the task first, then ends the lane on the step it restarts. A blocked task owns its unblocker lane, so that lane is ended too. A lane that is working or waiting on a prompt is interrupted first, and each is stopped, whichever terminal backend runs it. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. The task goes back to the same step with `attempts` at zero. An agent step also gets `restart: <step>` set. A command step gets no `restart:` key. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
 
-A `paused` task restarts the step it was parked or gated on. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
+A `paused` task restarts the step it was parked or gated on. A task parked from an escalated unblocker, or held by `gate_at: blocked`, restarts on `blocked` and keeps the step it stopped on. Its next pass or resume goes on from that step. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
 
 | Task | What the message says to do |
 |---|---|
@@ -859,12 +878,24 @@ A `paused` task restarts the step it was parked or gated on. The command accepts
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
 
+With `--step <step>`, the command restarts only while the task is on that step. When the task has moved on, it exits 1 and restarts nothing:
+
+```
+spoolway: r1 is on `review` now, not `implement`; nothing was restarted. Run `spoolway restart r1 --step review` to restart `review`, or look at it first with `spoolway queue route r1`.
+```
+
 The command is refused when run from inside a lane. It is also refused when a `spoolway report` changed the task file first. In that case it touches no lane and asks you to run it again.
 
 ```
 spoolway restart <task>
 spoolway restart <task> -m "the conversation looped"
+spoolway restart <task> --step review
 ```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--step <STEP>` | | Restart only if the task is on this step |
+| `-m`, `--message <WORDS>` | | Note for the status log |
 
 The output names each lane it tore down, the session it abandoned and the step it sent the task to:
 

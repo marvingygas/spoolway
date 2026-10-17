@@ -1103,7 +1103,8 @@ pub struct ResumeArgs {
 
     /// Step to resume at, overriding the route. On a blocked task this
     /// replaces the step it stopped on; on a paused task it reroutes past the
-    /// gate entirely, to a step of your choosing.
+    /// gate entirely, to a step of your choosing. `done` closes a blocked or
+    /// paused task instead, skipping every step it has left.
     #[arg(long, value_name = "STEP")]
     pub stage: Option<String>,
 
@@ -1116,6 +1117,12 @@ pub struct ResumeArgs {
 pub struct RestartArgs {
     /// Task id whose current step to start over.
     pub task: String,
+
+    /// Restart only if the task is on this step, and otherwise restart
+    /// nothing. Guards a late restart against a task that has already moved
+    /// on to the next step.
+    #[arg(long, value_name = "STEP")]
+    pub step: Option<String>,
 
     /// Note recorded in the task's status log.
     #[arg(long, short = 'm')]

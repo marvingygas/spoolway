@@ -401,7 +401,7 @@ fn next_step<'a>(
         crate::pipeline::QUEUED => return first_agent(),
         crate::pipeline::DONE => crate::pipeline::DONE.to_string(),
         _ => {
-            let dependents = crate::dispatch::queue_dependents(repo, task)?;
+            let dependents = crate::dispatch::queue_dependents(repo, pipelines, task)?;
             crate::commands::resume_road(task, pipelines)?.landing(pipeline, task, dependents)
         }
     };

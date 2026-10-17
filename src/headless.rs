@@ -878,6 +878,29 @@ impl Mux for Headless {
             );
         }
 
+        // A step revisited while its old lane is still finishing a turn starts
+        // under the same name, and writing the new record over the old one
+        // would orphan that process: its pid file is keyed by the same task and
+        // step, so the new lane would read as working, then settle on its own
+        // exit without ever reporting. Refused as `PaneBusy` instead, before
+        // the dispatcher has moved the task or counted a launch: it waits for
+        // the turn to end and starts again. This start used to overwrite the
+        // record, and the plain error `prompt` then returned, after the stage
+        // move, read as an agent dying at launch and sent the task to
+        // `blocked`.
+        if let Ok(old) = self.load(spec.name)
+            && self.status(&old) == LaneStatus::Working
+        {
+            return Err(anyhow::Error::new(crate::mux::PaneBusy {
+                pane_id: old.pane_id.clone(),
+                mid_turn: true,
+            })
+            .context(format!(
+                "lane `{}` is still finishing a turn — it cannot be started again until it ends",
+                spec.name
+            )));
+        }
+
         self.save(&Record {
             name: spec.name.to_string(),
             key: spec.key.to_string(),
@@ -1380,6 +1403,45 @@ mod tests {
         assert!(refused.unwrap_err().to_string().contains("mid-turn"));
 
         f.mux.stop_lane("implement-demo", "").unwrap();
+    }
+
+    /// A step revisited while its old lane finishes a turn is refused as
+    /// `PaneBusy`, which the dispatcher waits on, and the old turn is left
+    /// running with its record intact. Once the turn ends the same start is
+    /// accepted.
+    #[test]
+    fn starting_a_lane_over_one_mid_turn_is_refused_as_busy_until_it_ends() {
+        let f = Fixture::new("busy-restart");
+        f.agent("pi", "sleep 2");
+        f.lane("implement-demo", "pi", &["--session-id", "s1"]);
+        f.mux.prompt("implement-demo", "first").unwrap();
+
+        let pane = new_pane_id(&f.root);
+        let args = vec!["--session-id".to_string(), "s2".to_string()];
+        let env = BTreeMap::new();
+        let spec = LaneSpec {
+            name: "implement-demo",
+            key: "implement-demo",
+            label: "implementer",
+            kind: "pi",
+            pane_id: &pane,
+            args: &args,
+            env: &env,
+            path_prefix: Some(&f.bin),
+        };
+        let refused = f.mux.start_lane(&spec, &mut || {}).unwrap_err();
+        assert!(
+            refused.downcast_ref::<crate::mux::PaneBusy>().is_some(),
+            "a lane started over a live turn is not refused as `PaneBusy`: {refused:#}"
+        );
+        assert_eq!(
+            f.status("implement-demo"),
+            LaneStatus::Working,
+            "the refused start must leave the old turn running"
+        );
+
+        f.settle("implement-demo");
+        f.mux.start_lane(&spec, &mut || {}).unwrap();
     }
 
     /// A dispatcher killed between `prompt`'s spawn and its save leaves a

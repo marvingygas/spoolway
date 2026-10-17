@@ -221,14 +221,14 @@ A step with `gate: true` stops the task on `paused` after its pass. A single tas
 same with `gate_at: <step>` in its task, and a `gate_at` catches whatever the step reports:
 pass, fail, block, or a loop-max bound for `blocked`. A `gate_at` is spent when it fires. The
 task pauses once, and a later report from the same step runs straight through unless something
-writes a fresh `gate_at`. `spoolway resume` sends a caught pass or fail on by `on_pass`, and
-sends a caught block or loop-max to `blocked`, the same place it would have reached unheld.
+writes a fresh `gate_at`. `spoolway resume` sends a caught pass on by `on_pass`, a caught fail down `on_fail`, and
+a caught block or loop-max to `blocked`, the same place it would have reached unheld.
 `blocked` has no `on_pass`. A `gate_at: blocked` that caught the unblocker's pass sends the task
 to the `on_pass` of the step it stopped at, and hands a command step back to itself.
 A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
-exit, and `gate_at` holds any exit. `spoolway resume` sends a held failing command exit down the
-step's `on_fail`.
-Picking another step in the board's resume picker sends it to a step you name instead.
+exit, and `gate_at` holds any exit.
+Picking another step in the board's resume picker sends it to a step you name instead. The
+picker's last row, `done`, closes the task.
 
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a
 deploy or a release.

@@ -81,10 +81,22 @@ impl Graph {
                 continue;
             }
             let archived = archive_dir.join(format!("{dep}.md")).exists();
+            // A queue file that does not parse is absent from `tasks` but is
+            // still a task: it is waiting to be repaired, not gone. Calling
+            // it unknown would tell a person to drop a real dependency, and
+            // the dependent would then start ahead of it. The queue sits
+            // beside the archive in the project home.
+            let unparsed = archive_dir.parent().is_some_and(|home| {
+                home.join(crate::config::QUEUE_DIR)
+                    .join(format!("{dep}.md"))
+                    .exists()
+            });
             state.insert(
                 dep.clone(),
                 if archived {
                     DepState::Done
+                } else if unparsed {
+                    DepState::Pending
                 } else {
                     DepState::Unknown
                 },
@@ -216,6 +228,14 @@ impl Graph {
             .collect()
     }
 
+    /// Dependencies of `id` that are neither queued nor archived: the task
+    /// file is gone, so they can never finish and `id` never becomes ready.
+    pub fn lost_dependencies(&self, id: &str) -> Vec<&str> {
+        self.deps(id)
+            .filter(|dep| self.state(dep) == DepState::Unknown)
+            .collect()
+    }
+
     /// Whether `from` waits on `to`, directly or through other tasks.
     ///
     /// Two tasks in a dependency relation never run at the same time, however
@@ -316,19 +336,39 @@ impl Graph {
     pub fn validate(&self) -> Result<()> {
         let mut problems: Vec<String> = self.cycles.iter().map(|c| render_cycle(c)).collect();
 
-        for (id, deps) in &self.edges {
-            for dep in deps {
-                if self.state(dep) == DepState::Unknown {
-                    problems.push(format!("`{id}` depends on `{dep}`, which is not a task"));
-                }
-            }
-        }
+        problems.extend(self.lost_dependency_problems());
 
         if problems.is_empty() {
             Ok(())
         } else {
             bail!("{}", problems.join("; "));
         }
+    }
+
+    /// One sentence per dependency naming no task, queued or archived.
+    ///
+    /// Shared by `validate` and, through [`Graph::lost_dependency_problems_of`],
+    /// the dispatcher's pass.
+    pub fn lost_dependency_problems(&self) -> Vec<String> {
+        self.edges
+            .keys()
+            .flat_map(|id| self.lost_dependency_problems_of(id))
+            .collect()
+    }
+
+    /// The sentences for one task's lost dependencies. A dependent held on
+    /// `queued` by one never becomes ready, and a pass that said only
+    /// `nothing to do` over it hid the cause.
+    pub fn lost_dependency_problems_of(&self, id: &str) -> Vec<String> {
+        self.lost_dependencies(id)
+            .into_iter()
+            .map(|dep| {
+                format!(
+                    "`{id}` depends on `{dep}`, which is not a task — \
+                     remove it from `depends_on` or restore the task"
+                )
+            })
+            .collect()
     }
 
     /// One-line shape of the graph, for `spoolway doctor`.
@@ -631,6 +671,57 @@ mod tests {
                 .to_string()
                 .contains("not a task")
         );
+    }
+
+    /// A dependent of a task whose file is gone is told so by name, for the
+    /// dispatcher's pass to print. Before, only `validate` knew.
+    #[test]
+    fn a_lost_dependency_is_named_as_a_problem_not_as_a_wait() {
+        let tasks = [task("only", "queued", &["d1"], None)];
+        let graph = graph(&tasks);
+
+        assert_eq!(graph.lost_dependencies("only"), ["d1"]);
+        let problems = graph.lost_dependency_problems();
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].contains("`only` depends on `d1`, which is not a task"),
+            "{}",
+            problems[0]
+        );
+        assert_eq!(
+            crate::commands::dependency_note(&graph, "only").as_deref(),
+            Some("`d1` is not a task — fix `depends_on`")
+        );
+
+        let tasks = [task("two", "queued", &["a", "b"], None)];
+        assert_eq!(
+            crate::commands::dependency_note(
+                &Graph::build(&tasks, Path::new("/nonexistent")),
+                "two"
+            )
+            .as_deref(),
+            Some("`a`, `b` are not tasks — fix `depends_on`")
+        );
+    }
+
+    /// A dependency whose queue file exists but did not parse is a task
+    /// waiting for repair, not a lost one: telling a person to drop it would
+    /// let the dependent start ahead of it.
+    #[test]
+    fn a_dependency_with_an_unparseable_queue_file_is_pending_not_lost() {
+        let tasks = [task("c", "queued", &["torn"], None)];
+        let home = crate::scratch::root("graph-unparsed-dep");
+        let archive = home.join(crate::config::ARCHIVE_DIR);
+        let queue = home.join(crate::config::QUEUE_DIR);
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(queue.join("torn.md"), "---\nid: torn\n").unwrap();
+
+        let graph = Graph::build(&tasks, &archive);
+
+        assert_eq!(graph.state("torn"), DepState::Pending);
+        assert!(graph.lost_dependencies("c").is_empty());
+        assert_eq!(graph.waiting_on("c"), ["torn"]);
     }
 
     #[test]

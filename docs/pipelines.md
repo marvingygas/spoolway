@@ -89,9 +89,9 @@ steps:
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
-| `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
+| `on_pass` | none | Where a pass goes. `done` finishes the task. Required on every step except `blocked`: `spoolway pipeline check` refuses an agent or command step without it, because a task reaching it would never leave. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
-| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. A written value is 1 or more. |
+| `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane, whatever `dispatch.hide_commands` says. |
@@ -176,16 +176,20 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - That reset cannot stop a command step that fails every time while an unattended unblocker
-  keeps passing it. So spoolway counts those laps itself. Each unblocker pass that sends the
-  task back onto a command step is a lap. It counts whether the task stopped at the command
-  step or at an agent step behind it, as it does for a gate that fails back to that agent.
+  keeps passing it. So spoolway counts those laps itself, and the count watches the command,
+  not the route the unblocker takes. Each unblocker pass that sends the task back towards a
+  command step is a lap. It counts whether the pass is a plain `--pass`, a `--pass --stage`
+  naming the command, or a `--pass --stage` naming an earlier agent step that runs before the
+  command fails again. It counts whether the task stopped at the command step or at an agent
+  step behind it, as it does for a gate that fails back to that agent.
   The pass after the third lap parks the task on `paused` instead. The unblocker lane that
   makes that pass has already run, so four unblocker lanes run in all, and no fifth starts.
   `## Status Log` names the command step and the three laps. A person's `spoolway resume`
   starts the count again. It sends the task back to the step it stopped at, which is the
-  command step itself, or the agent step behind a gate that failed back to it. A pass that
-  lands on an agent step, a pass that names a step with `--stage`, and a command that
-  passes on its next run end the count rather than add to it.
+  command step itself, or the agent step behind a gate that failed back to it. A command that
+  passes on its next run ends the count. So does a pass whose road does not lead back to a
+  failing command: an agent step that blocked on its own, or a `--stage` to a step past the
+  command. Attended runs are not counted: a person at the board is the bound.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
   limit, so delete the line to keep the meaning 0.7 gave `loop: 0`. `loop: 1` is not the same:
   it blocks the task on its second arrival. `spoolway sync` refuses a file carrying it, and
@@ -206,7 +210,9 @@ outcome at every step, and the walk-past and the failed launch or busy pane, to 
 depth. It runs over the shipped pipelines, the tracked `.spoolway/pipelines` files, and
 pipelines it generates that pass `spoolway pipeline check`.
 Each path it walks must reach `done` or `blocked`, keep every `loop` count rising, and start no
-more lanes than a stated bound.
+more lanes than a stated bound. The walk treats `blocked` as resting, so it does not walk an
+unblocker's `--stage` out of `blocked`, and it does not take the unblocker laps above. Unit
+tests in `src/commands/report.rs` cover those.
 
 ## Unattended runs
 
@@ -223,7 +229,7 @@ flowchart LR
   D -->|pause| F[paused, for a person]
 ```
 
-The unblocker lane continues the lane that stopped, with everything it had read. A `gate:` on an
+The unblocker lane opens its own session on the `unblocker` prompt. The lane that stopped is continued only when the task goes back to its step, and then with everything it had read. A `gate:` on an
 agent step still waits for a person. A lane that keeps dying at launch is retried with a doubling
 delay, up to an hour.
 
@@ -269,7 +275,13 @@ lane without a session, set `blocked_session = false` in the config.
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
 - `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
-  or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker.
+  or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker, then
+  `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage`
+  puts the task back on `blocked` and starts another unblocker. `spoolway resume <task> --stage
+  done` is the exception: it stops the unblocker lane and closes the task.
+- An unblocker cannot close a task. `spoolway report --pass --stage done` from its lane exits 1.
+  Only a person closes a task, as described in
+  [Closing a stuck task](tasks.md#closing-a-stuck-task).
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
 - `spoolway doctor` and `spoolway pipeline check` judge the `blocked` step only while unattended
   is on. That means `enabled = true`, or a run started with `spoolway dispatch --unattended`.
@@ -339,7 +351,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
   and kill count. The log stays. This holds for
   every way a task reaches the step, including a lane's report and a resume.
 - A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
-  the step, or routes on the exit code that run wrote.
+  the step, or routes on the exit code that run wrote. If the step has become an agent step in
+  the meantime, the dispatcher stops the run and starts the agent lane. If an agent lane is
+  still on a step that has become a command step, the dispatcher stops the lane, counts its
+  usage and starts the command. Only one of the two runs on the task at a time.
 - The run's pid file holds the pid, the process start time, and a `started` line the command's
   shell adds as the command begins. After a reboot, a live process
   with the same pid but a different start time is not the run. The step reads as interrupted and
@@ -409,11 +424,15 @@ refuses longer text with an error naming the pane and the byte count.
 
 ### `last:` — a step the chain runs once
 
-The top task of a chain carries every change beneath it, so a suite the whole stack must pass
-runs once, there. A task is last when no unfinished task in its own group depends on it. Any
-other task walks past the step to its `on_pass`. Each group gets its own `last:` run, whatever
-stacks on top of it. `last:` is allowed on any step, and a task walked past an agent step
-starts no lane there.
+The highest task of a chain that has a `last:` step carries every change beneath it, so a suite
+the whole stack must pass runs once, there. A task is last when no unfinished task in its own
+group depends on it and runs a `last:` step of its own. A task that depends on it counts only
+when its pipeline has a `last:` step that its `skip:` does not name. Any other task walks past
+the step to its `on_pass`. Each group gets its own `last:` run, whatever stacks on top of it.
+`last:` is allowed on any step, and a task walked past an agent step starts no lane there.
+
+If the top task of a chain uses a pipeline with no `last:` step, the next task down that has
+one runs it, once.
 
 ### `first:` — a step only a chain's root runs
 
@@ -428,7 +447,7 @@ same step.
 ### Steps a task walks past
 
 A step is hidden for a task when its own `skip:` names it, when it is a `last:` step and
-something in the task's group is still open above it, or when it is a `first:` step and the
+an open task above it in the task's group runs a `last:` step, or when it is a `first:` step and the
 task is not its chain's root. These moves follow `on_pass` past hidden steps and write the
 first step the task runs as its stage: a lane's report, a command step's exit,
 `spoolway resume`, a cleared block, and a task's start off `queued`. The walk stops after as
@@ -553,12 +572,13 @@ open. A command step has no lane to report: `gate: true` holds its passing exit 
 and a task's `gate_at:` holds a command step's exit whatever it was. A `background: true` step
 passes as soon as it starts, so `gate: true` is refused there.
 
-On the board, press `r` on the paused row. The picker preselects the `on_pass` route, so `enter`
-lets the task past. Pick another step to send the task there instead.
+On the board, press `r` on the paused row. After a caught pass, the picker preselects the
+`on_pass` route, so `enter` lets the task past. Pick another step to send the task there
+instead.
 
-- `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
-  declares or does not. The one exception is a command step whose failing exit a task's
-  `gate_at:` held: resuming that takes the step's `on_fail`, the route the exit code chose.
+- A plain resume takes `on_pass` after a caught pass, whatever `on_fail` a step declares or does
+  not. After a task's `gate_at:` caught a `--fail` or a failing command exit, a plain resume
+  takes the step's `on_fail`, the route the failure chose.
 - Picking another step in the picker reroutes the task to that step, whatever the gate would
   otherwise have done.
 - A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about

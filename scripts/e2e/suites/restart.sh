@@ -404,6 +404,64 @@ else
 fi
 rm -f .spoolway/pipelines/t.yml
 
+# ------------------------- a step that changed kind never runs twice at once
+# A command step's slow run outlives its dispatcher. If the pipeline is edited
+# so the step is now an agent step, a restarted dispatcher must stop the old
+# run before the agent lane starts, or both work in the same worktree.
+# The command writes its pid to a file outside the worktree, so the check
+# asks the operating system whether that process is still alive.
+KC_PIDFILE="$WORK/kc-pid.txt"
+rm -f "$KC_PIDFILE"
+cat > .spoolway/pipelines/kc.yml <<YML
+description: One slow command step, which an edit turns into an agent step.
+
+steps:
+  - id: s
+    description: Records its pid, then outlives the dispatcher.
+    run: echo \$\$ > $KC_PIDFILE; exec sleep 120
+    headless: true
+    on_pass: done
+    on_fail: blocked
+YML
+works "the kind-change pipeline checks out" "$SPOOLWAY" pipeline check
+task_doc kc.md kc "$MIDRUN_BODY" "group: kc" "pipeline: kc"
+must "a task for the kind change queues" "$SPOOLWAY" queue add --from kc.md
+
+"$SPOOLWAY" dispatch >/dev/null 2>&1 &
+KC_DISPATCHER=$!
+poll_until 30 test -s "$KC_PIDFILE"
+kill -9 "$KC_DISPATCHER" 2>/dev/null
+wait "$KC_DISPATCHER" 2>/dev/null
+rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
+KC_PID=$(head -n1 "$KC_PIDFILE" 2>/dev/null)
+if [ -n "$KC_PID" ] && kill -0 "$KC_PID" 2>/dev/null; then
+  ok "the command run outlived the killed dispatcher"
+else
+  bad "the command run outlived the killed dispatcher (pid '${KC_PID:-none}')"
+fi
+
+cat > .spoolway/pipelines/kc.yml <<'YML'
+description: The same step, now an agent step.
+
+steps:
+  - id: s
+    description: Now a lane rather than a command.
+    agent: pi
+    model: fake-local
+    prompt: builder
+    on_pass: done
+    on_fail: blocked
+YML
+works "the re-kinded pipeline checks out" "$SPOOLWAY" pipeline check
+timeout 90 "$SPOOLWAY" dispatch >/dev/null 2>&1
+if [ -n "$KC_PID" ] && poll_while 10 kill -0 "$KC_PID"; then
+  ok "the old command run was stopped when its step became an agent step"
+else
+  bad "the old command run was stopped when its step became an agent step (pid ${KC_PID:-none} alive)"
+  kill "$KC_PID" 2>/dev/null
+fi
+rm -f .spoolway/pipelines/kc.yml
+
 # --------------------------------------------- refused before the lock: git identity
 # A start that would actually try to run something and cannot — no git
 # identity, and the shipped `handover` step reaches `spoolway stack`, which

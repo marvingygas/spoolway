@@ -88,8 +88,10 @@ Paragraphs sent only when they apply:
 
 | Paragraph | Sent when |
 |---|---|
-| The previous step failed the task back. Work from its `## Handoff`. | the previous step routes `on_fail` here |
+| The previous step failed the task back. Work from its `## Handoff`. | the previous step routes `on_fail` here. On `blocked`, only when that step reported `--fail` and its `on_fail` is `blocked` |
 | A command step failed into this one, and where its log is. | the previous step is a command step whose `on_fail` is here |
+| A command step stopped the task here, why, and where its log is. | the step is `blocked` and the task came from a command step |
+| How the task reached `blocked`, and where the reason is written: the latest `## Status Log` entry that contains `→ blocked` and the entries just above it. Also `## Blocker` when the dispatcher stopped the lane. The paragraph says whether the step reported `--block`, the dispatcher stopped its lane, or the step did not report and the dispatcher sent the task here. | the step is `blocked` and the task came from an agent step |
 | The task blocked and nobody is coming. Clear the obstacle. | the lane runs in an [unattended run](pipelines.md#unattended-runs) |
 | `spoolway queue list`, `spoolway queue show`, `spoolway lane`, `spoolway prompt show <name>` and `spoolway resume`. | the step is `blocked` |
 | Which step this pass stands in for, that step's own `description:` when it has one, and where to read its craft: `spoolway prompt show <name>` for an agent step, the command line itself for a command step. For an agent step, also the ready `spoolway report --pass --stage <step>` command that runs that step again, for a lane that only cleared the cause. A command step gets no such command, because a plain pass already runs it again. | the step is `blocked`, rendered against a real task whose `blocked_from` names a step this pipeline still has |

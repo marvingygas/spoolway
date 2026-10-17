@@ -63,6 +63,18 @@ pass names the file until it is fixed or moved out of the queue. While any job i
 queue and prints when the next job fires. A job store that will not parse keeps the run up too.
 See [Jobs](jobs.md).
 
+### A dependency with no task
+
+A queued task that names a dependency in `depends_on` with no task in the queue and none in the
+archive never becomes ready. Each pass prints a problem for it, in place of `nothing to do`:
+
+```
+! `leaf` depends on `d1`, which is not a task — remove it from `depends_on` or restore the task
+```
+
+A task that is already past `queued` is not named. A dependency whose queue file does not parse
+counts as a task that is still waiting, so it is not named.
+
 `ctrl-c` stops the run the same way. A stop tears nothing down. Every worktree, pane, tab and
 lane stays where it is, and the next run picks it back up. Before it exits, the run banks each
 still-running lane's spend in the usage ledger and forgives that lane's launch counter, so the
@@ -176,8 +188,9 @@ takes one pass per skill to open.
 ## Reading the state
 
 The dispatcher runs a pass every ten seconds. That rate is not configurable, and stays the floor
-under how long a quiet run can go without a pass: a change in the queue or commands directory
-wakes the next pass sooner, as described above. A pass that moves a task to a new stage, frees a
+under how long a quiet run can go without a pass: a change in the commands directory
+wakes the next pass sooner, as described above. A resume or `queue add` of an agent step waits out
+the ten second floor. A pass that moves a task to a new stage, frees a
 lane or archives a task runs the next pass at once instead of waiting for the next one. A long
 run of such passes in a row eventually waits anyway.
 
@@ -310,7 +323,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, or the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -343,8 +356,8 @@ stateDiagram-v2
 | `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
-| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. Entries above a `Cleared` line belong to a stop that is over. |
-| `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
+| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. |
+| `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
@@ -503,9 +516,9 @@ and the dispatcher keeps running while the popup is open.
 
 ### Resume picker
 
-`r` on a held row opens a picker titled `resume <task>`. It lists the steps of the task's pipeline in pipeline order, except `blocked` and `done`. The line above the list says where the task stopped.
+`r` on a held row opens a picker titled `resume <task>`. It lists the steps of the task's pipeline in pipeline order, except `blocked` and `done`. The line above the list says where the task stopped. A blocked or paused task ends the list with a `done` row.
 
-A step the task walks past is left out: a `first:` step when the task is not its chain's root, a `last:` step when a task in its group still depends on it, and a step its own `skip:` names. `spoolway resume --stage` refuses those steps, so the picker does not offer them. Two hidden steps are still listed. One is the step the task stopped at, so the person sees where the task is. `enter` on that row is refused unless it is also the `(next)` row. The other is the `(next)` row when a plain resume lands on a hidden step, which happens when that step has no `on_pass`.
+A step the task walks past is left out: a `first:` step when the task is not its chain's root, a `last:` step when a task above it in its group runs a `last:` step of its own, and a step its own `skip:` names. `spoolway resume --stage` refuses those steps, so the picker does not offer them. Two hidden steps are still listed. One is the step the task stopped at, so the person sees where the task is. `enter` on that row is refused unless it is also the `(next)` row. The other is the `(next)` row when a plain resume lands on a hidden step, which happens when that step has no `on_pass`.
 
 ```
 paused at review — it passed
@@ -521,7 +534,7 @@ paused at review — it passed
 |---|---|
 | `paused`, `blocked` | The step the task stopped at. |
 | `on pass`, `on fail` | The steps a pass or a fail of the stopped step lands on. A route onto a hidden step is followed past it, so these name the step the task would really run next. |
-| `(next)` | Where `spoolway resume <task>` sends the task, past any hidden step. The cursor starts here. |
+| `(next)` | Where `spoolway resume <task>` sends the task, past any hidden step. The cursor starts here. After a caught `--fail`, this is the stopped step's `on fail` step. |
 
 When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `done (next)` row sits under the steps. When the stopped step is not in the pipeline, the header names it, no row reads `(next)`, and the cursor starts on the first step.
 
@@ -530,7 +543,10 @@ When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `
 | `↑` `↓` | Move the cursor. A long list scrolls, with `▲ n more` and `▼ n more` lines. |
 | `enter` on the `(next)` row | The same as `spoolway resume <task>`. |
 | `enter` on any other row | The same as `spoolway resume <task> --stage <step>`. |
+| `enter` on the `done` row | The same as `spoolway resume <task> --stage done`. See [Closing a stuck task](tasks.md#closing-a-stuck-task). |
 | `esc` | Close the picker and change nothing. |
+
+The `done` row has no note and sits under the steps after a blank line. The cursor never starts on it, unless a plain resume already lands on `done`.
 
 An `enter` the resume refuses leaves the picker open and prints the reason above the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
 
@@ -792,8 +808,8 @@ passes the same age check but not the size bound. See [When a task needs a perso
 |---|---|---|
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
 | Launch-failure ceiling | A launch that cannot start at all, such as a refused tab, an unconfigured model or a worktree that cannot be cut, is retried twice. The third failure in a row routes the task to `blocked`. Only a command step whose own process will not start goes to its `on_fail`, or `blocked` when it names none. If the `blocked` lane itself cannot start, the task stops on `paused` for a person. | A launch that starts; arriving at the step again; re-queueing the task. |
-| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the task to the step's `on_fail`, or to `blocked` when the step names none. | A launch that starts; arriving at the step again; re-queueing the task. |
-| A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past and a failed launch count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
+| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. On the headless backend, a step revisited while its old lane is still finishing a turn is refused the same way. The task waits. After ten minutes it routes the task to the step's `on_fail`, or to `blocked` when the step names none. | A launch that starts; arriving at the step again; re-queueing the task. |
+| A step's `loop:` | How many times a task may arrive at the step by a lane's report, a command step's exit, a walk-past or a failed launch; a resume that walks past nothing is not checked. A walk-past and a failed launch count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
 | Hook time limit | An issue hook that runs 10 minutes without exiting is stopped. A `queued`, `started` or `done` hook pauses the task. | `spoolway resume` on the paused task. |

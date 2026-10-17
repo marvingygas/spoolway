@@ -383,8 +383,8 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "last",
-        "Only the task at the top of a chain runs it; every \
-         task below walks past to `on_pass`.",
+        "Only the highest task in its chain whose pipeline has a \
+         `last` step runs it; every task below it walks past to `on_pass`.",
     ),
     (
         "first",
@@ -624,7 +624,7 @@ fn template() -> String {
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
          \x20\x20\x20\x20# background: true         let the task move on; its exit never moves it\n\
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
-         \x20\x20\x20\x20# last: true                only the top task of a chain runs it\n\
+         \x20\x20\x20\x20# last: true                only the highest task of a chain with a last step runs it\n\
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
          \x20\x20\x20\x20on_pass: done\n\

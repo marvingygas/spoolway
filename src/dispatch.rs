@@ -115,7 +115,8 @@ enum LaunchFault {
 const MAX_COMMAND_KILLS: u32 = 3;
 
 /// How long a step tolerates its pane refusing `agent start` with
-/// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before giving up on the wait:
+/// `agent_pane_busy` under herdr, or its old lane still finishing a turn under
+/// headless — [`crate::mux::PaneBusy`] both — before giving up on the wait:
 /// the task is routed to `step.on_fail`, or `blocked` when it names none.
 /// That is not where [`MAX_LAUNCH_FAILURES`]'s ceiling sends an agent lane:
 /// that goes to `blocked`, or to `paused` when the lane is the unblocker.
@@ -985,12 +986,15 @@ fn run_step<'p, 'k>(
 /// pipeline itself cannot skip anything except through `last:`, below.
 ///
 /// `last: true` says this step belongs to the chain rather than to any one
-/// task in it, so only the task at the top runs it.
+/// task in it, so only the highest task in its chain that has a `last:` step
+/// runs it.
 ///
 /// The question is whether anything is still open *above* this task, *in its
 /// own group* — an unfinished task that depends on it, at any depth, whose
 /// bare group (see the caller's own use of [`Graph::dependents_where`])
-/// matches this task's own. A finished task is archived out of the open set,
+/// matches this task's own, and whose own pipeline has a `last:` step to run
+/// (see [`runs_a_last_step`]): a dependent with none would leave the chain
+/// without the step. A finished task is archived out of the open set,
 /// so a dependent that counts here is one that has yet to run. That is the
 /// whole difference from the retired `when: last`, which asked whether the
 /// pipeline's *declared* graph gave this task dependents and so found none at
@@ -1154,19 +1158,28 @@ pub(crate) fn land_past_hidden(
 /// [`same_group_dependents`] for a caller that has only the repository: it
 /// reads the open queue and builds the graph itself. For `spoolway report` and
 /// `spoolway resume`, which run outside the dispatcher's pass.
-pub(crate) fn queue_dependents(repo: &Repo, task: &Task) -> Result<usize> {
+pub(crate) fn queue_dependents(repo: &Repo, pipelines: &Pipelines, task: &Task) -> Result<usize> {
     let tasks = repo.tasks()?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
-    Ok(same_group_dependents(repo, &tasks, &graph, task))
+    Ok(same_group_dependents(repo, pipelines, &tasks, &graph, task))
 }
 
-/// How many open tasks above `task` in `graph` share its bare group — the
-/// only dependents that hold a `last:` step back (see [`fall_through`]).
+/// How many open tasks above `task` in `graph` hold its `last:` step back: the
+/// ones that share its bare group and will run a `last:` step themselves
+/// (see [`fall_through`]).
 /// Bare groups are compared the same slug-stripped way
 /// `commands::queue::check_dependencies_set` does, so a task with no group
 /// (its own group of one) never matches a dependent that also has none.
+///
+/// A dependent only takes the chain's `last:` step over if its own pipeline
+/// has one that its `skip:` does not name. Without that test, a chain whose
+/// top task runs a pipeline with no `last:` step would hide
+/// the step from every task below it, and no task would run it. A dependent
+/// whose pipeline cannot be found is counted, as it was before pipelines were
+/// consulted: the hold is kept rather than guessed away.
 pub(crate) fn same_group_dependents(
     repo: &Repo,
+    pipelines: &Pipelines,
     tasks: &[Task],
     graph: &Graph,
     task: &Task,
@@ -1178,9 +1191,23 @@ pub(crate) fn same_group_dependents(
         tasks
             .iter()
             .find(|t| t.id() == dep)
+            .filter(|t| runs_a_last_step(pipelines, t))
             .and_then(|t| crate::commands::bare_group(repo, t))
             .is_some_and(|theirs| theirs == mine)
     })
+}
+
+/// Whether `task` has a `last:` step of its own to run: its pipeline defines
+/// one that its `skip:` list does not name. True when the pipeline cannot be
+/// found, so an unreadable pipeline never lets a `last:` step run twice.
+fn runs_a_last_step(pipelines: &Pipelines, task: &Task) -> bool {
+    match pipelines.for_task(task) {
+        Ok(pipeline) => pipeline
+            .steps
+            .iter()
+            .any(|s| s.last && !task.front.skip.contains(&s.id)),
+        Err(_) => true,
+    }
 }
 
 /// Whether the dispatcher walks `task` past `step` without starting a lane,
@@ -1189,12 +1216,18 @@ pub(crate) fn same_group_dependents(
 /// reader that needs only the answer.
 pub(crate) fn walks_past(
     repo: &Repo,
+    pipelines: &Pipelines,
     tasks: &[Task],
     graph: &Graph,
     step: &Step,
     task: &Task,
 ) -> bool {
-    walk_past(step, task, same_group_dependents(repo, tasks, graph, task)).is_some()
+    walk_past(
+        step,
+        task,
+        same_group_dependents(repo, pipelines, tasks, graph, task),
+    )
+    .is_some()
 }
 
 impl<'a> Dispatcher<'a> {
@@ -1412,6 +1445,15 @@ impl<'a> Dispatcher<'a> {
         // The dependency graph, resolved once for the whole pass. It owns its
         // data, so the rest of the pass is free to keep writing task files.
         let graph = Graph::build(&tasks, &self.repo.archive_dir());
+        // Named every pass for a dependent still on `queued`, which a lost
+        // dependency holds back for good and which would otherwise read as an
+        // idle queue. One already past `queued` is held by nothing.
+        report.problems.extend(
+            tasks
+                .iter()
+                .filter(|t| t.stage() == crate::pipeline::QUEUED)
+                .flat_map(|t| graph.lost_dependency_problems_of(t.id())),
+        );
 
         // A lane whose step is over keeps its pane, but it is no longer the
         // task's work: it is banked, marked `kept`, and dropped from `owned`,
@@ -1667,7 +1709,8 @@ impl<'a> Dispatcher<'a> {
 
                 // Read before `tasks[index]` is borrowed mutably: a task
                 // leaving `queued` onto a `last:` entry step needs it.
-                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
+                let dependents =
+                    same_group_dependents(self.repo, self.pipelines, tasks, graph, &tasks[index]);
                 let keys = command_keys.get(tasks[index].id()).unwrap_or(&no_keys);
                 match self.route_reserved_stage(
                     &mut tasks[index],
@@ -1709,7 +1752,8 @@ impl<'a> Dispatcher<'a> {
                 // Only a dependent in this task's own group can hold its
                 // `last:` step back — see `fall_through`'s own doc, updated
                 // for groups that may now stack on one another.
-                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
+                let dependents =
+                    same_group_dependents(self.repo, self.pipelines, tasks, graph, &tasks[index]);
 
                 // A step already working for this task is not walked past. A
                 // `last:` or `first:` step starts its lane or command while
@@ -1725,10 +1769,14 @@ impl<'a> Dispatcher<'a> {
                 // leftover would read as live work and start the command
                 // again for a task the step is hidden for. A foreground
                 // step's key is cleared by `reap_stale_runs` once the task is
-                // elsewhere, so one found here belongs to this visit.
+                // elsewhere, so one found here belongs to this visit. `keys`
+                // was read before that reap, so a key on a step that has
+                // become an agent step is not live work either: the reap just
+                // stopped that run.
                 let live_work = owned.iter().any(|(lane_step, lane_task, _)| {
                     *lane_step == this_step.id && lane_task == tasks[index].id()
                 }) || (!this_step.background
+                    && this_step.kind() == StepKind::Command
                     && keys.contains(&crate::command_step::Runs::key(
                         &this_step.id,
                         tasks[index].id(),
@@ -1788,6 +1836,48 @@ impl<'a> Dispatcher<'a> {
             match step.kind() {
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
+                    // A lane left from when this step was an agent step: the
+                    // pipeline was edited across a restart. The command is
+                    // about to run in the same worktree, and nothing would
+                    // ever read that lane's report again, so it is stopped
+                    // first, however busy it is. What the turn spent is banked
+                    // and its record dropped, as every other stop of a lane
+                    // does, so the tokens reach the ledger and no stale record
+                    // outlives the lane.
+                    if let Some(lane) = lane {
+                        match self.mux.stop_lane(&lane.name, &lane.pane_id) {
+                            Ok(()) => {
+                                let ledger = self.ledger();
+                                let record = self.lanes.remove(&lane.name).unwrap_or_else(|| {
+                                    LaneRecord::readopted(
+                                        self.repo,
+                                        &lane.name,
+                                        now_secs(),
+                                        &ledger,
+                                    )
+                                });
+                                self.record_usage(
+                                    &record,
+                                    &id,
+                                    &step.id,
+                                    Some(&tasks[index]),
+                                    &pipeline.name,
+                                );
+                                report.actions.push(format!(
+                                    "{id}: stopped the lane of `{}`, which is a command step now",
+                                    step.id
+                                ));
+                            }
+                            Err(err) => {
+                                report.problems.push(format!(
+                                    "{id}: could not stop the lane of `{}`, which is a command \
+                                     step now, so the command is not started: {err:#}",
+                                    step.id
+                                ));
+                                continue;
+                            }
+                        }
+                    }
                     // Every other task, on any pipeline, for a serial step to
                     // ask whether one of them holds it — see
                     // [`crate::pipeline::Pipelines::serial_peers`]. Owned
@@ -1853,7 +1943,13 @@ impl<'a> Dispatcher<'a> {
                         &pipeline,
                         &tasks[index],
                         destination,
-                        same_group_dependents(self.repo, tasks, graph, &tasks[index]),
+                        same_group_dependents(
+                            self.repo,
+                            self.pipelines,
+                            tasks,
+                            graph,
+                            &tasks[index],
+                        ),
                     );
                     let to_bank = crate::commands::walked_past_budgets(
                         &pipeline,
@@ -4283,14 +4379,16 @@ impl<'a> Dispatcher<'a> {
 
     /// A launch refused because its pane is still busy — [`crate::mux::
     /// PaneBusy`] — never spends one of [`MAX_LAUNCH_FAILURES`]'s strikes:
-    /// the refusal is transient by construction (see [`crate::mux::Herdr::
-    /// start_lane`]'s own poll ahead of `agent start`). `boot_start_lane`'s
-    /// own take-back closes the pane, and a fresh one is split on every
-    /// attempt,
-    /// exactly as it does for any other launch failure — see its own doc
-    /// comment — so three of these in a row are three different panes
-    /// caught by the same race, not the same pane refusing three times over;
-    /// either way, not three broken launches.
+    /// the refusal is transient by construction. Under herdr it is a pane that
+    /// has not reached its prompt (see [`crate::mux::Herdr::start_lane`]'s own
+    /// poll ahead of `agent start`); `boot_start_lane`'s own take-back closes
+    /// the pane, and a fresh one is split on every attempt, exactly as it does
+    /// for any other launch failure — see its own doc comment — so three of
+    /// these in a row are three different panes caught by the same race, not
+    /// the same pane refusing three times over. Under headless it is the same
+    /// old lane every time, still finishing its turn, which `PaneBusy::
+    /// mid_turn` says and the two lines below word accordingly. Either way,
+    /// not three broken launches.
     ///
     /// Stamps [`Task::stamp_launch_busy`] on the first refusal only and
     /// reports one waiting line naming the pane and the elapsed time, below
@@ -4306,16 +4404,21 @@ impl<'a> Dispatcher<'a> {
         &self,
         task: &mut Task,
         step: &Step,
-        pane_id: &str,
+        busy: &crate::mux::PaneBusy,
         report: &mut Report,
     ) -> Option<String> {
+        let pane_id = busy.pane_id.as_str();
         let now = now_secs();
         let since = task.stamp_launch_busy(&step.id, now);
         let elapsed = (now - since).max(0) as u64;
         let bound = LAUNCH_BUSY_TIMEOUT.as_secs();
         if elapsed < bound {
+            let waiting_for = match busy.mid_turn {
+                true => format!("the lane in pane `{pane_id}` to finish its turn"),
+                false => format!("pane `{pane_id}` to reach its prompt"),
+            };
             report.actions.push(format!(
-                "{}: waiting for pane `{pane_id}` to reach its prompt (busy {} of {})",
+                "{}: waiting for {waiting_for} (busy {} of {})",
                 task.id(),
                 mmss(elapsed),
                 mmss(bound),
@@ -4323,8 +4426,12 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         task.clear_launch_busy(&step.id);
+        let held_up = match busy.mid_turn {
+            true => format!("the lane in pane `{pane_id}` was still finishing a turn"),
+            false => format!("pane `{pane_id}` never reached its prompt"),
+        };
         let reason = format!(
-            "`{}` could not be started: pane `{pane_id}` never reached its prompt after {}",
+            "`{}` could not be started: {held_up} after {}",
             step.id,
             mmss(bound)
         );
@@ -5082,10 +5189,7 @@ impl<'a> Dispatcher<'a> {
         // road keeps routing as it always has, so a busy unblocker pane still
         // reaches `blocked` again rather than parking.
         let (destination, from_ceiling) = match err.downcast_ref::<crate::mux::PaneBusy>() {
-            Some(busy) => (
-                self.note_pane_busy(task, step, &busy.pane_id, report),
-                false,
-            ),
+            Some(busy) => (self.note_pane_busy(task, step, busy, report), false),
             None => (
                 self.note_launch_failure(
                     task,
@@ -6035,7 +6139,8 @@ impl<'a> Dispatcher<'a> {
 
     /// Look after every one of this task's command runs except the one on the
     /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
-    /// and can say more about.
+    /// and can say more about. A run on the step it is sitting on is looked
+    /// after too once that step is no longer a command step.
     ///
     /// A background run is a sidecar: its exit code is never read to route,
     /// so nothing here moves the task. The step that started it walked away
@@ -6078,7 +6183,13 @@ impl<'a> Dispatcher<'a> {
             let Some((step_id, step)) = run_step(pipeline, task.id(), key) else {
                 continue;
             };
-            if step_id == task.stage() {
+            // The run on the step the task sits on is
+            // [`Dispatcher::run_command`]'s to watch, but only while that step
+            // is still a command step. A pipeline edited across a restart can
+            // turn it into an agent step: nothing watches the old run then,
+            // and the lane about to start would work in the same worktree
+            // beside it. So it is reaped like a run the task has left.
+            if step_id == task.stage() && step.kind() == StepKind::Command {
                 continue;
             }
             // A foreground step's run belongs to the visit that started it.
@@ -8757,6 +8868,27 @@ pub(crate) fn live_lane_sessions(repo: &Repo) -> HashSet<String> {
         .collect()
 }
 
+/// Whether `task` has already started work on `step`, as far as a process
+/// other than the dispatcher can tell.
+///
+/// This is the saved half of `live_work` in `collect_candidates`: a lane
+/// record for the step that is not kept, or, for a foreground command step, a
+/// run key in `commands/`. A step that has started is not walked past, so a
+/// `gate_at:` naming it still fires. A task that is only sitting on the step,
+/// waiting for a lane slot, its `serial:` turn or the next pass, has started
+/// nothing, and is walked past once a dependent hides the step.
+pub(crate) fn step_started(repo: &Repo, step: &Step, task: &Task) -> bool {
+    let lane = crate::mux::lane_name(&step.id, task);
+    peek_lane_records(repo)
+        .get(&lane)
+        .is_some_and(|record| !record.kept)
+        || (!step.background
+            && step.kind() == StepKind::Command
+            && crate::command_step::Runs::new(&repo.commands_dir())
+                .keys_for_task(task.id())
+                .contains(&crate::command_step::Runs::key(&step.id, task.id())))
+}
+
 /// `lanes.json` as it stands, for a reader that never saves it back: the
 /// board, which reads it every frame, and a lookup of one lane's session.
 ///
@@ -8879,6 +9011,9 @@ mod tests {
         /// and carrying [`crate::mux::PaneBusy`] rather than an ordinary
         /// failure.
         refuse_start_pane_busy: bool,
+        /// Like `refuse_start_pane_busy`, but as the headless backend answers: the
+        /// old lane under this name is still finishing a turn.
+        refuse_start_mid_turn: bool,
         /// Make the briefing refuse to land, the way a real backend does when
         /// a freshly started session never begins its turn — the lane is up,
         /// and `Mux::prompt` still comes back an error.
@@ -9006,6 +9141,7 @@ mod tests {
                 refuse_start: false,
                 tabless: false,
                 refuse_start_pane_busy: false,
+                refuse_start_mid_turn: false,
                 refuse_prompt: false,
                 refuse_start_named: None,
                 refuse_prompt_named: None,
@@ -9155,6 +9291,12 @@ mod tests {
         /// `agent_pane_busy`, transient by construction.
         fn refusing_to_start_with_a_busy_pane(mut self) -> FakeMux {
             self.refuse_start_pane_busy = true;
+            self
+        }
+        /// A backend whose `start_lane` always answers the way headless does for
+        /// a step revisited while its old lane still runs a turn.
+        fn refusing_to_start_over_a_lane_mid_turn(mut self) -> FakeMux {
+            self.refuse_start_mid_turn = true;
             self
         }
         /// A backend that starts a lane and then will not carry its briefing
@@ -9581,9 +9723,17 @@ mod tests {
             if self.refuse_start_named.as_deref() == Some(spec.name) {
                 anyhow::bail!("agent_start_failed");
             }
+            if self.refuse_start_mid_turn {
+                return Err(anyhow::Error::new(crate::mux::PaneBusy {
+                    pane_id: spec.pane_id.to_string(),
+                    mid_turn: true,
+                })
+                .context("lane is still finishing a turn"));
+            }
             if self.refuse_start_pane_busy {
                 return Err(anyhow::Error::new(crate::mux::PaneBusy {
                     pane_id: spec.pane_id.to_string(),
+                    mid_turn: false,
                 })
                 .context(format!(
                     "herdr agent start {} --pane {}: agent target pane {} is not an available shell",
@@ -12012,6 +12162,54 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("alone") && a.contains("running `suite`")),
             "a task with no group should have started `suite`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A chain mixing pipelines runs its `last:` step exactly once, on the
+    /// task nearest the top that has one. `low` and `mid` run the pipeline
+    /// with a `last:` step and `top` runs one without: before the fix `top`
+    /// counted as a dependent that held the step back from both of them, and
+    /// nothing in the chain ran it at all.
+    #[test]
+    fn a_chain_whose_top_pipeline_has_no_last_step_still_runs_it_once() {
+        let (repo, _root_guard) = fixture("last-mixed-chain");
+        let mut pipelines = last_pipelines();
+        let plain = crate::pipeline::Pipeline::parse(
+            "plain",
+            "steps:\n  - id: work\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        pipelines.pipelines.insert("plain".into(), plain);
+        let mux = FakeMux::new(vec![]);
+
+        for (id, deps, pipeline, stage) in [
+            ("low", vec![], "default", "suite"),
+            ("mid", vec!["low"], "default", "suite"),
+            ("top", vec!["mid"], "plain", "work"),
+        ] {
+            add_task_with(&repo, id, stage, |f| {
+                f.group = Some("stack".into());
+                f.pipeline = Some(pipeline.into());
+                f.depends_on = deps.iter().map(|d| d.to_string()).collect();
+            });
+        }
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        let ran: Vec<&String> = report
+            .actions
+            .iter()
+            .filter(|a| a.contains("running `suite`"))
+            .collect();
+        assert_eq!(ran.len(), 1, "`suite` runs once: {:?}", report.actions);
+        assert!(ran[0].contains("mid"), "on the tail that has it: {ran:?}");
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("low") && a.contains("not last in its chain")),
+            "`low` walks past it: {:?}",
             report.actions
         );
     }
@@ -16325,6 +16523,47 @@ mod tests {
         assert!(
             task.body
                 .contains("`implement` could not be started: pane `"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// Under headless the thing held up is an old lane finishing its turn, not
+    /// a pane without a prompt, and both lines the wait writes say so: the
+    /// pass's waiting line, and the reason on the `## Status Log` once the
+    /// ten minutes are spent — the entry an unblocker is sent to read.
+    #[test]
+    fn a_lane_still_finishing_a_turn_is_not_called_a_pane_without_a_prompt() {
+        let (repo, _root_guard) = fixture("lane-mid-turn-wait");
+        let path = add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).refusing_to_start_over_a_lane_mid_turn();
+
+        let report = run_pass(&repo, &mux);
+        let waiting = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("demo: waiting for the lane in pane "))
+            .unwrap_or_else(|| panic!("no waiting line: {:?}", report.actions));
+        assert!(waiting.contains("to finish its turn (busy "), "{waiting}");
+        assert_eq!(reload(&path).stage(), "queued");
+
+        let path = add_task_with(&repo, "late", "queued", |front| {
+            front
+                .launch_busy_since
+                .insert("implement".to_string(), now_secs() - 601);
+        });
+        run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked");
+        assert!(
+            task.body
+                .contains("`implement` could not be started: the lane in pane `")
+                && task.body.contains("was still finishing a turn after 10:00"),
+            "{}",
+            task.body
+        );
+        assert!(
+            !task.body.contains("never reached its prompt"),
             "{}",
             task.body
         );
@@ -22002,6 +22241,50 @@ mod tests {
         assert_eq!(reload(&leaf).stage(), "queued");
     }
 
+    /// A dependency whose task file is gone is a different wait from the two
+    /// above: it can never be released, so each pass names it as a problem
+    /// instead of printing `nothing to do`.
+    #[test]
+    fn a_dependency_with_no_task_file_is_named_as_a_problem_each_pass() {
+        let (repo, _root_guard) = fixture("lost-dependency");
+        let leaf = add_task_with(&repo, "leaf", "queued", |f| {
+            f.depends_on = vec!["d1".into()]
+        });
+
+        let mux = FakeMux::new(vec![]);
+        for _ in 0..2 {
+            let report = run_pass(&repo, &mux);
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|p| p.contains("`leaf` depends on `d1`, which is not a task")),
+                "problems: {:?}",
+                report.problems
+            );
+        }
+        assert!(mux.did("start").is_empty());
+        assert_eq!(reload(&leaf).stage(), "queued");
+    }
+
+    /// Only a dependent still on `queued` is held by the lost dependency, so
+    /// one already past it is not named every pass.
+    #[test]
+    fn a_lost_dependency_is_not_named_for_a_dependent_past_queued() {
+        let (repo, _root_guard) = fixture("lost-dependency-past-queued");
+        add_task_with(&repo, "leaf", "paused", |f| {
+            f.depends_on = vec!["d1".into()]
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let report = run_pass(&repo, &mux);
+        assert!(
+            !report.problems.iter().any(|p| p.contains("`d1`")),
+            "problems: {:?}",
+            report.problems
+        );
+    }
+
     #[test]
     fn a_dependency_cycle_is_reported_rather_than_waited_on_forever() {
         let (repo, _root_guard) = fixture("cycle");
@@ -23601,6 +23884,46 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert!(!path.exists(), "task file should have left the queue");
         assert!(repo.archive_dir().join("demo.md").exists());
+    }
+
+    /// A blocked task a person closes with `spoolway resume --stage done` is
+    /// torn down and archived by the next pass like any task that reaches
+    /// `done`, and the task waiting on it is no longer held back.
+    #[test]
+    fn a_task_closed_as_done_by_hand_is_archived_and_frees_its_dependent() {
+        let (mut repo, _root_guard) = fixture("close-as-done");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let path = add_task_with(&repo, "parent", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/parent".into());
+            f.blocked_from = Some("handover".into());
+        });
+        add_task_with(&repo, "child", crate::pipeline::QUEUED, |f| {
+            f.depends_on = vec!["parent".into()];
+        });
+
+        crate::commands::resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "parent".into(),
+                stage: Some(crate::pipeline::DONE.into()),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert!(!path.exists(), "the closed task left the queue");
+        assert!(repo.archive_dir().join("parent.md").exists());
+        let tasks = repo.tasks().unwrap();
+        let graph = crate::graph::Graph::build(&tasks, &repo.archive_dir());
+        assert!(graph.waiting_on("child").is_empty());
     }
 
     /// Archiving a task takes its hook and command run files with it, so
@@ -26155,6 +26478,113 @@ mod tests {
         assert_eq!(task.stage(), "review");
     }
 
+    /// A step that was a command step and is an agent step after a restart
+    /// must not leave the old command running beside the new lane: the run on
+    /// the task's own step is reaped when that step is no longer a command.
+    /// Before the fix `reap_stale_runs` skipped every run on the current
+    /// stage, so the command went on in the worktree the agent started in.
+    #[test]
+    fn a_command_run_on_a_step_that_became_an_agent_step_is_stopped() {
+        let (repo, _root_guard) = fixture("command-became-agent");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-kind-change");
+        let commands = pipelines_running(&run_until(&release), false);
+
+        Dispatcher::new(&repo, &commands, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        // The pipeline is edited across a restart: `implement` is an agent.
+        let agents = Pipelines::builtin();
+        let pipeline = agents.pipelines.get("default").unwrap();
+        let mut task = reload(&path);
+        let keys = runs.keys_for_task("demo");
+        Dispatcher::new(&repo, &agents, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut Report::default(),
+            &keys,
+        );
+
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Fresh,
+            "the old command is still going beside the agent step"
+        );
+    }
+
+    /// The other direction: a lane left on a step that is a command step
+    /// after a restart is stopped before the command starts, so only one of
+    /// them works in the worktree. Before the fix the command arm never looked
+    /// at the lane and started beside it.
+    #[test]
+    fn a_lane_on_a_step_that_became_a_command_step_is_stopped_first() {
+        let (repo, _root_guard) = fixture("agent-became-command");
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(idle_lanes(&repo, "implement"));
+        let release = repo.root.join("release-kind-change-lane");
+        let pipelines = pipelines_running(&run_until(&release), false);
+
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        dispatcher
+            .lanes
+            .insert("demo · implement".into(), LaneRecord::adopted(now_secs()));
+        dispatcher.pass(&mut || {}).unwrap();
+
+        assert!(
+            !dispatcher.lanes.contains_key("demo · implement"),
+            "the stopped lane's record was left behind"
+        );
+        assert_eq!(
+            mux.did("stop demo"),
+            vec!["stop demo · implement".to_string()],
+            "the old lane must be stopped: {:?}",
+            mux.calls()
+        );
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        runs.stop(&key);
+    }
+
+    /// A step that became an agent step while its old command's run was
+    /// still going, and that the task now walks past (`skip:` names it), is
+    /// walked past and starts no lane: the run the reap just stopped is not
+    /// live work that keeps the step from being walked past.
+    #[test]
+    fn a_reaped_run_on_a_step_that_became_an_agent_step_does_not_keep_it_from_being_walked_past() {
+        let (repo, _root_guard) = fixture("reaped-run-walked-past");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-reaped-walk");
+        let commands = pipelines_running(&run_until(&release), false);
+        Dispatcher::new(&repo, &commands, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        let mut task = reload(&path);
+        task.front.skip = vec!["implement".to_string()];
+        task.save().unwrap();
+        mux.clear_calls();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(
+            mux.did("start demo · implement").is_empty(),
+            "a lane started on a step the task skips: {:?}",
+            mux.calls()
+        );
+    }
+
     /// A foreground command that is still running when its task leaves the
     /// step is stopped, not just ignored: its process is killed and its run
     /// files are forgotten. Otherwise a long command would run on after the
@@ -28000,14 +28430,17 @@ mod tests {
     /// arrive knowing only that it was there again. It redid the work, passed,
     /// and handed the same tree back for the same failure — a loop whose only
     /// exit was the round cap. The paragraph names the step and its log.
+    ///
+    /// On `blocked` the paragraph cannot claim the command failed, because a
+    /// command without `on_fail` reaches `blocked` on a pass into a spent
+    /// `loop:` as well; it says the command stopped the task instead.
     #[test]
     fn a_lane_a_command_step_failed_into_is_told_which_one_and_where_to_read_it() {
         let (repo, _root_guard) = fixture("prompt-command-fail");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         // `handover` is the shipped pipeline's command step (`spoolway
-        // stack`), and its `on_fail` now goes straight to `blocked` — the
-        // shape this paragraph exists for.
+        // stack`), and its `on_fail` goes straight to `blocked`.
         let step = pipeline.step("blocked").unwrap();
 
         let mut task = reload(&add_task(&repo, "demo", "blocked"));
@@ -28016,7 +28449,221 @@ mod tests {
         task.front.arrived_from = Some("handover".to_string());
         let prompt = sent(&repo, &task, pipeline, step);
         assert!(
+            prompt.contains("command step `handover` stopped the task here"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+    }
+
+    /// The briefing is composed before the launch writes `arrived_from`, so a
+    /// task still sitting on the command step it is being sent back from has
+    /// `arrived_from` naming the step *before* that one. The paragraph used to
+    /// read that stale value and never appear, also for a `session: true` lane
+    /// whose prompt promises its reason in THIS PASS.
+    #[test]
+    fn the_command_that_failed_is_named_before_the_launch_records_the_arrival() {
+        let (repo, _root_guard) = fixture("prompt-command-fail-first-launch");
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.id == "handover" {
+                    step.on_fail = Some("implement".to_string());
+                }
+            }
+        }
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("implement").unwrap();
+        assert!(step.session, "the case is a `session:` step");
+
+        // On `handover` when the lane for `implement` is composed;
+        // `arrived_from` is still `document`, the arrival before that one.
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(
             prompt.contains("command step `handover` failed"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+
+        // Once the launch has moved the task and a retry composes again, the
+        // recorded arrival is the answer and still names it.
+        task.front.stage = "implement".to_string();
+        task.front.arrived_from = Some("handover".to_string());
+        assert!(sent(&repo, &task, pipeline, step).contains("command step `handover` failed"));
+    }
+
+    /// Every road into `blocked` is the fail route of a step with no
+    /// `on_fail`, so the route cannot say which one it was. A task that
+    /// reported `--block`, or was escalated, has no `## Handoff` to point at.
+    #[test]
+    fn an_unblocker_is_told_how_the_task_really_reached_it() {
+        let (repo, _root_guard) = fixture("prompt-blocked-cause");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+        let report = |outcome: &str| crate::task::LastReport {
+            step: "document".to_string(),
+            outcome: outcome.to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        };
+
+        // `document` declares no `on_fail`, so a fail also lands on `blocked`.
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("document".to_string());
+
+        task.front.last_report = Some(report("block"));
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("`document` reported `--block`"), "{prompt}");
+        assert!(prompt.contains("latest entry of"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("no `## Handoff`"), "{prompt}");
+
+        task.front.escalated = true;
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("dispatcher stopped its lane"), "{prompt}");
+        assert!(prompt.contains("`## Blocker`"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("no `## Handoff`"), "{prompt}");
+
+        task.front.escalated = false;
+        task.front.last_report = Some(report("fail"));
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(prompt.contains("failed this task back"), "{prompt}");
+    }
+
+    /// A report of the same step from an earlier lap, one that did not leave
+    /// the task on `blocked`, is not why the task is there now. The launch
+    /// guard and the launch-failure ceiling stop a task without marking
+    /// `escalated`, so the old fail used to be read as a fresh one and the
+    /// unblocker was told the step "failed this task back".
+    #[test]
+    fn an_old_report_of_the_same_step_is_not_read_as_the_cause_of_a_later_stop() {
+        let (repo, _root_guard) = fixture("prompt-blocked-stale-report");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("review".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".to_string(),
+            outcome: "fail".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: false,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(!prompt.contains("reported `--block`"), "{prompt}");
+        assert!(
+            prompt.contains("`review` is where this task stopped, and it did not report"),
+            "{prompt}"
+        );
+    }
+
+    /// A `--fail` whose own `on_fail` step has spent its `loop:` is
+    /// redirected to `blocked`, and the reason is the loop's, not the
+    /// findings. `review` fails back to `implement`, so its fail route is not
+    /// `blocked` and the old "Fix pass" wording does not apply.
+    #[test]
+    fn a_fail_redirected_by_a_spent_loop_is_not_a_fix_pass() {
+        let (repo, _root_guard) = fixture("prompt-blocked-spent-loop-fail");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("review".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "review".to_string(),
+            outcome: "fail".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(
+            prompt.contains("`review` is where this task stopped"),
+            "{prompt}"
+        );
+    }
+
+    /// A pass that left the task on `blocked` because the next step had spent
+    /// its `loop:` is where the `Some(_)` arm lands.
+    #[test]
+    fn a_pass_stopped_by_a_spent_loop_says_where_the_task_stopped() {
+        let (repo, _root_guard) = fixture("prompt-blocked-spent-loop-pass");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "blocked"));
+        task.front.arrived_from = Some("document".to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "document".to_string(),
+            outcome: "pass".to_string(),
+            at: 5_000,
+            at_ms: 5_000_000,
+            blocked: true,
+        });
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+        assert!(
+            prompt.contains("`document` is where this task stopped"),
+            "{prompt}"
+        );
+    }
+
+    /// A command gate that fails back to an agent step with a spent `loop:`
+    /// is redirected to `blocked`. Its fail route is not `blocked`, so the
+    /// route alone says nothing, but the unblocker is still told which command
+    /// stopped the task and where its log is.
+    #[test]
+    fn a_command_gate_stopped_by_a_spent_loop_is_named_to_the_unblocker() {
+        let (repo, _root_guard) = fixture("prompt-blocked-command-loop");
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.id == "handover" {
+                    step.on_fail = Some("implement".to_string());
+                }
+            }
+        }
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(
+            prompt.contains("command step `handover` stopped the task here"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("demo · handover.log"), "{prompt}");
+        assert!(!prompt.contains("failed this task back"), "{prompt}");
+    }
+
+    /// A command with no `on_fail` of its own fails to `blocked`, so its fail
+    /// route leads there. It may equally have passed into a step whose
+    /// `loop:` is spent. The unblocker cannot be told it "failed and routes
+    /// back here" when the exit code is gone and it may have passed.
+    #[test]
+    fn a_command_with_no_on_fail_is_not_said_to_have_failed_on_blocked() {
+        let (repo, _root_guard) = fixture("prompt-blocked-command-default-fail");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("blocked").unwrap();
+
+        let mut task = reload(&add_task(&repo, "demo", "handover"));
+        task.front.arrived_from = Some("document".to_string());
+        let prompt = sent(&repo, &task, pipeline, step);
+        assert!(!prompt.contains("failed and routes back here"), "{prompt}");
+        assert!(
+            prompt.contains("command step `handover` stopped the task here"),
             "{prompt}"
         );
         assert!(prompt.contains("demo · handover.log"), "{prompt}");

@@ -500,6 +500,20 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
     // see `clamp_rows`. A panel more than three rows short of the pane is
     // never padded past it.
     let fixed = 2 + 2 + 1 + pinned + 2 + 3;
+    // A pinned `done` row is set apart from the steps by a blank line above
+    // it, since it ends the task rather than running a step. The blank is
+    // the first row a short pane gives up: kept, it would fold the list
+    // below its least, or push the panel past a 15-row pane once a refusal
+    // and a pinned `blocked` row are drawn as well.
+    let least = match &picker.error {
+        Some(_) => MIN_WINDOW + REFUSAL_LEAST,
+        None => MIN_WINDOW,
+    };
+    let gap = picker.rows[picker.listed..]
+        .iter()
+        .any(|row| row.step == crate::pipeline::DONE)
+        && height.is_none_or(|height| height.saturating_sub(fixed + 1) >= least);
+    let fixed = fixed + usize::from(gap);
     let room = match height {
         Some(height) => {
             let free = height.saturating_sub(fixed);
@@ -545,10 +559,18 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
         body.push(String::new());
         return crate::screen::boxed(&format!("resume {}", picker.id), &body);
     }
-    let pinned_at = answers.len();
-    answers.extend((picker.listed..picker.rows.len()).map(line));
-    let cursor = match picker.cursor.checked_sub(picker.listed) {
-        Some(pin) => pinned_at + pin,
+    let mut cursor_pinned = None;
+    for i in picker.listed..picker.rows.len() {
+        if gap && picker.rows[i].step == crate::pipeline::DONE {
+            answers.push(String::new());
+        }
+        if i == picker.cursor {
+            cursor_pinned = Some(answers.len());
+        }
+        answers.push(line(i));
+    }
+    let cursor = match cursor_pinned {
+        Some(at) => at,
         None => picker
             .cursor
             .checked_sub(window.start)

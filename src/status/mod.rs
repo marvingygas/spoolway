@@ -924,7 +924,7 @@ impl Board {
         }
         // Read once, on the key: the picker is a snapshot, not redrawn from
         // the queue every frame.
-        let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+        let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
         self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines, dependents)?);
         Ok(())
     }
@@ -1215,6 +1215,7 @@ impl Board {
                             &routed,
                             &crate::cli::RestartArgs {
                                 task: confirm.id.clone(),
+                                step: None,
                                 message: None,
                             },
                             None,
@@ -1754,7 +1755,10 @@ struct PickRow {
 /// would fall back to. A `pause` on a blocked row writes
 /// `parked_from: blocked`, which names no step, so its `blocked_from`
 /// answers instead.
-fn stopped_at(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> Option<String> {
+pub(crate) fn stopped_at(
+    task: &crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+) -> Option<String> {
     let front = &task.front;
     let real = |step: &Option<String>| step.clone().filter(|s| s != crate::pipeline::BLOCKED);
     real(&front.paused_at)
@@ -1818,8 +1822,8 @@ fn picker_header(
 }
 
 /// The picker `r` opens on `task`: every step of its pipeline but `blocked`
-/// and `done`, which `--stage` does not accept, labelled against the step it
-/// stopped at.
+/// and `done`, labelled against the step it stopped at, then a pinned `done`
+/// row that closes the task.
 ///
 /// A step the task walks past is left out, since `resume --stage` refuses it.
 /// Two are kept anyway. The step it stopped at is listed so the person sees
@@ -1837,11 +1841,19 @@ fn picker_header(
 /// row cannot name a step the resume would not go to. The `on pass` and
 /// `on fail` labels are landed the same way. When that destination is
 /// `blocked` or `done`, one pinned row under the steps names it, since
-/// neither is a row anyone may pick on purpose. A stopped step the pipeline
-/// no longer has leaves no `(next)` row at all: `resume_road` either refuses
-/// it or, for a block whose `blocked_from` is gone, falls back to the step it
-/// last reported from. The cursor starts on the first step instead, for a
-/// person to pick a real one.
+/// `--stage` does not accept `blocked` and `--stage done` would close the
+/// task rather than resume it. A stopped step the pipeline no longer has
+/// leaves no `(next)` row at all: `resume_road` either refuses it or, for a
+/// block whose `blocked_from` is gone, falls back to the step it last
+/// reported from. The cursor starts on the first step instead, for a person
+/// to pick a real one.
+///
+/// A task on `blocked` or `paused` always ends with a `done` row, with no
+/// note, so a person can close a task whose last step can never pass; it
+/// sends `--stage done`, which skips every step left. It is the `(next)`
+/// row itself when a plain resume lands on `done`, since nothing is skipped
+/// then. Otherwise the cursor never starts on it, so `r` `enter` never skips
+/// work by accident.
 fn resume_picker(
     task: &crate::task::Task,
     pipelines: &Pipelines,
@@ -1916,7 +1928,21 @@ fn resume_picker(
             next: true,
         });
     }
-    let cursor = rows.iter().position(|row| row.next).unwrap_or(0);
+    let stopped_off_a_step =
+        task.stage() == crate::pipeline::BLOCKED || task.stage() == crate::pipeline::PAUSED;
+    if stopped_off_a_step && next.as_deref() != Some(crate::pipeline::DONE) {
+        rows.push(PickRow {
+            step: crate::pipeline::DONE.to_string(),
+            note: String::new(),
+            next: false,
+        });
+    }
+    let closes = |row: &PickRow| row.step == crate::pipeline::DONE && !row.next;
+    let cursor = rows
+        .iter()
+        .position(|row| row.next)
+        .or_else(|| rows.iter().position(|row| !closes(row)))
+        .unwrap_or(0);
     Ok(ResumePicker {
         id: task.id().to_string(),
         hold: Hold::of(task),
@@ -3709,6 +3735,23 @@ fn onward(
     }
 }
 
+/// The non-zero code a command step's run exited with, when the dispatcher
+/// has read it but not yet moved the task. The code stays on disk until the
+/// move lands, which waits for a free slot at an agent destination.
+fn failed_command_exit(
+    runs: &crate::command_step::Runs,
+    key: &str,
+    step: &crate::pipeline::Step,
+) -> Option<i32> {
+    if step.kind() != crate::pipeline::StepKind::Command {
+        return None;
+    }
+    match runs.state(key) {
+        crate::command_step::RunState::Exited(code) if code != 0 => Some(code),
+        _ => None,
+    }
+}
+
 /// The step a move to `destination` writes as `task`'s stage: `destination`
 /// itself, or the first step past it along `on_pass` that the task runs.
 ///
@@ -3775,13 +3818,12 @@ fn blocked_next(
 /// `commands::caught_at`: a pause raised from `blocked` itself resumes to
 /// `cleared_block_target`, a caught block or loop-max (`Caught::Blocked`)
 /// resumes straight to `blocked` — exactly where it would have landed
-/// unheld — a command step's caught fail resumes by its own `on_fail`, a
-/// command step held on a pass `blocked` gave rather than its own exit
-/// resumes onto the step itself, an unblocker's pass held by `gate_at:
-/// blocked` resumes through `cleared_block_target` to the `on_pass` of the
-/// step the task stopped at, and everything else, a plain gated pass or a
-/// schedule's caught fail at an agent step, resumes by the step's own
-/// `on_pass`. A `parked_from` with no
+/// unheld — a caught fail, at an agent step or a command step, resumes by
+/// the step's own `on_fail`, a command step held on a pass `blocked` gave
+/// rather than its own exit resumes onto the step itself, an unblocker's
+/// pass held by `gate_at: blocked` resumes through `cleared_block_target` to
+/// the `on_pass` of the step the task stopped at, and everything else, a
+/// plain gated pass, resumes by the step's own `on_pass`. A `parked_from` with no
 /// gate — a person's own keypress, or a lane `escalate_clock` gave up on —
 /// names nothing to pass: `unpark` sends the task straight back onto that
 /// exact step, so this names the step itself rather than whatever comes
@@ -3813,14 +3855,11 @@ fn paused_next(
                 crate::commands::cleared_block_target(task, pipeline, true)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
-            // A command step's held failure resumes down the `on_fail` its
-            // exit code chose — see `resume_road`.
-            Some(crate::commands::Caught::Fail)
-                if step.kind() == crate::pipeline::StepKind::Command =>
-            {
-                step.destination(crate::pipeline::Outcome::Fail)
-                    .map(str::to_string)?
-            }
+            // A held failure resumes down the step's `on_fail` — see
+            // `resume_road`.
+            Some(crate::commands::Caught::Fail) => step
+                .destination(crate::pipeline::Outcome::Fail)
+                .map(str::to_string)?,
             _ => step
                 .destination(crate::pipeline::Outcome::Pass)
                 .map(str::to_string)?,
@@ -3958,11 +3997,31 @@ fn build_rows(
             rows.push(unroutable_row(repo, tasks, graph, task, refusal));
             continue;
         }
-        let pipeline = pipelines.for_task(task)?;
+        let pipeline = match pipelines.for_task(task) {
+            Ok(pipeline) => pipeline,
+            // A task naming a pipeline that is not on disk is one row's
+            // problem, not the whole listing's: failing here made one stale
+            // `pipeline:` hide every other task from `queue list` and the
+            // board. The dispatcher still refuses to start it; this only
+            // keeps the row drawn, saying why.
+            Err(_) => {
+                let name = task.front.pipeline.as_deref().unwrap_or("");
+                let why = match name.is_empty() {
+                    true => "has no pipeline — set `pipeline:` in the task file".to_string(),
+                    false => format!(
+                        "names pipeline `{name}`, which is missing — restore it \
+                         or run `spoolway pipeline check`"
+                    ),
+                };
+                rows.push(unroutable_row(repo, tasks, graph, task, &why));
+                continue;
+            }
+        };
         let step = pipeline.step(task.stage());
         // Read off the graph this frame already built, for every step NEXT
         // names: the `last:` rule needs the open tasks above this one.
-        let dependents = crate::dispatch::same_group_dependents(repo, tasks, graph, task);
+        let dependents =
+            crate::dispatch::same_group_dependents(repo, pipelines, tasks, graph, task);
         // The step a boot mark names, when there is one. It is what STEP
         // reads for this row: a task coming off `queued` keeps that stage
         // on disk until its boot has returned, and the row should name the
@@ -4132,10 +4191,10 @@ fn build_rows(
                         && (parked_by_a_person || !lane_busy(lanes, &step_ids, task));
                     let target = paused_next(task, pipeline, dependents);
                     // The word this pause caught, ahead of the arrow — "review
-                    // failed → e2e" rather than a bare "→ e2e" — so a caught
-                    // fail or block never reads like the plain pass a gate
-                    // always used to mean. `None` for that plain pass leaves the
-                    // arrow exactly as it always drew.
+                    // failed → implement" rather than a bare "→ implement" —
+                    // so a caught fail or block never reads like the plain
+                    // pass a gate always used to mean. `None` for that plain
+                    // pass leaves the arrow exactly as it always drew.
                     let arrow = match paused_arrow(task) {
                         Some(label) => format!("{label} →"),
                         None => "→".to_string(),
@@ -4226,7 +4285,30 @@ fn build_rows(
                     (None, true) => State::Running,
                     (None, false) => State::Queued,
                 };
-                (state, onward(task, pipeline, &step.id, dependents), false)
+                // A command that already exited non-zero is only waiting for
+                // a slot to land its `on_fail` destination, so that is where
+                // the row points, not at the `on_pass` one.
+                let next = match failed_command_exit(&runs, &key, step) {
+                    Some(_) if task.front.gate_at.as_deref() != Some(step.id.as_str()) => {
+                        let to = step
+                            .on_fail
+                            .clone()
+                            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
+                        let to = landed(pipeline, task, to, dependents);
+                        // The dispatcher bounds this move by the
+                        // destination's `loop:` too, and lands on its exit
+                        // when that is spent.
+                        let to = crate::commands::budgeted_destination(
+                            pipeline,
+                            task,
+                            to,
+                            repo.unattended(),
+                        );
+                        format!("→ {to}")
+                    }
+                    _ => onward(task, pipeline, &step.id, dependents),
+                };
+                (state, next, false)
             }
         };
         // The lane's clock, which runs from the launch of the round in flight
@@ -5309,8 +5391,13 @@ fn off_a_step(
     // stage a report or a command step's exit writes. Compared raw, a move
     // from `test` straight to `document` past a hidden `suite` matches
     // neither route and reads as a bare `left test`.
-    let dependents =
-        crate::dispatch::same_group_dependents(queue.repo, queue.tasks, queue.graph, task);
+    let dependents = crate::dispatch::same_group_dependents(
+        queue.repo,
+        queue.pipelines,
+        queue.tasks,
+        queue.graph,
+        task,
+    );
     let land = |outcome| {
         step.destination(outcome)
             .map(|destination| landed(pipeline, task, destination.to_string(), dependents))
@@ -5398,7 +5485,14 @@ fn off_a_step(
     // No report from `was`. The dispatcher's own walk-past first, asked of
     // the dispatcher itself, since a step walked past follows its `on_pass`
     // exactly as a pass does.
-    if crate::dispatch::walks_past(queue.repo, queue.tasks, queue.graph, step, task) {
+    if crate::dispatch::walks_past(
+        queue.repo,
+        queue.pipelines,
+        queue.tasks,
+        queue.graph,
+        step,
+        task,
+    ) {
         return if raw_pass == Some(stage) {
             Move::Skipped {
                 from,
@@ -6061,7 +6155,7 @@ mod tests {
     }
 
     /// A paused row that caught something other than a plain pass carries the
-    /// caught outcome ahead of the arrow — `review failed → document` and
+    /// caught outcome ahead of the arrow — `review failed → implement` and
     /// `review blocked → blocked` — so nobody resumes blind; a plain caught
     /// pass still reads exactly as it always has, with no word in front of
     /// the arrow at all.
@@ -6107,7 +6201,7 @@ mod tests {
         let rows = rows(&repo, &pipelines).unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
-        assert_eq!(row("pause-reach").next, "[r] review failed → document");
+        assert_eq!(row("pause-reach").next, "[r] review failed → implement");
         assert_eq!(row("look-holds").next, "[r] review blocked → blocked");
         assert_eq!(
             row("sweep-own-tabs").next,
@@ -10722,6 +10816,108 @@ mod tests {
         );
     }
 
+    /// One live task naming a pipeline that is not on disk is drawn as a row
+    /// that names it, and every other task is still drawn. Before, the
+    /// whole reading failed on the one task.
+    #[test]
+    fn a_task_naming_a_missing_pipeline_is_drawn_and_the_rest_still_are() {
+        let (repo, _root_guard) = fixture("row-missing-pipeline");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "fine", &[], Some("implement"), Some("fine"));
+        add_to(&repo, "stale", &[], Some("implement"), Some("stale"));
+        let mut task = repo.task("stale").unwrap();
+        task.front.pipeline = Some("deleted-pipeline".into());
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        assert!(rows.iter().any(|r| r.id == "fine"));
+        let row = rows.iter().find(|r| r.id == "stale").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(!row.resumable);
+        assert!(
+            row.next.contains("`deleted-pipeline`, which is missing"),
+            "{}",
+            row.next
+        );
+    }
+
+    /// A command step whose non-zero exit is waiting to land is drawn going
+    /// to its `on_fail` destination. The default pipeline's `handover` has
+    /// none, so that is `blocked`; before, the row said `done`.
+    #[test]
+    fn a_failed_command_step_row_points_at_its_fail_destination() {
+        let (repo, _root_guard) = fixture("row-failed-command-next");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "exit 1", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let started = Instant::now();
+        while !matches!(runs.state(&key), crate::command_step::RunState::Exited(1)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(row.next.ends_with("→ blocked"), "{}", row.next);
+
+        runs.stop(&key);
+    }
+
+    /// A task with no `pipeline:` at all gets its own wording, telling the
+    /// person to set the key, and is drawn like the missing-pipeline row.
+    #[test]
+    fn a_task_with_no_pipeline_is_drawn_and_told_to_set_one() {
+        let (repo, _root_guard) = fixture("row-no-pipeline");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "bare", &[], Some("implement"), Some("bare"));
+        let mut task = repo.task("bare").unwrap();
+        task.front.pipeline = None;
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "bare").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert!(row.next.contains("set `pipeline:`"), "{}", row.next);
+    }
+
+    /// A failed command whose `on_fail` step has spent its `loop:` lands on
+    /// that step's exit, `blocked`, in the dispatcher; the row names the same.
+    #[test]
+    fn a_failed_command_row_follows_a_spent_loop_to_its_exit() {
+        let (repo, _root_guard) = fixture("row-failed-command-spent-loop");
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines.get_mut("default").unwrap();
+        default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap()
+            .on_fail = Some("implement".into());
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        let mut task = repo.task("login").unwrap();
+        // `implement` carries `loop: 2`.
+        task.front.arrivals.insert("implement".into(), 2);
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(&key, "exit 1", &repo.root, &BTreeMap::new())
+            .unwrap();
+        let started = Instant::now();
+        while !matches!(runs.state(&key), crate::command_step::RunState::Exited(1)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(row.next.ends_with("→ blocked"), "{}", row.next);
+
+        runs.stop(&key);
+    }
+
     /// An `r` the dispatcher's copy refuses after the row was read — it
     /// changed in between — opens the picker with the refusal rather than
     /// doing nothing, and with only `esc` offered: there is no step to pick.
@@ -11507,11 +11703,11 @@ mod tests {
         assert_eq!(row.next, "→ paused after implement");
     }
 
-    /// A command step's held failure resumes down its `on_fail`, so the NEXT
-    /// column names that step, not `on_pass`; an agent step's still names
-    /// `on_pass`.
+    /// A held failure resumes down its step's `on_fail`, so the NEXT column
+    /// names that step, not `on_pass` — for a command step and an agent step
+    /// alike.
     #[test]
-    fn the_next_column_names_on_fail_for_a_held_command_failure() {
+    fn the_next_column_names_on_fail_for_a_held_failure() {
         let (repo, _root_guard) = fixture("held-command-failure-next-column");
         let mut pipelines = Pipelines::builtin();
         let pipeline = pipelines.pipelines.get_mut("default").unwrap();
@@ -11549,10 +11745,8 @@ mod tests {
             .unwrap()
             .on_fail = Some("rebase".into());
         let agent = agent_pipelines.pipelines.get("default").unwrap();
-        assert_eq!(
-            paused_next(&task, agent, 0).as_deref(),
-            Some(on_pass.as_str())
-        );
+        assert_ne!(on_pass, "rebase");
+        assert_eq!(paused_next(&task, agent, 0).as_deref(), Some("rebase"));
     }
 
     /// A gated command step held for a pass its command never gave — an
@@ -12599,6 +12793,8 @@ mod tests {
                 "│  > document    on pass (next)   │",
                 "│    handover                     │",
                 "│                                 │",
+                "│    done                         │",
+                "│                                 │",
                 "│  [enter] confirm   [esc] close  │",
                 format!("{BOTTOM_LEFT}─────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ],
@@ -12621,7 +12817,7 @@ mod tests {
     /// `r` `enter` lands every kind of held row on its own `(next)` step —
     /// the one `resume_road` names: a gate on its `on_pass`, a `pause` park
     /// back on the step it left, a block on the step it blocked at, and a
-    /// caught fail at an agent step on its `on_pass`, never its `on_fail`.
+    /// caught fail at an agent step on its `on_fail`, never its `on_pass`.
     #[test]
     fn r_enter_lands_each_kind_of_hold_on_its_next_step() {
         let (repo, _root_guard) = fixture("picker-next-roads");
@@ -12648,7 +12844,7 @@ mod tests {
             ("gate", "document"),
             ("park", "review"),
             ("wall", "review"),
-            ("caught-fail", "document"),
+            ("caught-fail", "implement"),
         ] {
             let road = crate::commands::resume_road(&repo.task(id).unwrap(), &pipelines).unwrap();
             assert_eq!(road.destination(), lands, "{id}");
@@ -12679,9 +12875,9 @@ mod tests {
     }
 
     /// A caught block resumes to `blocked`, which `--stage` does not accept:
-    /// it is one pinned `blocked (next)` row under the steps, with the cursor
-    /// on it, and `enter` there sends the task exactly where a plain resume
-    /// does.
+    /// it is one pinned `blocked (next)` row under the steps, above the
+    /// pinned `done` row, with the cursor on it, and `enter` there sends the
+    /// task exactly where a plain resume does.
     #[test]
     fn a_caught_block_pins_one_blocked_next_row_under_the_steps() {
         let (repo, _root_guard) = fixture("picker-caught-block");
@@ -12703,7 +12899,14 @@ mod tests {
         let steps: Vec<&str> = picker.rows.iter().map(|r| r.step.as_str()).collect();
         assert_eq!(
             steps,
-            ["implement", "review", "document", "handover", "blocked"]
+            [
+                "implement",
+                "review",
+                "document",
+                "handover",
+                "blocked",
+                "done"
+            ]
         );
         assert_eq!(picker.listed, 4);
         assert_eq!(picker.rows[picker.cursor].step, "blocked");
@@ -12718,6 +12921,97 @@ mod tests {
         assert_eq!(
             repo.task("ship-login").unwrap().stage(),
             crate::pipeline::BLOCKED
+        );
+    }
+
+    /// A blocked task's picker ends with a pinned `done` row, with no note,
+    /// set apart by a blank line; the cursor starts on `(next)`, never on
+    /// `done`. Moving down onto it and pressing `enter` closes the task.
+    #[test]
+    fn a_blocked_tasks_picker_ends_with_a_done_row_that_closes_it() {
+        let (mut repo, _root_guard) = fixture("picker-close");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "b-noop", &[], None);
+        let mut task = repo.task("b-noop").unwrap();
+        task.set_stage("handover", None);
+        task.front.blocked_from = Some("handover".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board.cursor = Some("b-noop".to_string());
+        press(
+            &mut board,
+            &repo,
+            &pipelines,
+            &[crate::screen::Key::Char('r')],
+        );
+        let panel = resume_picker_panel(open_picker(&board), None);
+        assert_eq!(
+            panel,
+            vec![
+                format!("{TOP_LEFT}─ resume b-noop ─────────────────{TOP_RIGHT}").as_str(),
+                "│                                 │",
+                "│  blocked at handover            │",
+                "│                                 │",
+                "│    implement                    │",
+                "│    review                       │",
+                "│    document                     │",
+                "│  > handover    blocked (next)   │",
+                "│                                 │",
+                "│    done                         │",
+                "│                                 │",
+                "│  [enter] confirm   [esc] close  │",
+                format!("{BOTTOM_LEFT}─────────────────────────────────{BOTTOM_RIGHT}").as_str(),
+            ]
+        );
+
+        press(
+            &mut board,
+            &repo,
+            &pipelines,
+            &[crate::screen::Key::Down, crate::screen::Key::Enter],
+        );
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("b-noop").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::DONE);
+        assert!(
+            task.section("## Status Log").unwrap().contains(
+                "resumed from `blocked` at `handover` with --stage done; skipped: handover"
+            )
+        );
+    }
+
+    /// A gate that caught a failed agent step preselects its `on_fail` step:
+    /// `review` failed, so the cursor starts on `implement`, and `document`,
+    /// its `on_pass`, is one key away.
+    #[test]
+    fn a_caught_fail_at_an_agent_step_preselects_its_on_fail_step() {
+        let (repo, _root_guard) = fixture("picker-caught-fail");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "g1", &[], None);
+        caught_at_step(&repo, "g1", "review", "fail");
+
+        let picker = resume_picker(&repo.task("g1").unwrap(), &pipelines, 0).unwrap();
+        let panel = resume_picker_panel(&picker, None);
+        assert_eq!(
+            panel,
+            vec![
+                format!("{TOP_LEFT}─ resume g1 ─────────────────────{TOP_RIGHT}").as_str(),
+                "│                                 │",
+                "│  paused at review — it failed   │",
+                "│                                 │",
+                "│  > implement   on fail (next)   │",
+                "│    review      paused           │",
+                "│    document    on pass          │",
+                "│    handover                     │",
+                "│                                 │",
+                "│    done                         │",
+                "│                                 │",
+                "│  [enter] confirm   [esc] close  │",
+                format!("{BOTTOM_LEFT}─────────────────────────────────{BOTTOM_RIGHT}").as_str(),
+            ]
         );
     }
 
@@ -13024,7 +13318,8 @@ mod tests {
     }
 
     /// The refusal `enter` meets on a task that moved on is drawn in the
-    /// 15-row pane the picker is held to, with or without a pinned row.
+    /// 15-row pane the picker is held to, under the pinned `done` row alone
+    /// and under a pinned `blocked` row as well.
     #[test]
     fn a_stale_refusal_is_drawn_in_a_fifteen_row_pane() {
         let (repo, _root_guard) = fixture("picker-stale-short");
@@ -13044,7 +13339,8 @@ mod tests {
             press(&mut board, &repo, &pipelines, &[crate::screen::Key::Enter]);
 
             let picker = open_picker(&board);
-            assert_eq!(picker.listed < picker.rows.len(), outcome == "block");
+            let pinned = picker.rows.len() - picker.listed;
+            assert_eq!(pinned, if outcome == "block" { 2 } else { 1 });
             let panel = resume_picker_panel(picker, Some(15));
             let text = panel.join("\n");
             assert!(panel.len() <= 12, "{outcome}: {text}");
@@ -13252,6 +13548,7 @@ mod tests {
                     ("fix", "on fail"),
                     ("document", "on pass (next)"),
                     ("handover", ""),
+                    ("done", ""),
                 ],
                 "{rule:?}"
             );
@@ -13272,7 +13569,7 @@ mod tests {
             caught_at_step(&repo, "t", "suite", "pass");
 
             let task = repo.task("t").unwrap();
-            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &pipelines, &task).unwrap();
             let picker = resume_picker(&task, &pipelines, dependents).unwrap();
             let rows: Vec<(&str, &str)> = picker
                 .rows
@@ -13288,6 +13585,7 @@ mod tests {
                     ("suite", "paused"),
                     ("document", "on pass (next)"),
                     ("handover", ""),
+                    ("done", ""),
                 ],
                 "{rule:?}"
             );

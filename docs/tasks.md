@@ -69,7 +69,7 @@ as JSON.
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
 | `spare_pane` | the dispatcher | The workspace's first pane, until a step runs in it. See [Herdr](dispatcher.md#herdr). |
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
-| `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back onto each command step. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
+| `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back towards each command step, by a plain pass or by `--stage`. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
@@ -110,11 +110,19 @@ words with a hyphen instead, for example `needs-triage`.
 
 ### One constraint no key can express
 
-`gate_at` must name a step of the task's pipeline. `done` is not a step. `spoolway queue add`
-and `spoolway task contract --from` refuse any other value, naming the task and the steps it
-may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`. A trial
-refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
+`gate_at` must name a step of the task's pipeline that the task runs. `done` is not a step.
+`spoolway queue add` and `spoolway task contract --from` refuse any other value, naming the task
+and the steps it may name. `spoolway task contract` lists the steps of each pipeline under
+`.pipelines.<name>.gate_at`.
+A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
 [Trials](planning.md#trials).
+
+`spoolway queue add` also refuses a `gate_at` on a step the task [walks
+past](pipelines.md#steps-a-task-walks-past), because that gate would never fire. An example is the
+`last:` step of a task that has another task above it in its group. The refusal names the task,
+the step, the rule and the steps the task does run. It applies to the tasks in the batch. It also
+applies to a task already queued when the batch adds a dependent above it. The refusal then
+names the queued task, its step and the new dependent.
 
 A body may not still hold the `[[…]]` placeholder text of its skeleton. `spoolway queue add`,
 the queue screen, `spoolway task contract --from` and a trial refuse such a task. The refusal
@@ -284,6 +292,10 @@ or the `done` hook holds the dependency on `blocked` or `paused`, every task beh
 `queued`. A dependency is refused when it names a task that does not exist, names itself, closes
 a cycle, or crosses two bases.
 
+A queued task whose dependency has no task in the queue and none in the archive stays `queued`.
+Its row reads ``` `<id>` is not a task — fix `depends_on` ```, and each dispatcher pass names it as a
+problem. See [A dependency with no task](dispatcher.md#a-dependency-with-no-task).
+
 Work that has nothing to do with another task goes in a group of its own, not a second root of
 the same group.
 
@@ -312,9 +324,13 @@ The board reads a stacked group's line as `after <group>`. See [Rows are grouped
 ## When a task needs a person
 
 A task moves to `blocked` when a step reports `block`, when a step spends its `loop` budget
-and routes to `blocked`, or when a lane fails to start three times. The reason for a lane that
-fails to start is written to `## Status Log`. Other reasons are written to `## Blocker`. The board
-pins the task at the top of its group.
+and routes to `blocked`, or when a lane fails to start three times. The reason a lane gives with
+`report --block -m …` is written to the `→ blocked` entry of `## Status Log`, not to `## Blocker`.
+The reason for a lane that fails to start, or for a spent `loop:`, is the `## Status Log` entry just
+above that one. The dispatcher writes `## Blocker` when it
+escalates a task, whether it stopped a lane or its launch guard gave up, and, when it stopped a
+lane, adds that lane's last output. A lane may add its own notes there. Putting the task back adds the
+`- Cleared` line described below. The board pins the task at the top of its group.
 
 A person puts the task back with `spoolway resume`, with `r` or restart on the board, or by answering a gate. Each adds one line under the entries in `## Blocker`:
 
@@ -344,12 +360,13 @@ task whose own `gate_at:` names the step it is reporting from, whatever that ste
 same holds for a command step: `gate: true` holds a passing exit, and `gate_at:` holds any exit.
 Nothing went wrong. You decide whether it goes on.
 
-Press `r` on the paused row. The picker preselects the step the gate's pass leads to, and
-`enter` sends the task on. Pick another step to send it back round to that step.
+Press `r` on the paused row. The picker preselects the step a plain resume lands on, and
+`enter` sends the task there. After a caught pass, that is the step the pass leads to. Pick
+another step to send the task to that step instead.
 
 A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
-column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
+column names the outcome a scheduled pause caught, such as `review failed → implement`, when it was
 not a plain pass.
 
 A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the `on_pass` of the
@@ -357,14 +374,42 @@ step the task stopped at, which is where an unheld pass would have gone. A comma
 at runs again. The board's resume picker says the block was cleared. When the stopped step has
 `gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
 
-A `gate_at` that caught a command step's failing exit sends a plain resume down that step's
-`on_fail`, the route the exit code chose.
+A `gate_at` that caught a `--fail`, at an agent step or a command step alike, sends a plain
+resume down that step's `on_fail`, the route the failure chose. The picker preselects that
+step. A step with no `on_fail` sends the task to `blocked`. To wave the failure through
+instead, pick the step's `on_pass` step in the picker. To close the task instead, pick the
+`done` row. See [Closing a stuck task](#closing-a-stuck-task).
 
 A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events)
 also pauses the task, on `queued`, on `started` or on `done`. `spoolway resume` forgets that
 hook's failed run, so the hook fires again. A task paused on `queued` or `started` resumes back
 to `queued`. A task paused on `done` resumes straight back to `done` instead, since a plain
 resume only knows pipeline steps and `queued`.
+
+### Closing a stuck task
+
+A task whose last step can never pass can be closed as `done` by hand. Close a `blocked` or
+`paused` task with the `done` row at the end of the board's resume picker, or with a command:
+
+```
+$ spoolway resume cart-totals --stage done -m "work already on main (#71)"
+cart-totals: -> done (skipped: handover)
+```
+
+The output names every step the task skips, or `none`. The task's `## Status Log` gets one
+line, with `-m` as its Note:
+
+```
+→ `done`: resumed from `blocked` at `handover` with --stage done; skipped: handover. Note: work already on main (#71)
+```
+
+A lane still working on the task is stopped first. The task is then torn down and archived like
+any task that reaches `done`, and the tasks that depend on it go on.
+
+Only a person closes a task. `spoolway report --pass --stage done` from an unblocker lane exits 1
+and says so. The close is refused while a task in `depends_on` has not finished, and while the
+dispatcher is starting a lane for the task. In the second case, run the command again in a
+moment.
 
 ### A start branch that does not exist
 
