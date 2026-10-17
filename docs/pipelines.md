@@ -289,6 +289,11 @@ max_cost_usd = 20.0
 Reaching either starts no further lane. Live lanes finish, then the dispatcher stops. Tasks
 stay where they are, and the next `spoolway dispatch` picks them up.
 
+The spend counted is the ledger plus every lane the current pass has just finished. The
+pass that finishes a lane over the ceiling therefore starts no other lane. The stop message
+prints the spend and the ceiling as they are, for example `this run has spent $0.020002
+against a max_cost_usd of $0.015`.
+
 The brake is not what ends a command step that keeps failing under an unblocker that keeps
 passing. Spoolway's own count of those laps does, and parks the task on `paused` on the
 fourth unblocker pass whatever the ceilings are. See [Loops](#loops).

@@ -247,6 +247,75 @@ if ls -A .git | diff -q "$LIVE/review.git-before" - >/dev/null && [ -z "$(find .
   ok ".git holds nothing in the second clone"
 else bad ".git holds nothing in the second clone"; fi
 
+# ------------------------------------- a project job fires once per workspace
+# Both clones run a real dispatcher over the one shared `config/jobs.toml`. A
+# project job there has one fired record, in the workspace folder, so the two
+# dispatchers fire its window once between them rather than once each. How the
+# record is read, locked and seeded is unit-tested in src/jobs.rs. What a unit
+# test cannot reach is two live processes taking the same window at once.
+cat > "$WS2/config/jobs.toml" <<TOML
+[jobs.shared-audit]
+schedule = "* * * * *"
+pipeline = "default"
+routine = "shared"
+base = "main"
+TOML
+mkdir -p "$WS2/config/routines/shared"
+task_doc "$WS2/config/routines/shared/shared-audit.md" shared-audit "$BODY" "group: shared"
+for clone in "$FRESH" "$SECOND"; do
+  (cd "$clone" && must "the headless backend, for the clone's dispatcher" \
+    "$SPOOLWAY" config set dispatch.backend headless)
+done
+# Dispatch refuses to start without a git identity, and this suite's HOME is
+# its own, so the identity is set there and not in either clone.
+must "a git identity for the dispatchers" git config --global user.name "spoolway tests"
+must "a git identity for the dispatchers" git config --global user.email spoolway@example.invalid
+# Each in its own session, so stopping it is one signal to one process group.
+for clone in "$FRESH" "$SECOND"; do
+  name=$(basename "$clone")
+  (cd "$clone" && env -u SPOOLWAY_PROJECT_HOME SPOOLWAY_SKIP_VERSION_CHECK=1 \
+    E2E_BIN="$SPOOLWAY" E2E_PIDFILE="$LIVE/shared-job-$name.pid" \
+    setsid bash -c 'echo $$ >"$E2E_PIDFILE"; exec "$E2E_BIN" dispatch' \
+    >>"$LIVE/shared-job-$name.out" 2>&1 </dev/null &)
+done
+poll_until 10 test -s "$LIVE/shared-job-api.pid" -a -s "$LIVE/shared-job-api-review.pid" \
+  || bad "the two dispatchers never started"
+shared_copies() {
+  find "$WS2/dispatchers" \( -path '*/queue/*' -o -path '*/archive/*' \) \
+    -name 'shared-audit-*.md' 2>/dev/null | wc -l
+}
+shared_fired_minute() {
+  jq -r '."shared-audit".fired_minute // empty' "$WS2/jobs.state.json" 2>/dev/null
+}
+# The job runs every minute, so the first window is at most a minute off.
+poll_until 90 test "$(shared_copies)" -ge 1 \
+  && ok "the shared project job fired" || bad "the shared project job never fired"
+# Let both dispatchers pass over the same minute again before counting: each
+# prints "next pass in" when a pass ends idle, so two of those from each is
+# proof that a later pass found the window already fired.
+passes_in() { grep -ac "next pass in" "$1" 2>/dev/null; }
+two_passes_each() {
+  [ "$(passes_in "$LIVE/shared-job-api.out")" -ge 2 ] \
+    && [ "$(passes_in "$LIVE/shared-job-api-review.out")" -ge 2 ]
+}
+poll_until 60 two_passes_each || bad "the two dispatchers did not both pass again"
+MINUTE=$(shared_fired_minute)
+if [ -n "$MINUTE" ]; then ok "the fired minute is in the workspace's own record"
+else bad "the fired minute is in the workspace's own record"; ls -A "$WS2" | sed 's/^/        /'; fi
+if [ "$(shared_fired_minute)" = "$MINUTE" ]; then
+  works "one copy of the task across both clones for the minute" test "$(shared_copies)" -eq 1
+fi
+lacks "no clone's own record holds the project job" "shared-audit" "$WS2/dispatchers/api/jobs.state.json"
+lacks "and neither does the other clone's" "shared-audit" "$WS2/dispatchers/api-review/jobs.state.json"
+for f in "$LIVE"/shared-job-*.pid; do
+  pid=$(cat "$f")
+  kill -TERM -- "-$pid" 2>/dev/null
+  poll_while 5 kill -0 -- "-$pid"
+  kill -KILL -- "-$pid" 2>/dev/null
+done
+rm -f "$WS2"/dispatchers/*/queue/shared-audit-*.md "$WS2"/dispatchers/*/archive/shared-audit-*.md
+rm -f "$WS2/config/jobs.toml"
+
 # --------------------------------------------- a gone clone is taken over
 # The second clone has a task queued, then its folder is deleted. A fresh clone
 # of the same repository joining the workspace is the one gone entry with

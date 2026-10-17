@@ -43,6 +43,24 @@ pub struct Repo {
     pub home: PathBuf,
 }
 
+/// The ids of the `.md` files in a queue directory — [`Repo::queued_ids`]
+/// for any clone's queue.
+fn queued_ids_under(queue: &Path) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(queue) else {
+        return ids;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("md")
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            ids.insert(stem.to_string());
+        }
+    }
+    ids
+}
+
 /// How long [`Repo::remote_branch_answer`] waits for `origin` to answer.
 ///
 /// The dispatcher asks inside its pass, where nothing else runs while it
@@ -486,6 +504,7 @@ impl Repo {
             crate::mux::GitWithin::Finished {
                 success: true,
                 stdout,
+                ..
             } => Some(!stdout.is_empty()),
             _ => None,
         }
@@ -753,11 +772,72 @@ impl Repo {
         self.home().join(crate::config::JOBS_STORE)
     }
 
-    /// When each job last fired, always in machine home whichever store the
-    /// job itself came from — a fired minute is a fact about this machine,
-    /// not about the project. See [`crate::jobs`].
+    /// When each job last fired, in machine home: every user job's record,
+    /// and a project job's outside a home-mode workspace. A fired minute is a
+    /// fact about this machine, not about the project. A project job in a
+    /// workspace keeps its record in [`Repo::project_jobs_state_file`]
+    /// instead. See [`crate::jobs`].
     pub fn jobs_state_file(&self) -> PathBuf {
         self.home().join(crate::jobs::STATE_FILE)
+    }
+
+    /// When each project job last fired. In a home-mode workspace this is
+    /// one file beside the workspace's `config/`, because the job store it
+    /// answers for is shared by every clone: a record per clone made each
+    /// clone's dispatcher fire the same job. Anywhere else it is
+    /// [`Repo::jobs_state_file`], the one machine-home file. See
+    /// [`crate::jobs`].
+    pub fn project_jobs_state_file(&self) -> PathBuf {
+        match workspace_clone(&self.root) {
+            Some(clone) => clone.workspace.join(crate::jobs::STATE_FILE),
+            None => self.jobs_state_file(),
+        }
+    }
+
+    /// The dispatcher folder name this checkout is registered under in its
+    /// home-mode workspace, which is how a shared record names the clone
+    /// holding a job's copy. `None` outside a workspace.
+    pub fn workspace_dispatcher(&self) -> Option<String> {
+        workspace_clone(&self.root).map(|clone| clone.dispatcher)
+    }
+
+    /// Every clone's `jobs.state.json` in this checkout's home-mode
+    /// workspace, this one's included, as `(dispatcher, path)`. Empty outside
+    /// a workspace.
+    pub fn sibling_jobs_state_files(&self) -> Vec<(String, PathBuf)> {
+        let Some(clone) = workspace_clone(&self.root) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(clone.workspace.join("dispatchers")) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                let path = entry.path().join(crate::jobs::STATE_FILE);
+                path.is_file().then_some((name, path))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The ids queued in another clone of this home-mode workspace, or
+    /// `None` when `dispatcher` names no clone here. Read-only: a job's
+    /// copy queued in a sibling clone is still queued for the job's next
+    /// window, whichever clone's dispatcher reaches it.
+    pub fn queued_ids_in_clone(
+        &self,
+        dispatcher: &str,
+    ) -> Option<std::collections::BTreeSet<String>> {
+        let clone = workspace_clone(&self.root)?;
+        let queue = clone
+            .workspace
+            .join("dispatchers")
+            .join(dispatcher)
+            .join(crate::config::QUEUE_DIR);
+        queue.is_dir().then(|| queued_ids_under(&queue))
     }
 
     /// The advisory lock over the usage ledger's read-diff-append — see
@@ -843,19 +923,7 @@ impl Repo {
     /// [`crate::tracking::failures`], so `spoolway doctor` stops naming a hook
     /// failure once its task is archived.
     pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
-        let mut ids = std::collections::BTreeSet::new();
-        let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {
-            return ids;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("md")
-                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-            {
-                ids.insert(stem.to_string());
-            }
-        }
-        ids
+        queued_ids_under(&self.queue_dir())
     }
 
     /// Find a task by id in the queue, then in the archive.
@@ -4253,6 +4321,176 @@ pub fn run_with_env(
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// How long one of spoolway's own git calls may run while it executes a git
+/// hook of the person's repo, such as a husky `post-checkout`. Generous,
+/// because a hook may do real work — an `npm ci` is the usual one — but not
+/// unbounded: the call is made from inside the dispatcher's pass, and a hook
+/// that never exits would hold every task with it.
+pub const GIT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The error [`run_git_hooked`] fails with when git was still running at the
+/// limit and was stopped. Its own type so a caller that has left something
+/// half done, as a worktree cut does, can tell a stop from an ordinary
+/// failure and clean up after it.
+#[derive(Debug)]
+pub struct GitTimedOut(pub String);
+
+impl std::fmt::Display for GitTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GitTimedOut {}
+
+/// [`run_with_env`] for a git call that runs the person's git hooks, stopped
+/// after [`GIT_HOOK_TIMEOUT`]. `hooks` names the hooks the call can run, for
+/// the error to say so when the hook that hung cannot be seen.
+pub fn run_git_hooked(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    hooks: &[&str],
+) -> Result<String> {
+    run_git_hooked_within(cwd, args, envs, hooks, GIT_HOOK_TIMEOUT)
+}
+
+/// [`run_git_hooked`] with the bound passed in, so a test can prove the kill
+/// without waiting out the real one. The bound itself is
+/// [`crate::mux::git_bounded`]'s: git runs in a group of its own so the stop
+/// reaches the hook and what the hook started, not just git.
+pub(crate) fn run_git_hooked_within(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    hooks: &[&str],
+    limit: std::time::Duration,
+) -> Result<String> {
+    #[cfg(test)]
+    if let Ok(mut runs) = PROCESS_RUNS.lock() {
+        runs.push((cwd.to_path_buf(), std::thread::current().id()));
+    }
+    let shown = format!("git {}", args.join(" "));
+    // Looked at when the deadline passes and before git is signalled: the
+    // hook is gone afterwards.
+    let seen = std::cell::RefCell::new(None);
+    let outcome = crate::mux::git_bounded(
+        cwd,
+        args,
+        envs,
+        limit,
+        &crate::mux::GitCapture {
+            stdout: true,
+            stderr: true,
+            at_deadline: &|pid| *seen.borrow_mut() = running_hook_name(cwd, pid, hooks),
+        },
+    );
+    match outcome {
+        crate::mux::GitWithin::NotRun => bail!("running `{shown}`: git could not be started"),
+        crate::mux::GitWithin::TimedOut => {
+            let after = crate::tracking::minutes(limit);
+            Err(GitTimedOut(match seen.into_inner() {
+                Some(hook) => format!(
+                    "`{shown}` was stopped after {after} because its `{hook}` git hook was \
+                     still running. spoolway does not skip a repository's git hooks: make that \
+                     hook exit, then run this again."
+                ),
+                None => format!(
+                    "`{shown}` was still running after {after} and was stopped. It runs these \
+                     git hooks: {}; one of them may be stuck, or git may be waiting on \
+                     something else, such as a signing prompt or a lock. Find what is hung, then \
+                     run this again.",
+                    hooks
+                        .iter()
+                        .map(|h| format!("`{h}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })
+            .into())
+        }
+        crate::mux::GitWithin::Finished {
+            success,
+            stdout,
+            stderr,
+            status,
+        } => {
+            if !success {
+                bail!(
+                    "`{shown}` failed ({status}): {}",
+                    String::from_utf8_lossy(&stderr).trim()
+                );
+            }
+            Ok(String::from_utf8_lossy(&stdout).into_owned())
+        }
+    }
+}
+
+/// The git hook running under the process group `group` leads, found by
+/// looking for a process whose command line names a file of one of `hooks`
+/// inside the directory git reads hooks from. `None` when no such process is
+/// seen: the hook runs under a wrapper that hides its name, the call was
+/// stuck on something that is not a hook, or this platform has no `/proc`.
+///
+/// The directory comes from `git rev-parse --git-path hooks`, which follows
+/// `core.hooksPath`. Husky 9 sets that to `.husky/_` and runs the stub there
+/// first, so matching a directory literally called `hooks` would never name
+/// it.
+fn running_hook_name(cwd: &Path, group: u32, hooks: &[&str]) -> Option<String> {
+    let dir = Command::new("git")
+        .args(["rev-parse", "--git-path", "hooks"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())?;
+    let dir = cwd.join(dir);
+    let same_dir = |a: &Path, b: &Path| {
+        a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    };
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // Fields after the parenthesised name: state, ppid, pgrp.
+        let Some(pgrp) = stat
+            .rsplit_once(')')
+            .and_then(|(_, after)| after.split_whitespace().nth(2)?.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pgrp != group {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let process_cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_default();
+        for arg in cmdline.split(|b| *b == 0) {
+            let Ok(arg) = std::str::from_utf8(arg) else {
+                continue;
+            };
+            let path = process_cwd.join(arg);
+            let (Some(name), Some(parent)) =
+                (path.file_name().and_then(|n| n.to_str()), path.parent())
+            else {
+                continue;
+            };
+            if hooks.contains(&name) && same_dir(parent, &dir) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Every process [`run`] has started so far in this process, as the `cwd`
@@ -7947,5 +8185,136 @@ mod tests {
             );
             assert!(said.contains("spoolway init --setup home"), "{said}");
         });
+    }
+
+    /// A scratch repository with one commit, for a test that runs a hook.
+    fn hooked_repo(name: &str) -> crate::scratch::ScratchRoot {
+        let root = crate::scratch::root(name);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        run(
+            &root,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "root"],
+        )
+        .unwrap();
+        root
+    }
+
+    /// Write `body` as an executable script at `path`.
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The limit the hook tests give git. It has to outlast git and a shell
+    /// starting under a loaded parallel run, or the kill lands before the
+    /// hook has written its child's pid and the test fails for a reason
+    /// that has nothing to do with the kill.
+    const HOOK_TEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A git hook that never exits is stopped, named, and its children go
+    /// with it. Before the bound, `git worktree add` ran through `output()`
+    /// and a hung husky `post-checkout` held the dispatcher's pass for ever.
+    #[test]
+    #[cfg(unix)]
+    fn a_git_hook_past_its_limit_is_stopped_and_named() {
+        let root = hooked_repo("git-hook-limit");
+        let child_pid = root.join("child.pid");
+        write_script(
+            &root.join(".git/hooks/post-checkout"),
+            &format!("sleep 300 &\necho $! >'{}'\nwait", child_pid.display()),
+        );
+        let path_arg = root.join("wt").display().to_string();
+
+        let began = std::time::Instant::now();
+        let err = run_git_hooked_within(
+            &root,
+            &["worktree", "add", "-b", "lane", &path_arg],
+            &[],
+            &["post-checkout"],
+            HOOK_TEST_LIMIT,
+        )
+        .unwrap_err();
+
+        assert!(began.elapsed() < std::time::Duration::from_secs(60));
+        assert!(err.downcast_ref::<GitTimedOut>().is_some(), "{err:#}");
+        let said = format!("{err:#}");
+        assert!(said.contains("its `post-checkout` git hook"), "{said}");
+        assert!(said.contains("was stopped after"), "{said}");
+        let child: u32 = std::fs::read_to_string(&child_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !crate::headless::alive(child),
+            "the hook's child outlived the kill"
+        );
+    }
+
+    /// A hook directory set with `core.hooksPath` is where the hook is looked
+    /// for. Husky 9 sets it to `.husky/_`, whose stub runs the real hook, so a
+    /// match on a directory called `hooks` never named it.
+    #[test]
+    #[cfg(unix)]
+    fn a_hook_under_core_hooks_path_is_named() {
+        let root = hooked_repo("git-hook-hooks-path");
+        run(&root, "git", &["config", "core.hooksPath", ".husky/_"]).unwrap();
+        write_script(&root.join(".husky/_/pre-commit"), "sh .husky/pre-commit");
+        write_script(&root.join(".husky/pre-commit"), "sleep 300");
+        std::fs::write(root.join("file"), "x").unwrap();
+        run(&root, "git", &["add", "file"]).unwrap();
+
+        let err = run_git_hooked_within(
+            &root,
+            &["commit", "-q", "-m", "x"],
+            &[],
+            &["pre-commit", "commit-msg"],
+            HOOK_TEST_LIMIT,
+        )
+        .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("its `pre-commit` git hook"), "{said}");
+    }
+
+    /// A call stuck on something that is not a hook is not blamed on one: the
+    /// message says it was still running and lists the hooks it could have
+    /// been, rather than telling the person to fix a hook that is fine.
+    #[test]
+    #[cfg(unix)]
+    fn a_stuck_call_with_no_hook_in_sight_does_not_blame_one() {
+        let root = hooked_repo("git-hook-unseen");
+
+        let err = run_git_hooked_within(
+            &root,
+            &["-c", "alias.hold=!sleep 300", "hold"],
+            &[],
+            &["post-checkout"],
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("was still running after"), "{said}");
+        assert!(said.contains("`post-checkout`"), "{said}");
+        assert!(!said.contains("because its"), "{said}");
+    }
+
+    /// A hooked call that finishes in time answers like `run_with_env`.
+    #[test]
+    #[cfg(unix)]
+    fn a_hooked_git_call_inside_its_limit_answers_normally() {
+        let root = crate::scratch::root("git-hook-fast");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        let branch = run_git_hooked(&root, &["symbolic-ref", "--short", "HEAD"], &[], &[]).unwrap();
+        assert_eq!(branch.trim(), "main");
+        let err = run_git_hooked(&root, &["no-such-subcommand"], &[], &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("failed"), "{err:#}");
     }
 }

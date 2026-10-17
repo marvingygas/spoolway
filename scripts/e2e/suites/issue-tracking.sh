@@ -24,6 +24,7 @@
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
 # covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task with the reason `issue_tracking hook exited N`, and the task gains a `## Hook error` section holding the run's last output; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
+# covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and pause the task with a problem line the dispatcher prints
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
 # covers: the shipped github.sh and jira.sh run in bash under `set -eE` with an ERR trap, no `check` branch and no `|| exit $?`; a failing command's trace — command, line, case arm, callers — lands in the hook's own log, which `## Hook error` reads its tail from
@@ -405,6 +406,27 @@ task_doc "$LIVE/on-gate.md" on-gate "$BODY" "group: on-gate" \
 ON_GATE_OUT=$("$SPOOLWAY" queue add --from "$LIVE/on-gate.md" </dev/null 2>&1)
 has "while a batch that reaches the hook still draws the gate" \
   "issue tracking is not supported" <(printf '%s\n' "$ON_GATE_OUT")
+must "the hook is switched back to the one that only answers open" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
+
+# An `open` hook that never exits is stopped after 60 seconds, a fixed limit,
+# and the add fails all or nothing with the limit named. This waits out the
+# real limit, since there is no setting to shorten it.
+cat > .spoolway/hooks/open-hangs.sh <<'EOF'
+#!/bin/sh
+[ "$SPOOLWAY_EVENT" = open ] || exit 0
+exec sleep 300
+EOF
+chmod +x .spoolway/hooks/open-hangs.sh
+must "the hook is switched to one that sleeps through every open call" \
+  "$SPOOLWAY" config set issue_tracking.hook open-hangs.sh
+task_doc "$LIVE/open-hangs.md" open-hangs "$BODY" "group: open-hangs" \
+  "group_description: a task whose open hook never exits"
+refuses "an open hook that never exits fails the add once its limit is up" \
+  "still running after 1m and was stopped" \
+  "$SPOOLWAY" queue add --from "$LIVE/open-hangs.md"
+works "and nothing was queued" \
+  bash -c '! test -e "$1/queue/open-hangs.md"' _ "$SPOOLWAY_PROJECT_HOME"
 must "the hook is switched back to the one that only answers open" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 

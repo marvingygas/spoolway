@@ -4052,9 +4052,22 @@ fn build_rows(
                 // — so a task it has ranked behind another group is not
                 // held apart from every other task waiting on a worker
                 // slot, and reads the same line the rest of them do.
-                match dependency {
-                    Some(d) => (State::Queued, d, false),
-                    None => (
+                //
+                // A lifecycle hook still running is the real wait: the task
+                // cannot leave `queued` until it exits, and it is stopped at
+                // its limit, so the row names it, how long it has run and
+                // when it will be stopped.
+                let hook = crate::tracking::running_hook(repo, task).map(|(event, ran)| {
+                    format!(
+                        "`{event}` hook running {} (stopped at {})",
+                        crate::tracking::minutes(ran),
+                        crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+                    )
+                });
+                match (hook, dependency) {
+                    (Some(hook), _) => (State::Queued, hook, false),
+                    (None, Some(d)) => (State::Queued, d, false),
+                    (None, None) => (
                         State::Queued,
                         "waiting for a worker slot to free up".to_string(),
                         false,
@@ -4143,7 +4156,17 @@ fn build_rows(
                 }
             }
             None if task.stage() == crate::pipeline::DONE => {
-                (State::Queued, "finished".to_string(), false)
+                // The `done` hook runs before the task archives, so a hung
+                // one holds the row here; name it the way `queued` does.
+                let next = match crate::tracking::running_hook(repo, task) {
+                    Some((event, ran)) => format!(
+                        "`{event}` hook running {} (stopped at {})",
+                        crate::tracking::minutes(ran),
+                        crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+                    ),
+                    None => "finished".to_string(),
+                };
+                (State::Queued, next, false)
             }
             None => (
                 State::Unknown,
@@ -7018,6 +7041,43 @@ mod tests {
         assert_eq!(
             header_cells(running, None, "v1".to_string()).join(" · "),
             "dispatcher running · pid 1234 · v1"
+        );
+    }
+
+    /// A task held by a lifecycle hook that is still running reads the hook,
+    /// how long it has run and its limit, in place of the line that said it
+    /// was waiting for a worker slot: the hook is what the task waits on.
+    #[test]
+    fn a_running_hook_is_named_on_the_queued_row() {
+        let (repo, _root_guard) = fixture("hook-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "other", &[], Some(crate::pipeline::QUEUED));
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(crate::pipeline::STARTED, "other");
+        runs.start(&key, "sleep 60", &repo.root, &Default::default())
+            .unwrap();
+
+        // Backdated through the pid file's timestamp, which is what the row
+        // reads, so the figure does not depend on how long the test took.
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(150))
+            .unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        runs.stop(&key);
+
+        let row = rows.iter().find(|r| r.id == "other").unwrap();
+        assert!(matches!(row.state, State::Queued));
+        assert!(
+            row.next
+                .contains("`started` hook running 2m (stopped at 10m)"),
+            "{}",
+            row.next
         );
     }
 

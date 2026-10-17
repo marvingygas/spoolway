@@ -43,6 +43,14 @@ pub fn issue_show(repo: &Repo, reference: &str) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
+        crate::tracking::FetchResult::TimedOut => {
+            bail!(
+                "the fetch hook was still running after {} and was stopped for `{reference}` — \
+                 nothing was read. The log is in {}.",
+                crate::tracking::minutes(crate::tracking::OPEN_FETCH_TIMEOUT),
+                repo.tracking_dir().display()
+            );
+        }
         crate::tracking::FetchResult::Failed { exit_code } => {
             let code = exit_code
                 .map(|c| c.to_string())

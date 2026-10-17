@@ -36,7 +36,6 @@ const ATTENDED: &str = "attended";
 #[derive(Debug)]
 pub struct HeldBy {
     pub pid: u32,
-    path: PathBuf,
 }
 
 impl std::fmt::Display for HeldBy {
@@ -45,10 +44,8 @@ impl std::fmt::Display for HeldBy {
             f,
             "a dispatcher is already running for this repo (pid {}). \
              It re-reads the queue every pass, so anything just queued starts on its own — \
-             stop that one first if you really do want a different run. \
-             If that pid is not a dispatcher, delete {}.",
-            self.pid,
-            self.path.display()
+             stop that one first if you really do want a different run.",
+            self.pid
         )
     }
 }
@@ -59,6 +56,26 @@ impl std::error::Error for HeldBy {}
 #[derive(Debug)]
 pub struct Lock {
     path: PathBuf,
+    /// The start time written to the file's second line, kept so
+    /// [`Lock::still_held`] can tell this process's own record from a later one
+    /// that happens to reuse the pid.
+    started: String,
+}
+
+/// The line a dispatcher prints when [`Lock::still_held`] says it lost its
+/// lock. One line for every way of losing it — deleted, re-taken, or
+/// overwritten — because the reader's next step is the same: look at who
+/// else is running.
+pub fn lost_line(path: &Path) -> String {
+    let file = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    format!(
+        "{file} no longer names this dispatcher (pid {}); another one holds it. \
+         Stopping, so two dispatchers never work one queue.",
+        std::process::id()
+    )
 }
 
 impl Lock {
@@ -90,9 +107,12 @@ impl Lock {
             true => UNATTENDED,
             false => ATTENDED,
         };
+        // Read once: the file's second line and `Lock.started` must be the
+        // same string, or `still_held` would read a failed second `/proc`
+        // read as a lost lock and stop a healthy dispatcher.
+        let started = started_at(pid).unwrap_or_default();
         let contents = format!(
-            "{pid}\n{}\n{mode}\n{}\n",
-            started_at(pid).unwrap_or_default(),
+            "{pid}\n{started}\n{mode}\n{}\n",
             pane_id.unwrap_or_default()
         );
 
@@ -107,15 +127,12 @@ impl Lock {
                 Ok(true) => {
                     return Ok(Lock {
                         path: path.to_path_buf(),
+                        started,
                     });
                 }
                 Ok(false) => match Lock::holder(path)? {
                     Some(pid) => {
-                        return Err(HeldBy {
-                            pid,
-                            path: path.to_path_buf(),
-                        }
-                        .into());
+                        return Err(HeldBy { pid }.into());
                     }
                     // Stale: nothing alive holds it. Best effort — if the
                     // removal itself loses a race to someone else clearing
@@ -133,6 +150,27 @@ impl Lock {
             "could not take the lock at {} — it kept being replaced out from under this attempt",
             path.display()
         )
+    }
+
+    /// Whether this process still holds the lock it took, read off the file's
+    /// first two lines: this process's pid and the start time it recorded
+    /// when it took the lock.
+    ///
+    /// The dispatcher asks at the top of every pass. Without it a deleted or
+    /// replaced file lets a second dispatcher start beside this one, and both
+    /// work the same queue. A file that cannot be read for any reason other
+    /// than being absent counts as still held: a transient I/O error must not
+    /// stop a healthy run.
+    pub fn still_held(&self) -> bool {
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        let mut lines = raw.lines();
+        let pid: Option<u32> = lines.next().unwrap_or_default().trim().parse().ok();
+        let started = lines.next().unwrap_or_default().trim();
+        pid == Some(std::process::id()) && started == self.started
     }
 
     /// Whether the run in progress stops for a person, or `None` when there is
@@ -922,6 +960,76 @@ mod tests {
         assert_eq!(held.pid, std::process::id());
         assert!(err.to_string().contains("already running for this repo"));
         drop(dir);
+    }
+
+    /// The refusal does not tell the reader to delete the lock file: removing
+    /// it under a running dispatcher is what lets a second one in.
+    #[test]
+    fn the_refusal_does_not_advise_deleting_the_lock_file() {
+        let (path, dir) = scratch("no-delete-advice");
+        let _held = Lock::acquire(&path, false, None).unwrap();
+        let err = Lock::acquire(&path, false, None).unwrap_err();
+        assert!(!err.to_string().contains("delete"), "{err}");
+        drop(dir);
+    }
+
+    /// A lock nobody touched reads as held on every pass, however many there
+    /// are: a healthy dispatcher is never stopped by its own record.
+    #[test]
+    fn an_unchanged_lock_stays_held_across_many_checks() {
+        let (path, dir) = scratch("check-unchanged");
+        let lock = Lock::acquire(&path, false, None).unwrap();
+        for _ in 0..200 {
+            assert!(lock.still_held());
+        }
+        drop(dir);
+    }
+
+    /// A deleted lock file is a lost lock, not an error to ignore.
+    #[test]
+    fn a_deleted_lock_file_is_reported_gone() {
+        let (path, dir) = scratch("check-gone");
+        let lock = Lock::acquire(&path, false, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(!lock.still_held());
+        drop(dir);
+    }
+
+    /// A file that names another process, or the same pid with another start
+    /// time (a reused pid), is a lost lock, and the dispatcher's own drop
+    /// leaves the new holder's file alone.
+    #[test]
+    fn a_lock_naming_another_process_is_reported_taken() {
+        let (path, dir) = scratch("check-taken");
+        let lock = Lock::acquire(&path, false, None).unwrap();
+        std::fs::write(&path, "4242\n1\nattended\n\n").unwrap();
+        assert!(!lock.still_held());
+        let pid = std::process::id();
+        std::fs::write(&path, format!("{pid}\nnot-our-start\nattended\n\n")).unwrap();
+        if started_at(pid).is_some() {
+            assert!(!lock.still_held());
+        }
+        std::fs::write(&path, "garbage").unwrap();
+        assert!(!lock.still_held());
+        let theirs = "4242\n1\nattended\n\n";
+        std::fs::write(&path, theirs).unwrap();
+        drop(lock);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+        drop(dir);
+    }
+
+    /// The stop line is the one the dispatcher is documented to print.
+    #[test]
+    fn the_stop_line_says_why_the_dispatcher_stops() {
+        let line = lost_line(Path::new("/x/dispatch.pid"));
+        assert_eq!(
+            line,
+            format!(
+                "dispatch.pid no longer names this dispatcher (pid {}); another one holds it. \
+                 Stopping, so two dispatchers never work one queue.",
+                std::process::id()
+            )
+        );
     }
 
     /// The property every other test here rests on: this very process, which

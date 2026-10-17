@@ -228,6 +228,61 @@ fi
 sweep
 forget hang
 
+# ------------------------------------------- a lock file deleted under a dispatcher
+# `dispatch.pid` is removed while its dispatcher runs a lane, and a second
+# dispatcher then starts and takes the lock. Two dispatchers must never work
+# one queue, so the first stops at its next pass. The lane it started is not
+# its to tear down: it keeps running, and the dispatcher now holding the lock
+# adopts it instead of starting another.
+#
+# A unit test cannot reach this: it takes a real lock file, two real
+# dispatcher processes and a detached lane that outlives the one that started
+# it. The line is waited on in the log, never slept for.
+dispatcher_start
+queue_hang lostlock
+LL_PID=$(lane_pid "lostlock · implement" 20)
+if [ -n "$LL_PID" ]; then
+  # The pid file lands before the pass writes its `started` line; the count
+  # is only a baseline once that line is there.
+  poll_until 20 grep -q 'started lostlock · implement' "$E2E_DISPATCH_LOG"
+  LL_STARTS=$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
+  FIRST_HOLDER=$(head -1 "$LOCKFILE" 2>/dev/null)
+  rm -f "$LOCKFILE"
+  LL_SECOND=$(one_shot_start)
+  lock_taken() { [ "$(head -1 "$LOCKFILE" 2>/dev/null)" = "$LL_SECOND" ]; }
+  lock_loss_said() { grep -q 'no longer names this dispatcher' "$E2E_DISPATCH_LOG" 2>/dev/null; }
+  if poll_until 10 lock_taken && poll_until 40 lock_loss_said; then
+    passes_since() {
+      grep -c 'lanes still working' "$E2E_DISPATCH_LOG" 2>/dev/null || true
+    }
+    LL_SEEN=$(passes_since)
+    two_more_passes() { [ "$(passes_since)" -ge "$(( LL_SEEN + 2 ))" ]; }
+    poll_until 40 two_more_passes
+    if kill -0 "$LL_PID" 2>/dev/null \
+       && [ "$(stage_of lostlock)" = implement ] \
+       && [ "$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG")" = "$LL_STARTS" ] \
+       && [ "$(head -1 "$LOCKFILE" 2>/dev/null)" = "$LL_SECOND" ] \
+       && ! kill -0 "$FIRST_HOLDER" 2>/dev/null; then
+      ok "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane"
+    else
+      bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane"
+      printf '        lane alive: %s, stage: %s, starts %s -> %s, lock: %s (second %s), first alive: %s\n' \
+        "$(kill -0 "$LL_PID" 2>/dev/null && echo yes || echo no)" "$(stage_of lostlock)" \
+        "$LL_STARTS" "$(grep -c 'started lostlock · implement' "$E2E_DISPATCH_LOG")" \
+        "$(head -1 "$LOCKFILE" 2>/dev/null)" "$LL_SECOND" \
+        "$(kill -0 "$FIRST_HOLDER" 2>/dev/null && echo yes || echo no)"
+    fi
+  else
+    bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane (no stop line, or the lock was not re-taken)"
+    tail -5 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+  fi
+  one_shot_stop "$LL_SECOND"
+else
+  bad "a dispatcher whose lock file was deleted and re-taken stops, and the new holder adopts its lane (the lane never started)"
+fi
+sweep
+forget lostlock
+
 # ------------------------------------------------ a report, nobody listening
 # The claim is about a report that lands with nothing running: the lane says
 # it passed, the dispatcher that started it is gone, and the next dispatcher
@@ -674,6 +729,69 @@ fi
 sweep
 forget rmdep
 git branch -D task/rmkill 2>/dev/null
+
+# ------------------------------------ a worktree deleted under a live lane
+# `docs/dispatcher.md` promises that a worktree deleted while a step is
+# running is not quietly cut again: the lane stops and the task goes to
+# `blocked`, with a Blocker that names the vanished folder. Before this was
+# held, the step's lost output was routed on as a pass.
+is_blocked() { [ "$(stage_of vanishwt)" = blocked ]; }
+dispatcher_start
+queue_hang vanishwt
+VW_PID=$(lane_pid "vanishwt · implement" 20)
+VW_WT=$(worktree_of vanishwt)
+if [ -n "$VW_PID" ] && [ -n "$VW_WT" ] && [ -d "$VW_WT" ]; then
+  rm -rf "$VW_WT"
+  poll_until 40 is_blocked
+  if [ "$(stage_of vanishwt)" = blocked ] \
+     && grep -qF "$VW_WT" "$SPOOLWAY_PROJECT_HOME/queue/vanishwt.md"; then
+    ok "a worktree deleted under a live lane blocks the task, naming the folder"
+  else
+    bad "a worktree deleted under a live lane blocks the task, naming the folder"
+    printf '        stage: %s\n' "$(stage_of vanishwt)"
+  fi
+else
+  bad "a worktree deleted under a live lane blocks the task (the lane never started)"
+fi
+sweep
+forget vanishwt
+
+# ------------------------------------------ a read-only tree is still removed
+# A step can leave a read-only folder behind, as `go mod download` does. A
+# plain delete refuses it, which kept the task on `done` for ever and held
+# its dependent. Cleanup now makes the tree writable first.
+dispatcher_start
+queue_hang rotree
+echo hang > "$CTL/rodep"
+task_doc "$LIVE/rodep.md" rodep "$BODY" "group: rotree" "depends_on: [rotree]"
+must "rodep queues" "$SPOOLWAY" queue add --from "$LIVE/rodep.md"
+RO_PID=$(lane_pid "rotree · implement" 20)
+RO_WT=$(worktree_of rotree)
+if [ -n "$RO_PID" ] && [ -n "$RO_WT" ] && [ -d "$RO_WT" ]; then
+  kill_dispatcher KILL
+  kill -9 "$RO_PID" 2>/dev/null
+  mkdir -p "$RO_WT/.cache/mod/sub"
+  : > "$RO_WT/.cache/mod/sub/file"
+  chmod -R a-w "$RO_WT/.cache"
+  sed -i 's/^stage: .*/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/rotree.md"
+  dispatcher_start
+  poll_until 40 test -f "$SPOOLWAY_PROJECT_HOME/archive/rotree.md"
+  RODEP_PID=$(lane_pid "rodep · implement" 30)
+  if [ -f "$SPOOLWAY_PROJECT_HOME/archive/rotree.md" ] \
+     && [ ! -d "$RO_WT" ] && [ -n "$RODEP_PID" ]; then
+    ok "a task whose worktree holds a read-only folder is archived and its dependent starts"
+  else
+    bad "a task whose worktree holds a read-only folder is archived and its dependent starts"
+    printf '        stage: %s, worktree: %s\n' "$(stage_of rotree)" \
+      "$([ -d "$RO_WT" ] && echo present || echo gone)"
+  fi
+else
+  bad "a task whose worktree holds a read-only folder is archived (the lane never started)"
+fi
+chmod -R u+w "$RO_WT" 2>/dev/null
+sweep
+forget rodep
+git branch -D task/rotree 2>/dev/null
 
 # ---------------- a home deleted by hand refuses, naming both files
 # `binding-record`'s own Goal names three ways the checkout's stamp and its

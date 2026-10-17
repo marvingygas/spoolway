@@ -7,8 +7,10 @@
 //! A job lives in one of two TOML stores: `jobs.toml` in this machine's
 //! per-project home ([`Scope::User`], the default) or `.spoolway/jobs.toml`
 //! in the checkout ([`Scope::Project`], tracked and shared). Its firing
-//! history lives in one JSON file in machine home, whichever store the job
-//! came from — a fired minute is a fact about this machine.
+//! history lives in a JSON file in machine home — a fired minute is a fact
+//! about this machine. A project job in a home-mode workspace is the one
+//! exception: its store is shared by every clone, so its history is one file
+//! in the workspace, and the clone that holds its copy is named there.
 //!
 //! Reads dominate. The two stores are written only by the `spoolway jobs`
 //! screen, through [`write`] and [`delete`] — nothing else stamps a schedule —
@@ -21,7 +23,7 @@
 //! the *current* minute, so a window that passed while no dispatcher ran is
 //! never queued later.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -33,8 +35,9 @@ use crate::cron::Cron;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
 
-/// Machine-home file recording when each job last fired, beside `lanes.json`
-/// and `usage.jsonl`.
+/// File recording when each job last fired: in machine home beside
+/// `lanes.json` and `usage.jsonl`, and in a home-mode workspace's own folder
+/// for its project jobs — see [`Repo::project_jobs_state_file`].
 pub const STATE_FILE: &str = "jobs.state.json";
 
 /// How a job's `fired_minute` and `skipped_minute` are stamped: local time
@@ -428,11 +431,20 @@ pub struct FireRecord {
     /// stacking a second copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_ids: Vec<String>,
-    /// The local minute a window was last skipped — because the previous
-    /// run, or another task named after the routine, was still in the queue,
-    /// because the routine folder or the job's base will not resolve, or
-    /// because the job's table carries an unknown key — so the skip is
-    /// reported once, not on every pass that crosses the minute.
+    /// The workspace clone whose queue holds [`FireRecord::queued_ids`], in
+    /// a shared record only. Another clone's dispatcher reads that queue to
+    /// tell whether the last run is still in flight, since its own queue
+    /// never held it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone: Option<String>,
+    /// The local minute a window was last skipped or failed — because the
+    /// previous run, or another task named after the routine, was still in
+    /// the queue, because the routine folder or the job's base will not
+    /// resolve, because the job's table carries an unknown key, or because
+    /// the firing itself failed (a failing `open` hook, a routine that cannot
+    /// be queued), bar an unreachable `origin` and a busy routine, which are
+    /// tried again — so it is reported once, not on every pass that crosses
+    /// the minute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_minute: Option<String>,
     /// The local minute [`fire_due`] last looked at for this job,
@@ -442,7 +454,9 @@ pub struct FireRecord {
     /// [`due_minute`]. Disabled jobs keep it moving too, so enabling a job
     /// does not fire the window it was off for. Absent in a state file
     /// written before the field existed, which reads as "the current minute
-    /// only", exactly what every pass did until then.
+    /// only", exactly what every pass did until then. Never written to a
+    /// workspace's shared record, whose several dispatchers would overwrite
+    /// each other's: see [`looks`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_minute: Option<String>,
     /// The dispatcher run that wrote [`FireRecord::checked_minute`], from
@@ -502,24 +516,207 @@ fn due_minute(cron: &Cron, checked: Option<&str>, now: NaiveDateTime) -> Option<
 /// The whole state file: one [`FireRecord`] per job name.
 type State = BTreeMap<String, FireRecord>;
 
-fn read_state(repo: &Repo) -> State {
-    std::fs::read_to_string(repo.jobs_state_file())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+/// The newest minute a record holds, of the three it stamps. `MINUTE_FMT`
+/// sorts as text, so comparing the strings compares the times.
+fn newest_minute(record: &FireRecord) -> Option<&str> {
+    [
+        record.fired_minute.as_deref(),
+        record.skipped_minute.as_deref(),
+        record.checked_minute.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
-fn write_state(repo: &Repo, state: &State) -> Result<()> {
+/// Records this process could not write, by file. A state file that will not
+/// take a write would otherwise be read back as it was, and every pass would
+/// fire the same window again — 52 firings in 65 seconds. Read ahead of the
+/// disk in [`read_state`] and emptied by the first write that lands.
+fn unsaved() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, State>> {
+    static UNSAVED: std::sync::Mutex<BTreeMap<PathBuf, State>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    UNSAVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A state file's records, and a sentence on why it could not be read when it
+/// is there and will not read: that one is named every pass by the caller,
+/// not mistaken for a job that never fired. A file that is simply absent is
+/// no problem. `seed_names` is `Some` for a workspace's shared file: when that
+/// is absent, the records of those job names are seeded from the clones' own
+/// files, so a workspace upgraded to one shared record does not fire every
+/// job a second time.
+fn read_state(
+    repo: &Repo,
+    path: &Path,
+    seed_names: Option<&BTreeSet<String>>,
+) -> (State, Option<String>) {
+    let (mut state, problem) = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<State>(&text) {
+            Ok(state) => (state, None),
+            Err(err) => (
+                State::new(),
+                Some(format!(
+                    "jobs: could not read {}: {err} — fix the file or delete it, and its jobs \
+                     fire as if they never had",
+                    path.display()
+                )),
+            ),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (
+            seed_names.map_or_else(State::new, |names| seed(repo, names)),
+            None,
+        ),
+        Err(err) => (
+            State::new(),
+            Some(format!(
+                "jobs: could not read {}: {err} — make it readable by this user, and its jobs \
+                 fire as if they never had",
+                path.display()
+            )),
+        ),
+    };
+    if let Some(held) = unsaved().get(path) {
+        for (name, kept) in held {
+            let newer = state
+                .get(name)
+                .is_none_or(|disk| newest_minute(kept) >= newest_minute(disk));
+            if newer {
+                state.insert(name.clone(), kept.clone());
+            }
+        }
+    }
+    (state, problem)
+}
+
+/// The first shared record of a workspace: for each of `names`, the record
+/// of the clone that fired it last, marked with that clone.
+///
+/// Only the project jobs' names are taken. A clone's own file also holds its
+/// user jobs, and one of those sharing a project job's name says nothing
+/// about the project job's windows. The clone is picked by its last firing,
+/// not its last look: every running clone looks on every pass, and the one
+/// that looked last need not be the one holding the live copy. The looks are
+/// dropped, since they belong to a dispatcher run, not to the workspace.
+fn seed(repo: &Repo, names: &BTreeSet<String>) -> State {
+    let mut seeded = State::new();
+    for (dispatcher, path) in repo.sibling_jobs_state_files() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<State>(&text) else {
+            continue;
+        };
+        for (name, mut record) in state {
+            if !names.contains(&name) || record.fired_minute.is_none() {
+                continue;
+            }
+            let newer = seeded
+                .get(&name)
+                .is_none_or(|have| record.fired_minute > have.fired_minute);
+            if newer {
+                record.clone = Some(dispatcher.clone());
+                record.checked_minute = None;
+                record.checked_by = None;
+                seeded.insert(name, record);
+            }
+        }
+    }
+    seeded
+}
+
+fn write_state(path: &Path, state: &State) -> Result<()> {
     let text = serde_json::to_string_pretty(state)?;
-    crate::task::write_atomic(&repo.jobs_state_file(), text)
+    let written = crate::task::write_atomic(path, text);
+    match &written {
+        Ok(()) => {
+            unsaved().remove(path);
+        }
+        Err(_) => {
+            unsaved().insert(path.to_path_buf(), state.clone());
+        }
+    }
+    written
+}
+
+/// The file a job's record is kept in. A project job's may be the
+/// workspace's shared one, and is [`Repo::jobs_state_file`] everywhere else.
+fn state_path(repo: &Repo, scope: Scope) -> PathBuf {
+    match scope {
+        Scope::User => repo.jobs_state_file(),
+        Scope::Project => repo.project_jobs_state_file(),
+    }
+}
+
+/// One state file read for a pass, and whether the pass changed it.
+struct Loaded {
+    state: State,
+    dirty: bool,
+    /// Whether this is a home-mode workspace's shared file.
+    shared: bool,
+    /// Another clone holds the shared file's lock, or it could not be taken:
+    /// no job in it is touched this pass.
+    locked_out: bool,
+    /// Held from the read to the write of a shared file, so two clones'
+    /// passes take turns and the second reads what the first recorded.
+    _lock: Option<crate::lock::TaskLock>,
+}
+
+/// The minute each dispatcher run last looked at each job of a shared file,
+/// by file and job name. A shared record has several dispatchers writing it,
+/// and a single `checked_by` in it would be replaced by whichever wrote last,
+/// so no run could tell its own earlier look from another's and the catch-up
+/// of a window that fell between two passes would be lost. A look is only
+/// ever a fact about this run, so it is kept here and never written.
+fn looks() -> std::sync::MutexGuard<'static, BTreeMap<(PathBuf, String), String>> {
+    static LOOKS: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    LOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The minute this run last looked at the job, if it did: from the record in
+/// a user file, from [`looks`] in a shared one.
+fn own_look(record: &FireRecord, shared: bool, path: &Path, name: &str) -> Option<String> {
+    if shared {
+        return looks()
+            .get(&(path.to_path_buf(), name.to_string()))
+            .cloned();
+    }
+    (record.checked_by.as_deref() == Some(run_id()))
+        .then(|| record.checked_minute.clone())
+        .flatten()
+}
+
+/// Note that this run looked at the job in `minute`. Returns whether the
+/// record changed and so needs writing, which a shared record's never does.
+fn note_look(record: &mut FireRecord, shared: bool, path: &Path, name: &str, minute: &str) -> bool {
+    if shared {
+        looks().insert((path.to_path_buf(), name.to_string()), minute.to_string());
+        return false;
+    }
+    if record.checked_minute.as_deref() == Some(minute)
+        && record.checked_by.as_deref() == Some(run_id())
+    {
+        return false;
+    }
+    record.checked_minute = Some(minute.to_string());
+    record.checked_by = Some(run_id().to_string());
+    true
 }
 
 /// Fire every enabled job whose expression matches the current local minute,
-/// recording the minute in machine home. Called at the top of a dispatcher
+/// recording the minute in the job's state file — machine home, or the
+/// workspace's shared file for a project job there. Called at the top of a dispatcher
 /// pass, before it reads the queue, so a job's freshly queued tasks are
 /// dispatched by the same pass.
 ///
-/// Trouble with one job goes to `problems` and the rest still run. A job
+/// Trouble with one job goes to `problems` and the rest still run. A firing
+/// that fails is recorded for its minute, so it is named once and not on every
+/// pass of it, unless `origin` could not be asked about its base. A job
 /// that fires, and one skipped because its previous run or any other task
 /// named after its routine is still in the queue, are each pushed to
 /// `actions` naming the job.
@@ -551,20 +748,89 @@ pub fn fire_due(
         Default::default()
     };
 
-    let mut state = read_state(repo);
-    let mut dirty = false;
+    // One file per place records are kept, read once. Named every pass when
+    // it will not read, since the jobs in it fire as if they never had.
+    let project_names: BTreeSet<String> = jobs
+        .iter()
+        .filter(|job| job.scope == Scope::Project)
+        .map(|job| job.name.clone())
+        .collect();
+    let mut files: BTreeMap<PathBuf, Loaded> = BTreeMap::new();
+    for job in &jobs {
+        let path = state_path(repo, job.scope);
+        if files.contains_key(&path) {
+            continue;
+        }
+        let shared = job.scope == Scope::Project && path != repo.jobs_state_file();
+        // The shared record is read, changed and written under a lock, so a
+        // second clone's pass reads what the first recorded and not the
+        // window as still open. A clone that cannot take it leaves the
+        // shared jobs alone this pass: a holder is firing them and it is
+        // tried again on the next, and a lock that cannot be written is
+        // named as a problem.
+        let (lock, locked_out) = if shared {
+            let mut name = path.file_name().unwrap_or_default().to_os_string();
+            name.push(".lock");
+            match crate::lock::TaskLock::acquire(&path.with_file_name(name)) {
+                Ok(lock) => (Some(lock), false),
+                Err(err) => {
+                    if err.downcast_ref::<crate::lock::TaskLockHeld>().is_none() {
+                        problems.push(format!(
+                            "jobs: could not lock {}: {err:#} — no project job fires from this \
+                             clone until it can, so make the workspace folder writable by this \
+                             user",
+                            path.display()
+                        ));
+                    }
+                    (None, true)
+                }
+            }
+        } else {
+            (None, false)
+        };
+        let (state, problem) = if locked_out {
+            (State::new(), None)
+        } else {
+            read_state(repo, &path, shared.then_some(&project_names))
+        };
+        problems.extend(problem);
+        // A record seeded from the clones' files is written at once, so the
+        // seeding happens one time and not on every pass until a firing.
+        let seeded = shared && !state.is_empty() && !path.exists();
+        files.insert(
+            path,
+            Loaded {
+                state,
+                dirty: seeded,
+                shared,
+                locked_out,
+                _lock: lock,
+            },
+        );
+    }
 
     for job in &jobs {
+        let path = state_path(repo, job.scope);
+        let Loaded {
+            state,
+            dirty,
+            shared,
+            locked_out,
+            ..
+        } = files
+            .get_mut(&path)
+            .expect("every job's state file was read above");
+        if *locked_out {
+            continue;
+        }
+        let shared = *shared;
         if !job.spec.enabled {
             // A disabled job skips its windows. Moving its minute along keeps
             // enabling it later from looking back over the time it was off.
-            if let Some(record) = state.get_mut(&job.name)
-                && (record.checked_minute.as_deref() != Some(minute.as_str())
-                    || record.checked_by.as_deref() != Some(run_id()))
-            {
-                record.checked_minute = Some(minute.clone());
-                record.checked_by = Some(run_id().to_string());
-                dirty = true;
+            if let Some(record) = state.get_mut(&job.name) {
+                *dirty |= note_look(record, shared, &path, &job.name, &minute);
+            } else if shared {
+                looks().insert((path.clone(), job.name.clone()), minute.clone());
             }
             continue;
         }
@@ -575,17 +841,9 @@ pub fn fire_due(
         let unknown_note = job.unknown_keys_note();
 
         let record = state.entry(job.name.clone()).or_default();
-        let own_look = (record.checked_by.as_deref() == Some(run_id()))
-            .then_some(record.checked_minute.as_deref())
-            .flatten();
-        let due = due_minute(&cron, own_look, now);
-        if record.checked_minute.as_deref() != Some(minute.as_str())
-            || record.checked_by.as_deref() != Some(run_id())
-        {
-            record.checked_minute = Some(minute.clone());
-            record.checked_by = Some(run_id().to_string());
-            dirty = true;
-        }
+        let looked = own_look(record, shared, &path, &job.name);
+        let due = due_minute(&cron, looked.as_deref(), now);
+        *dirty |= note_look(record, shared, &path, &job.name, &minute);
         let Some(due) = due else {
             continue;
         };
@@ -604,14 +862,21 @@ pub fn fire_due(
             // the job would run as if enabled. Report it once per window,
             // like a skip, rather than on every pass.
             record.skipped_minute = Some(minute.clone());
-            dirty = true;
+            *dirty = true;
             problems.push(note);
             continue;
         }
 
-        if record.queued_ids.iter().any(|id| queued.contains(id)) {
+        // A shared record's copy may sit in another clone's queue.
+        let held_elsewhere = shared
+            .then_some(record.clone.as_deref())
+            .flatten()
+            .filter(|clone| Some(*clone) != repo.workspace_dispatcher().as_deref())
+            .and_then(|clone| repo.queued_ids_in_clone(clone));
+        let queued_now = held_elsewhere.as_ref().unwrap_or(&queued);
+        if record.queued_ids.iter().any(|id| queued_now.contains(id)) {
             record.skipped_minute = Some(minute.clone());
-            dirty = true;
+            *dirty = true;
             actions.push(format!(
                 "job {} · due now · skipped, its last run is still in the queue",
                 job.name
@@ -622,6 +887,10 @@ pub fn fire_due(
         let target = match job.target(repo) {
             Ok(target) => target,
             Err(err) => {
+                // A routine path that escapes the routines directory is
+                // refused the same on every pass until the store is edited.
+                record.skipped_minute = Some(minute.clone());
+                *dirty = true;
                 problems.push(format!("{err:#}"));
                 continue;
             }
@@ -632,7 +901,7 @@ pub fn fire_due(
         // instead, the way a skip is.
         if let Some(refusal) = crate::commands::routine_target_refusal(&target) {
             record.skipped_minute = Some(minute.clone());
-            dirty = true;
+            *dirty = true;
             problems.push(format!("job {}: {refusal}", job.name));
             continue;
         }
@@ -648,8 +917,9 @@ pub fn fire_due(
                 record.fired_minute = Some(minute.clone());
                 record.fired_at = Some(Local::now().timestamp());
                 record.queued_ids = ids.clone();
+                record.clone = shared.then(|| repo.workspace_dispatcher()).flatten();
                 record.skipped_minute = None;
-                dirty = true;
+                *dirty = true;
                 actions.push(format!(
                     "job {} · fired · queued {}",
                     job.name,
@@ -663,46 +933,69 @@ pub fn fire_due(
                 // Skipped and named once per window, the way a window whose
                 // last run is still queued is.
                 record.skipped_minute = Some(minute.clone());
-                dirty = true;
+                *dirty = true;
                 actions.push(format!("job {} · due now · skipped, {err}", job.name));
             }
             Err(err) if err.downcast_ref::<crate::commands::RoutineBusy>().is_some() => {
                 // Another submission of the routine held its lock past the
                 // wait: one from the routines tab whose issue hook is still
                 // running, say. Nothing for a person to do, so no problem
-                // line. The minute is left unrecorded like any other failure
-                // here, and a pass later within it tries again: it finds
+                // line. The minute is left unrecorded, as for an unreachable
+                // `origin`, and a pass later within it tries again: it finds
                 // that submission's copy once saved and skips as still
                 // queued, or fires if the copy never landed.
             }
             Err(err) => {
-                // Only a base problem is recorded like the unknown-key case:
-                // a job with no base it can resolve fails the same way on
-                // every pass, and naming it each time buries the
-                // dispatcher's own output. Any other failure may be gone on
-                // the next pass (a hook that failed once, a write that
-                // raced, `origin` out of reach when the base lives only
-                // there), so it stays unrecorded and the minute is retried.
-                // A later due minute tries a base problem again.
-                if err.downcast_ref::<crate::commands::BaseProblem>().is_some() {
+                // Every failure is recorded for its minute, so the passes
+                // left in it neither queue the tasks that did land again nor
+                // re-open their tickets (a failing `open` hook), nor repeat
+                // an error nothing but an edit will lift (a `gate_at:` naming
+                // no step) or wait out a hung hook's limit once more. The
+                // next due minute tries again. Only a base `origin` could not
+                // be asked about is left open: it is the one refusal that is
+                // likely gone by the next pass.
+                if err
+                    .downcast_ref::<crate::commands::OriginUnreachable>()
+                    .is_none()
+                {
                     record.skipped_minute = Some(minute.clone());
-                    dirty = true;
+                    *dirty = true;
                 }
                 problems.push(format!("job {}: {err:#}", job.name));
             }
         }
     }
 
-    if dirty && let Err(err) = write_state(repo, &state) {
-        problems.push(format!("jobs: could not write {}: {err:#}", STATE_FILE));
+    // A file with unsaved records is tried again every pass, so a state file
+    // that stays unwritable is named every pass and not once.
+    for (path, loaded) in &files {
+        let pending = unsaved().contains_key(path);
+        if !loaded.locked_out
+            && (loaded.dirty || pending)
+            && let Err(err) = write_state(path, &loaded.state)
+        {
+            problems.push(format!(
+                "jobs: could not write {}: {err:#} — until it can be written, jobs are \
+                 kept from firing twice in a window by this dispatcher alone",
+                path.display()
+            ));
+        }
     }
 }
 
 /// One job's last-fired time, for `jobs list`'s LAST column.
 pub fn last_fired(repo: &Repo, name: &str) -> Option<i64> {
-    read_state(repo)
-        .get(name)
-        .and_then(|record| record.fired_at)
+    // From the file the job's own scope keeps its record in: a user job and a
+    // project job of one name must not read each other's firing.
+    let scope = load(repo)
+        .ok()?
+        .into_iter()
+        .find(|job| job.name == name)?
+        .scope;
+    read_state(repo, &state_path(repo, scope), None)
+        .0
+        .remove(name)?
+        .fired_at
 }
 
 /// Why the dispatcher is staying up on an empty queue: which enabled job
@@ -734,13 +1027,15 @@ pub struct ActiveJobsMemo {
     value: Vec<ActiveJob>,
 }
 
-/// How many jobs are enabled across both stores. A store that will not load
-/// counts as none — cheap enough to call every idle pass, where
-/// [`active_jobs`] (which also scans for each one's next firing) is not.
-pub fn enabled_count(repo: &Repo) -> usize {
-    load(repo)
-        .map(|jobs| jobs.iter().filter(|job| job.spec.enabled).count())
-        .unwrap_or(0)
+/// Whether the dispatcher stays up on an empty queue for a job: some job is
+/// enabled, or a store will not load. A store that will not parse is not
+/// "no jobs" — its jobs are still to run once a person mends it, and exiting
+/// would stop every scheduled job without a word. Each pass names the parse
+/// error, the way a queue file that will not parse is named. Cheap enough to
+/// call every idle pass, where [`active_jobs`] (which also scans for each
+/// one's next firing) is not.
+pub fn keeps_dispatcher_up(repo: &Repo) -> bool {
+    load(repo).map_or(true, |jobs| jobs.iter().any(|job| job.spec.enabled))
 }
 
 /// Every enabled job across both stores, ordered by next firing — the
@@ -748,8 +1043,9 @@ pub fn enabled_count(repo: &Repo) -> usize {
 /// of an empty one while a dispatcher holds the lock. A job whose schedule
 /// will never come round sorts last, carrying `next: None`, rather than
 /// being dropped: a person still needs to see it is there and broken. A
-/// store that will not load counts as no jobs — the dispatcher then behaves
-/// exactly as it does with none.
+/// store that will not load draws no rows here; the dispatcher stays up on it
+/// all the same and names the parse error each pass (see
+/// [`keeps_dispatcher_up`]).
 pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
     let Ok(jobs) = load(repo) else {
         return Vec::new();
@@ -983,6 +1279,17 @@ pub fn until(delta: chrono::TimeDelta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PathExt as _;
+
+    /// The user-scope record file, which every test below fires its jobs
+    /// through; shadows the pass's own, which names the file it reads.
+    fn read_state(repo: &Repo) -> State {
+        super::read_state(repo, &repo.jobs_state_file(), None).0
+    }
+
+    fn write_state(repo: &Repo, state: &State) -> Result<()> {
+        super::write_state(&repo.jobs_state_file(), state)
+    }
     use crate::commands::testutil::fixture;
 
     /// [`JOB_KEYS`] and [`JobSpec`]'s own fields have to name exactly the
@@ -2023,22 +2330,46 @@ mod tests {
         }
     }
 
-    /// A failure that is not about the base may be gone on the next pass, so
-    /// it is not recorded as skipped: the minute is retried and the problem
-    /// shows again. An empty routine folder stands in for any such failure.
+    /// A routine that can never be queued, here a folder with no task in
+    /// it, is named once for its due minute and recorded, the way a base
+    /// problem is: nothing but an edit lifts it, so repeating it every pass
+    /// only buries the dispatcher's own output.
     #[test]
-    fn a_failure_unrelated_to_the_base_is_retried_within_the_minute() {
+    fn a_routine_that_cannot_be_queued_is_named_once_per_due_minute() {
         let (repo, _root_guard) = fixture("jobs-retry-other");
         every_minute_job(&repo, "nightly", "default");
         std::fs::remove_file(repo.routines_dir().join("nightly").join("audit.md")).unwrap();
 
-        for pass in 1..=2 {
-            let (actions, problems) = fire(&repo);
-            assert!(actions.is_empty(), "pass {pass}: {actions:?}");
-            assert_eq!(problems.len(), 1, "pass {pass}: {problems:?}");
-            assert!(problems[0].contains("holds no tasks"), "{problems:?}");
-            assert!(!skipped(&repo), "pass {pass}: the minute stays open");
-        }
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("holds no tasks"), "{problems:?}");
+        assert!(skipped(&repo), "the minute is recorded");
+
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(problems.is_empty(), "second pass: {problems:?}");
+    }
+
+    /// A routine whose task names a `gate_at:` step its pipeline lacks is
+    /// refused on every firing, so the refusal is recorded for its minute
+    /// and `doctor` fails the job before it fires.
+    #[test]
+    fn a_gate_at_naming_no_step_is_recorded_and_doctor_fails_it() {
+        let (repo, _root_guard) = fixture("jobs-gate-at");
+        every_minute_job(&repo, "nightly", "default");
+        std::fs::write(
+            repo.routines_dir().join("nightly").join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\ngate_at: nosuchstep\n---\n\
+             ## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+
+        let (_, problems) = fire(&repo);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("nosuchstep"), "{problems:?}");
+        let (_, problems) = fire(&repo);
+        assert!(problems.is_empty(), "second pass: {problems:?}");
     }
 
     /// A routine task that names its own `base:` is cut from it, whatever
@@ -2127,5 +2458,265 @@ mod tests {
         let note = jobs[0].unknown_keys_note().unwrap();
         assert!(note.contains("`a`") && note.contains("`Enabled`"), "{note}");
         assert!(jobs[1].unknown_keys_note().is_none());
+    }
+
+    /// With the record file unwritable, a job still fires once per window:
+    /// the dispatcher keeps what it could not save, and names the failure on
+    /// every pass. A directory standing where the file belongs stands in for
+    /// any unwritable one.
+    #[test]
+    fn an_unwritable_state_file_fires_the_job_once_and_names_the_problem_every_pass() {
+        let (repo, _root_guard) = fixture("jobs-unwritable");
+        every_minute_job(&repo, "nightly", "default");
+        std::fs::create_dir_all(repo.jobs_state_file()).unwrap();
+
+        let mut fired = 0;
+        for pass in 1..=3 {
+            let (actions, problems) = fire(&repo);
+            fired += actions.iter().filter(|a| a.contains("fired")).count();
+            assert!(
+                problems.iter().any(|p| p.contains("could not write")),
+                "pass {pass}: {problems:?}"
+            );
+        }
+        assert_eq!(fired, 1, "one firing, not one per pass");
+    }
+
+    /// A `jobs.toml` that stops parsing keeps the dispatcher up and is named
+    /// on every pass; the job fires again once the file parses.
+    #[test]
+    fn a_store_that_stops_parsing_keeps_the_dispatcher_up_and_is_named_every_pass() {
+        let (repo, _root_guard) = fixture("jobs-broken-store");
+        every_minute_job(&repo, "nightly", "default");
+        let good = std::fs::read_to_string(repo.user_jobs_file()).unwrap();
+        assert!(keeps_dispatcher_up(&repo));
+
+        std::fs::write(repo.user_jobs_file(), "[jobs.nightly\nschedule = ").unwrap();
+        assert!(keeps_dispatcher_up(&repo), "a broken store is not no jobs");
+        for pass in 1..=2 {
+            let (actions, problems) = fire(&repo);
+            assert!(actions.is_empty(), "pass {pass}: {actions:?}");
+            assert_eq!(problems.len(), 1, "pass {pass}: {problems:?}");
+            assert!(problems[0].contains("parsing job store"), "{problems:?}");
+        }
+
+        std::fs::write(repo.user_jobs_file(), good).unwrap();
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(actions.iter().any(|a| a.contains("fired")), "{actions:?}");
+    }
+
+    /// No store and nothing enabled is still no reason to stay up.
+    #[test]
+    fn no_enabled_job_does_not_keep_the_dispatcher_up() {
+        let (repo, _root_guard) = fixture("jobs-none-enabled");
+        assert!(!keeps_dispatcher_up(&repo));
+        write_user_store(
+            &repo,
+            "[jobs.off]\nschedule = \"* * * * *\"\npipeline = \"default\"\nroutine = \"r\"\n\
+             enabled = false\n",
+        );
+        assert!(!keeps_dispatcher_up(&repo));
+    }
+
+    /// Two clones of one home-mode workspace, each with its own queue and
+    /// home, sharing the workspace's project job store. The workspace and its
+    /// scratch home live as long as the returned guards.
+    fn two_clones(name: &str) -> (Repo, Repo, [crate::scratch::ScratchRoot; 3]) {
+        let (first, first_guard) = fixture(&format!("{name}-a"));
+        let (second, second_guard) = fixture(&format!("{name}-b"));
+        let home = crate::scratch::root(&format!("jobs-ws-home-{name}"));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let home_dir = std::path::PathBuf::from(&*home).canonical().unwrap();
+        crate::platform::test_home::pin(&home_dir);
+        let workspace = home_dir.join(".spoolway").join("shared-ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(workspace.join("config").join("config.toml"), "").unwrap();
+        let mut clones = Vec::new();
+        let mut repos = Vec::new();
+        for (repo, dispatcher) in [(first, "a"), (second, "b")] {
+            let canon = repo.root.canonical().unwrap();
+            clones.push(format!(
+                "{{ root = {canon:?}, dispatcher = {dispatcher:?} }}"
+            ));
+            repos.push(Repo {
+                root: canon.clone(),
+                checkout: canon,
+                home: workspace.join("dispatchers").join(dispatcher),
+                ..repo
+            });
+        }
+        std::fs::write(
+            workspace.join("project.toml"),
+            format!("id = \"shared\"\nclones = [{}]\n", clones.join(", ")),
+        )
+        .unwrap();
+        let second = repos.pop().unwrap();
+        let first = repos.pop().unwrap();
+        (first, second, [first_guard, second_guard, home])
+    }
+
+    /// A project job in the shared store, due every minute.
+    fn shared_job(repo: &Repo) {
+        let dir = repo.routines_dir().join("nightly");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        write_project_store(
+            repo,
+            "[jobs.nightly]\nschedule = \"* * * * *\"\npipeline = \"default\"\n\
+             routine = \"nightly\"\nbase = \"plan/demo\"\n",
+        );
+    }
+
+    /// A project job fires once per window across a workspace's clones, and
+    /// the next window skips while the copy is still queued in the other
+    /// clone.
+    #[test]
+    fn a_project_job_fires_once_across_the_clones_of_a_workspace() {
+        let (first, second, _guards) = two_clones("jobs-ws-once");
+        shared_job(&first);
+        // Both passes inside one minute, or the second would be a new window.
+        settled_now();
+
+        let (actions, problems) = fire(&first);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let (actions, problems) = fire(&second);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions.is_empty(),
+            "the other clone fires nothing: {actions:?}"
+        );
+
+        let shared = first.project_jobs_state_file();
+        assert!(shared.is_file(), "one record in the workspace");
+        assert!(!first.jobs_state_file().exists(), "none per clone");
+        let mut state: State =
+            serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+        assert_eq!(state["nightly"].clone.as_deref(), Some("a"));
+        assert!(
+            state["nightly"].checked_by.is_none() && state["nightly"].checked_minute.is_none(),
+            "a look belongs to a dispatcher run, not to the shared record"
+        );
+
+        // The next window: the record's last firing is an earlier minute.
+        state.get_mut("nightly").unwrap().fired_minute = Some("2000-01-01T00:00".into());
+        std::fs::write(&shared, serde_json::to_string(&state).unwrap()).unwrap();
+        settled_now();
+        let (actions, _) = fire(&second);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert!(actions[0].contains("skipped"), "{actions:?}");
+        assert!(
+            second.queued_ids().is_empty(),
+            "nothing queued in the other clone"
+        );
+    }
+
+    /// A clone that finds the shared record's lock held by a live process
+    /// leaves the project job alone for the pass, without a problem line: the
+    /// holder is mid-firing, and two clones firing at once is what the one
+    /// shared record is there to prevent.
+    #[test]
+    fn a_clone_does_not_fire_while_another_holds_the_shared_record() {
+        let (first, second, _guards) = two_clones("jobs-ws-lock");
+        shared_job(&first);
+        settled_now();
+        let mut lock = first
+            .project_jobs_state_file()
+            .file_name()
+            .unwrap()
+            .to_os_string();
+        lock.push(".lock");
+        let lock_path = first.project_jobs_state_file().with_file_name(lock);
+        // A lock named for a live process that is not this one: the parent.
+        let parent = std::os::unix::process::parent_id();
+        let started = crate::lock::started_at(parent).unwrap_or_default();
+        std::fs::write(&lock_path, format!("{parent}\n{started}\n")).unwrap();
+
+        let (actions, problems) = fire(&second);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "{actions:?} {problems:?}"
+        );
+        assert!(second.queued_ids().is_empty());
+
+        std::fs::remove_file(&lock_path).unwrap();
+        let (actions, _) = fire(&second);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+    }
+
+    /// The first shared record is seeded from the clone that fired last, so
+    /// a workspace upgraded to it does not fire the window a clone already
+    /// did. A clone that only looked more recently does not win, and a user
+    /// job of the same name in a clone's file is not taken.
+    #[test]
+    fn the_shared_record_is_seeded_from_the_clone_that_fired_last() {
+        let (first, second, _guards) = two_clones("jobs-ws-seed");
+        shared_job(&first);
+        let now = settled_now();
+        let minute = now.format(MINUTE_FMT).to_string();
+        let earlier = (now - Duration::minutes(30)).format(MINUTE_FMT).to_string();
+        // Clone `b` fired this minute; clone `a`, which sorts first, fired
+        // long ago but looked this minute.
+        let clone_file = |repo: &Repo, record: FireRecord| {
+            let path = repo.jobs_state_file();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            super::write_state(&path, &State::from([("nightly".to_string(), record)])).unwrap();
+        };
+        clone_file(
+            &second,
+            FireRecord {
+                fired_minute: Some(minute),
+                ..Default::default()
+            },
+        );
+        clone_file(
+            &first,
+            FireRecord {
+                fired_minute: Some(earlier),
+                checked_minute: Some(now.format(MINUTE_FMT).to_string()),
+                ..Default::default()
+            },
+        );
+
+        let (actions, problems) = fire(&second);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(actions.is_empty(), "already fired by a clone: {actions:?}");
+        let shared: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shared["nightly"].clone.as_deref(), Some("b"));
+    }
+
+    /// Only the project jobs' records are taken into the shared file: a
+    /// clone's own file also holds its user jobs', which are no business of
+    /// the workspace.
+    #[test]
+    fn the_shared_record_takes_only_project_job_names_from_a_clone_file() {
+        let (first, second, _guards) = two_clones("jobs-ws-seed-names");
+        shared_job(&first);
+        let now = settled_now();
+        let path = first.jobs_state_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let fired = FireRecord {
+            fired_minute: Some(now.format(MINUTE_FMT).to_string()),
+            ..Default::default()
+        };
+        super::write_state(&path, &State::from([("userjob".to_string(), fired)])).unwrap();
+
+        let (actions, problems) = fire(&second);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(actions.len(), 1, "nightly was never fired: {actions:?}");
+        let shared: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert!(!shared.contains_key("userjob"), "{:?}", shared.keys());
     }
 }

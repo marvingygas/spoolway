@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use crate::repo::{run, run_with_env};
+use crate::repo::run;
 
 /// What a lane is doing right now, as the multiplexer sees it.
 ///
@@ -2740,6 +2740,18 @@ const CUT_ENV: &[(&str, &str)] = &[("LC_ALL", "C")];
 /// which is the half that matters: a file nobody queued is still a file the
 /// dispatcher will pick up.
 pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
+    cut_worktree_within(repo, path, branch, base, crate::repo::GIT_HOOK_TIMEOUT)
+}
+
+/// [`cut_worktree`] with the git hook limit passed in, so a test can prove
+/// the clean-up after a stopped hook without waiting out the real one.
+fn cut_worktree_within(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+    hook_limit: Duration,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -2792,8 +2804,50 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
             },
         )
     } else {
-        run_with_env(repo, "git", &args, CUT_ENV)
+        // `post-checkout` is the hook `git worktree add` runs, and the one a
+        // husky install leaves in the person's repo.
+        crate::repo::run_git_hooked_within(repo, &args, CUT_ENV, &["post-checkout"], hook_limit)
     };
+    // `post-checkout` runs after git has written the files and dropped its
+    // `initializing` lock, so a hook stopped at its limit leaves a checkout
+    // that looks finished. The retry would adopt it and run the step in a
+    // worktree whose hook never completed. Taken away here, with the branch
+    // if this call made it, so the retry cuts afresh and fails visibly again
+    // if the hook is still hung.
+    //
+    // The removal can fail: [`remove_worktree`] makes the checkout's own
+    // folders writable, but not the one it sits in, which a hook may have made
+    // read-only. The checkout then stays, and with the lock gone the retry would adopt
+    // it all the same. So an entry git still lists is locked as
+    // `initializing` again, which is what `ensure_workspace` reads as
+    // unfinished: it tries the removal itself and, if that fails too, stops
+    // with the command to run by hand rather than running the step in it.
+    // An entry git has already dropped leaves only a folder, and the next cut
+    // refuses to land in a folder that is not empty.
+    if let Err(err) = &cut
+        && let Some(stopped) = err.downcast_ref::<crate::repo::GitTimedOut>()
+    {
+        let root = path.parent().unwrap_or(path);
+        match remove_worktree(repo, root, path) {
+            Ok(()) => {
+                if !exists {
+                    let _ = run(repo, "git", &["branch", "-D", branch]);
+                }
+            }
+            Err(removal) => {
+                let _ = run(
+                    repo,
+                    "git",
+                    &["worktree", "lock", "--reason", "initializing", &path_arg],
+                );
+                bail!(
+                    "{stopped} The worktree it left half set up at {path_arg} could not be \
+                     removed ({removal:#}). Run `{}`, then resume the task.",
+                    remove_by_hand_command(repo, path)
+                );
+            }
+        }
+    }
     cut.with_context(|| {
         cut_failure(
             &format!("could not cut a worktree for `{branch}` at {path_arg}"),
@@ -2802,6 +2856,28 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
         )
     })?;
     Ok(())
+}
+
+/// The command a person can run to take a worktree away by hand when
+/// [`remove_worktree`] could not.
+///
+/// `git worktree remove` is no use here: git drops its entry before it deletes
+/// the folder, so a delete that fails leaves a folder git no longer lists, and
+/// the command then refuses it. The steps are separate commands, run whatever
+/// the one before said, so that each half still works when the other has
+/// nothing to do: making the tree writable fails on a folder already gone, and
+/// unlocking fails on an entry that is not locked, while the prune that
+/// follows is still needed. The unlock is there because the half-set-up
+/// worktrees are locked as `initializing`, which `git worktree prune` skips.
+/// Both paths are quoted, because either can hold a space, and git is pointed
+/// at the repository so the command runs from wherever the person is standing.
+pub(crate) fn remove_by_hand_command(repo: &Path, path: &Path) -> String {
+    let path = crate::platform::quote(&path.display().to_string());
+    let repo = crate::platform::quote(&repo.display().to_string());
+    format!(
+        "chmod -R u+w {path} 2>/dev/null; rm -rf {path}; \
+         git -C {repo} worktree unlock {path} 2>/dev/null; git -C {repo} worktree prune"
+    )
 }
 
 /// Take a worktree away with git, whatever state it was left in.
@@ -2850,6 +2926,7 @@ pub(crate) fn remove_worktree(repo: &Path, worktree_root: &Path, path: &Path) ->
                 worktree_root.display()
             )));
         }
+        make_writable(path);
         std::fs::remove_dir_all(path).with_context(|| {
             format!("git could not remove the worktree at {path_arg} ({first:#}), and neither could deleting it")
         })?;
@@ -2859,6 +2936,43 @@ pub(crate) fn remove_worktree(repo: &Path, worktree_root: &Path, path: &Path) ->
     })?;
     Ok(())
 }
+
+/// Give the owner write access to every directory under `root`, so that
+/// deleting the tree cannot be refused for a read-only folder.
+///
+/// A step can leave one behind: the Go module cache is read-only by design.
+/// Deleting a file needs write access to the folder holding it, so one such
+/// folder fails the whole delete, and `git worktree remove` has by then
+/// already dropped the worktree's entry.
+///
+/// Symlinks are never followed, and their targets are never touched. A link
+/// inside the worktree may point at a read-only folder somewhere else, and
+/// changing that folder's mode is not this function's to do. Failures are
+/// ignored here: the delete that follows reports whatever is still in the way.
+#[cfg(unix)]
+fn make_writable(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(root) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    // Owner read, write and search: write to delete entries, and the other two
+    // to list and enter the folder so the walk can reach what is inside.
+    if mode & 0o700 != 0o700 {
+        let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode | 0o700));
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            make_writable(&entry.path());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_writable(_root: &Path) {}
 
 /// The reason a cut failed, with the fetch's part in it when it was stopped.
 ///
@@ -2894,8 +3008,25 @@ pub(crate) enum GitWithin {
     NotRun,
     /// It was still running at the deadline and has been stopped.
     TimedOut,
-    /// It ended on its own, with whether it succeeded and what it printed.
-    Finished { success: bool, stdout: Vec<u8> },
+    /// It ended on its own, with whether it succeeded, what it printed, how
+    /// its exit reads (`exit status: 1`), and what it wrote to stderr when
+    /// the caller asked for that.
+    Finished {
+        success: bool,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        status: String,
+    },
+}
+
+/// What a bounded git call keeps of its output, and the one thing it does at
+/// the deadline.
+pub(crate) struct GitCapture<'a> {
+    pub stdout: bool,
+    pub stderr: bool,
+    /// Called with git's pid once the deadline has passed, before anything is
+    /// signalled, so the caller can look at what git's group is running.
+    pub at_deadline: &'a dyn Fn(u32),
 }
 
 /// Run `git <args>` in `repo`, and stop it, with everything it started, once
@@ -2926,39 +3057,76 @@ pub(crate) fn git_within(
     timeout: Duration,
     capture_stdout: bool,
 ) -> GitWithin {
+    git_bounded(
+        repo,
+        args,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+        timeout,
+        &GitCapture {
+            stdout: capture_stdout,
+            stderr: false,
+            at_deadline: &|_| {},
+        },
+    )
+}
+
+/// [`git_within`] with the environment and the captured streams chosen by
+/// the caller. It is the one place a git call is bounded and its whole group
+/// stopped, so the calls that run a person's git hooks and the ones that talk
+/// to `origin` cannot drift apart on how a timeout is enforced.
+pub(crate) fn git_bounded(
+    repo: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+    capture: &GitCapture,
+) -> GitWithin {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let Ok(mut child) = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(if capture_stdout {
+    let piped = |wanted: bool| {
+        if wanted {
             Stdio::piped()
         } else {
             Stdio::null()
-        })
-        .stderr(Stdio::null())
+        }
+    };
+    let Ok(mut child) = std::process::Command::new("git")
+        .args(args)
+        .envs(envs.iter().copied())
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .stdout(piped(capture.stdout))
+        .stderr(piped(capture.stderr))
         .process_group(0)
         .spawn()
     else {
         return GitWithin::NotRun;
     };
-    // Read on a thread, so a command that prints more than a pipe holds
+    // Read on threads, so a command that prints more than a pipe holds
     // cannot stall on a full pipe while this loop is only polling for its
-    // exit.
-    let mut pipe = child.stdout.take();
-    let reader = capture_stdout.then(|| {
+    // exit. The text comes back over a channel and is waited for only
+    // briefly: a hook that backgrounded something keeps the pipe open past
+    // git's own exit, and joining would then hold this call for as long as
+    // that thing lives.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        let (sender, text) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut out = Vec::new();
-            if let Some(pipe) = pipe.as_mut() {
+            if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut out);
             }
-            out
-        })
-    });
+            let _ = sender.send(out);
+        });
+        text
+    };
+    let stdout_reader = capture
+        .stdout
+        .then(|| reader(child.stdout.take().map(|p| Box::new(p) as _)));
+    let stderr_reader = capture
+        .stderr
+        .then(|| reader(child.stderr.take().map(|p| Box::new(p) as _)));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -2968,14 +3136,19 @@ pub(crate) fn git_within(
         }
     };
     if let Some(status) = status {
-        let stdout = reader
-            .map(|reader| reader.join().unwrap_or_default())
-            .unwrap_or_default();
+        let grace = Duration::from_secs(2);
+        let read = |text: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
+            text.and_then(|text| text.recv_timeout(grace).ok())
+                .unwrap_or_default()
+        };
         return GitWithin::Finished {
             success: status.success(),
-            stdout,
+            stdout: read(stdout_reader),
+            stderr: read(stderr_reader),
+            status: status.to_string(),
         };
     }
+    (capture.at_deadline)(child.id());
     // The leader is asked first and reaped before the group is swept.
     // `kill_group` treats a zombie as alive on a Mac, and git is still our
     // own unreaped child here, so handing it a group whose leader had
@@ -2990,13 +3163,13 @@ pub(crate) fn git_within(
     let _ = child.kill();
     let _ = child.wait();
     crate::headless::kill_group(child.id());
-    // The reader is left to end on its own and its output is thrown away.
-    // Joining it would wait on every holder of the pipe, and the sweep above
-    // does not promise to have closed them all: `kill_group` gives up after
-    // a few seconds, and a descendant that started a session of its own is
-    // outside the group. Either would hold this pass for as long as it
-    // lives, which is the hang this function exists to end.
-    drop(reader);
+    // The readers are left to end on their own and their output is thrown
+    // away. Waiting for them would wait on every holder of the pipe, and the
+    // sweep above does not promise to have closed them all: `kill_group`
+    // gives up after a few seconds, and a descendant that started a session
+    // of its own is outside the group. Either would hold this pass for as
+    // long as it lives, which is the hang this function exists to end.
+    drop((stdout_reader, stderr_reader));
     GitWithin::TimedOut
 }
 
@@ -4357,7 +4530,8 @@ mod tests {
         assert_eq!(CUT_ENV, &[("LC_ALL", "C")]);
         let dir = crate::scratch::root("cut-env");
         std::fs::create_dir_all(&dir).unwrap();
-        let seen = run_with_env(&dir, "sh", &["-c", "printf %s \"$LC_ALL\""], CUT_ENV).unwrap();
+        let seen = crate::repo::run_with_env(&dir, "sh", &["-c", "printf %s \"$LC_ALL\""], CUT_ENV)
+            .unwrap();
         assert_eq!(seen, "C");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4890,6 +5064,216 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A cut whose `post-checkout` hook is stopped at its limit leaves nothing
+    /// behind. git has already written the files and dropped its
+    /// `initializing` lock by then, so a checkout left standing looks
+    /// finished and the retry would run the step in it, hook unfinished.
+    #[test]
+    fn a_cut_whose_hook_is_stopped_leaves_no_worktree_or_branch() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = crate::scratch::root("mux-cut-hook-stopped");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        let hook = work.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = work.join("worktrees").join("task-new");
+
+        let err = cut_worktree_within(&work, &path, "task/new", "main", Duration::from_secs(3))
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("post-checkout"), "{err:#}");
+        assert!(!path.exists(), "the half-set-up worktree was left standing");
+        assert!(
+            run(
+                &work,
+                "git",
+                &["rev-parse", "--verify", "--quiet", "refs/heads/task/new"]
+            )
+            .is_err(),
+            "the branch this cut made was left behind"
+        );
+        assert!(
+            !run(&work, "git", &["worktree", "list"])
+                .unwrap()
+                .contains("task-new"),
+            "git still lists the worktree"
+        );
+    }
+
+    /// A stopped hook whose checkout cannot be removed is not left to be
+    /// adopted: the error says what to run, and an entry git still lists is
+    /// held under `initializing` again so the dispatcher treats it as
+    /// unfinished. (Git may already have dropped the entry, leaving only the
+    /// folder, which the next cut refuses to land in.) The hook makes the
+    /// folder the checkout sits in read-only, so the checkout cannot be
+    /// unlinked from it. Read-only directories inside the checkout no longer
+    /// do this, because [`remove_worktree`] makes them writable first. A test
+    /// running as root could delete it anyway, so it stops there.
+    #[test]
+    fn a_stopped_cut_that_cannot_be_removed_is_not_left_to_be_adopted() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the process's own id and has no failure.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let work = crate::scratch::root("mux-cut-hook-stuck");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        let hook = work.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nchmod 555 ..\nexec sleep 300\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = work.join("worktrees").join("task-new");
+
+        let err = cut_worktree_within(&work, &path, "task/new", "main", Duration::from_secs(5))
+            .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("could not be removed"), "{said}");
+        assert!(
+            said.contains("chmod -R u+w") && said.contains("worktree prune"),
+            "{said}"
+        );
+        assert!(path.exists(), "the premise: the removal failed");
+        let listing = run(&work, "git", &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(
+            !listing.contains("task-new") || listing.contains("locked initializing"),
+            "git lists the leftover as a finished checkout: {listing}"
+        );
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    /// The command printed for a removal by hand quotes a path with a space,
+    /// and works from anywhere on a folder that is already gone while git
+    /// still lists the entry, locked as `initializing` or not.
+    #[test]
+    fn the_by_hand_removal_command_clears_what_is_left_whatever_half_it_is() {
+        let said = remove_by_hand_command(Path::new("/my repo"), Path::new("/my repo/w t"));
+        assert!(
+            said.contains("'/my repo/w t'") && said.contains("-C '/my repo'"),
+            "{said}"
+        );
+
+        for lock in [false, true] {
+            let work = crate::scratch::root(&format!("mux-by-hand-{lock}"));
+            std::fs::create_dir_all(&work).unwrap();
+            crate::scratch::git_init(&work, &["-b", "main"]);
+            run(
+                &work,
+                "git",
+                &["commit", "--allow-empty", "-q", "-m", "seed"],
+            )
+            .unwrap();
+            let path = work.join("worktrees").join("task new");
+            cut_worktree(&work, &path, "task/new", "main").unwrap();
+            if lock {
+                run(
+                    &work,
+                    "git",
+                    &[
+                        "worktree",
+                        "lock",
+                        "--reason",
+                        "initializing",
+                        &path.display().to_string(),
+                    ],
+                )
+                .unwrap();
+            }
+            std::fs::remove_dir_all(&path).unwrap();
+
+            let command = remove_by_hand_command(&work, &path);
+            let status = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .current_dir(std::env::temp_dir())
+                .status()
+                .unwrap();
+
+            assert!(status.success(), "{command}");
+            assert!(
+                !run(&work, "git", &["worktree", "list"])
+                    .unwrap()
+                    .contains("task new"),
+                "git still lists the worktree after: {command}"
+            );
+        }
+    }
+
+    /// A step that leaves a read-only directory in the worktree, as a Go
+    /// module cache does, no longer keeps the worktree from being removed.
+    /// The walk that makes it writable does not follow a symlink, so a
+    /// read-only directory outside the worktree keeps its mode.
+    #[test]
+    fn a_read_only_directory_in_a_worktree_is_removed_without_touching_a_link_target() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the process's own id and has no failure.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let work = crate::scratch::root("mux-remove-read-only");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        let root = work.join("worktrees");
+        let path = root.join("task-new");
+        cut_worktree(&work, &path, "task/new", "main").unwrap();
+        let outside = work.join("outside");
+        std::fs::create_dir_all(outside.join("inner")).unwrap();
+        std::fs::write(outside.join("inner/file"), "x").unwrap();
+        std::fs::set_permissions(
+            outside.join("inner"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, path.join("link")).unwrap();
+        std::fs::create_dir_all(path.join("cache/deep")).unwrap();
+        std::fs::write(path.join("cache/deep/file"), "x").unwrap();
+        std::fs::set_permissions(
+            path.join("cache/deep"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::set_permissions(path.join("cache"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        remove_worktree(&work, &root, &path).unwrap();
+
+        assert!(!path.exists(), "the worktree was left on disk");
+        let mode = std::fs::metadata(outside.join("inner"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o555, "a link target was made writable");
+        std::fs::set_permissions(
+            outside.join("inner"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     /// A base only `origin` has — the ordinary shape of a pending pull

@@ -763,6 +763,15 @@ impl Runs {
         self.end(key)
     }
 
+    /// Write `code` as this run's exit code, for a run that was stopped from
+    /// outside and so never wrote one. The run then reads as having exited
+    /// with `code`, which keeps a caller that starts a run only while it is
+    /// [`RunState::Fresh`] from starting it again.
+    pub fn record_exit(&self, key: &str, code: i32) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        write_private(&self.exit_path(key), &code.to_string())
+    }
+
     /// Stop what a run that has lost its wrapper left running, keeping its
     /// files for the caller to clear.
     ///

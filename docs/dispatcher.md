@@ -60,13 +60,29 @@ own.
 The run stops when the queue is empty. A `paused` or `blocked` task keeps the run alive,
 because it is waiting on a person. A queue file that does not parse keeps the run alive too. Each
 pass names the file until it is fixed or moved out of the queue. While any job is enabled, the run also stays up on an empty
-queue and prints when the next job fires. See [Jobs](jobs.md).
+queue and prints when the next job fires. A job store that will not parse keeps the run up too.
+See [Jobs](jobs.md).
 
 `ctrl-c` stops the run the same way. A stop tears nothing down. Every worktree, pane, tab and
 lane stays where it is, and the next run picks it back up. Before it exits, the run banks each
 still-running lane's spend in the usage ledger and forgives that lane's launch counter, so the
 next run does not treat a lane that survived the stop as a failed launch. A second `ctrl-c`
 kills the process at once.
+
+### When the lock file is lost
+
+The run records itself in `dispatch.pid`. At the start of every pass it reads that file again.
+If the file is deleted, or no longer names this run, the run prints one line and exits with code 0:
+
+```
+  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. Stopping, so two dispatchers never work one queue.
+```
+
+The same line goes to the problem log. Under the screen it is printed without the `  ! ` prefix.
+
+The run moves no task and stops no lane before it exits. A dispatcher that holds the lock
+carries the running lanes on. Do not delete `dispatch.pid` while a dispatcher runs. A lock left
+by a process that no longer exists is cleared on the next start.
 
 ## What a pass does
 
@@ -294,7 +310,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, or the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -349,8 +365,8 @@ A cause in brackets follows when the route alone does not explain the move.
 | `left <step>, moved to <step>` | The task file does not say how the task left the step. |
 | `passed <step>, moved to paused (gate)` | The step has `gate: true`. |
 | `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
-| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, or was killed three times in a row. |
-| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, or was killed three times in a row. |
+| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
+| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
 | `stopped on <step>, moved to paused (manually)` | A person picked `pause` from the board's options menu, or pressed Escape in the lane's pane. |
 | `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
 | `stopped on <step>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
@@ -780,6 +796,7 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past and a failed launch count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
+| Hook time limit | An issue hook that runs 10 minutes without exiting is stopped. A `queued`, `started` or `done` hook pauses the task. | `spoolway resume` on the paused task. |
 | Reminder loop | Three answered reminders. A silent lane is reminded again and never counted. | Anything the lane writes to its transcript. On a claude lane, a turn the model wrote. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
@@ -989,6 +1006,13 @@ fails, the start fails with a message that says to run `git worktree prune` in t
 resume the task. The new worktree uses the task's own branch, and `base_commit` keeps the value it
 had.
 
+A worktree deleted while a step is running is not cut again. For an agent step, the dispatcher stops
+the lane and moves the task to `blocked`. For a command step, it does this when the command exits,
+whatever the exit code, and ignores the step's `on_pass` and `on_fail`. The reason names the vanished worktree. A `spoolway report` that lands first
+is read as `--block`. Changes the step had not committed are lost. Its commits stay on the task's
+branch. Resuming the task runs the step again in a fresh worktree. In an unattended run whose
+pipeline has no `blocked` step, an agent step runs again at once instead of waiting on `blocked`.
+
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
 In an unattended run the `blocked` lane meets the same failure, and the task then stops on
@@ -1018,6 +1042,32 @@ On the task's next start, the dispatcher looks at a checkout of the task's branc
 
 A checkout under `worktrees/` is never marked `borrowed` for a task that has started before. A
 checkout that a person locked for another reason is never removed.
+
+### Git hooks in a cut
+
+The dispatcher runs `git worktree add` with your repository's own git hooks, such as a
+`post-checkout` that installs packages. It does not skip them. A git hook that is still running
+after 10 minutes is stopped together with the processes it started. The cut fails and the
+failure names the hook and the limit:
+
+```
+`git worktree add <path> task/cart-totals` was stopped after 10m because its `post-checkout` git hook was still running. spoolway does not skip a repository's git hooks: make that hook exit, then run this again.
+```
+
+When the dispatcher cannot tell which hook was running, the failure says the call was still
+running and lists the git hooks it could have been.
+
+The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
+afresh. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
+failure gives the by-hand command shown under [A removal that was stopped or
+failed](#a-removal-that-was-stopped-or-failed). Run it before the task is resumed.
+The failure counts toward the launch-failure ceiling described under [Restarts, laps and
+escalation](#restarts-laps-and-escalation).
+
+The commit that saves leftover work when a task reaches `done` runs the `pre-commit`,
+`prepare-commit-msg`, `commit-msg` and `post-commit` hooks under the same 10-minute limit. When
+one is stopped, the task is held on `blocked` and the dispatcher prints the hook and the limit
+beside `uncommitted work could not be recorded before cleanup`.
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
@@ -1081,12 +1131,14 @@ The worktree counts as not removed when any of these is true:
 The dispatcher then prints this problem and keeps the task at `done`:
 
 ```
-! <task>: its worktree <path> could not be removed. To do it by hand, run `git worktree remove --force --force <path>` and delete the folder if it is still there
+! <task>: its worktree <path> could not be removed. To do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
 ! <task>: stays at `done`; cleanup removes its worktree again on the next pass
 ```
 
-The task is archived on the first pass after the worktree is gone. Removing a worktree deletes
-the folder directly only when it sits under `worktrees/`.
+The dispatcher makes read-only folders inside the worktree writable before it deletes them, so a
+step that leaves a read-only tree does not hold the task on `done`. The task is archived on the
+first pass after the worktree is gone. Removing a worktree deletes the folder directly only when it
+sits under `worktrees/`.
 
 `spoolway queue unqueue --force` prints the first message on standard error and carries the task
 to `pending`. It does not try again.

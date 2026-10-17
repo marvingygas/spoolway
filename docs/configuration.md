@@ -455,6 +455,29 @@ each failure. `spoolway resume` forgets that run, so the hook fires again. A non
 `blocked` or `paused` only records the failure, since both stages are already stopped for a
 person.
 
+A `queued`, `started` or `done` hook that is still running after 10 minutes is stopped and the
+task is paused. The reason names the hook and the limit:
+
+```
+issue_tracking hook `started` ran 10m and was stopped at the limit of 10m
+```
+
+While such a hook runs, the task's row names it and how long it has run. The NEXT column reads:
+
+```
+`started` hook running 2m (stopped at 10m)
+```
+
+A `blocked` or `paused` hook that is still running after 10 minutes is stopped and recorded as
+exit code 124. It is not fired again, and the dispatcher prints a line for it once.
+
+Every task paused by a hook adds a line to the dispatcher's problems, whether the hook exited
+non-zero or ran past its limit:
+
+```
+paused `t5`: issue_tracking hook exited 3. Fix the hook, then resume.
+```
+
 A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
 again on the next pass. The pass report says so. If three runs in a row are killed this way, the
 hook is not fired again. For the `queued`, `started` and `done` events the task is then paused
@@ -462,15 +485,18 @@ with the reason `issue_tracking hook was killed 3 times in a row without an exit
 that count along with the run. A re-fired hook can repeat whatever the killed run already did,
 such as opening a ticket.
 
-| Event | When it fires | Waits for the script | A non-zero exit |
-|---|---|---|---|
-| `fetch` | `spoolway issue show <ref>` reads one issue | Yes | Refuses the command |
-| `open` | `spoolway queue add` opens a ticket per task | Yes | Refuses the whole batch |
-| `queued` | A task arrives in the queue | No | Pauses the task |
-| `started` | A queued task is ready and about to leave `queued` for its entry step | No | Pauses the task |
-| `blocked` | A task comes to rest on `blocked` | No | Records the failure |
-| `paused` | A task arrives on the persisted `paused` stage | No | Records the failure |
-| `done` | A task finishes | No | Pauses the task |
+| Event | When it fires | Waits for the script | Time limit | A non-zero exit |
+|---|---|---|---|---|
+| `fetch` | `spoolway issue show <ref>` reads one issue | Yes | 60 s | Refuses the command |
+| `open` | `spoolway queue add` opens a ticket per task | Yes | 60 s | Refuses the whole batch |
+| `queued` | A task arrives in the queue | No | 10 min | Pauses the task |
+| `started` | A queued task is ready and about to leave `queued` for its entry step | No | 10 min | Pauses the task |
+| `blocked` | A task comes to rest on `blocked` | No | 10 min | Records the failure |
+| `paused` | A task arrives on the persisted `paused` stage | No | 10 min | Records the failure |
+| `done` | A task finishes | No | 10 min | Pauses the task |
+
+The time limits are fixed. No key changes them. A hook that is still running at its limit is
+stopped together with every process it started.
 
 A task queued with `tracking: off` fires none of `queued`, `started`, `blocked`, `paused` or
 `done`, and is never held waiting on one of them. See [`tracking`](tasks.md#the-frontmatter-is-spoolways).
@@ -522,6 +548,10 @@ has no file of its own, such as a `queue add --from -` stream entry. The hook bu
 whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's own
 `## Context` and `## Acceptance criteria` sections; spoolway renders nothing into it.
 
+An `open` hook that is still running after 60 seconds is stopped. The whole `queue add` fails
+and nothing is queued. When a job firing calls the hook, that minute's firing fails and the
+dispatcher's pass goes on.
+
 The submission is refused, naming the group, when no task in a group sets
 `group_description:`. A group whose tasks in the submission all set `tracking: off` and name
 no `ticket:` needs none. A group named by `queue add --no-tracking` needs none either. A
@@ -562,7 +592,7 @@ pending tasks first, so running the command again resumes.
 reference as typed) and `SPOOLWAY_PROJECT_KEY`. The script writes one JSON object to
 `SPOOLWAY_OUT` with `ref`, `url`, `title`, `state`, `labels`, `body` and `comments`. The
 command prints it. With no hook configured, or a script with no `fetch` branch, the command
-refuses.
+refuses. A `fetch` hook that is still running after 60 seconds is stopped and the command fails.
 
 ### `started` — a seventh event, fired by the dispatcher itself
 

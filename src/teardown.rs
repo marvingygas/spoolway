@@ -212,9 +212,17 @@ impl<'a> Dispatcher<'a> {
                     Some("uncommitted work could not be recorded before cleanup"),
                 );
                 task.save()?;
+                // The reason travels with the line: a commit stopped by a
+                // hung git hook is otherwise named only in the task's
+                // `## Status Log`, and the dispatcher printed no cause.
                 report.problems.push(format!(
-                    "{}: held at `blocked` — uncommitted work could not be recorded before cleanup",
-                    task.id()
+                    "{}: held at `blocked` — uncommitted work could not be recorded before \
+                     cleanup{}",
+                    task.id(),
+                    outcome
+                        .note()
+                        .map(|why| format!(": {why}"))
+                        .unwrap_or_default()
                 ));
                 return Ok(false);
             }
@@ -647,11 +655,10 @@ impl<'a> Dispatcher<'a> {
                     .unwrap_or_default();
                 report.problems.push(format!(
                     "{}: its worktree {} could not be removed{why}. To do it by hand, run \
-                     `git worktree remove --force --force {}` and delete the folder if it is \
-                     still there",
+                     `{}`",
                     task.id(),
                     checkout.display(),
-                    checkout.display()
+                    crate::mux::remove_by_hand_command(&self.repo.root, checkout)
                 ));
                 return false;
             }
@@ -1022,7 +1029,12 @@ impl<'a> Dispatcher<'a> {
             fresh.launch_landed();
             fresh.save()?;
             drop(lock);
-            left_standing += 1;
+            // Only a lane `lanes.json` records is standing. A task that holds
+            // a worktree between steps has nothing running, and counting it
+            // told a person lanes were left when none were.
+            if self.lanes.contains_key(&name) {
+                left_standing += 1;
+            }
         }
 
         // Whatever this pass banked, or any other lane's own bookkeeping —

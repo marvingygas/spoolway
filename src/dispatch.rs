@@ -662,6 +662,11 @@ pub struct Dispatcher<'a> {
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
     ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
+    /// The lines this pass appended to the ledger after `ledger` was loaded.
+    /// The unattended ceilings add them to the snapshot's sum, so the lane a
+    /// pass has just banked counts toward the brake it may have crossed; every
+    /// other reader of the snapshot is deliberately left without them.
+    banked_this_pass: Vec<crate::usage::Entry>,
     /// A fingerprint of each task's whole rendered file, as this pass first
     /// read it, by task id — not `last_report.at` alone: a key typed on the
     /// board mid-pass (`pause`, `unqueue` or `r` — see `status::on_key`) writes
@@ -908,7 +913,8 @@ enum TrackingGate {
     Pending,
     /// The hook exited clean.
     Clean,
-    /// The hook exited nonzero, or was killed without an exit code
+    /// The hook exited nonzero, ran past [`crate::tracking::LIFECYCLE_TIMEOUT`],
+    /// or was killed without an exit code
     /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row — with the reason
     /// the task is paused under.
     Failed(String),
@@ -1203,6 +1209,7 @@ impl<'a> Dispatcher<'a> {
             unattended: repo.unattended(),
             usage_banked: None,
             ledger: None,
+            banked_this_pass: Vec::new(),
             file_seen: HashMap::new(),
             pending_command_forget: None,
             pending_command_result: None,
@@ -2034,6 +2041,30 @@ impl<'a> Dispatcher<'a> {
                         continue;
                     }
 
+                    // A worktree that vanished under a live lane. Whatever the
+                    // lane writes from here lands nowhere; the task goes to
+                    // `blocked` with the reason. A report that lands first is
+                    // read the same way by `spoolway report`. A worktree
+                    // missing before a step starts is not this:
+                    // `ensure_workspace` re-cuts it.
+                    if let Some(lane) = lane
+                        && let Some(vanished) = tasks[index]
+                            .front
+                            .worktree_path
+                            .clone()
+                            .filter(|path| !path.is_dir())
+                    {
+                        self.block_vanished_worktree(
+                            &mut tasks[index],
+                            &pipeline,
+                            &step,
+                            lane,
+                            &vanished,
+                            report,
+                        )?;
+                        continue;
+                    }
+
                     // A lane of this task's is *working*, so the launch that
                     // made it did not die at launch — which is the only thing
                     // `attempts` counts. Forgiven here, at the first pass that
@@ -2285,6 +2316,22 @@ impl<'a> Dispatcher<'a> {
                     task.id()
                 )),
             }
+            // `blocked` and `paused` hooks hold nothing, so no gate below
+            // reads them and nothing would ever end one that hangs: the task
+            // sits there already, and a hook run that stays `Running` is not
+            // fired again for the task's next pause. Stopped here at the same
+            // limit and said once.
+            if (stage == crate::pipeline::BLOCKED || stage == crate::pipeline::PAUSED)
+                && let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage)
+            {
+                report.problems.push(format!(
+                    "{}: issue_tracking hook on `{stage}` ran {} and was stopped at the limit \
+                     of {}",
+                    task.id(),
+                    crate::tracking::minutes(ran),
+                    crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+                ));
+            }
         }
         if stage == crate::pipeline::QUEUED {
             let id = task.id().to_string();
@@ -2305,7 +2352,7 @@ impl<'a> Dispatcher<'a> {
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(reason) => {
-                    self.pause_for_hook_failure(task, stage, &reason)?;
+                    self.pause_for_hook_failure(task, stage, &reason, report)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2358,7 +2405,12 @@ impl<'a> Dispatcher<'a> {
                 match self.tracking_gate(task, crate::pipeline::STARTED) {
                     TrackingGate::Inactive | TrackingGate::Clean => {}
                     TrackingGate::Failed(reason) => {
-                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, &reason)?;
+                        self.pause_for_hook_failure(
+                            task,
+                            crate::pipeline::STARTED,
+                            &reason,
+                            report,
+                        )?;
                         return Ok(Routed::NextTask);
                     }
                     TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2457,7 +2509,7 @@ impl<'a> Dispatcher<'a> {
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(reason) => {
-                    self.pause_for_hook_failure(task, stage, &reason)?;
+                    self.pause_for_hook_failure(task, stage, &reason, report)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2538,6 +2590,17 @@ impl<'a> Dispatcher<'a> {
                 "issue_tracking hook was killed {kills} times in a row without an exit code"
             ));
         }
+        // A hook that has run past its limit is killed here, on the pass that
+        // notices, and the task pauses with the hook and the limit named. The
+        // alternative is the task waiting on `Pending` for ever behind a hook
+        // that will never exit.
+        if let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage) {
+            return TrackingGate::Failed(format!(
+                "issue_tracking hook `{stage}` ran {} and was stopped at the limit of {}",
+                crate::tracking::minutes(ran),
+                crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
+            ));
+        }
         match crate::tracking::exit_code(self.repo, task, stage) {
             Some(0) => TrackingGate::Clean,
             Some(code) => TrackingGate::Failed(format!("issue_tracking hook exited {code}")),
@@ -2546,8 +2609,9 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Pause `task` at `stage` (`queued`, `started` or `done`) over a hook
-    /// that failed for `reason` — a non-zero exit, or too many runs killed
-    /// without one (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
+    /// that failed for `reason` — a non-zero exit, a run stopped at
+    /// [`crate::tracking::LIFECYCLE_TIMEOUT`], or too many runs killed
+    /// without an exit code (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
@@ -2566,7 +2630,13 @@ impl<'a> Dispatcher<'a> {
     /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
     /// under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
-    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, reason: &str) -> Result<()> {
+    fn pause_for_hook_failure(
+        &mut self,
+        task: &mut Task,
+        stage: &str,
+        reason: &str,
+        report: &mut Report,
+    ) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
         let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
@@ -2583,6 +2653,14 @@ impl<'a> Dispatcher<'a> {
         task.front.hook_paused = Some(stage.to_string());
         task.set_stage(crate::pipeline::PAUSED, Some(reason));
         self.persist(task)?;
+        // The pause is silent on its own: a dispatcher whose only news is a
+        // paused task printed `nothing to do`. Said once, on the pass that
+        // pauses it, the way `pause_for_missing_start_branch` says its own.
+        report.moved = true;
+        report.problems.push(format!(
+            "paused `{}`: {reason}. Fix the hook, then resume.",
+            task.id()
+        ));
         Ok(())
     }
 
@@ -3361,6 +3439,18 @@ impl<'a> Dispatcher<'a> {
         // record for `busy_s`'s sake (see that field's own doc) reads this
         // and does not zero accrued time a write never actually banked.
         let appended = crate::usage::append(self.repo, &entry).is_ok();
+        // The pass's ledger snapshot was loaded at the top of this function,
+        // or earlier in the pass, before this line existed, so the ceiling
+        // checks would sum a ledger missing the very lane just banked and
+        // start more lanes over a brake already passed. The line is kept in
+        // `banked_this_pass` for them rather than pushed into the snapshot:
+        // the snapshot is shared, and pushing would copy the whole ledger
+        // whenever a caller still held it, and would change which session a
+        // later start in this pass carries. Only when the write landed: a
+        // line that is not on disk is not in the next run's sum either.
+        if appended {
+            self.banked_this_pass.push(entry.clone());
+        }
         // Folded into the running total immediately, so a second lane banked
         // against this same carried session later in the same pass sees this
         // entry without a fresh read of the file. Already populated by the
@@ -3574,6 +3664,114 @@ impl<'a> Dispatcher<'a> {
              gone",
             profile.session_blocked_ctx,
         ))
+    }
+
+    /// Stop a lane that is being given up on, bank what it spent, and bring
+    /// its pane forward where the backend keeps one. Answers the lane's
+    /// record, which says where the branch stood when the lane began.
+    ///
+    /// The one place a torn-down lane is stopped, for
+    /// [`Dispatcher::tear_down_and_escalate`] and
+    /// [`Dispatcher::block_vanished_worktree`] alike, so a fix to how it is
+    /// stopped or banked reaches both.
+    fn stop_and_bank_lane(
+        &mut self,
+        task: &Task,
+        pipeline: &Pipeline,
+        step: &Step,
+        lane: &Lane,
+    ) -> Result<LaneRecord> {
+        // Only on a backend where a pane is a thing to keep. Headless has
+        // none: what "keeping" it means there is a turn's process left
+        // running with nobody able to look at it, and a `sleep` or a model
+        // mid-thought outliving the run that started it. The log is what a
+        // person reads on that backend, and the log already outlives the lane.
+        // Same question as `holds_a_slot` asks, for the same reason — ask the
+        // backend rather than assume one. Unconditional otherwise, whichever
+        // stage the task is about to land on: a staffed `blocked` lane settles
+        // like any other step, and `finish_lanes` finishes the held pane then.
+        let hold = self.mux.resident_while_waiting();
+        if hold {
+            // A held pane is not necessarily a settled one any more — the
+            // context ceiling can reach this with a lane still mid-turn —
+            // and keeping the pane open must not mean leaving the agent
+            // running past the very ceiling that just stopped it. Escape
+            // ends the turn without ending the session, the same as
+            // `Mux::interrupt_lane` does for a person's own keypress, so the
+            // pane a person reads next still holds the conversation, just
+            // not one still spending.
+            // Spelled out rather than `is_busy()`: a lane parked on a
+            // permission prompt is still spending against the ceiling that
+            // just fired, exactly as a working one is, and Escape clears a
+            // prompt the same way it ends a turn.
+            if matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked) {
+                let _ = self.mux.interrupt_lane(&lane.name);
+            }
+        } else {
+            self.mux.stop_lane(&lane.name, &lane.pane_id)?;
+        }
+        // A lane that went wrong spent exactly as much as one that went right,
+        // and is the one you most want to find in `spoolway eval` afterwards.
+        // Booked here rather than in `finish_lanes`, which never sees a lane
+        // this path has already torn down — or, for a held one, only banks
+        // what a person added after the hold.
+        let ledger = self.ledger();
+        let record = match hold {
+            true => {
+                let record = self.lanes.entry(lane.name.clone()).or_insert_with(|| {
+                    LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
+                });
+                record.held_for_block = true;
+                record.clone()
+            }
+            false => self.lanes.remove(&lane.name).unwrap_or_else(|| {
+                LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
+            }),
+        };
+        let banked = self.record_usage(&record, task.id(), &step.id, Some(task), &pipeline.name);
+        // Same reset `hold_for_block` does, on the same condition: a held
+        // record stays in `self.lanes` after this bank, and its `busy_s`
+        // must not carry the interval just banked into whatever this lane
+        // is held for next — but only once a line was actually appended, or
+        // the accrued time this call left unbanked is simply lost.
+        if hold
+            && banked
+            && let Some(record) = self.lanes.get_mut(&lane.name)
+        {
+            record.busy_s = 0;
+        }
+        if hold {
+            let _ = self.mux.focus_lane(&lane.name);
+        }
+        Ok(record)
+    }
+
+    /// Stop a lane whose worktree was deleted while it ran, and send its task
+    /// to `blocked` with the vanished folder named.
+    ///
+    /// Whatever the lane had not committed is gone; its commits are on the
+    /// task's branch. Left alone, the lane would report from a folder that no
+    /// longer exists, or settle and be reminded, and the step's missing
+    /// output would be routed on as if it had passed. The lane's spend is
+    /// still banked, because it was spent.
+    fn block_vanished_worktree(
+        &mut self,
+        task: &mut Task,
+        pipeline: &Pipeline,
+        step: &Step,
+        lane: &Lane,
+        vanished: &Path,
+        report: &mut Report,
+    ) -> Result<()> {
+        self.stop_and_bank_lane(task, pipeline, step, lane)?;
+        let reason = vanished_worktree_reason(&step.id, vanished);
+        self.escalate(task, pipeline, step, &reason, true)?;
+        report.actions.push(format!(
+            "{}: blocked at `{}` — {reason}",
+            task.id(),
+            step.id
+        ));
+        Ok(())
     }
 
     /// Tear a lane down for a fault only a person or the unblocker can clear —
@@ -3935,73 +4133,7 @@ impl<'a> Dispatcher<'a> {
         output: &str,
         reason: &str,
     ) -> Result<()> {
-        // Only on a backend where a pane is a thing to keep. Headless has
-        // none: what "keeping" it means there is a turn's process left
-        // running with nobody able to look at it, and a `sleep` or a model
-        // mid-thought outliving the run that started it. The log is what a
-        // person reads on that backend, and the log already outlives the lane.
-        // Same question as `holds_a_slot` asks, for the same reason — ask the
-        // backend rather than assume one. Unconditional otherwise, whichever
-        // stage the task is about to land on: a staffed `blocked` lane settles
-        // like any other step, and `finish_lanes` finishes the held pane then.
-        let hold = self.mux.resident_while_waiting();
-        if hold {
-            // A held pane is not necessarily a settled one any more — the
-            // context ceiling can reach this with a lane still mid-turn —
-            // and keeping the pane open must not mean leaving the agent
-            // running past the very ceiling that just stopped it. Escape
-            // ends the turn without ending the session, the same as
-            // `Mux::interrupt_lane` does for a person's own keypress, so the
-            // pane a person reads next still holds the conversation, just
-            // not one still spending.
-            // Spelled out rather than `is_busy()`: a lane parked on a
-            // permission prompt is still spending against the ceiling that
-            // just fired, exactly as a working one is, and Escape clears a
-            // prompt the same way it ends a turn.
-            if matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked) {
-                let _ = self.mux.interrupt_lane(&lane.name);
-            }
-        } else {
-            self.mux.stop_lane(&lane.name, &lane.pane_id)?;
-        }
-        // A lane that went wrong spent exactly as much as one that went right,
-        // and is the one you most want to find in `spoolway eval` afterwards.
-        // Booked here rather than in `finish_lanes`, which never sees a lane
-        // this path has already torn down — or, for a held one, only banks
-        // what a person added after the hold.
-        let ledger = self.ledger();
-        let record = match hold {
-            true => {
-                let record = self.lanes.entry(lane.name.clone()).or_insert_with(|| {
-                    LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
-                });
-                record.held_for_block = true;
-                Some(record.clone())
-            }
-            false => Some(self.lanes.remove(&lane.name).unwrap_or_else(|| {
-                LaneRecord::readopted(self.repo, &lane.name, now_secs(), &ledger)
-            })),
-        };
-        let banked = match &record {
-            Some(record) => {
-                self.record_usage(record, task.id(), &step.id, Some(task), &pipeline.name)
-            }
-            None => false,
-        };
-        // Same reset `hold_for_block` does, on the same condition: a held
-        // record stays in `self.lanes` after this bank, and its `busy_s`
-        // must not carry the interval just banked into whatever this lane
-        // is held for next — but only once a line was actually appended, or
-        // the accrued time this call left unbanked is simply lost.
-        if hold
-            && banked
-            && let Some(record) = self.lanes.get_mut(&lane.name)
-        {
-            record.busy_s = 0;
-        }
-        if hold {
-            let _ = self.mux.focus_lane(&lane.name);
-        }
+        let record = self.stop_and_bank_lane(task, pipeline, step, lane)?;
 
         // The other end of the backstop. This lane never reached `spoolway
         // report`, so nothing has committed what it managed to do — and the
@@ -4009,7 +4141,7 @@ impl<'a> Dispatcher<'a> {
         // well resume it at a step that cleans up. Where it stood at launch is the lane
         // record's, because there is no lane left to ask.
         if let Some(worktree) = task.front.worktree_path.clone() {
-            let started_at = record.as_ref().map(|r| r.head.as_str()).unwrap_or("");
+            let started_at = record.head.as_str();
             if let Some(note) = crate::commands::auto_commit(
                 self.repo,
                 std::path::Path::new(&worktree),
@@ -4550,6 +4682,27 @@ impl<'a> Dispatcher<'a> {
                 panes,
                 commands: command_closes,
             } = self.take_for_limit(task, &lane, &pipeline.name, kept_panes, owned, &commands);
+            // Banking a finished lane is what puts its spend in the ledger,
+            // and these are the places a pass does it for a lane that is
+            // leaving — after the ceiling check `pass` made before any lane
+            // started. Looked at again here, so the lane that takes the run
+            // over its brake is the last one to cost anything. Nothing was
+            // closed or booted yet: the records go back as a failed boot puts
+            // them, banked and with no busy time left to bank twice.
+            if let Some(ceiling) = self
+                .over_output_ceiling()
+                .or_else(|| self.over_cost_ceiling())
+            {
+                claims.release(task.id());
+                if let Some(mut previous) = previous.filter(|p| p.kept) {
+                    previous.busy_s = 0;
+                    self.lanes.insert(lane, previous);
+                }
+                put_back_lanes(&mut self.lanes, taken_over, kept_panes, |_| true);
+                report.actions.push(ceiling.note.clone());
+                report.ceiling = Some(ceiling);
+                break;
+            }
             // With a limit of 1 the old pane is the tab's last. Closing it
             // before the split would empty the tab, and herdr closes a
             // workspace with its last tab's last pane.
@@ -5178,6 +5331,25 @@ impl<'a> Dispatcher<'a> {
                 // it finds recorded, for a run the `Running` arm's own
                 // timeout stopped without touching its pane.
                 self.close_hidden_command_pane(&runs, &key);
+                // A worktree deleted while the command ran. The step's
+                // exit code describes a tree that is gone, and routing it
+                // would carry on as if its work had survived. A worktree
+                // missing before the step starts never gets here: the
+                // `Fresh` arm re-cuts it first. To `blocked` whatever the
+                // step's `on_fail` says, because the code is not the answer.
+                if let Some(vanished) = task
+                    .front
+                    .worktree_path
+                    .clone()
+                    .filter(|path| !path.is_dir())
+                {
+                    let reason = vanished_worktree_reason(&step.id, &vanished);
+                    task.append_to_section("## Blocker", &format!("- {reason}\n"));
+                    report
+                        .actions
+                        .push(format!("{id}: blocked at `{}` — {reason}", step.id));
+                    return Ok(Some((crate::pipeline::BLOCKED.to_string(), Outcome::Fail)));
+                }
                 let (destination, outcome) = match code {
                     0 => (step.on_pass.clone(), Outcome::Pass),
                     _ => (
@@ -6172,6 +6344,7 @@ impl<'a> Dispatcher<'a> {
         let ledger = self.ledger();
         let spent: u64 = ledger
             .iter()
+            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6217,6 +6390,7 @@ impl<'a> Dispatcher<'a> {
         let ledger = self.ledger();
         let spent: f64 = ledger
             .iter()
+            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6230,11 +6404,17 @@ impl<'a> Dispatcher<'a> {
         }
         Some(Ceiling {
             note: format!(
-                "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — \
+                "this run has spent ${} against a max_cost_usd of ${} — \
                  starting nothing further. Lanes still open will finish, and the queue keeps its \
-                 place for the next run"
+                 place for the next run",
+                crate::fmt::usd_exact(spent),
+                crate::fmt::usd_exact(ceiling),
             ),
-            reached: format!("unattended.max_cost_usd reached: ${spent:.2} of ${ceiling:.2}"),
+            reached: format!(
+                "unattended.max_cost_usd reached: ${} of ${}",
+                crate::fmt::usd_exact(spent),
+                crate::fmt::usd_exact(ceiling)
+            ),
         })
     }
 }
@@ -6411,10 +6591,10 @@ fn take_back_fresh_cut(
         {
             report.problems.push(format!(
                 "{}: its worktree {} could not be removed after the task was unqueued: {err:#}. \
-                 Run `git worktree remove --force --force {}` and delete the folder if it is still there",
+                 Run `{}`",
                 task.id(),
                 path.display(),
-                path.display()
+                crate::mux::remove_by_hand_command(&repo.root, path)
             ));
         }
         let _ = mux.close_workspace(workspace);
@@ -6623,6 +6803,21 @@ fn is_borrowed(repo: &Repo, task: &Task) -> bool {
         .clone()
         .unwrap_or_else(|| crate::task::default_branch(task.id()));
     matches!(repo.worktree_for(&branch), Ok(Some(_)))
+}
+
+/// Why a task is blocked after its worktree was deleted under a running step,
+/// for an agent lane, a command and a lane's own report alike.
+///
+/// Only what was not committed is lost: commits are on the task's branch,
+/// which lives in the shared repository and which the fresh worktree is cut
+/// from again.
+pub(crate) fn vanished_worktree_reason(step: &str, vanished: &Path) -> String {
+    format!(
+        "`{step}` lost its worktree {} while it was running, so anything it had not \
+         committed is gone and its result would route work that no longer exists. \
+         Resume the task to run the step again in a fresh worktree",
+        vanished.display()
+    )
 }
 
 /// The workspace's first pane, when a step that shows a pane may run in it
@@ -6856,10 +7051,10 @@ fn ensure_workspace(
                     crate::mux::remove_worktree(&repo.root, &repo.worktree_root(), &checkout)
                         .with_context(|| {
                         format!(
-                            "{}: a worktree cut for it was left half done at {} and could not be removed; run `git worktree remove --force --force {}`, then resume the task",
+                            "{}: a worktree cut for it was left half done at {} and could not be removed; run `{}`, then resume the task",
                             task.id(),
                             checkout.display(),
-                            checkout.display()
+                            crate::mux::remove_by_hand_command(&repo.root, &checkout)
                         )
                     })?;
                     found = None;
@@ -10258,9 +10453,14 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .sweep_on_stop(&mut report)
-            .unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let ledger = dispatcher.ledger();
+        dispatcher.lanes.insert(
+            "demo · implement".into(),
+            LaneRecord::readopted(&repo, "demo · implement", now_secs(), &ledger),
+        );
+        dispatcher.sweep_on_stop(&mut report).unwrap();
 
         assert!(
             mux.calls().is_empty(),
@@ -10288,6 +10488,27 @@ mod tests {
               where they were"
             ]
         );
+    }
+
+    /// A task that holds a worktree but has no lane recorded is not a lane
+    /// left standing, so the stop line does not count it.
+    #[test]
+    fn a_stop_counts_only_the_lanes_the_records_hold() {
+        let (repo, _root_guard) = fixture("stop-no-lanes");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+            f.branch = Some("task/demo".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .sweep_on_stop(&mut report)
+            .unwrap();
+
+        assert!(report.actions.is_empty(), "{:?}", report.actions);
     }
 
     /// The other half of that deal, so sparing the interrupted case does not
@@ -14489,6 +14710,93 @@ mod tests {
         let line = lines.pop().expect("the lane was not banked");
         assert_eq!(lines.len(), usize::from(seeded.is_some()), "banked once");
         line
+    }
+
+    /// An unattended run starts no lane once the spend it has banked reaches
+    /// `max_cost_usd`, and that includes the spend of a lane the very same
+    /// pass frees. The note says what the ledger holds and prints the ceiling
+    /// as it was written.
+    #[test]
+    fn the_pass_that_banks_a_lane_over_the_cost_ceiling_starts_no_other_lane() {
+        let (mut repo, _root_guard) = unattended_fixture("brake-counts-this-pass");
+        repo.config.dispatch.visible_lanes = crate::config::VisibleLanes::Count(1);
+        repo.config.unattended.max_cost_usd = 0.015;
+        repo.config.models.insert(
+            "claude-tiered".to_string(),
+            crate::usage::ModelPrice {
+                input: 1.0,
+                output: 10.0,
+                cache_read: 0.1,
+                ..Default::default()
+            },
+        );
+        let worktree = a_checkout("dispatch-brake-counts-this-pass");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let waiting = add_task(&repo, "waiting", "queued");
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind: "claude".into(),
+                agent: "claude".into(),
+                model: "claude-tiered".into(),
+                ..kept_record("brake-lane", 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        // One request worth $0.02 at the prices above, over the $0.015 ceiling.
+        let home = crate::scratch::root("dispatch-brake-counts-this-pass-home");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("brake-lane.jsonl"),
+            "{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\
+             \"model\":\"claude-tiered\",\"usage\":{\"input_tokens\":20000,\
+             \"output_tokens\":1,\"cache_read_input_tokens\":0,\
+             \"cache_creation_input_tokens\":0}}}\n",
+        )
+        .unwrap();
+
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Working,
+            "w1:p7",
+        )]);
+        let report = with_home(&home, || run_pass(&repo, &mux));
+
+        let spent: f64 = crate::usage::read(&repo)
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.cost_usd)
+            .sum();
+        assert!(spent >= 0.015, "the freed lane was not banked: {spent}");
+        assert!(
+            mux.did("start").is_empty(),
+            "a lane started after the ceiling was reached: {:?}",
+            mux.calls()
+        );
+        assert!(
+            reload(&waiting).front.workspace_id.is_none(),
+            "the queued task was given a workspace"
+        );
+        let ceiling = report.ceiling.expect("the ceiling was not reported");
+        assert!(
+            ceiling
+                .note
+                .contains(&format!("${} against", crate::fmt::usd_exact(spent))),
+            "{ceiling:?}"
+        );
+        assert!(
+            ceiling.note.contains("max_cost_usd of $0.015"),
+            "{ceiling:?}"
+        );
     }
 
     /// `record_usage` is the path every torn-down lane is banked through. Its
@@ -20949,6 +21257,38 @@ mod tests {
         }
     }
 
+    /// A worktree deleted while its step's lane is running sends the task to
+    /// `blocked` with the vanished folder named, rather than leaving the
+    /// lane to report work that no longer exists.
+    #[test]
+    fn a_worktree_deleted_under_a_running_lane_blocks_the_task() {
+        let (repo, _root_guard) = fixture("vanished-worktree");
+        let gone = repo.root.join("vanished-worktree-folder");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(gone.clone());
+        });
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        let blocker = task.section("## Blocker").unwrap_or_default();
+        assert!(
+            blocker.contains(&gone.display().to_string()) && blocker.contains("lost its worktree"),
+            "{blocker}"
+        );
+        assert!(
+            !mux.did("interrupt").is_empty() || !mux.did("stop").is_empty(),
+            "the lane was left running: {:?}",
+            mux.calls()
+        );
+    }
+
     /// The end-to-end shape `session_blocked_ctx` exists for: a lane still
     /// running — busy in its pane, not settled — whose last completed turn
     /// has already read past the ceiling. The dispatcher stops it on the
@@ -25250,6 +25590,31 @@ mod tests {
         );
     }
 
+    /// A command whose worktree is deleted while it runs ends on `blocked`
+    /// with the vanished folder named, not on `on_pass` as if its work had
+    /// survived.
+    #[test]
+    fn a_command_that_loses_its_worktree_blocks_the_task() {
+        let (repo, _root_guard) = fixture("command-vanished");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let worktree = reload(&path).front.worktree_path.unwrap();
+        let mux = FakeMux::new(vec![]);
+        // The command removes the folder it runs in, then exits cleanly.
+        let pipelines = pipelines_running("cd / && rm -rf \"$SPOOLWAY_WORKTREE\"", false);
+
+        drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        let blocker = task.section("## Blocker").unwrap_or_default();
+        assert!(
+            blocker.contains(&worktree.display().to_string())
+                && blocker.contains("lost its worktree"),
+            "{blocker}"
+        );
+    }
+
     /// A command step routed to `blocked` writes down where it came from.
     ///
     /// `report` does this on its own route there, and `escalate` on its own,
@@ -28419,6 +28784,150 @@ exit 0"#,
             );
             assert!(mux.did("start").is_empty(), "{event}: no lane may start");
         }
+    }
+
+    /// A hook that has run past its limit is killed and the task pauses with
+    /// the hook and the limit named, and the pass says so on a problem line:
+    /// without one the dispatcher printed `nothing to do` over a held task.
+    /// Before this a hung hook was `Pending` for ever. The run is backdated
+    /// through its pid file's timestamp, which is what `elapsed` reads, so
+    /// the test does not wait out the real limit.
+    #[test]
+    fn a_hook_past_its_limit_is_killed_and_pauses_the_task() {
+        let (mut repo, _root_guard) = fixture("hook-timeout");
+        write_hook(&repo, "hang.sh", "exec sleep 300");
+        repo.config.issue_tracking.hook = "hang.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(crate::pipeline::QUEUED, "demo");
+
+        for _ in 0..200 {
+            run_pass(&repo, &mux);
+            if runs.state(&key) == crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        assert_eq!(reload(&path).stage(), crate::pipeline::QUEUED);
+
+        let pid = runs.read_pid(&key).unwrap();
+        let eleven_minutes_ago = std::time::SystemTime::now() - Duration::from_secs(11 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(eleven_minutes_ago)
+            .unwrap();
+
+        let report = run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.hook_paused.as_deref(), Some("queued"));
+        let problem = report
+            .problems
+            .iter()
+            .find(|p| p.contains("paused `demo`"))
+            .unwrap_or_else(|| panic!("no problem line: {:?}", report.problems));
+        assert!(
+            problem.contains("`queued`") && problem.contains("11m") && problem.contains("10m"),
+            "{problem}"
+        );
+        assert!(
+            !crate::headless::group_alive(pid),
+            "the hook's process group must be gone"
+        );
+    }
+
+    /// A `paused` hook that hangs is stopped at the same limit and recorded
+    /// as a failed run, so it is not started a second time and `doctor` names
+    /// it. Nothing pauses: the task is already stopped for a person. Before
+    /// this, only the hooks a gate reads were bounded, and a `paused` hook
+    /// that hung stayed `Running` for ever.
+    #[test]
+    fn a_paused_hook_past_its_limit_is_stopped_and_recorded() {
+        let (mut repo, _root_guard) = fixture("hook-paused-timeout");
+        write_hook(&repo, "hang.sh", "exec sleep 300");
+        repo.config.issue_tracking.hook = "hang.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::PAUSED);
+        let mux = FakeMux::new(vec![]);
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(crate::pipeline::PAUSED, "demo");
+
+        for _ in 0..200 {
+            run_pass(&repo, &mux);
+            if runs.state(&key) == crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60))
+            .unwrap();
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("hook on `paused`") && p.contains("11m") && p.contains("10m")),
+            "{:?}",
+            report.problems
+        );
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(124),
+            "the stop is recorded, so the hook is not started again"
+        );
+        assert!(
+            crate::tracking::failures(&repo)
+                .iter()
+                .any(|f| f.event == "paused" && f.exit_code == 124)
+        );
+        let quiet = run_pass(&repo, &mux);
+        assert!(
+            quiet
+                .problems
+                .iter()
+                .all(|p| !p.contains("hook on `paused`")),
+            "said again: {:?}",
+            quiet.problems
+        );
+    }
+
+    /// A hook that exits non-zero pauses the task and the pass says so:
+    /// the pause alone printed nothing, and the dispatcher read `nothing to
+    /// do` over a task it had just stopped.
+    #[test]
+    fn a_failing_hook_adds_a_problem_line() {
+        let (mut repo, _root_guard) = fixture("hook-problem-line");
+        write_hook(&repo, "fail.sh", "exit 7");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+
+        let mut problems = Vec::new();
+        for _ in 0..200 {
+            problems.extend(run_pass(&repo, &mux).problems);
+            if reload(&path).stage() != crate::pipeline::QUEUED {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("paused `demo`") && p.contains("exited 7")),
+            "{problems:?}"
+        );
     }
 
     /// A hook failing on `blocked` or `paused` only ever records the
