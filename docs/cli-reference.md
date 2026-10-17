@@ -45,7 +45,7 @@ list` and `sync`.
 say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt contract`,
 `prompt list`, `prompt override`, `config show`, `config get`, `config contract`,
 `config override`, `template contract`, `hook contract`, `override contract`, `group list`,
-`sync` and `queue add` without `--from`.
+`sync`, `queue add`, `queue show`, `prompt show` and `whats-new`.
 
 ## Your work
 
@@ -275,7 +275,7 @@ spoolway queue add --from <PATH> --base <BRANCH>
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
+| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. A directory skips dotfiles and links that point nowhere, and names each on standard error. Repeatable. Every task is validated together and written all or none |
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 | `--no-tracking [<GROUP>]` | | Queue a group with `tracking: off` and call no `open` hook for it. Repeatable, once per group. With no group, it covers every group in the batch |
@@ -290,16 +290,36 @@ written. A `base:` that exists only on `origin` is accepted; the worktree is cut
 both places.
 
 A task whose id is already in the queue or the archive refuses the whole batch and writes
-nothing:
+nothing. A queue file holds an id under any name, so `dd1 - Copy.md` holds `dd1` as much as
+`dd1.md` does:
 
 ```
 task `cart-totals` already exists at /home/me/.spoolway/proj-ab12cd34/queue/cart-totals.md
+```
+
+A task whose id is the name of a routine is refused too, because the lanes of the routine's
+copies take the routine's name. Nothing is queued:
+
+```
+task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. Give this task another id; nothing was queued.
 ```
 
 When several adds of one id run at the same moment, exactly one is queued and the others are
 refused with the same message and write nothing. The queue screen, scheduled jobs and the
 routines tab follow the same rule. An add that cannot take the id's lock within three seconds is refused with
 `could not lock task`. Run it again.
+
+When several adds of root tasks into one group run at the same moment, one queues its root and
+the others are refused. The message names the group and both roots. An add that cannot take the
+group's lock within three seconds is refused with `could not lock group`. Run it again.
+
+A task that sets a key spelt like a field of the task contract in another case or with `-` for
+`_`, such as `gate-at:`, `depends-on:` or `ID:`, refuses the whole batch. The message names the
+field. For a field spoolway sets itself, it says to remove the key. See [The frontmatter is
+spoolway's](tasks.md#the-frontmatter-is-spoolways).
+
+A task body that still holds its skeleton's `[[…]]` placeholder text refuses the whole batch. The
+message names the section. See [One constraint no key can express](tasks.md#one-constraint-no-key-can-express).
 
 A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
 command prints one line for each such task and then `Nothing was queued.`:
@@ -313,7 +333,24 @@ See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-e
 With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
 A `--from` path under this project's own pending directory is deleted once the batch is
-written. A `--from` path anywhere else, including `-`, is read and left alone.
+written. A `--from` path anywhere else, including `-`, is read and left alone. When an `open`
+hook fails, the ids it already returned are written back into the files in the pending
+directory. A file anywhere else is never written. The failure message lists, task by task, which
+ids were written into `pending/` and which were not. It names each task whose ticket you must
+close by hand.
+
+```
+    ids      written into pending/: c2
+             not written — only files in pending/ are updated: c1 (outside pending/); close those by hand first
+```
+
+A task whose `task-<id>` worktree or `task/<id>` branch is still on disk refuses the whole batch.
+Those are the leftovers of an earlier task with that id, such as one whose queue file was
+deleted. Nothing is queued. The message names the worktree and the branch, the `git worktree
+remove --force` and `git branch -D` commands that drop them, and the `git branch -m` rename that
+keeps the work. The queue screen and routines refuse the same id. A task still in the queue is
+reported as already existing instead. See [A start branch that does not
+exist](tasks.md#a-start-branch-that-does-not-exist).
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements and runs its
 `# spoolway-login:` command first; an unmet requirement or a failed login prints the same gate
@@ -371,8 +408,12 @@ pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 On a paused or blocked row, STEP and the `--json` `stage` name the step the stop came from, so a
 script that finds paused or blocked tasks matches `state`, not `stage`.
 
-A file in the queue that does not parse has no row. Under the table, the text output lists each
-such file with its reason. In `--json`, each entry of `unparseable` has a `path` and an `error`.
+A file in the queue that does not parse has no row. A file that holds an id another file holds,
+such as `dd1 - Copy.md` beside `dd1.md`, has no row either. The dispatcher skips both. Under the
+table, the text output lists the files that do not parse under one heading, and the files that
+hold an id already in use under another. Each file is listed with its reason. In `--json`, each
+entry of `unparseable` has a `path`, an `error` and a `duplicate` boolean, which is `true` for a
+file that holds an id already in use.
 
 ### `spoolway queue show <task>`
 
@@ -865,7 +906,7 @@ spoolway task edit <task> --section Mockup --from -
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--section <NAME>` | | The `##` heading to rewrite, named without its `##` |
+| `--section <NAME>` | | The `##` heading to rewrite, named without its `##`. A `##` line inside a code fence stays in the section |
 | `--from <PATH>` | | The section's new content: a file path, or `-` for standard input |
 
 See [The stop is yours to work in](tasks.md#the-stop-is-yours-to-work-in).
@@ -928,6 +969,10 @@ $ spoolway pipeline check
 
 A missing or overlong `description:` is a warning, not a failure. So is a step that no route
 from the first step reaches.
+
+A step's `prompt:` fails when it starts with `/` or holds `..`. A name such as `team/worker` is
+looked up beneath the prompts directory and passes. A `task_template:` that names a missing file
+also fails.
 
 While a dispatcher runs, the check first prints a line naming each pipeline file edited since
 it started. That line is not a failure. See [Editing a pipeline while it
@@ -1120,6 +1165,11 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 | `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
 
+With `--task` and no `--step`, a task on a step renders that step. A queued task renders the
+pipeline's first agent step. A paused task renders the step `spoolway resume` sends it to, the
+one `spoolway queue route` prints. If that step is a command step, the command says no agent
+runs there. A done task has no next step, and the command says so.
+
 With neither `--pipeline` nor `--task`, and no pipeline yet in the project, it prints a line
 pointing at `spoolway pipeline contract` instead of a step's contract: there is no step yet to
 render against.
@@ -1214,8 +1264,8 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 
 The contract holds every pipeline's longest agent step and body skeleton, the sizing guidance,
 the output directory, the allowed and refused keys, one sentence per key, and the rules that
-hold across a set. `--from` runs the same validation as `queue add --from`
-and exits non-zero on a refusal.
+hold across a set. `--from` runs the same validation as `queue add --from`, including the
+start-branch check and the placeholder check, and exits non-zero on a refusal.
 
 Bare, with no `--from`, the contract also carries a top-level `base`: the branch the checkout
 it ran in has out. A worktree reports its own branch. A detached checkout reports `null`.
@@ -1650,8 +1700,25 @@ seconds, as below. The warnings screen shown before dispatching never runs it.
   FAIL  jira.sh login: `acli jira auth status` failed: ✗ Error: unauthorized: use 'acli jira auth login' to authenticate. Log in again with `acli jira auth login`, then re-run `spoolway doctor`.
 ```
 
+A `FAIL` row labelled `queue ids are unique` names each queue file that holds an id another file
+holds. A `FAIL` row labelled `no queued task is named like a routine` names each queued task whose
+id is the name of a routine.
+
+A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
+`task/<id>` branch that no queued task owns, with the commands that drop them and the rename
+that keeps the work. The row also fails when git cannot list the worktrees.
+
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.
+
+A `FAIL` row labelled `the configured hook script has Unix line endings` names a hook whose first
+line ends in a carriage return. A `FAIL` row labelled `the configured hook script is executable`
+names a hook with no executable bit and gives its mode. Each row gives the command that fixes it.
+See [The issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+
+A `FAIL` row labelled ``prompt `<name>` `` names a step prompt that starts with `/` or holds `..`.
+A `FAIL` row labelled ``task template of pipeline `<name>` `` names a pipeline whose
+`task_template:` file is missing.
 
 ```
   note  2 project home(s) under ~/.spoolway/ record a checkout that is gone; delete a folder to remove it: /home/you/.spoolway/scratch-1a2b, /home/you/.spoolway/demo-3c4d

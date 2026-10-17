@@ -532,6 +532,58 @@ impl Repo {
         Ok(None)
     }
 
+    /// Every task checkout git lists under [`Repo::worktree_root`] that no
+    /// queued task owns, as its path and the branch it has out.
+    ///
+    /// Deleting a running task's queue file takes the task off the board but
+    /// leaves its worktree and branch behind, and nothing else reports it.
+    /// A checkout counts as owned when a parsed queued task records its path,
+    /// or names its branch. A queue file that will not parse still belongs to
+    /// a live task, so any branch `queue add` could have given its file-name
+    /// id owns the checkout too. Only branches under `task/` are looked at,
+    /// so the scratch checkouts `pipeline contract` cuts under the same root
+    /// are not taken for leftovers.
+    pub fn orphaned_task_checkouts(&self, tasks: &[Task]) -> Result<Vec<(PathBuf, String)>> {
+        let listing = self.git(&["worktree", "list", "--porcelain"])?;
+        let root = self.worktree_root();
+        let unparsed: Vec<String> = self
+            .queued_ids()
+            .into_iter()
+            .filter(|id| !tasks.iter().any(|task| task.id() == id))
+            .collect();
+        let owned = |path: &Path, branch: &str| {
+            tasks.iter().any(|task| {
+                task.front.worktree_path.as_deref().map(Path::new) == Some(path)
+                    || task
+                        .front
+                        .branch
+                        .as_deref()
+                        .unwrap_or(&task::default_branch(task.id()))
+                        == branch
+            }) || unparsed
+                .iter()
+                .any(|id| task::branch_belongs_to(branch, id))
+        };
+        let mut found = Vec::new();
+        let mut path: Option<PathBuf> = None;
+        for line in listing.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(rest));
+            } else if let Some(reference) = line.strip_prefix("branch refs/heads/")
+                && let Some(checkout) = path.take()
+            {
+                let branch = reference.trim();
+                if branch.starts_with("task/")
+                    && crate::platform::is_within(&checkout, &root)
+                    && !owned(&checkout, branch)
+                {
+                    found.push((checkout, branch.to_string()));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Whether git still holds `checkout` under its `initializing` lock.
     ///
     /// `git worktree add` locks the entry it is making with that reason and
@@ -872,6 +924,28 @@ impl Repo {
         self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
+    /// The advisory lock held while a group's shape is checked and its new
+    /// tasks saved, so two `queue add` calls into one group cannot both see
+    /// it without a root — see `save_new_tasks` in `commands::queue`. It lives
+    /// beside the task locks but in its own folder, so a group named like a
+    /// task id never shares a lock with that task. Any character that is not
+    /// safe in a file name becomes `_`, so two names (`a.b` and `a_b`, or
+    /// two spellings on a disk that ignores case) can land on one file. Their
+    /// adds then take turns, which is harmless, but a caller locking both in
+    /// one call must take the path once.
+    pub fn group_lock_file(&self, group: &str) -> PathBuf {
+        let safe: String = group
+            .chars()
+            .map(
+                |c| match c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    true => c,
+                    false => '_',
+                },
+            )
+            .collect();
+        self.home().join("group-locks").join(format!("{safe}.lock"))
+    }
+
     /// The advisory lock held while a routine is checked for a live copy and
     /// its next copy saved, so two submissions of one routine cannot both
     /// find the queue clear — see `claim_routines` in `commands::queue`.
@@ -898,7 +972,7 @@ impl Repo {
     /// failing the whole read — see [`task::load_dir`]. Callers that want to
     /// name the bad file reach for [`Repo::tasks_and_problems`] instead.
     pub fn tasks(&self) -> Result<Vec<Task>> {
-        Ok(task::load_dir(&self.queue_dir())?.0)
+        Ok(self.tasks_and_problems()?.0)
     }
 
     /// Every active task in id order, together with the queue files that
@@ -908,8 +982,13 @@ impl Repo {
     /// The board reads the queue through `status::cached_queue` instead, a
     /// per-file cache over the same [`task::load_dir`] that skips reparsing a
     /// file whose bytes have not moved since the last frame.
+    ///
+    /// A queue task whose id the archive already holds is skipped and named
+    /// too — see [`task::skip_archived_ids`].
     pub fn tasks_and_problems(&self) -> Result<(Vec<Task>, Vec<task::LoadProblem>)> {
-        task::load_dir(&self.queue_dir())
+        let (tasks, mut problems) = task::load_dir(&self.queue_dir())?;
+        let tasks = task::skip_archived_ids(tasks, &mut problems, &self.archive_dir());
+        Ok((tasks, problems))
     }
 
     /// The id of every task file currently in `queue/`, read from the file
@@ -4754,6 +4833,35 @@ mod tests {
         let (home, home_guard) = scratch_home("registered");
         let repo = crate::platform::test_home::with_home(&home, || Repo::discover(start))?;
         Ok((repo, home_guard))
+    }
+
+    /// The dispatcher pass, `queue list` and `doctor` all read the queue
+    /// through here. A copy whose id the archive holds must come back as a
+    /// duplicate problem and no task, or `dd1` would run a second time once
+    /// the first run archives.
+    #[test]
+    fn tasks_and_problems_skips_a_queue_file_whose_id_is_archived() {
+        let base = crate::scratch::root("repo-archived-id-skipped");
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config: Config::default(),
+            home: base.join(".home"),
+        };
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(repo.queue_dir().join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(repo.archive_dir().join("dd1.md"), doc).unwrap();
+
+        let (tasks, problems) = repo.tasks_and_problems().unwrap();
+
+        assert!(tasks.is_empty());
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].duplicate);
+        assert!(problems[0].path.ends_with("dd1 - Copy.md"));
+        assert!(repo.tasks().unwrap().is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A bare "origin", a checkout wired to it, and spoolway state in the

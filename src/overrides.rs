@@ -316,8 +316,8 @@ pub(crate) fn apply_pipeline_patch(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let patch: PipelinePatch =
-        serde_norway::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let patch: PipelinePatch = serde_norway::from_str(crate::task::without_bom(&raw))
+        .with_context(|| format!("parsing {}", path.display()))?;
 
     if let Some(description) = patch.description {
         pipeline.description = Some(description);
@@ -782,7 +782,8 @@ pub(crate) fn read_pipeline_patch(overrides: &Path, name: &str) -> Result<Option
     let path = pipeline_patch_path(overrides, name);
     match std::fs::read_to_string(&path) {
         Ok(raw) => Ok(Some(
-            serde_norway::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?,
+            serde_norway::from_str(crate::task::without_bom(&raw))
+                .with_context(|| format!("parsing {}", path.display()))?,
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -1632,6 +1633,20 @@ agent: pi
         assert!(render_scalar(&mapping).is_err());
         let sequence: serde_norway::Value = serde_norway::from_str("[1, 2]").unwrap();
         assert!(render_scalar(&sequence).is_err());
+    }
+
+    /// A patch file saved with a byte order mark reads like one without.
+    #[test]
+    fn a_pipeline_patch_with_a_byte_order_mark_is_read() {
+        let overrides = crate::scratch::root("overrides-patch-bom");
+        let _ = std::fs::remove_dir_all(&overrides);
+        let path = pipeline_patch_path(&overrides, "impl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "\u{feff}steps:\n  implement:\n    model: m\n").unwrap();
+
+        let patch = read_pipeline_patch(&overrides, "impl").unwrap().unwrap();
+
+        assert_eq!(patch.steps["implement"]["model"].as_str(), Some("m"));
     }
 
     /// A pipeline patch round-trips through read/write, and a second

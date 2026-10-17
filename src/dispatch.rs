@@ -1373,11 +1373,7 @@ impl<'a> Dispatcher<'a> {
         // than a board that has silently stopped moving. See
         // [`crate::task::load_dir`].
         for problem in &load_problems {
-            report.problems.push(format!(
-                "{} did not parse and was skipped: {}",
-                problem.path.display(),
-                problem.error
-            ));
+            report.problems.push(problem.skipped_line());
         }
 
         let mine = our_checkouts(self.repo, &tasks);

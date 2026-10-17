@@ -51,6 +51,7 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
                 .map(|problem| serde_json::json!({
                     "path": problem.path.display().to_string(),
                     "error": problem.error,
+                    "duplicate": problem.duplicate,
                 }))
                 .collect::<Vec<_>>(),
         });
@@ -78,16 +79,28 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
         if !rows.is_empty() {
             println!();
         }
-        println!(
-            "{} in the queue did not parse, so the dispatcher skips {}:",
-            plural(problems.len(), "file"),
-            match problems.len() {
-                1 => "it",
-                _ => "them",
+        // A duplicate parsed fine, so it is not said not to: it is skipped
+        // because another file already holds its id.
+        let (duplicates, unparsed): (Vec<_>, Vec<_>) =
+            problems.iter().partition(|problem| problem.duplicate);
+        for (group, reason) in [
+            (unparsed, "did not parse"),
+            (duplicates, "holds an id already in use"),
+        ] {
+            if group.is_empty() {
+                continue;
             }
-        );
-        for problem in &problems {
-            println!("  {} — {}", problem.path.display(), problem.error);
+            let (them, reason) = match group.len() {
+                1 => ("it", reason.to_string()),
+                _ => ("them", reason.replace("holds", "hold")),
+            };
+            println!(
+                "{} in the queue {reason}, so the dispatcher skips {them}:",
+                plural(group.len(), "file"),
+            );
+            for problem in group {
+                println!("  {} — {}", problem.path.display(), problem.error);
+            }
         }
         println!("Fix the file, or move it out of the queue directory.");
     }
@@ -933,7 +946,9 @@ fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
 }
 
 /// Every task named by `--from`, in the order it names them: a directory
-/// expands to its `*.md` files in filename order, `-` reads a
+/// expands to its `*.md` files in filename order, minus the dotfiles and
+/// dangling links an editor leaves there, each named on standard error as it
+/// is skipped (see [`not_a_task_file`]); `-` reads a
 /// `---`-separated stream from standard input, and anything else is one
 /// file. Each entry is named for the errors below — a path, or `<stdin>#N`
 /// for a stream's Nth task — and holds the raw, unparsed task text.
@@ -963,6 +978,10 @@ pub(crate) fn gather_tasks(from: &[String]) -> Result<Vec<(String, String)>> {
                 .collect();
             entries.sort();
             for entry in entries {
+                if let Some(why) = not_a_task_file(&entry) {
+                    eprintln!("skipping {}: {why}", entry.display());
+                    continue;
+                }
                 gather_one(&entry, &mut tasks)?;
             }
         } else {
@@ -970,6 +989,30 @@ pub(crate) fn gather_tasks(from: &[String]) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(tasks)
+}
+
+/// Why a `*.md` entry of a `--from` directory is not a task file, if it is
+/// not one.
+///
+/// An editor leaves files here that merely look like tasks: a dotfile such
+/// as `.pa.md`, and Emacs's lock link `.#pa.md`, which points at
+/// `user@host.pid` and so at nothing. Reading either would fail the whole
+/// batch over a file the person never meant to queue. The queue tab's
+/// listing of the pending directory asks the same question, so the board
+/// and `queue add` agree about which files are tasks.
+pub(crate) fn not_a_task_file(path: &std::path::Path) -> Option<&'static str> {
+    let hidden = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'));
+    if hidden {
+        return Some("a dotfile, which an editor leaves behind");
+    }
+    // `exists` follows links, so a link to nothing is false here.
+    if !path.exists() {
+        return Some("a link that points nowhere");
+    }
+    None
 }
 
 /// One `--from` entry that is neither a directory nor `-`.
@@ -1006,7 +1049,7 @@ fn split_stream(input: &str) -> Vec<String> {
             // part of the fence, any more than it is to `split_fence`: left
             // in, that fence goes uncounted and the stream is cut one fence
             // late, running one task's front matter into the one before.
-            let fence = line.strip_prefix('\u{feff}').unwrap_or(line);
+            let fence = crate::task::without_bom(line);
             if fence.trim_end() == "---" {
                 fences += 1;
                 if fences == 3 {
@@ -1064,6 +1107,26 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                 "{name} sets `{key}:`, which spoolway sets on every task itself — \
                  remove it from the task"
             );
+        }
+    }
+
+    // `gate-at:` or `ID:` is not `gate_at:` or `id:`, so it would pass as
+    // passthrough metadata and the person's intent would vanish. Only a
+    // spelling that folds to a key the contract names is refused; any other
+    // key stays the project's own.
+    for key in mapping.keys().filter_map(|k| k.as_str()) {
+        match super::task::misspelt_key(key) {
+            Some((known, true)) => bail!(
+                "{name} sets `{key}:`, which spoolway does not read — it means `{known}:`. \
+                 Rename it to `{known}:`."
+            ),
+            // Renaming would only walk into the refusal or the silent drop
+            // of the key itself, so the advice is to take it out.
+            Some((known, false)) => bail!(
+                "{name} sets `{key}:`, which is `{known}:` spelt another way — a key \
+                 spoolway sets itself or throws away. Remove it from the task."
+            ),
+            None => {}
         }
     }
 
@@ -1312,33 +1375,33 @@ fn validate_batch_undescribed(
         // gh-359 — so a task id needs no pipeline at all to be checked
         // against, just the plain path-safety rule below.
         let pipeline = pipelines.get(pipeline_name)?;
-        // `gate_at:` pauses a task when it reports from the step it names. A
-        // name that is no step of this pipeline — a typo, or `done`, which is
-        // not a step — is never matched, so the checkpoint is dropped and the
-        // task runs straight through. Refused here, where the task can still
-        // be corrected, rather than left to fail silently at run time.
-        if let Some(gate_at) = task.front.gate_at.as_deref()
-            && pipeline.step(gate_at).is_none()
-        {
-            bail!(
-                "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
-                 `{pipeline_name}` — it may name one of: {}",
-                task.front.id,
-                pipeline.step_ids().join(", ")
-            );
-        }
+        check_gate_at(&task, pipeline)?;
+        refuse_unfilled_skeleton(
+            name,
+            &task,
+            &[crate::task_template::resolve_for(repo, pipeline)],
+        )?;
         // A task id becomes a branch and a file name too. Both are checked
         // here rather than only when a task's value happens to differ,
         // the same as `check_task_base` above.
         crate::mux::check_task_id(&task.front.id)?;
 
         task.path = repo.queue_dir().join(format!("{}.md", task.front.id));
+        if let Some(refusal) = routine_name_refusal(repo, &task.front.id) {
+            bail!("{refusal}");
+        }
         if let Some(existing) = existing_task_path(repo, &task.front.id) {
             bail!(
                 "task `{}` already exists at {}",
                 task.front.id,
                 existing.display()
             );
+        }
+        // After the existing-task check: a task still in the queue owns its
+        // own worktree and branch, and telling a person to remove those would
+        // be advice to destroy live work.
+        if let Some(refusal) = leftover_refusal(repo, &task.front.id, &task_branch(&task)) {
+            bail!("{refusal}");
         }
         if tasks.iter().any(|t: &Task| t.id() == task.id()) {
             bail!(
@@ -1353,6 +1416,89 @@ fn validate_batch_undescribed(
     untrack_named_groups(&mut tasks, no_tracking)?;
     check_dependencies_set(repo, &mut tasks)?;
     Ok(tasks)
+}
+
+/// Every `[[…]]` placeholder in `text`, as written there, brackets included.
+/// Placeholders wrap across lines in the skeletons, so the span is taken from
+/// the text, not line by line.
+fn placeholders_in(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(len) = rest[start..].find("]]") else {
+            break;
+        };
+        found.push(&rest[start..start + len + 2]);
+        rest = &rest[start + len + 2..];
+    }
+    found
+}
+
+/// Refuse a task body that still holds a `[[…]]` placeholder of the skeleton
+/// it was written from.
+///
+/// A task queued without its skeleton filled in reaches a lane whose brief
+/// says "[[what this task achieves]]", and the lane has nothing to build. The
+/// placeholders refused are those of `own`, the skeletons this project writes
+/// the task from ([`crate::task_template::resolve_for`]), and of the
+/// shipped skeletons, since a project's own file may be one an older release
+/// wrote, whose placeholder wording the shipped file no longer has. Only that
+/// exact text is refused, so a task that writes double brackets of its own on
+/// purpose still queues. The refusal names the heading the placeholder sits
+/// under, the one thing a person needs to find it. Run for `queue add`, `task
+/// contract` and a trial's arms alike.
+fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<()> {
+    let body = task.body.as_str();
+    let Some(at) = own
+        .iter()
+        .map(String::as_str)
+        .chain(crate::assets::TASK_TEMPLATES.iter().map(|(_, text)| *text))
+        .flat_map(placeholders_in)
+        .filter_map(|p| body.find(p))
+        .min()
+    else {
+        return Ok(());
+    };
+    let heading = body[..at]
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("## "))
+        .map_or("the top of the task", str::trim);
+    bail!(
+        "{name}: the section `{heading}` still holds the skeleton's `[[…]]` \
+         placeholder text. Replace it with the task's own words, or delete the \
+         section if the task has nothing to say there, then add it again."
+    );
+}
+
+/// Refuse a task whose `gate_at:` names no step of its pipeline.
+///
+/// `gate_at:` pauses a task when it reports from the step it names. A name
+/// that is no step of this pipeline — a typo, or `done`, which is not a step —
+/// is never matched, so the checkpoint is dropped and the task runs straight
+/// through. Refused where the task can still be corrected, rather than left to
+/// fail silently at run time. `queue add` uses this; a trial's arms use
+/// [`unmatched_gate_at`] and word the refusal for the picker instead.
+fn check_gate_at(task: &Task, pipeline: &crate::pipeline::Pipeline) -> Result<()> {
+    if let Some(gate_at) = unmatched_gate_at(task, pipeline) {
+        bail!(
+            "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
+             `{}` — it may name one of: {}",
+            task.front.id,
+            pipeline.name,
+            pipeline.step_ids().join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The `gate_at:` of `task` when `pipeline` has no step of that name, which
+/// is what [`check_gate_at`] and a trial arm both refuse.
+fn unmatched_gate_at<'a>(task: &'a Task, pipeline: &crate::pipeline::Pipeline) -> Option<&'a str> {
+    task.front
+        .gate_at
+        .as_deref()
+        .filter(|gate_at| pipeline.step(gate_at).is_none())
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -1459,6 +1605,10 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
 /// repeat submission — and a trial's own mint, below — both need to be true
 /// before a name is safe to use: a queued collision fails at once, and an
 /// archived one would be silently overwritten the moment this task finished.
+///
+/// A queue file holds an id under any name, not only `<id>.md`: a copy such
+/// as `dd1 - Copy.md` still says `id: dd1`, and a second task saved under
+/// that id would run beside it. So the queue is read for its ids as well.
 fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
     for dir in [repo.queue_dir(), repo.archive_dir()] {
         let path = dir.join(format!("{id}.md"));
@@ -1466,13 +1616,106 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
             return Some(path);
         }
     }
-    None
+    queued_id_paths(repo).remove(id)
 }
 
-/// The lowest-numbered `<id>-N` free in both the queue and the archive — see
-/// [`existing_task_path`] — and not already claimed earlier in the same
-/// trial, since a batch of arms is minted before any of them is saved and
-/// so cannot see each other on disk yet.
+/// The path of every queue file that parses, by the `id:` it holds. A file
+/// that will not parse has no id to hold and is left out; one hiding a
+/// duplicate of an id is left out too, because the file that holds the id is
+/// the one named.
+fn queued_id_paths(repo: &Repo) -> BTreeMap<String, std::path::PathBuf> {
+    let (tasks, _) = repo.tasks_and_problems().unwrap_or_default();
+    tasks
+        .into_iter()
+        .map(|task| (task.front.id.clone(), task.path))
+        .collect()
+}
+
+/// The ids of every task file under `.spoolway/routines/`: the names routine
+/// copies are numbered from and their lanes are drawn under.
+pub(crate) fn routine_names(repo: &Repo) -> std::collections::BTreeSet<String> {
+    super::routines::list_routines(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|folder| folder.tasks)
+        .map(|task| task.id)
+        .collect()
+}
+
+/// The refusal for an id that is a routine's name, or `None` when it is not.
+///
+/// A routine's copies are numbered (`nite-1`), but their lanes are named for
+/// the routine (`nite · implement`). An ordinary task with the id `nite`
+/// would be given the same lane name, and the two would take over each
+/// other's panes.
+fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
+    routine_names(repo).contains(id).then(|| {
+        format!(
+            "task id `{id}` is the name of routine `{id}`, whose copies' lanes are named \
+             `{id}{}<step>`. Give this task another id; nothing was queued.",
+            crate::mux::LANE_NAME_SEPARATOR
+        )
+    })
+}
+
+/// The refusal for an id whose worktree or branch an earlier task left
+/// behind, or `None` when neither exists.
+///
+/// Deleting a running task's queue file drops it without cleaning up.
+/// Queueing the id again would adopt the leftover checkout without a word, so
+/// the new task would start from the old one's half-finished work. A branch
+/// alone is not adopted, but the first cut would refuse it later. Nothing is
+/// deleted here: the person may mean to continue that work, so the refusal
+/// names both and the commands that remove or rename them.
+fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
+    let worktree = repo.worktree_root().join(crate::mux::branch_slug(branch));
+    let has_worktree = worktree.exists();
+    let has_branch = ref_exists(repo, branch);
+    if !has_worktree && !has_branch {
+        return None;
+    }
+    let mut what = Vec::new();
+    let mut remove = Vec::new();
+    if has_worktree {
+        what.push(format!("worktree {}", worktree.display()));
+        remove.push(format!(
+            "`git worktree remove --force {}`",
+            worktree.display()
+        ));
+    }
+    if has_branch {
+        what.push(format!("branch `{branch}`"));
+        remove.push(format!("`git branch -D {branch}`"));
+    }
+    // The two leftovers fail differently: a worktree already on disk is
+    // adopted without a word, while a branch alone is refused by the first cut.
+    let why = match has_worktree {
+        true => "and the new task would pick it up",
+        false => {
+            "and the new task's first cut would be refused because it never uses a \
+                  branch that already exists"
+        }
+    };
+    Some(format!(
+        "task id `{id}` cannot be queued: {} from an earlier task with that id is still \
+         there, {why}. To drop it, run {}. To keep the work, rename the branch with `git \
+         branch -m {branch} <name>` and set `starts_from: <name>` in the task. Nothing was \
+         queued.",
+        what.join(" and "),
+        remove.join(", then "),
+    ))
+}
+
+/// The lowest-numbered `<id>-N` held by no queue file, archive file,
+/// `task/<id>` branch or routine name — see [`existing_task_path`] — and not
+/// already claimed earlier in the same trial, since a batch of arms is minted
+/// before any of them is saved and so cannot see each other on disk yet.
+///
+/// The branch is checked because archive retention deletes an old task's
+/// file but not its branch. Minting the freed id again would hand dispatch a
+/// task whose first cut refuses the branch it finds already there, and the
+/// copy would sit blocked on every later window. Each candidate costs one
+/// `git show-ref`, the same lookup the first-cut guard makes.
 ///
 /// Starts at 1: an ordinary submission already reaches the queue under the
 /// task's own bare id (see [`parse_submission`]), so the first minted
@@ -1485,6 +1728,10 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
 /// the base is cut short, by as much as the suffix needs, before the suffix
 /// goes on.
 fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String>) -> String {
+    // Read once, not per candidate: the queue and the routines folder are
+    // parsed in full to answer, and a long-lived base id tries many numbers.
+    let queued = queued_id_paths(repo);
+    let routines = routine_names(repo);
     let mut n = 1usize;
     loop {
         let suffix = format!("-{n}");
@@ -1493,11 +1740,44 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
         // hyphen left at the cut would double up against the suffix.
         let base = base_id.get(..room).unwrap_or(base_id).trim_end_matches('-');
         let candidate = format!("{base}{suffix}");
-        if !taken.contains(&candidate) && existing_task_path(repo, &candidate).is_none() {
+        if !taken.contains(&candidate)
+            && !queued.contains_key(&candidate)
+            && !routines.contains(&candidate)
+            && [repo.queue_dir(), repo.archive_dir()]
+                .iter()
+                .all(|dir| !dir.join(format!("{candidate}.md")).exists())
+            && !branch_exists(repo, &candidate)
+        {
             return candidate;
         }
         n += 1;
     }
+}
+
+/// The branch `task` will be cut onto: the one recorded in it, which
+/// `issue_tracking.key_in_names` may have prefixed with a tracker slug, and
+/// `task/<id>` otherwise.
+fn task_branch(task: &Task) -> String {
+    task.front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(task.id()))
+}
+
+/// Whether `task/<id>` is a local branch.
+fn branch_exists(repo: &Repo, id: &str) -> bool {
+    ref_exists(repo, &crate::task::default_branch(id))
+}
+
+/// Whether `branch` is a local branch.
+fn ref_exists(repo: &Repo, branch: &str) -> bool {
+    repo.git(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{branch}"),
+    ])
+    .is_ok()
 }
 
 /// The base a task ends up with — a task's own `base:`, or the
@@ -1724,7 +2004,7 @@ fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
 /// `queue add`'s refusal of a whole batch over any task whose start branch
 /// does not exist. A command has no summary to list the rest in, so it
 /// queues none of it, the way every other refusal of `queue add` does.
-fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
+pub(crate) fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let sentences = missing_start_sentences(&not_queued(repo, tasks));
     if !sentences.is_empty() {
         bail!("{}\n\nNothing was queued.", sentences.join("\n"));
@@ -1821,6 +2101,39 @@ fn queue_add_tasks(
     Ok(())
 }
 
+/// The groups [`save_new_tasks`] locks for `tasks`: each task's own, and the
+/// group of every dependency that sits in another group.
+///
+/// The shape check under the lock reads the tail of a group a task stacks
+/// onto through a cross-group `depends_on`, so an add extending that group at
+/// the same time would pass both checks and leave the stack on a task that is
+/// no longer the tail. A dependency in the batch itself, or one no queued or
+/// archived task answers to, adds nothing.
+fn groups_to_lock(repo: &Repo, tasks: &[Task]) -> BTreeSet<String> {
+    let mut groups: BTreeSet<String> = tasks.iter().filter_map(|t| bare_group(repo, t)).collect();
+    let in_batch: BTreeSet<&str> = tasks.iter().map(Task::id).collect();
+    let deps: BTreeSet<&str> = tasks
+        .iter()
+        .flat_map(|t| t.front.depends_on.iter().map(String::as_str))
+        .filter(|dep| !in_batch.contains(dep))
+        .collect();
+    if deps.is_empty() {
+        return groups;
+    }
+    let mut siblings = repo.tasks().unwrap_or_default();
+    let archive_dir = repo.archive_dir();
+    if let Ok(indexed) = crate::archive_index::read_at(&archive_dir) {
+        siblings.extend(indexed.iter().map(|entry| entry.to_task(&archive_dir)));
+    }
+    groups.extend(
+        siblings
+            .iter()
+            .filter(|t| deps.contains(t.id()))
+            .filter_map(|t| bare_group(repo, t)),
+    );
+    groups
+}
+
 /// Write a validated batch of brand-new tasks, refusing any id that was
 /// taken after [`validate_batch`] looked.
 ///
@@ -1833,7 +2146,38 @@ fn queue_add_tasks(
 /// write anything. Locks are taken in id order so two overlapping batches
 /// cannot wait on each other. Unlike the dispatcher's use of this lock, a
 /// timeout is an error here: proceeding unlocked is the race itself.
+///
+/// The groups the batch joins are locked too, each from the group-shape check
+/// to the write, for the same reason as the ids: parallel adds of a root into
+/// one group would each pass the earlier unlocked check. The lock is per
+/// group, so adds into different groups never wait on each other.
 fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    // Group locks first, in lock-path order, then the task locks below in id
+    // order: every caller takes them in that one order, so none waits on a
+    // lock held by something that waits on one of its own. By path, not
+    // group name, and each path once: two group names can share a lock file
+    // (see [`Repo::group_lock_file`]), and taking one twice in a call would
+    // wait out [`crate::lock::TaskLock::WAIT`] on itself and then refuse.
+    let groups = groups_to_lock(repo, tasks);
+    let paths: BTreeSet<std::path::PathBuf> =
+        groups.iter().map(|g| repo.group_lock_file(g)).collect();
+    let mut group_locks = Vec::new();
+    for path in &paths {
+        group_locks.push(crate::lock::TaskLock::acquire(path).with_context(|| {
+            // Only the groups behind the path that was held: the rest of the
+            // batch's groups are not what is busy.
+            let busy: Vec<String> = groups
+                .iter()
+                .filter(|g| repo.group_lock_file(g) == *path)
+                .map(|g| format!("`{g}`"))
+                .collect();
+            format!(
+                "could not lock group {} to queue into it — another `queue add` into the \
+                 same group is holding it. Run this again in a moment.",
+                busy.join(" or ")
+            )
+        })?);
+    }
     let mut ids: Vec<&str> = tasks.iter().map(Task::id).collect();
     ids.sort_unstable();
     let mut locks = Vec::new();
@@ -1855,13 +2199,27 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
                 existing.display()
             );
         }
+        // The branch the task will really get: `task/<slug>-<id>` once
+        // `issue_tracking.key_in_names` has prefixed it, which `validate_batch`
+        // could not know when it ran.
+        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+            bail!("{refusal}");
+        }
     }
-    // All or none: every task parsed and validated above and every id was
-    // just re-checked under its lock, so the writes are the commit.
+    // The group's shape is checked again now that the group is locked. The
+    // check in [`validate_batch`] ran with no lock, so six parallel adds of a
+    // root into one group each saw it empty and each passed. Under the lock
+    // the earlier add's file is on disk, and this one is refused naming the
+    // root that is already there.
+    check_dependencies_set(repo, &mut tasks.to_vec())?;
+    // All or none: every task parsed and validated above, every id was just
+    // re-checked under its lock and every group's shape under the group's
+    // lock, so the writes are the commit.
     for task in tasks {
         task.save()?;
     }
     drop(locks);
+    drop(group_locks);
     Ok(())
 }
 
@@ -1992,12 +2350,29 @@ fn open_and_prefix(
     // it into the queue — because a sibling task further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let group_slug = open_tickets(repo, submitted, task_files, tasks, log)?;
+    let opened = open_tickets(repo, submitted, task_files, tasks, log)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
     // already stamped and the lane name already checked by `validate_batch`.
-    prefix_generated_names(tasks, &group_slug, log);
+    prefix_generated_names(tasks, &opened.group_slug, log);
+
+    // The branch a task will really get is only known now, so a leftover
+    // checkout on a slug-prefixed branch is only found now — after the hook
+    // has opened its issue. Refusing here as the hook-failure path does keeps
+    // that issue from being lost: its id goes back into the pending file and
+    // the message names it, so the run after the leftover is cleared reuses
+    // it instead of opening a second one.
+    for task in tasks.iter() {
+        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+            let written_back = write_back_ids(repo, submitted, tasks, &opened.tasks)?;
+            let rows = lost_ids_rows(&opened.opened, &written_back);
+            if rows.is_empty() {
+                bail!("{refusal}");
+            }
+            bail!("{refusal}\n\n{}", rows.trim_end());
+        }
+    }
     Ok(())
 }
 
@@ -2487,8 +2862,9 @@ fn prefix_generated_names(
 ///
 /// A failing call bails out — nothing in this batch is queued — but not
 /// before every id already answered is written back into the task it
-/// came from, in place on disk: see [`write_back_ids`], which is what makes
-/// re-running the same `queue add` resume rather than open a second set.
+/// came from, in place in the pending directory: see [`write_back_ids`],
+/// which is what makes re-running the same `queue add` resume rather than
+/// open a second set.
 ///
 /// Returns the slug decided for each `group:` this batch touches — one per
 /// group, the first non-blank `slug=` a hook answers, seeded from tasks
@@ -2505,7 +2881,7 @@ fn open_tickets(
     task_files: &[String],
     tasks: &mut [Task],
     log: &mut dyn TicketLog,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<OpenedTickets> {
     // `group:` on every task in this batch is still the bare name a task
     // wrote — `validate_batch` never prefixes it — so every map here is keyed
     // by the bare group.
@@ -2513,7 +2889,10 @@ fn open_tickets(
     let key_in_names = repo.config.issue_tracking.key_in_names;
 
     if !crate::tracking::configured(repo) {
-        return Ok(group_slug);
+        return Ok(OpenedTickets {
+            group_slug,
+            ..Default::default()
+        });
     }
 
     let mut group_size: BTreeMap<String, usize> = BTreeMap::new();
@@ -2619,6 +2998,10 @@ fn open_tickets(
     // say exactly that — not "an id", the id — the same way the task's own
     // Mockup does.
     let mut opened: Vec<String> = Vec::new();
+    // The tasks this call opened an issue for, as against a task that merely
+    // carries a `ticket:` from an earlier run or a `slug:` stamped on it from
+    // its group. Only these have an id a failure can lose.
+    let mut opened_tasks: std::collections::BTreeSet<String> = Default::default();
 
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
@@ -2687,6 +3070,7 @@ fn open_tickets(
                     group_epic.insert(group.clone(), epic.clone());
                     log.row("group issue", "created", &epic, &group);
                     opened.push(format!("epic {epic} (`{group}`)"));
+                    opened_tasks.insert(tasks[i].id().to_string());
                 }
                 if !epic.is_empty() {
                     tasks[i].set_extra_str("epic", &epic);
@@ -2694,6 +3078,7 @@ fn open_tickets(
                 if !ticket.is_empty() {
                     tasks[i].set_extra_str("ticket", &ticket);
                     opened.push(format!("ticket {ticket} (`{}`)", tasks[i].id()));
+                    opened_tasks.insert(tasks[i].id().to_string());
                 }
                 record_slug_and_url(
                     &mut tasks[i],
@@ -2713,7 +3098,7 @@ fn open_tickets(
                 // a later task's own raw answer, which task order would
                 // otherwise let win the re-run.
                 stamp_group_slugs(tasks, &group_slug);
-                let written_back = write_back_ids(submitted, tasks)?;
+                let written_back = write_back_ids(repo, submitted, tasks, &opened_tasks)?;
                 // A hook that ran past its limit fails the add the same way
                 // one that exited non-zero does: all or nothing, with the
                 // limit named so a person knows the hook was stopped.
@@ -2742,21 +3127,7 @@ fn open_tickets(
                     &repo.home,
                     &crate::command_step::Runs::new(&repo.tracking_dir()).log_path(&key),
                 );
-                let mut rows = String::new();
-                for item in &opened {
-                    let label = if rows.is_empty() { "opened" } else { "" };
-                    rows.push_str(&format!("    {label:<9}{item}\n"));
-                }
-                if !opened.is_empty() {
-                    let ids = if written_back {
-                        "written into pending/".to_string()
-                    } else {
-                        "not written — no task on disk to record them in; close those \
-                         by hand first"
-                            .to_string()
-                    };
-                    rows.push_str(&format!("    {:<9}{ids}\n", "ids"));
-                }
+                let mut rows = lost_ids_rows(&opened, &written_back);
                 rows.push_str(&format!("    {:<9}{log}", "log"));
                 let message = format!(
                     "the open hook {what} for `{}` — nothing was queued.\n\n{rows}",
@@ -2778,7 +3149,11 @@ fn open_tickets(
     if !printed_header.is_empty() {
         log.done();
     }
-    Ok(group_slug)
+    Ok(OpenedTickets {
+        group_slug,
+        opened,
+        tasks: opened_tasks,
+    })
 }
 
 /// The bare `group:` name, with a recognised `<slug>-` prefix removed. A
@@ -3024,7 +3399,7 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
 }
 
 /// Write every value `open_tickets` already secured back into the task it
-/// came from, in place on disk — called only once a hook call has failed,
+/// came from, in place in the pending directory — called only once a hook call has failed,
 /// so a re-run of the same `queue add` sees those tasks already carrying
 /// `epic:`/`ticket:`/`slug:`/`url:` and does not undo the first call's work:
 /// a `ticket:` reports the task `kept` and skips the hook, and a `slug:`
@@ -3034,16 +3409,47 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
 /// `submitted` and `tasks` are index-aligned: `validate_batch` parses one
 /// [`Task`] per submitted item, in the order `submitted` names them, and
 /// never reorders that top-level list — only a task's own `depends_on` is
-/// ever reordered. A task read from `-` (standard input) has no file to
-/// write back to and is silently skipped; there is nowhere on disk for its
-/// answer to resume from anyway. Returns whether any task was written at
-/// all, so the failure message can say where the ids went — or that they
-/// went nowhere.
-fn write_back_ids(submitted: &[(String, String)], tasks: &[Task]) -> Result<bool> {
-    let mut written = false;
-    for (task, (name, raw)) in tasks.iter().zip(submitted.iter()) {
+/// ever reordered.
+///
+/// A task read from `-` (standard input) has no file to write back to, and
+/// neither does a routine's: there is nowhere on disk for its answer to
+/// resume from anyway. A file outside this project's pending directory is not
+/// written to either: `--from` documents that such a path is read and left
+/// alone, and rewriting a person's own file would break that promise.
+///
+/// Returns where the ids of each task in `opened_tasks` went, so the failure
+/// message can say it per task — a batch can mix files inside pending with
+/// files outside it. A task this call opened nothing for is in neither list:
+/// a `ticket:` it already carried is not something the failure lost, and the
+/// group's slug stamped on every sibling is not an id a person has to close.
+fn write_back_ids(
+    repo: &Repo,
+    submitted: &[(String, String)],
+    tasks: &[Task],
+    opened_tasks: &std::collections::BTreeSet<String>,
+) -> Result<WriteBack> {
+    let pending_dir = repo.pending_dir().comparable();
+    let mut outcome = WriteBack::default();
+    for (i, task) in tasks.iter().enumerate() {
+        let id = task.id().to_string();
+        let lost = opened_tasks.contains(&id);
+        let Some((name, raw)) = submitted.get(i) else {
+            if lost {
+                outcome.left.push((id, "no file to write to"));
+            }
+            continue;
+        };
         let path = std::path::Path::new(name);
         if !path.is_file() {
+            if lost {
+                outcome.left.push((id, "no file to write to"));
+            }
+            continue;
+        }
+        if path.comparable().parent() != Some(pending_dir.as_path()) {
+            if lost {
+                outcome.left.push((id, "outside pending/"));
+            }
             continue;
         }
 
@@ -3057,10 +3463,66 @@ fn write_back_ids(submitted: &[(String, String)], tasks: &[Task]) -> Result<bool
         if updated != *raw {
             crate::task::write_atomic(path, &updated)
                 .with_context(|| format!("writing the opened ids back into {name}"))?;
-            written = true;
+        }
+        if lost {
+            outcome.written.push(id);
         }
     }
-    Ok(written)
+    Ok(outcome)
+}
+
+/// What [`open_tickets`] did: the slug decided for each `group:`, one line per
+/// issue it opened, and the tasks those issues were opened for.
+#[derive(Default)]
+struct OpenedTickets {
+    group_slug: BTreeMap<String, String>,
+    opened: Vec<String>,
+    tasks: std::collections::BTreeSet<String>,
+}
+
+/// The `opened` and `ids` rows of a refusal that comes after the hook has
+/// opened issues: what was opened, and per task whether its id reached a
+/// pending file. Empty when nothing was opened, because there is nothing to
+/// resume from and running the command again starts fresh.
+fn lost_ids_rows(opened: &[String], written_back: &WriteBack) -> String {
+    let mut rows = String::new();
+    for item in opened {
+        let label = if rows.is_empty() { "opened" } else { "" };
+        rows.push_str(&format!("    {label:<9}{item}\n"));
+    }
+    // One row per verdict, because a batch can mix files inside pending with
+    // files outside it or read from `-`.
+    let mut id_rows = Vec::new();
+    if !written_back.written.is_empty() {
+        id_rows.push(format!(
+            "written into pending/: {}",
+            written_back.written.join(", ")
+        ));
+    }
+    if !written_back.left.is_empty() {
+        let left: Vec<String> = written_back
+            .left
+            .iter()
+            .map(|(id, why)| format!("{id} ({why})"))
+            .collect();
+        id_rows.push(format!(
+            "not written — only files in pending/ are updated: {}; close those by hand first",
+            left.join(", ")
+        ));
+    }
+    for (n, row) in id_rows.iter().enumerate() {
+        let label = if n == 0 { "ids" } else { "" };
+        rows.push_str(&format!("    {label:<9}{row}\n"));
+    }
+    rows
+}
+
+/// Where [`write_back_ids`] put each task's ids: the tasks whose ids are now
+/// in their pending file, and those whose ids went nowhere, with why.
+#[derive(Default)]
+struct WriteBack {
+    written: Vec<String>,
+    left: Vec<(String, &'static str)>,
 }
 
 /// Sections are appended to a body later, and `append_to_section` reasons in
@@ -6232,7 +6694,7 @@ fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     // `split_fence` accepts a leading byte order mark, so a routine saved
     // with one reaches here too. `trim` does not count it as whitespace, so
     // left on, the fence would not be found and the id would go unminted.
-    let doc = doc.strip_prefix('\u{feff}').unwrap_or(doc);
+    let doc = crate::task::without_bom(doc);
     let Some(nl) = doc.find('\n') else {
         return doc.to_string();
     };
@@ -8278,6 +8740,22 @@ fn build_trial_arm(
     arm.front.trial_group = Some(stamp.source_group.to_string());
     arm.front.group = Some(stamp.group.to_string());
     arm.front.pipeline = Some(pipeline.name.clone());
+    // `with_trial_pipeline` swapped the pipeline in before the parse, so
+    // nothing yet has checked the task's `gate_at:` against *this* pipeline.
+    // Without it an arm on a pipeline lacking that step is written with a
+    // checkpoint nothing can match, and runs straight to `done`. The refusal
+    // names the source task, not the arm: the arm's minted id exists nowhere
+    // yet. Its remedy is the trial's own — the same `gate_at:` has to suit
+    // every ticked pipeline, so editing it to fit this one would break another.
+    if let Some(gate_at) = unmatched_gate_at(&arm, pipeline) {
+        bail!(
+            "{name} has `gate_at: {gate_at}`, which is no step of pipeline `{}`. \
+             Untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
+             names a step every ticked pipeline has.",
+            pipeline.name,
+            pipeline.name
+        );
+    }
     // Only the ticked steps this pipeline actually has: `spoolway doctor`
     // refuses a `skip:` naming a step its own pipeline lacks
     // (`src/commands/pipeline.rs`). Each pipeline keeps its own skip set
@@ -8425,6 +8903,23 @@ fn begin_trial(
                     return outcome("trial refused", format!("{err:#}"));
                 }
             };
+            // The skeleton check `queue add` runs. The task was written from
+            // its own pipeline's skeleton, which is not the ticked one's, so
+            // both are read: a trial of a pending row would otherwise queue an
+            // unfilled skeleton that `queue add` refuses.
+            let written_from = match task.pipeline.as_deref().map(|name| pipelines.get(name)) {
+                Some(Ok(source)) => crate::task_template::resolve_for(repo, source),
+                _ => crate::task_template::resolve(repo, crate::task_template::FALLBACK),
+            };
+            let skeletons = [
+                written_from,
+                crate::task_template::resolve_for(repo, pipeline),
+            ];
+            if let Err(err) =
+                refuse_unfilled_skeleton(&task.path.display().to_string(), &arm, &skeletons)
+            {
+                return outcome("trial refused", format!("{err:#}"));
+            }
 
             // Every dependency this copy also forks maps to that
             // predecessor's own minted id — the bare id it named is never
@@ -8950,6 +9445,9 @@ fn claim_routines<'a>(
         }
     }
     let (tasks, problems) = repo.tasks_and_problems()?;
+    // A skipped duplicate parsed fine and never runs, so it cannot be a live
+    // copy; only a file whose `routine:` cannot be read refuses the batch.
+    let problems: Vec<_> = problems.into_iter().filter(|p| !p.duplicate).collect();
     if !problems.is_empty() {
         bail!("{}", unreadable_refusal(&problems, &names));
     }
@@ -9744,6 +10242,14 @@ mod tests {
         path.display().to_string()
     }
 
+    /// Write `text` into the project's pending directory, the one place a
+    /// failed hook call writes ids back into, and hand back its path.
+    fn write_pending_doc(repo: &Repo, name: &str, text: &str) -> String {
+        let path = repo.pending_dir().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    }
+
     /// `--base` set to the fixture's own checkout branch — the ambient value
     /// every one of these tests relied on before a base had to be chosen —
     /// so a task under test can still leave `base:` out unless the test
@@ -9756,6 +10262,132 @@ mod tests {
             dry_run: false,
             no_tracking: Vec::new(),
         }
+    }
+
+    /// An id whose `task/<id>` branch or worktree an earlier task left behind
+    /// is refused, naming both and the commands that clear them. Before this,
+    /// `queue add` took the id and the new task adopted the old checkout.
+    #[test]
+    fn queue_add_refuses_an_id_whose_worktree_and_branch_were_left_behind() {
+        let (repo, _root_guard) = fixture("queue-add-leftovers");
+        let worktree = repo.worktree_root().join("task-ghost");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/ghost",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let path = write_doc(
+            &repo,
+            "ghost.md",
+            &task_text("ghost", "group: ghosts\n", BODY),
+        );
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(&worktree.display().to_string()), "{err}");
+        assert!(err.contains("branch `task/ghost`"), "{err}");
+        assert!(err.contains("git worktree remove --force"), "{err}");
+        assert!(err.contains("git branch -D task/ghost"), "{err}");
+        assert!(repo.queued_ids().is_empty());
+
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        crate::repo::run(&repo.root, "git", &["branch", "-D", "task/ghost"]).unwrap();
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("the same advice, once followed, lets the id through");
+    }
+
+    /// An id still in the queue is "already exists", whatever its checkout
+    /// looks like. Its worktree and branch are live, so the leftover advice
+    /// to remove them would be advice to destroy a running task's work.
+    #[test]
+    fn queue_add_of_a_live_id_says_it_exists_and_not_that_it_left_a_leftover() {
+        let (repo, _root_guard) = fixture("queue-add-live-id");
+        crate::commands::testutil::add(&repo, "live", &[]);
+        let worktree = repo.worktree_root().join("task-live");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/live",
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let path = write_doc(&repo, "live2.md", &task_text("live", "group: demo\n", BODY));
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert!(!err.contains("git worktree remove"), "{err}");
+    }
+
+    /// A branch alone is not adopted by a new task; its first cut would
+    /// refuse it. The refusal says that, and not that the task would "pick
+    /// it up", which is only true of a worktree.
+    #[test]
+    fn queue_add_gives_the_true_reason_when_only_a_branch_is_left() {
+        let (repo, _root_guard) = fixture("queue-add-branch-only");
+        crate::repo::run(&repo.root, "git", &["branch", "task/solo"]).unwrap();
+        let path = write_doc(&repo, "solo.md", &task_text("solo", "group: solos\n", BODY));
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("first cut would be refused"), "{err}");
+        assert!(!err.contains("pick it up"), "{err}");
+        assert!(err.contains("git branch -D task/solo"), "{err}");
+        assert!(!err.contains("git worktree remove"), "{err}");
     }
 
     /// A lane cannot mutate the queue for itself — `in_lane: true` is refused
@@ -11852,6 +12484,54 @@ mod tests {
         assert!(docs[1].0.ends_with("b.md"), "{docs:?}");
     }
 
+    /// A dotfile and a link that points nowhere, both ending `.md`, are left
+    /// out of a `--from` directory rather than failing the batch.
+    #[test]
+    fn a_directory_skips_dotfiles_and_dangling_links() {
+        let (repo, _root_guard) = fixture("from-dir-editor-files");
+        let dir = repo.root.join("tasks");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), task_text("a", "group: demo\n", BODY)).unwrap();
+        std::fs::write(dir.join(".b.md"), "swap").unwrap();
+        std::os::unix::fs::symlink("user@host.123", dir.join(".#a.md")).unwrap();
+        std::os::unix::fs::symlink("gone.md", dir.join("c.md")).unwrap();
+
+        let docs = gather_tasks(&[dir.display().to_string()]).unwrap();
+
+        assert_eq!(docs.len(), 1, "{docs:?}");
+        assert!(docs[0].0.ends_with("a.md"), "{docs:?}");
+    }
+
+    /// A key that folds to a key spoolway reads is refused by name, and one
+    /// that folds to nothing it reads is left alone.
+    #[test]
+    fn a_misspelt_known_key_is_refused_and_a_project_key_is_not() {
+        for (key, known) in [
+            ("gate-at", "gate_at"),
+            ("depends-on", "depends_on"),
+            ("ID", "id"),
+        ] {
+            let raw = task_text("a", &format!("group: demo\n{key}: x\n"), BODY);
+            let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(&format!("`{known}:`")), "{message}");
+        }
+        // A reserved or ignored key is told to go, not to be renamed into
+        // the refusal or the silent drop that follows.
+        for (key, known) in [("Stage", "stage"), ("Worktree-Path", "worktree_path")] {
+            let raw = task_text("a", &format!("group: demo\n{key}: x\n"), BODY);
+            let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(&format!("`{known}:`")), "{message}");
+            assert!(message.contains("Remove it"), "{message}");
+            assert!(!message.contains("Rename"), "{message}");
+        }
+        let raw = task_text("a", "group: demo\nTracking: off\n", BODY);
+        assert!(parse_submission("a.md", &raw, Some("main")).is_err());
+        let raw = task_text("a", "group: demo\nowner-team: x\n", BODY);
+        parse_submission("a.md", &raw, Some("main")).unwrap();
+    }
+
     // ------------------------------------------------------------- the screen
 
     fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
@@ -13501,6 +14181,244 @@ mod tests {
         )
         .expect("a task naming a start branch that exists is queued");
         assert!(repo.queue_dir().join("index-file.md").exists());
+    }
+
+    /// A trial arm on a pipeline that lacks the step the task's `gate_at:`
+    /// names is refused, the way `queue add` refuses the same file, rather
+    /// than written with a checkpoint nothing matches. The pipeline that has
+    /// the step still takes it. Fails without the check: the arm is built.
+    #[test]
+    fn a_trial_arm_on_a_pipeline_without_the_gate_at_step_is_refused() {
+        let pipelines = Pipelines::builtin();
+        let doc = task_text("gated", "group: demo\ngate_at: implement\n", BODY);
+        let stamp = TrialStamp {
+            trial: "t1",
+            source_group: "demo",
+            group: "demo-bugfix",
+        };
+        let skip = Default::default();
+
+        let bugfix = pipelines.get("bugfix").unwrap();
+        let err = build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-1",
+            &stamp,
+            bugfix,
+            &skip,
+        )
+        .expect_err("bugfix has no `implement` step");
+        let said = format!("{err:#}");
+        assert!(said.contains("gated.md has `gate_at: implement`"), "{said}");
+        assert!(said.contains("Untick `bugfix`"), "{said}");
+        assert!(!said.contains("gated-1"), "{said}");
+
+        let default = pipelines.get("default").unwrap();
+        let arm = build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-2",
+            &stamp,
+            default,
+            &skip,
+        )
+        .expect("default has an `implement` step");
+        assert_eq!(arm.front.gate_at.as_deref(), Some("implement"));
+    }
+
+    /// Six `queue add` calls of a root task into one group, all validated
+    /// before any saved, queue exactly one. The rest are refused naming the
+    /// group and the root already there. Fails without the group lock: each
+    /// validated against an empty group and all six are saved.
+    #[test]
+    fn parallel_adds_of_roots_into_one_group_queue_one() {
+        let (repo, _root_guard) = fixture("parallel-root-adds");
+        let pipelines = Pipelines::builtin();
+        let validated: Vec<Vec<Task>> = (0..6)
+            .map(|n| {
+                let id = format!("root-{n}");
+                let text = task_text(&id, "group: shared\n", BODY);
+                validate_batch(
+                    &repo,
+                    &pipelines,
+                    Some("plan/demo"),
+                    &[(format!("{id}.md"), text)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let results: Vec<Result<()>> = std::thread::scope(|scope| {
+            let repo = &repo;
+            let handles: Vec<_> = validated
+                .iter()
+                .map(|batch| scope.spawn(move || save_new_tasks(repo, batch)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        for err in results.iter().filter_map(|r| r.as_ref().err()) {
+            let said = format!("{err:#}");
+            assert!(said.contains("group `shared`"), "{said}");
+            assert!(said.contains("root-"), "{said}");
+        }
+        assert_eq!(repo.tasks().unwrap().len(), 1);
+    }
+
+    /// A task still holding a skeleton's `[[…]]` placeholder is refused,
+    /// naming the section; double brackets the skeletons never wrote queue.
+    /// Fails without the check: both validate.
+    #[test]
+    fn a_task_holding_a_skeleton_placeholder_is_refused_by_heading() {
+        let (repo, _root_guard) = fixture("skeleton-placeholder");
+        let check = |body: &str| {
+            validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("a.md".into(), task_text("a", "group: demo\n", body))],
+            )
+        };
+
+        let skeleton = crate::assets::task_template("default").unwrap();
+        let err = check(skeleton).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(said.contains("`Context`"), "{said}");
+        assert!(said.contains("[[…]]"), "{said}");
+
+        let filled = "## Intend\n\nPrint `a[[0]]` for the index.\n";
+        check(filled).expect("brackets the skeleton never wrote are the task's own");
+    }
+
+    /// One batch with roots in groups whose names share a lock file (`a.b`
+    /// and `a_b`) saves both. Fails without the deduped lock paths: the
+    /// second acquire waits on the first, which this same call holds, and the
+    /// batch is refused after the lock wait.
+    #[test]
+    fn a_batch_in_two_groups_sharing_a_lock_file_is_saved() {
+        let (repo, _root_guard) = fixture("shared-group-lock-file");
+        assert_eq!(repo.group_lock_file("a.b"), repo.group_lock_file("a_b"));
+        let submitted: Vec<(String, String)> = [("one", "a.b"), ("two", "a_b")]
+            .iter()
+            .map(|(id, group)| {
+                (
+                    format!("{id}.md"),
+                    task_text(id, &format!("group: {group}\n"), BODY),
+                )
+            })
+            .collect();
+        let tasks =
+            validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted).unwrap();
+        save_new_tasks(&repo, &tasks).expect("one lock file taken once covers both groups");
+        assert_eq!(repo.tasks().unwrap().len(), 2);
+    }
+
+    /// A group a task stacks onto through a `depends_on` in another group is
+    /// locked with the task's own, so a parallel add extending that group
+    /// cannot leave the stack on a task that stopped being its tail.
+    #[test]
+    fn groups_to_lock_includes_the_group_a_cross_group_dependency_sits_in() {
+        let (repo, _root_guard) = fixture("lock-stacked-onto-group");
+        add(&repo, "parent", &[]);
+        let text = task_text("child", "group: other\ndepends_on: [parent]\n", BODY);
+        let tasks = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("child.md".into(), text)],
+        )
+        .unwrap();
+        let groups = groups_to_lock(&repo, &tasks);
+        assert_eq!(
+            groups.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["demo", "other"]
+        );
+    }
+
+    /// The placeholders refused are those of the skeleton this project writes
+    /// the task from, not only the shipped ones. Fails when only the shipped
+    /// skeletons are read: this one's placeholder passes.
+    #[test]
+    fn a_placeholder_of_the_projects_own_skeleton_is_refused() {
+        let (repo, _root_guard) = fixture("own-skeleton-placeholder");
+        let dir = repo.task_templates_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.md"),
+            "## Panels\n\n[[the panels this task has to match]]\n",
+        )
+        .unwrap();
+        let body = "## Panels\n\n[[the panels this task has to match]]\n";
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("a.md".into(), task_text("a", "group: demo\n", body))],
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("`Panels`"), "{err:#}");
+    }
+
+    /// A trial of a pending task still holding the skeleton queues nothing,
+    /// as `queue add` refuses the same file. Fails without the check in the
+    /// trial loop: the arm is queued.
+    #[test]
+    fn a_trial_of_a_task_holding_the_skeleton_queues_nothing() {
+        let (repo, _root_guard) = fixture("screen-trial-skeleton");
+        let skeleton = crate::assets::task_template("default").unwrap();
+        write_pending(
+            &repo,
+            "raw",
+            &task_text("raw", "group: audits\npipeline:\n", skeleton),
+        );
+        let groups = listed(&repo);
+
+        screen(&repo, groups, "o\r \r\r");
+
+        assert!(
+            repo.tasks().unwrap().is_empty(),
+            "no arm of an unfilled skeleton is queued"
+        );
+    }
+
+    /// A pending task written from its own pipeline's project skeleton is
+    /// checked against that skeleton even when the trial ticks only another
+    /// pipeline. Fails without the source's skeleton in the check: the
+    /// `default` arm is checked against `default.md` alone and is queued.
+    #[test]
+    fn a_trial_checks_the_skeleton_the_task_was_written_from() {
+        let (repo, _root_guard) = fixture("screen-trial-source-skeleton");
+        let dir = repo.task_templates_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let placeholder = "[[the panels this task has to match]]";
+        std::fs::write(
+            dir.join("bugfix.md"),
+            format!("## Panels\n\n{placeholder}\n"),
+        )
+        .unwrap();
+        write_pending(
+            &repo,
+            "solo",
+            &task_text(
+                "solo",
+                "group: audits\npipeline: bugfix\n",
+                &format!("## Panels\n\n{placeholder}\n"),
+            ),
+        );
+        let groups = listed(&repo);
+
+        // `bugfix` starts ticked: `space` unticks it, `j` moves to `default`,
+        // `space` ticks it, `enter` twice past both screens.
+        screen(&repo, groups, "o\r j \r\r");
+
+        assert!(repo.tasks().unwrap().is_empty(), "nothing is queued");
     }
 
     /// Only a task with something to check is checked: one whose dependency
@@ -15607,8 +16525,8 @@ mod tests {
         );
     }
 
-    /// The same pair of directories a repeat submission is refused against —
-    /// see `existing_task_path` — is what a trial mints around too, so an
+    /// The same places a repeat submission is refused against — see
+    /// `existing_task_path` — are what a trial mints around too, so an
     /// id already queued or already archived is skipped over rather than
     /// collided with.
     #[test]
@@ -15660,6 +16578,78 @@ mod tests {
 
         // A short base keeps its whole name.
         assert_eq!(mint_id(&repo, "solo", &Default::default()), "solo-1");
+    }
+
+    /// A copy such as `dd1 - Copy.md` still holds `id: dd1`. Queueing `dd1`
+    /// again used to pass, because only `dd1.md` was looked for, and the two
+    /// files then ran the same task twice.
+    #[test]
+    fn an_id_held_by_a_queue_file_under_any_name_is_refused() {
+        let (repo, _root_guard) = fixture("add-id-any-file-name");
+        std::fs::write(
+            repo.queue_dir().join("dd1 - Copy.md"),
+            "---\nid: dd1\ntitle: dd1\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        let submitted = vec![("dd1.md".to_string(), task_text("dd1", "group: g\n", BODY))];
+
+        let err = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+            .unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(text.contains("already exists"), "{text}");
+        assert!(text.contains("dd1 - Copy.md"), "{text}");
+    }
+
+    /// A routine's copies are numbered but their lanes carry the routine's
+    /// name, so an ordinary task with that id would share its lane names.
+    #[test]
+    fn an_id_equal_to_a_routine_name_is_refused() {
+        let (repo, _root_guard) = fixture("add-id-routine-name");
+        let folder = repo.routines_dir().join("nightly");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("nite.md"), task_text("nite", "", BODY)).unwrap();
+        let submitted = vec![("nite.md".to_string(), task_text("nite", "group: g\n", BODY))];
+
+        let err = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains(
+                "task id `nite` is the name of routine `nite`, whose copies' lanes are \
+                 named `nite · <step>`. Give this task another id; nothing was queued."
+            ),
+            "{err:#}"
+        );
+        // The id the routine's own copies are minted under is still free.
+        assert_eq!(mint_id(&repo, "nite", &Default::default()), "nite-1");
+    }
+
+    /// Archive retention removes `archive/ping-1.md` and keeps the branch
+    /// `task/ping-1`. Minting `ping-1` again blocked the copy at its first
+    /// cut, on every window after.
+    #[test]
+    fn a_minted_id_skips_one_whose_task_branch_exists() {
+        let (repo, _root_guard) = fixture("mint-id-branch");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["branch", "task/ping-1"]);
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
+    }
+
+    /// A routine named `ping-1` holds that name too, since its lanes are
+    /// drawn under it.
+    #[test]
+    fn a_minted_id_skips_a_routine_name() {
+        let (repo, _root_guard) = fixture("mint-id-routine-name");
+        let folder = repo.routines_dir().join("pings");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("ping-1.md"), task_text("ping-1", "", BODY)).unwrap();
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
     }
 
     /// An arm forked from a task already in the archive gets its own
@@ -17670,7 +18660,15 @@ mod tests {
             "bugfix",
         )
         .unwrap();
-        add(&repo, "audit-docs", &[]);
+        // Dropped into the queue by hand: `queue add` now refuses an id that
+        // is a routine's name, so only a file already there, or one queued
+        // before the routine was added, can be in this state.
+        std::fs::write(
+            repo.queue_dir().join("audit-docs.md"),
+            "---\nid: audit-docs\ntitle: audit-docs\ngroup: demo\npipeline: default\n\
+             stage: queued\n---\n## Goal\n\nDo the thing.\n",
+        )
+        .unwrap();
         put_at(&repo, "audit-docs", crate::pipeline::PAUSED);
 
         // `nightly` sorts second, below `maintenance`.
@@ -18762,13 +19760,13 @@ mod tests {
                 "group: scanner-rework\ngroup_description: scanning rework\n",
                 BODY,
             );
-            let first_path = write_doc(&repo, "scan-pending.md", &first);
+            let first_path = write_pending_doc(&repo, "scan-pending.md", &first);
             let second = task_text(
                 "split-fields",
                 "group: scanner-rework\ndepends_on: [scan-pending]\n",
                 BODY,
             );
-            let second_path = write_doc(&repo, "split-fields.md", &second);
+            let second_path = write_pending_doc(&repo, "split-fields.md", &second);
 
             let err = queue_add(
                 &repo,
@@ -18899,13 +19897,13 @@ mod tests {
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
             );
-            let a_path = write_doc(&repo, "auth-01.md", &a);
+            let a_path = write_pending_doc(&repo, "auth-01.md", &a);
             let b = task_text(
                 "auth-02",
                 "group: auth-rework\ndepends_on: [auth-01]\n",
                 BODY,
             );
-            let b_path = write_doc(&repo, "auth-02.md", &b);
+            let b_path = write_pending_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
                 &Pipelines::builtin(),
@@ -18973,11 +19971,11 @@ mod tests {
                 "group: chain\ngroup_description: chained work\n",
                 BODY,
             );
-            let a_path = write_doc(&repo, "chain-a.md", &a);
+            let a_path = write_pending_doc(&repo, "chain-a.md", &a);
             let b = task_text("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
-            let b_path = write_doc(&repo, "chain-b.md", &b);
+            let b_path = write_pending_doc(&repo, "chain-b.md", &b);
             let c = task_text("chain-c", "group: chain\ndepends_on: [chain-b]\n", BODY);
-            let c_path = write_doc(&repo, "chain-c.md", &c);
+            let c_path = write_pending_doc(&repo, "chain-c.md", &c);
 
             // Submitted back to front.
             queue_add(
@@ -19204,6 +20202,218 @@ mod tests {
             assert!(refusal.contains("broken.md"), "{refusal}");
         }
 
+        /// A `--from` file outside pending is read and left alone, even when
+        /// the hook fails after answering: its text is byte for byte what it
+        /// was, and the failure says the ids went nowhere. Before this, the
+        /// ids were written into the person's own file and the message said
+        /// `written into pending/`.
+        #[test]
+        fn a_failing_hook_leaves_a_file_outside_pending_unwritten() {
+            let (mut repo, _root_guard) = fixture("open-fails-outside-pending");
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "split-fields" ]; then exit 1; fi
+                   echo "ticket=acme/app#43" >"$SPOOLWAY_OUT""#,
+            );
+            let first = task_text(
+                "scan-pending",
+                "group: scanner-rework\ngroup_description: scanning rework\n",
+                BODY,
+            );
+            let first_path = write_doc(&repo, "scan-pending.md", &first);
+            let second = task_text(
+                "split-fields",
+                "group: scanner-rework\ndepends_on: [scan-pending]\n",
+                BODY,
+            );
+            let second_path = write_doc(&repo, "split-fields.md", &second);
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&first_path, &second_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("acme/app#43"), "{err}");
+            assert!(err.contains("ids      not written"), "{err}");
+            assert!(!err.contains("written into pending/"), "{err}");
+            assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
+            assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
+        }
+
+        /// A batch mixing a file outside pending with files inside it gets one
+        /// verdict per task: the ids written into pending are named, and so
+        /// are the ones that went nowhere. A single verdict for the batch
+        /// said `written into pending/` for all of them.
+        #[test]
+        fn a_mixed_batch_says_per_task_where_its_ids_went() {
+            let (mut repo, _root_guard) = fixture("open-fails-mixed");
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "c3" ]; then exit 1; fi
+                   echo "ticket=acme/app#$SPOOLWAY_TASK" >"$SPOOLWAY_OUT""#,
+            );
+            let head = task_text("c1", "group: mixed\ngroup_description: mixed batch\n", BODY);
+            let outside = write_doc(&repo, "c1.md", &head);
+            let inside = write_pending_doc(
+                &repo,
+                "c2.md",
+                &task_text("c2", "group: mixed\ndepends_on: [c1]\n", BODY),
+            );
+            let failing = write_pending_doc(
+                &repo,
+                "c3.md",
+                &task_text("c3", "group: mixed\ndepends_on: [c2]\n", BODY),
+            );
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&outside, &inside, &failing]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("written into pending/: c2"), "{err}");
+            assert!(err.contains("c1 (outside pending/)"), "{err}");
+            assert!(!err.contains("none was submitted"), "{err}");
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), head);
+        }
+
+        /// Only a task this run opened an issue for has an id the failure can
+        /// lose. A group slug stamped on every sibling, and a task the hook was
+        /// never reached for, are not ids to close by hand, so they are not
+        /// listed. Naming all four of these files told a person to close
+        /// tickets that do not exist.
+        #[test]
+        fn the_failure_names_only_the_tasks_it_opened_something_for() {
+            let (mut repo, _root_guard) = fixture("open-fails-names-opened");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "c3" ]; then exit 1; fi
+                   { echo "ticket=acme/app#$SPOOLWAY_TASK"; echo "slug=acme-1"; } >"$SPOOLWAY_OUT""#,
+            );
+            let mut paths = Vec::new();
+            for (n, id) in ["c1", "c2", "c3", "c4"].into_iter().enumerate() {
+                let extra = match n {
+                    0 => "group: chain\ngroup_description: a chain\n".to_string(),
+                    _ => format!("group: chain\ndepends_on: [c{n}]\n"),
+                };
+                paths.push(write_doc(
+                    &repo,
+                    &format!("{id}.md"),
+                    &task_text(id, &extra, BODY),
+                ));
+            }
+            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&paths),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("c1 (outside pending/)"), "{err}");
+            assert!(err.contains("c2 (outside pending/)"), "{err}");
+            assert!(!err.contains("c3 (outside"), "{err}");
+            assert!(!err.contains("c4 (outside"), "{err}");
+        }
+
+        /// With `issue_tracking.key_in_names` the branch is `task/<slug>-<id>`,
+        /// a name `validate_batch` cannot know before the hook has answered. A
+        /// leftover checkout on that branch must still refuse the id, or the
+        /// new task adopts the old worktree without a word.
+        #[test]
+        fn a_leftover_on_a_slug_prefixed_branch_refuses_the_id() {
+            let (mut repo, _root_guard) = fixture("open-slug-leftover");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=acme-1"; } >"$SPOOLWAY_OUT""#,
+            );
+            let worktree = repo.worktree_root().join("task-acme-1-c9");
+            crate::repo::run(
+                &repo.root,
+                "git",
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/acme-1-c9",
+                    &worktree.display().to_string(),
+                ],
+            )
+            .unwrap();
+            let text = task_text(
+                "c9",
+                "group: slugged\ngroup_description: slugged work\n",
+                BODY,
+            );
+            let path = write_pending_doc(&repo, "c9.md", &text);
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("branch `task/acme-1-c9`"), "{err}");
+            assert!(err.contains(&worktree.display().to_string()), "{err}");
+            assert!(repo.queued_ids().is_empty());
+
+            // The issue the hook opened before the refusal is not lost: it is
+            // named, and written into the pending file for the next run.
+            assert!(err.contains("ticket PROJ-13 (`c9`)"), "{err}");
+            assert!(err.contains("written into pending/: c9"), "{err}");
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("ticket: PROJ-13"),
+                "the opened ticket was not written back"
+            );
+
+            // Once the leftover is gone, the run reuses that ticket. The hook
+            // now fails, so a second call to it would fail the add.
+            crate::repo::run(
+                &repo.root,
+                "git",
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree.display().to_string(),
+                ],
+            )
+            .unwrap();
+            crate::repo::run(&repo.root, "git", &["branch", "-D", "task/acme-1-c9"]).unwrap();
+            with_hook(&mut repo, "exit 1");
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            assert_eq!(queued(&repo, "c9").extra_str("ticket"), "PROJ-13");
+        }
+
         /// A routine has no task on disk for a failed batch's ids to be
         /// written back into, so the failure must not send a person to
         /// `pending/` to look for them: it says the ids went nowhere, and
@@ -19233,11 +20443,11 @@ mod tests {
             .to_string();
 
             assert!(
-                err.contains("ids      not written — no task on disk"),
+                err.contains("ids      not written — only files in pending/ are updated"),
                 "{err}"
             );
             assert!(err.contains("close those by hand first"), "{err}");
-            assert!(!err.contains("pending/"), "{err}");
+            assert!(!err.contains("written into pending/"), "{err}");
             assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
             assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
             assert!(

@@ -394,7 +394,7 @@ price_max_age_days = 30
 | `update_check` | `true` | Show a newer release in the dispatcher header when one is out. The header shows the published version in yellow. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
 | `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/` or `tracking/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
-| `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on`. The sweep skips `archive/` while a file in `queue/` cannot be read, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
+| `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on` or holds its id. The sweep skips `archive/` while a file in `queue/` does not parse, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
 | `price_max_age_days` | `30` | Days before `spoolway doctor` notes that the price table is old. `0` turns the note off. Refresh with `spoolway models refresh`. See [Pricing](cost.md#pricing). |
 
 Archiving a task removes its files under `tracking/`, `commands/` and its session home at
@@ -536,6 +536,16 @@ file name, a script with no `fetch` branch, `key_in_names` on with a script that
 `slug=`, and a tool named in a `# spoolway-requires:` line whose installed version is below
 the line's floor.
 
+It also fails a script that cannot start. Each failure names the fix.
+
+| Script | Run time result | Fix |
+|---|---|---|
+| First line ends in a carriage return (Windows line endings) | Exit 127 | `sed -i 's/\r$//' <path>` |
+| No executable bit, such as mode 644 | Exit 126 | `chmod +x <path>` |
+
+Either failure makes every `queue add` fail and pauses each task on its next lifecycle event.
+The mode check runs on Unix only. spoolway never rewrites the script.
+
 ### `open` — a fifth event, run by `queue add` itself
 
 `spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
@@ -584,7 +594,9 @@ The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 | `url=` | `url:` | Must be an absolute `http` or `https` URL. |
 
 A non-zero exit refuses the whole batch. Ids already returned are written back into the
-pending tasks first, so running the command again resumes.
+pending tasks first, so running the command again resumes. A task read from outside the pending
+directory, or from `-`, gets nothing written back. The failure message lists it, and you close
+its ticket by hand.
 
 ### `fetch` — a sixth event, run by `spoolway issue show`
 

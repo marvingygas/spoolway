@@ -6,8 +6,10 @@
 //! records is a struct edit and never a migration on disk. The body is written
 //! once, at queue time, from a skeleton this project owns outright.
 //!
-//! Nothing in that body is ever parsed. No heading is required, none is
-//! validated, and the three sections spoolway appends to a running task —
+//! Almost nothing in that body is read back. No heading is required, none is
+//! validated, and the only check is that a `[[…]]` placeholder of the skeleton
+//! is not left in it, which `queue add` and `task contract` refuse. The three
+//! sections spoolway appends to a running task —
 //! `## Status Log`, `## Handoff`, `## Blocker` — are created by
 //! [`crate::task::Task::append_to_section`] if the skeleton does not have them.
 //! A skeleton may be a single `## Goal` and everything still works.

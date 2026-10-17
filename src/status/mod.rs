@@ -2772,7 +2772,10 @@ fn build(
     // uncached read of the dispatcher pass (`dispatch.rs`) and of `queue list`,
     // which must see a just-written file immediately and run far less often
     // than a reading.
-    let (tasks, load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
+    let (tasks, mut load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
+    // The archive check is a stat per task, not a parse, so it sits outside
+    // the byte cache and runs on every reading.
+    let tasks = crate::task::skip_archived_ids(tasks, &mut load_problems, &repo.archive_dir());
     let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
@@ -3286,9 +3289,12 @@ fn paint_at(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("a queue file");
-        problems.push_str(&format!(
-            " {AMBER}⚠ {name} does not parse and was skipped{RESET}\n"
-        ));
+        let why = if problem.duplicate {
+            "holds an id another file holds"
+        } else {
+            "does not parse"
+        };
+        problems.push_str(&format!(" {AMBER}⚠ {name} {why} and was skipped{RESET}\n"));
     }
 
     // Built before the table and the ticker although it is printed after
@@ -4617,6 +4623,7 @@ fn cached_queue_in(
                 problems.push(crate::task::LoadProblem {
                     path,
                     error: format!("{e:#}"),
+                    duplicate: false,
                 });
                 continue;
             }
@@ -4630,6 +4637,7 @@ fn cached_queue_in(
                 Err(error) => problems.push(crate::task::LoadProblem {
                     path: path.clone(),
                     error: error.clone(),
+                    duplicate: false,
                 }),
             }
             continue;
@@ -4644,6 +4652,7 @@ fn cached_queue_in(
             Err(error) => problems.push(crate::task::LoadProblem {
                 path: path.clone(),
                 error: error.clone(),
+                duplicate: false,
             }),
         }
         state.files.insert(path, CachedQueueFile { bytes, outcome });
@@ -4654,7 +4663,9 @@ fn cached_queue_in(
     // the session cache beside this one.
     state.files.retain(|path, _| seen.contains(path));
 
-    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
+    // The same pass `load_dir` ends with, so the board never draws a second
+    // row for an id the dispatcher is skipping.
+    let tasks = crate::task::skip_duplicate_ids(tasks, &mut problems);
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems, parsed))
 }
@@ -6370,6 +6381,7 @@ mod tests {
             load_problems: vec![crate::task::LoadProblem {
                 path: "broken.md".into(),
                 error: "no frontmatter".to_string(),
+                duplicate: false,
             }],
             changed_pipelines: vec!["default".to_string()],
             ..Snapshot::empty()
@@ -7840,6 +7852,50 @@ mod tests {
         lose_index(&repo);
         assert_eq!(rows_now(), from_files());
         assert_eq!(rows_now().len(), 2, "b and c remain");
+    }
+
+    /// The board's reading must skip a queue copy whose id the archive holds,
+    /// the same as the dispatcher does, or it would draw a live row for a
+    /// task that is never run.
+    #[test]
+    fn a_reading_skips_a_queue_file_whose_id_is_archived() {
+        let (repo, _root_guard) = fixture("reading-archived-id");
+        let doc = "---\nid: dd1\nstage: implement\ngroup: g\n---\n";
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.queue_dir().join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(repo.archive_dir().join("dd1.md"), doc).unwrap();
+        let mut memory = Memory::new();
+
+        let snapshot = build(&repo, &Pipelines::builtin(), None, &mut memory).unwrap();
+
+        assert!(snapshot.rows.is_empty(), "{:?}", snapshot.rows.len());
+        assert_eq!(snapshot.load_problems.len(), 1);
+        assert!(snapshot.load_problems[0].duplicate);
+    }
+
+    /// The board reads the queue through the cache, so it must skip a second
+    /// file holding one id the same way `load_dir` does, or it would draw a
+    /// row for a task the dispatcher is not running.
+    #[test]
+    fn cached_queue_skips_a_second_file_holding_one_id() {
+        let (repo, _root_guard) = fixture("queue-cache-duplicate-id");
+        let dir = repo.queue_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = "---\nid: dd1\nstage: implement\ngroup: g\n---\n";
+        std::fs::write(dir.join("dd1.md"), doc).unwrap();
+        std::fs::write(dir.join("dd1 - Copy.md"), doc).unwrap();
+        let mut state = QueueCache {
+            dir: dir.clone(),
+            files: HashMap::new(),
+        };
+
+        let (tasks, problems, _) = cached_queue_in(&dir, &mut state).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].path.ends_with("dd1.md"));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].path.ends_with("dd1 - Copy.md"));
     }
 
     /// `board-reads-changed-only`: `render` used to call

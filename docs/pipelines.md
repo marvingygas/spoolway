@@ -12,6 +12,8 @@ the flow is a file edit.
 
 The file name is the pipeline name. There is no `name:` key.
 
+A UTF-8 byte order mark at the top of a pipeline file is ignored.
+
 ```
 .spoolway/pipelines/
   default.yml        # implement, review, document
@@ -80,7 +82,7 @@ steps:
 | `description` | none | One line, shown by `spoolway pipeline show`. |
 | `agent` | none | A profile from `config.toml`. Makes this an agent step. |
 | `run` | none | A shell command line. Makes this a command step. |
-| `prompt` | the step id | The prompt file the step runs. |
+| `prompt` | the step id | The prompt file the step runs. It may not start with `/` or hold `..`. |
 | `model` | none | The model. Required on every agent step. |
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
 | `skills` | none | Skills the lane invokes before the task briefing, each as its own message. Comma separated, names only. See [Skills](agents.md#skills). |

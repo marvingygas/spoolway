@@ -139,6 +139,30 @@ says "doctor refuses a hook name that is not a bare filename" \
 must "hook is restored to the bare name" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
+# A hook that cannot start is something only a real process can prove. These
+# two are run for real, so `doctor`'s claim of exit 127 or 126 is checked
+# against what the shell does, then `doctor` must fail each and pass it fixed.
+printf '#!/bin/sh\r\nexit 0\r\n' > .spoolway/hooks/crlf.sh
+chmod +x .spoolway/hooks/crlf.sh
+printf '#!/bin/sh\nexit 0\n' > .spoolway/hooks/noexec.sh
+chmod 644 .spoolway/hooks/noexec.sh
+rc=0; (cd .spoolway/hooks && sh -c ./crlf.sh) >/dev/null 2>&1 || rc=$?
+works "a CRLF hook really exits 127" test "$rc" = 127
+rc=0; (cd .spoolway/hooks && sh -c ./noexec.sh) >/dev/null 2>&1 || rc=$?
+works "a mode-644 hook really exits 126" test "$rc" = 126
+must "hook is set to the CRLF one" "$SPOOLWAY" config set issue_tracking.hook crlf.sh
+says "doctor fails a hook saved with CRLF line endings" \
+  "Windows (CRLF) line endings" "$SPOOLWAY" doctor
+must "hook is set to the one without an executable bit" \
+  "$SPOOLWAY" config set issue_tracking.hook noexec.sh
+says "doctor fails a hook that is not executable, naming the mode" \
+  "mode 644" "$SPOOLWAY" doctor
+chmod +x .spoolway/hooks/noexec.sh
+silent_about "and doctor stops complaining once the mode is fixed" \
+  "is not executable" "$SPOOLWAY" doctor
+must "hook is restored to the bare name again" \
+  "$SPOOLWAY" config set issue_tracking.hook record.sh
+
 # `handover` is `spoolway stack`, and the second task of a group is the second
 # pull request of a stack — one `gh api` call that needs a remote reading as
 # `github.com` and a `gh` that tracks stack membership. This suite's forge is
@@ -313,20 +337,23 @@ has "the group's own words reached the hook on the first task" \
 has "and on the dependent, which set no group_description of its own" \
   "a mirrored pair of tasks" "$SPOOLWAY_PROJECT_HOME/tracking/group-description.opened-b"
 
+PEND_OK="$SPOOLWAY_PROJECT_HOME/pending/opened-ok.md"
+PEND_FAILS="$SPOOLWAY_PROJECT_HOME/pending/opened-fails.md"
 # A batch of two, the second of which the hook above refuses by name: nothing
 # is queued, but the first document's own ticket was already written back
-# into it in place, in `$LIVE` — not the queue — so a second `queue add` over
+# into it in place, in `pending/` — not the queue; a file outside `pending/`
+# is left alone — so a second `queue add` over
 # the same two documents resumes rather than opening a second set.
-task_doc "$LIVE/opened-ok.md" opened-ok "$BODY" "group: opened-fail-batch" \
+pending_doc opened-ok "$BODY" "group: opened-fail-batch" \
   "group_description: a batch that fails partway through"
 # Chained on `opened-ok`: a group is one chain, and two unrelated tasks in it
 # would be refused as two roots before the hook this case is about ran at all
 # — and that refusal names `opened-fails` too, so the check below would pass
 # on the wrong message.
-task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch" \
+pending_doc opened-fails "$BODY" "group: opened-fail-batch" \
   "depends_on: [opened-ok]"
 refuses "a mid-batch hook failure queues nothing" "opened-fails" \
-  "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
+  "$SPOOLWAY" queue add --from "$PEND_OK" --from "$PEND_FAILS"
 if [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md" ] \
   && [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-fails.md" ]; then
   ok "neither task of the failed batch was queued"
@@ -334,15 +361,15 @@ else
   bad "neither task of the failed batch was queued"
 fi
 has "the one that succeeded had its ticket written back into the pending file" \
-  "ticket: acme/app#" "$LIVE/opened-ok.md"
+  "ticket: acme/app#" "$PEND_OK"
 
 # The hook no longer refuses anything: the second run over the same two
 # documents queues both, and the first is `kept` rather than opened again —
 # proven by its ticket id being unchanged from what the first run secured.
-FIRST_TICKET=$(grep '^ticket:' "$LIVE/opened-ok.md" | awk '{print $2}')
+FIRST_TICKET=$(grep '^ticket:' "$PEND_OK" | awk '{print $2}')
 sed -i '/SPOOLWAY_TASK" = "opened-fails"/,+2d' .spoolway/hooks/open.sh
 must "the second run over the same batch queues both" \
-  "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
+  "$SPOOLWAY" queue add --from "$PEND_OK" --from "$PEND_FAILS"
 has "the resumed run kept the first ticket rather than opening a new one" \
   "ticket: $FIRST_TICKET" "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md"
 

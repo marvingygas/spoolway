@@ -1057,9 +1057,19 @@ impl Task {
     }
 
     /// Serialise back to the on-disk form.
+    ///
+    /// A body written with CRLF line endings gets a CRLF frontmatter too, so
+    /// a file saved by a Windows editor comes back with one kind of line
+    /// ending from top to bottom rather than a mix. The body decides because
+    /// it is kept verbatim from the file; the frontmatter is serialised
+    /// afresh and would otherwise always end its lines with a bare `\n`.
     pub fn render(&self) -> Result<String> {
         let yaml = serde_norway::to_string(&self.front).context("serialising frontmatter")?;
-        Ok(format!("---\n{yaml}---\n{}", self.body))
+        let head = format!("---\n{yaml}---\n");
+        match self.body.contains("\r\n") {
+            true => Ok(format!("{}{}", head.replace('\n', "\r\n"), self.body)),
+            false => Ok(format!("{head}{}", self.body)),
+        }
     }
 
     /// Write the task file. If [`Task::set_stage`] or
@@ -1305,30 +1315,32 @@ impl Task {
     /// `## Status Log`. [`Task::mark_blocker_cleared`] also appends a line to
     /// `## Blocker`.
     pub fn append_to_section(&mut self, heading: &str, text: &str) {
+        let eol = self.eol();
+        let text = text.replace("\r\n", "\n").replace('\n', eol);
         match self.find_section(heading) {
             Some((_, end)) => {
-                let mut insert_at = end;
                 // Back up over trailing blank lines so the new entry sits
-                // directly under the existing ones.
-                while insert_at > 0 && self.body[..insert_at].ends_with('\n') {
-                    let trimmed = self.body[..insert_at].trim_end_matches('\n');
-                    if insert_at - trimmed.len() <= 1 {
-                        break;
-                    }
-                    insert_at -= 1;
-                }
-                self.body.insert_str(insert_at, text);
+                // directly under the existing ones, keeping the one line
+                // ending the last entry already has.
+                let content = self.body[..end].trim_end_matches(['\r', '\n']).len();
+                let rest = &self.body[content..end];
+                let insert_at = match rest {
+                    r if r.starts_with("\r\n") => content + 2,
+                    r if r.starts_with('\n') => content + 1,
+                    _ => end,
+                };
+                self.body.insert_str(insert_at, &text);
             }
             None => {
                 if !self.body.ends_with('\n') && !self.body.is_empty() {
-                    self.body.push('\n');
+                    self.body.push_str(eol);
                 }
-                if !self.body.ends_with("\n\n") && !self.body.is_empty() {
-                    self.body.push('\n');
+                if !self.body.ends_with(&format!("{eol}{eol}")) && !self.body.is_empty() {
+                    self.body.push_str(eol);
                 }
                 self.body.push_str(heading);
-                self.body.push('\n');
-                self.body.push_str(text);
+                self.body.push_str(eol);
+                self.body.push_str(&text);
             }
         }
     }
@@ -1350,37 +1362,88 @@ impl Task {
     /// heading `find_section` can see at all. The trailing blank line is
     /// dropped for the body's own last section, matching the single newline
     /// [`Task::render`] already ends every task with.
+    ///
+    /// The body's own line endings win over the input's: a task file saved
+    /// with CRLF stays CRLF all the way down, and an input of either kind is
+    /// converted to match. A line of the input outside a code fence that
+    /// would read as a heading ending this section is written with a
+    /// backslash in front (`\## Fake`). Markdown shows it as the same text,
+    /// and `find_section` no longer takes it for a heading, so the edit
+    /// cannot split the section it was asked to fill. Text that opens a code
+    /// fence and never closes it is refused, since written as it is the
+    /// fence would swallow every heading after it.
     pub fn replace_section(&mut self, heading: &str, text: &str) -> Result<()> {
         let (start, end) = self
             .find_section(heading)
             .with_context(|| format!("no `{heading}` section in this task's body"))?;
-        let trimmed = text.trim();
+        let level = heading.chars().take_while(|c| *c == '#').count();
+        let eol = self.eol();
+        let unix = text.replace("\r\n", "\n");
+        let lines: Vec<&str> = unix.trim().split('\n').collect();
+        let (inside, unclosed) = fenced(&lines);
+        // A fence the input opens and never closes would swallow the rest of
+        // the body once written, so it is refused rather than closed on the
+        // writer's behalf.
+        if unclosed {
+            bail!(
+                "the text for `{heading}` opens a code fence and never closes it, so it \
+                 would swallow every section after it — add the closing fence, or take \
+                 the opening one out"
+            );
+        }
+        let escaped: Vec<String> = lines
+            .iter()
+            .zip(&inside)
+            .map(|(line, inside)| {
+                match !inside && heading_level(line) > 0 && heading_level(line) <= level {
+                    true => format!("\\{line}"),
+                    false => line.to_string(),
+                }
+            })
+            .collect();
+        let trimmed = escaped.join(eol);
         let replacement = match end == self.body.len() {
-            true => format!("\n{trimmed}\n"),
-            false => format!("\n{trimmed}\n\n"),
+            true => format!("{eol}{trimmed}{eol}"),
+            false => format!("{eol}{trimmed}{eol}{eol}"),
         };
         self.body.replace_range(start..end, &replacement);
         Ok(())
     }
 
+    /// The line ending this body is written with: CRLF when any line has
+    /// one, LF otherwise. Every write into the body follows it, so a file
+    /// saved by a Windows editor is never left with a mix.
+    fn eol(&self) -> &'static str {
+        match self.body.contains("\r\n") {
+            true => "\r\n",
+            false => "\n",
+        }
+    }
+
     /// Byte range of a section's content (after the heading line, up to the
     /// next heading of the same or higher level, or end of body).
+    ///
+    /// A line inside a fenced code block is never a heading, whichever side
+    /// of the section it sits on: `## ` at the start of a fenced line is the
+    /// content of an example, not the end of the section holding it.
     fn find_section(&self, heading: &str) -> Option<(usize, usize)> {
         let level = heading.chars().take_while(|c| *c == '#').count();
         let mut content_start = None;
         let mut offset = 0usize;
+        let lines: Vec<&str> = self.body.split_inclusive('\n').collect();
+        let (inside, _) = fenced(&lines);
 
-        for line in self.body.split_inclusive('\n') {
+        for (line, inside) in lines.into_iter().zip(inside) {
             let trimmed = line.trim_end();
             match content_start {
                 None => {
-                    if trimmed.eq_ignore_ascii_case(heading) {
+                    if !inside && trimmed.eq_ignore_ascii_case(heading) {
                         content_start = Some(offset + line.len());
                     }
                 }
                 Some(start) => {
-                    let this_level = trimmed.chars().take_while(|c| *c == '#').count();
-                    if this_level > 0 && this_level <= level {
+                    let this_level = heading_level(trimmed);
+                    if !inside && this_level > 0 && this_level <= level {
                         return Some((start, offset));
                     }
                 }
@@ -1452,6 +1515,17 @@ impl Task {
     }
 }
 
+/// `raw` without a leading UTF-8 byte order mark.
+///
+/// Some Windows editors write one at the top of every file they save. It is
+/// invisible there, but a YAML reader takes it for the first character of the
+/// first key and refuses a perfectly good file as "missing field `steps` at
+/// line 1 column 2". Every reader of a task, pipeline or patch file strips it
+/// through here.
+pub(crate) fn without_bom(raw: &str) -> &str {
+    raw.strip_prefix('\u{feff}').unwrap_or(raw)
+}
+
 /// Split `---\n<yaml>\n---\n<body>` into its two halves, without deciding
 /// anything about what the yaml half means.
 ///
@@ -1466,7 +1540,7 @@ impl Task {
 /// so a task that looks like it starts with `---` would otherwise be refused
 /// for not starting with it.
 pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let raw = without_bom(raw);
     let rest = raw
         .strip_prefix("---\n")
         .or_else(|| raw.strip_prefix("---\r\n"))
@@ -1486,6 +1560,67 @@ pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
         yaml_end.context("task file has no closing `---` frontmatter fence")?;
 
     Ok((&rest[..yaml_end], &rest[body_start..]))
+}
+
+/// How many `#` a line starts with, which is how `find_section` tells
+/// where one section ends and the next begins.
+fn heading_level(line: &str) -> usize {
+    line.chars().take_while(|c| *c == '#').count()
+}
+
+/// If `line` opens a fenced code block, the character and length of its run.
+///
+/// Three or more backticks or tildes open one. A backtick fence's opening
+/// line may not hold another backtick, so prose such as "```x``` text" opens
+/// nothing. This is the one home of the rule: [`fenced`] and, through it,
+/// `find_section` and `replace_section` all read fences by it.
+fn fence_opener(line: &str) -> Option<(char, usize)> {
+    ['`', '~'].into_iter().find_map(|c| {
+        let n = line.chars().take_while(|x| *x == c).count();
+        let rest = &line[n..];
+        (n >= 3 && !(c == '`' && rest.contains('`'))).then_some((c, n))
+    })
+}
+
+/// For each of `lines`, whether it is inside a fenced code block, and
+/// whether some fence opened and never closed.
+///
+/// A fence closes with a run of its own character at least as long as the
+/// opening one, carrying nothing else on its line. Everything between the
+/// two fence lines, and the fence lines themselves, count as inside.
+///
+/// A fence that never closes counts as no fence at all. Read as running to
+/// the end, it would hide every heading after it, and `append_to_section`
+/// would then add a fresh `## Status Log` under it on every write. The lines
+/// after such an opener are scanned again, so a real fence below it is still
+/// seen. The second answer lets `replace_section` refuse text that would
+/// leave one behind.
+fn fenced(lines: &[&str]) -> (Vec<bool>, bool) {
+    let mut inside = vec![false; lines.len()];
+    let mut unclosed = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((c, n)) = fence_opener(lines[i].trim_end()) else {
+            i += 1;
+            continue;
+        };
+        let close = (i + 1..lines.len()).find(|&j| {
+            let line = lines[j].trim_end();
+            line.chars().take_while(|x| *x == c).count() >= n
+                && line.trim_start_matches(c).is_empty()
+        });
+        match close {
+            Some(j) => {
+                inside[i..=j].iter_mut().for_each(|x| *x = true);
+                i = j + 1;
+            }
+            None => {
+                unclosed = true;
+                i += 1;
+            }
+        }
+    }
+    (inside, unclosed)
 }
 
 /// Write via a temporary file + rename so a crash never leaves a half-written
@@ -1591,6 +1726,26 @@ fn writer_pid(file_name: &str) -> Option<u32> {
 pub struct LoadProblem {
     pub path: PathBuf,
     pub error: String,
+    /// The file parsed, but its `id:` is already held by another queue file —
+    /// see [`skip_duplicate_ids`]. `doctor` fails these and nothing else here,
+    /// since a file that will not parse has no id to collide.
+    pub duplicate: bool,
+}
+
+impl LoadProblem {
+    /// What a person reads for this file in a list of skipped ones: a
+    /// duplicate parsed fine, so it is not said not to.
+    pub fn skipped_line(&self) -> String {
+        if self.duplicate {
+            format!("{} {}", self.path.display(), self.error)
+        } else {
+            format!(
+                "{} did not parse and was skipped: {}",
+                self.path.display(),
+                self.error
+            )
+        }
+    }
 }
 
 /// Load every `*.md` task file in a directory, sorted by id for stable
@@ -1602,7 +1757,8 @@ pub struct LoadProblem {
 /// hand-edit left without its closing `---` froze the whole pipeline with
 /// the only trace in `~/.spoolway/logs/<project>.log`. The bad file is now
 /// skipped and returned in the second half of the pair, for the caller to
-/// name where a person will see it.
+/// name where a person will see it. A second file holding an id another file
+/// already holds is skipped the same way — see [`skip_duplicate_ids`].
 pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     let mut tasks = Vec::new();
     let mut problems = Vec::new();
@@ -1623,13 +1779,97 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
             Err(e) => problems.push(LoadProblem {
                 path,
                 error: format!("{e:#}"),
+                duplicate: false,
             }),
         }
     }
 
-    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
+    let tasks = skip_duplicate_ids(tasks, &mut problems);
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems))
+}
+
+/// Keep one task per `id:` and turn every other file holding it into a
+/// [`LoadProblem`], then sort the survivors by id.
+///
+/// Two queue files with one id, such as a Windows Explorer copy
+/// `dd1 - Copy.md` beside `dd1.md`, used to load as two tasks. Both ran the
+/// same steps against the same branch and both saved over the same task
+/// file, so the dispatcher relaunched them hundreds of times a minute and the
+/// task never archived. The file whose stem equals the id is the one a person
+/// queued, so it wins. When none does, the first by path wins, so the choice
+/// is the same on every pass. The others are named, never deleted.
+///
+/// Shared by [`load_dir`] and the board's cached reader, so the dispatcher,
+/// `queue list` and the board agree on which file is the task.
+pub fn skip_duplicate_ids(mut tasks: Vec<Task>, problems: &mut Vec<LoadProblem>) -> Vec<Task> {
+    // Stem match first, then path, so the kept file does not depend on the
+    // order `read_dir` happened to list the directory in.
+    let stem_is_id =
+        |task: &Task| task.path.file_stem().and_then(|s| s.to_str()) == Some(task.id());
+    tasks.sort_by(|a, b| {
+        a.front
+            .id
+            .cmp(&b.front.id)
+            .then(stem_is_id(b).cmp(&stem_is_id(a)))
+            .then(a.path.cmp(&b.path))
+    });
+    let mut kept: Vec<Task> = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match kept.last() {
+            Some(first) if first.id() == task.id() => problems.push(LoadProblem {
+                error: format!(
+                    "holds the id `{id}`, which {first} already holds, so it was skipped. \
+                     Two files with one id would run the same task twice; rename this \
+                     file's `id:` or delete the file",
+                    id = task.id(),
+                    first = first.path.display(),
+                ),
+                path: task.path,
+                duplicate: true,
+            }),
+            _ => kept.push(task),
+        }
+    }
+    kept
+}
+
+/// Drop every queue task whose id already has a record in `archive_dir`,
+/// naming each as a [`LoadProblem`].
+///
+/// [`skip_duplicate_ids`] only compares queue files with each other, so once
+/// `dd1.md` finishes and moves to the archive, a leftover `dd1 - Copy.md`
+/// would stop being a duplicate and run `dd1` a second time. It would then
+/// archive over the first run's record, or sit blocked on a branch the first
+/// run left. `queue add` already refuses an id the archive holds, so no
+/// legitimate queue file shares one. Archiving renames the queue file in one
+/// step, so a task's own file is never in both places at once.
+pub fn skip_archived_ids(
+    tasks: Vec<Task>,
+    problems: &mut Vec<LoadProblem>,
+    archive_dir: &Path,
+) -> Vec<Task> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let archived = archive_dir.join(format!("{}.md", task.id()));
+        if archived.exists() {
+            problems.push(LoadProblem {
+                error: format!(
+                    "holds the id `{}`, which {} already finished, so it was skipped. \
+                     Running it would archive over that record; rename this file's `id:` \
+                     or delete the file",
+                    task.id(),
+                    archived.display(),
+                ),
+                path: task.path,
+                duplicate: true,
+            });
+        } else {
+            kept.push(task);
+        }
+    }
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    kept
 }
 
 /// The unprefixed branch name for a task: `task/<id>`. The one place this
@@ -1693,6 +1933,131 @@ mod tests {
     // passthrough in `extra`, the same as any other key spoolway does not
     // name.
     const SAMPLE: &str = "---\nid: demo\nstage: queued\ntouches: [src/**]\n---\n## Goal\nDo a thing.\n\n## Status Log\n- earlier entry\n";
+
+    /// A CRLF task file comes back from a save with CRLF frontmatter lines
+    /// as well as a CRLF body.
+    #[test]
+    fn a_crlf_task_file_is_saved_with_crlf_throughout() {
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\r\nid: demo\r\nstage: queued\r\n---\r\n## Goal\r\nold\r\n",
+        )
+        .unwrap();
+        task.replace_section("## Goal", "new").unwrap();
+        let rendered = task.render().unwrap();
+        assert!(!rendered.replace("\r\n", "").contains('\n'), "{rendered:?}");
+        assert!(rendered.starts_with("---\r\nid: demo\r\n"), "{rendered:?}");
+    }
+
+    /// A fenced `## ` line belongs to the section holding it: the section
+    /// is found whole, and replacing it leaves the next real heading alone.
+    #[test]
+    fn replace_section_keeps_a_fenced_heading_line_inside_the_section() {
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\nid: demo\nstage: queued\n---\n## Goal\n```\n## not a heading\n```\nmore\n\n## Next\nkeep\n",
+        )
+        .unwrap();
+        task.replace_section("## Goal", "new").unwrap();
+        assert_eq!(task.body, "## Goal\n\nnew\n\n## Next\nkeep\n");
+
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\nid: demo\nstage: queued\n---\n## Goal\nx\n\n## Next\n```\n## Goal\n```\n",
+        )
+        .unwrap();
+        assert_eq!(task.section("## Goal"), Some("x"));
+        task.replace_section("## Next", "```\n## in a fence\n```")
+            .unwrap();
+        assert!(task.body.ends_with("## Next\n\n```\n## in a fence\n```\n"));
+    }
+
+    /// CRLF in the body stays CRLF, whatever line endings the input had.
+    #[test]
+    fn replace_section_keeps_the_bodys_line_endings() {
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\r\nid: demo\r\nstage: queued\r\n---\r\n## Goal\r\nold\r\n\r\n## Next\r\nkeep\r\n",
+        )
+        .unwrap();
+        task.replace_section("## Goal", "a\nb").unwrap();
+        assert_eq!(
+            task.body,
+            "## Goal\r\n\r\na\r\nb\r\n\r\n## Next\r\nkeep\r\n"
+        );
+    }
+
+    /// A `## ` line in the input is text, not a new section.
+    #[test]
+    fn replace_section_writes_a_heading_in_the_input_as_text() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.replace_section("## Goal", "one\n## Fake heading\n### Deeper")
+            .unwrap();
+        assert_eq!(
+            task.section("## Goal"),
+            Some("one\n\\## Fake heading\n### Deeper")
+        );
+        assert!(task.section("## Fake heading").is_none());
+        assert!(task.section("## Status Log").is_some());
+    }
+
+    /// A fence that never closes, in the body or in the text of an edit,
+    /// must not hide the sections after it.
+    #[test]
+    fn an_unclosed_fence_hides_nothing_and_an_edit_may_not_leave_one() {
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\nid: demo\nstage: queued\n---\n## Goal\n```sh\nx\n\n## Status Log\n- a\n",
+        )
+        .unwrap();
+        assert_eq!(task.section("## Status Log"), Some("- a"));
+        task.append_to_section("## Status Log", "- b\n");
+        assert_eq!(task.body.matches("## Status Log").count(), 1);
+
+        let err = task.replace_section("## Goal", "```sh\n## x").unwrap_err();
+        assert!(format!("{err:#}").contains("never closes it"), "{err:#}");
+        assert!(
+            task.body.contains("```sh\nx"),
+            "refused edit changed the body"
+        );
+    }
+
+    /// Prose holding a pair of backticks after three is not a fence.
+    #[test]
+    fn a_backtick_line_with_a_backtick_in_its_info_string_is_not_a_fence() {
+        let lines = ["```x``` text", "## Real", "~~~", "## In", "~~~"];
+        assert_eq!(fenced(&lines).0, [false, false, true, true, true]);
+        assert!(!fenced(&lines).1);
+
+        // An opener that never closes hides nothing, and a real fence below
+        // it is still seen.
+        let lines = ["```sh", "~~~", "## In", "~~~", "## Out"];
+        assert_eq!(fenced(&lines), (vec![false, true, true, true, false], true));
+    }
+
+    /// An append to a CRLF body writes CRLF, under the last entry.
+    #[test]
+    fn appending_to_a_crlf_body_adds_no_bare_line_feed() {
+        let mut task = Task::parse(
+            PathBuf::from("demo.md"),
+            "---\r\nid: demo\r\nstage: queued\r\n---\r\n## Goal\r\nx\r\n\r\n## Status Log\r\n- a\r\n\r\n## Next\r\ny\r\n",
+        )
+        .unwrap();
+        task.log_status("hello");
+        assert!(
+            !task.body.replace("\r\n", "").contains('\n'),
+            "{:?}",
+            task.body
+        );
+        let log = task.section("## Status Log").unwrap();
+        assert!(log.starts_with("- a\r\n- "), "{log:?}");
+        task.append_to_section("## New", "z\n");
+        assert!(
+            !task.body.replace("\r\n", "").contains('\n'),
+            "{:?}",
+            task.body
+        );
+    }
 
     /// `write_atomic` names the path it was trying to create a directory
     /// for when that fails — the "`local` is a file" case a copy or promote
@@ -2461,6 +2826,67 @@ mod tests {
         assert_eq!(tasks[0].id(), "good");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].path.ends_with("broken.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two queue files holding one id load as one task: the file named for
+    /// the id. The other is a problem, named and flagged as a duplicate. Two
+    /// loaded tasks made the dispatcher run the same steps over and over.
+    #[test]
+    fn load_dir_keeps_the_file_named_for_the_id_and_names_the_copy() {
+        let dir = crate::scratch::root("load-dir-duplicate-id");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(dir.join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(dir.join("dd1.md"), doc).unwrap();
+
+        let (tasks, problems) = load_dir(&dir).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].path.ends_with("dd1.md"));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].path.ends_with("dd1 - Copy.md"));
+        assert!(problems[0].duplicate);
+        assert!(
+            problems[0].error.contains("dd1.md"),
+            "{}",
+            problems[0].error
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Once `dd1` has archived, a leftover `dd1 - Copy.md` is no longer a
+    /// duplicate of any queue file. It still must not run: the archive holds
+    /// the id, and a second run would archive over the first one's record.
+    #[test]
+    fn a_queue_task_whose_id_is_archived_is_skipped_and_named() {
+        let dir = crate::scratch::root("skip-archived-id");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (queue, archive) = (dir.join("queue"), dir.join("archive"));
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        let doc = "---\nid: dd1\nstage: queued\n---\n## Goal\nok\n";
+        std::fs::write(archive.join("dd1.md"), doc).unwrap();
+        std::fs::write(queue.join("dd1 - Copy.md"), doc).unwrap();
+        std::fs::write(
+            queue.join("other.md"),
+            "---\nid: other\nstage: queued\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+
+        let (tasks, mut problems) = load_dir(&queue).unwrap();
+        let tasks = skip_archived_ids(tasks, &mut problems, &archive);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id(), "other");
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].duplicate);
+        let line = problems[0].skipped_line();
+        assert!(line.contains("dd1 - Copy.md"), "{line}");
+        assert!(!line.contains("did not parse"), "{line}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

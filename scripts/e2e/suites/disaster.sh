@@ -793,6 +793,27 @@ sweep
 forget rodep
 git branch -D task/rotree 2>/dev/null
 
+# ---------------- six `queue add` processes at once into one group
+# Each process checks the group's shape before it saves. Without the per-group
+# lock all six see an empty group and all six save a root, leaving a group
+# that refuses every later add (docs/tasks.md says a split group "is still
+# caught"). The unit test races threads; this races real processes, which is
+# what the lock file's pid check has to survive.
+for n in 1 2 3 4 5 6; do
+  task_doc "$LIVE/race-$n.md" "race-$n" "$BODY" "group: race"
+done
+RACE_OUT="$LIVE/race-out"
+mkdir -p "$RACE_OUT"
+for n in 1 2 3 4 5 6; do
+  "$SPOOLWAY" queue add --from "$LIVE/race-$n.md" >"$RACE_OUT/$n.log" 2>&1 &
+done
+wait
+works "exactly one of six parallel adds into one group is queued" \
+  bash -c '[ "$(ls "$1"/queue/race-*.md 2>/dev/null | wc -l)" -eq 1 ]' _ "$SPOOLWAY_PROJECT_HOME"
+works "the five refused adds name the group's root" \
+  bash -c 'root=$(basename "$(ls "$1"/queue/race-*.md)" .md); [ "$(grep -l "has two tasks with no dependency in it" "$2"/*.log | wc -l)" -eq 5 ] && grep -q "$root" "$2"/*.log' _ "$SPOOLWAY_PROJECT_HOME" "$RACE_OUT"
+rm -f "$SPOOLWAY_PROJECT_HOME"/queue/race-*.md
+
 # ---------------- a home deleted by hand refuses, naming both files
 # `binding-record`'s own Goal names three ways the checkout's stamp and its
 # home's record can stop agreeing, and says each one "stops with an error

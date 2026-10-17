@@ -1062,7 +1062,8 @@ impl Pipeline {
     /// straight from a validated string.
     #[cfg(test)]
     pub fn parse(name: &str, raw: &str) -> Result<Pipeline> {
-        let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
+        let mut pipeline: Pipeline =
+            serde_norway::from_str(crate::task::without_bom(raw)).context("parsing pipeline")?;
         pipeline.name = name.to_string();
         pipeline.blocked_declared = pipeline.steps.iter().any(|s| s.id == BLOCKED);
         refuse_retired_step_keys(&pipeline)?;
@@ -1955,7 +1956,8 @@ impl Pipeline {
 /// needs exactly this same unchecked parse, at exactly this same trust
 /// level: good enough to read a field off, not yet proven to run.
 pub(crate) fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
-    let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
+    let mut pipeline: Pipeline =
+        serde_norway::from_str(crate::task::without_bom(raw)).context("parsing pipeline")?;
     pipeline.name = name.to_string();
     pipeline.blocked_declared = pipeline.steps.iter().any(|s| s.id == BLOCKED);
     refuse_retired_step_keys(&pipeline)?;
@@ -2177,7 +2179,7 @@ impl Pipelines {
         };
         let mut problems = Vec::new();
         for (name, _path, raw) in &files {
-            match serde_norway::from_str::<Pipeline>(raw) {
+            match serde_norway::from_str::<Pipeline>(crate::task::without_bom(raw)) {
                 Ok(mut pipeline) => {
                     pipeline.name = name.clone();
                     for problem in pipeline.retired_shape_problems() {
@@ -2734,6 +2736,16 @@ fn refuse_tracked_steps_naming_a_private_only_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A byte order mark in front of a pipeline file is not part of its
+    /// first key.
+    #[test]
+    fn a_pipeline_with_a_byte_order_mark_loads_like_one_without() {
+        let raw = "steps:\n  - id: build\n    agent: implementer\n";
+        let plain = parse_unchecked("p", raw).unwrap();
+        let marked = parse_unchecked("p", &format!("\u{feff}{raw}")).unwrap();
+        assert_eq!(plain.steps.len(), marked.steps.len());
+    }
 
     // covers: pipeline.steps — the steps a pipeline declares are what it runs, in the order it declares them
 

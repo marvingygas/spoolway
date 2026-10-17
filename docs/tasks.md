@@ -79,7 +79,9 @@ as JSON.
 | `skip`, `trial`, `trial_group` | the queue screen's `trial` menu item | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
 
-Keys not in this table are kept as they are, so a project can add its own metadata.
+Keys not in this table are kept as they are, so a project can add its own metadata. A key that
+is a field of this table spelt in another case or with `-` for `_`, such as `gate-at`,
+`depends-on` or `ID`, is refused. The message names the field it means.
 
 ### What a task may set
 
@@ -110,7 +112,20 @@ words with a hyphen instead, for example `needs-triage`.
 
 `gate_at` must name a step of the task's pipeline. `done` is not a step. `spoolway queue add`
 and `spoolway task contract --from` refuse any other value, naming the task and the steps it
-may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
+may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`. A trial
+refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
+[Trials](planning.md#trials).
+
+A body may not still hold the `[[…]]` placeholder text of its skeleton. `spoolway queue add`,
+the queue screen, `spoolway task contract --from` and a trial refuse such a task. The refusal
+names the section the placeholder sits under:
+
+```
+$ spoolway queue add --from mine.md
+mine.md: the section `Context` still holds the skeleton's `[[…]]` placeholder text. Replace it
+with the task's own words, or delete the section if the task has nothing to say there, then add
+it again.
+```
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
 digits and hyphens, starting with a letter. A task id may be at most 100 characters, because
@@ -200,13 +215,13 @@ a file of its own.
 tasks in one call are checked together and written all or none. The queue screen leaves out a
 task whose start branch does not exist and queues the rest. See [A start branch that does not
 exist](#a-start-branch-that-does-not-exist). A task id that is already in the queue or the
-archive is refused, also when several adds of that id run at once. See [`spoolway queue
+archive is refused, as is a task id that is the name of a routine, also when several adds of that id run at once. See [`spoolway queue
 add`](cli-reference.md#spoolway-queue-add).
 
 ```
 spoolway queue add --from task.md               # one file
 spoolway queue add --from a.md --from b.md      # several
-spoolway queue add --from tasks/                # every *.md in a directory
+spoolway queue add --from tasks/                # every *.md in a directory, except dotfiles and broken links
 spoolway queue add --from -                     # a `---`-separated stream on stdin
 ```
 
@@ -215,8 +230,13 @@ directory and `.spoolway/routines/`. See [Queueing a plan](planning.md#queueing-
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
-A body may not contain a line that is exactly `---`. The task starts on its pipeline's first
-step.
+A directory skips each editor leftover, such as `.pa.md` or an Emacs lock link `.#pa.md` that
+points nowhere, and names it on standard error. The queue screen does not list these files
+either.
+
+A task file's body may contain a line that is exactly `---`. Only a stream on standard input
+(`--from -`) may not, because `---` is what separates its tasks. The task starts on its
+pipeline's first step.
 
 ### Read the queue
 
@@ -230,8 +250,11 @@ step.
 | `spoolway queue resume <task>` | Same as `r` on the board. |
 | `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
 
-A queue file that does not parse is skipped. The board names it in amber, `spoolway queue list`
-names it with its reason, and the dispatcher keeps running while it is in the queue. A pending file
+A queue file that does not parse is skipped. A queue file that holds an id another file holds is
+skipped too, as is a queue file whose id is already in the archive. The file whose name is the id
+runs, and the other is left untouched. The board names a skipped file in amber, `spoolway queue
+list` names it with its reason, `spoolway doctor` fails a duplicate, and the dispatcher keeps
+running while it is in the queue. A pending file
 that does not parse is named on the queue screen. See [`spoolway queue list`](cli-reference.md#spoolway-queue-list).
 
 ## Expressing order
@@ -239,7 +262,8 @@ that does not parse is named on the queue screen. See [`spoolway queue list`](cl
 A group is one chain: each task depends on the one before it. There is one root, with no
 `depends_on`, and one tail, that nothing depends on. `queue add` and `task contract` refuse
 any other shape, over the queue, the archive and the batch being added together, so a group
-split across two `queue add` calls is still caught.
+split across two `queue add` calls is still caught. Adds into one group at the same moment take
+turns. The first queues its root. The others are refused, naming the group and both roots.
 
 ```
 TASK       STEP       NOTE
@@ -365,6 +389,8 @@ branch exists neither locally nor on `origin`. It prints, for each such task:
 cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
 ```
 
+`spoolway task contract --from` prints the same line for such a task.
+
 The queue screen queues the rest of the selection. It leaves the task and every selected task that
 depends on it in the pending directory, and lists them in its popup. Once `starts_from:` names a
 branch that exists, sending the task again queues it. A dependency that is not yet `done` has no
@@ -384,12 +410,19 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 --force` removes that value, so a task sent again is cut again from its start branch. A
 `starts_from:` you set before the cut stays.
 
-`unqueue --force` keeps the task's branch when it has commits no remote has. A task sent again
-with that branch in place is refused and moves to `blocked`, because its first cut never uses a
-branch that already exists. Rename the branch with `git branch -m task/<id> <name>` and set
-`starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop it. Then resume
-the task. See [Where work happens on
+`unqueue --force` keeps the task's branch when it has commits no remote has. Sending the task
+again with that branch in place is refused by `queue add`, because its first cut never uses a
+branch that already exists. Nothing is queued. Rename the branch with `git branch -m task/<id>
+<name>` and set `starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop
+it. Then send the task again. See [Where work happens on
 disk](dispatcher.md#where-work-happens-on-disk).
+
+Deleting a running task's queue file takes the task off the board and leaves its worktree and
+`task/<id>` branch behind. Nothing removes them, and a command step already running in that
+worktree keeps running. `spoolway doctor` fails the row `no deleted task left a
+worktree or branch` and names both. `spoolway queue add` refuses that id until they are gone,
+and the message gives the `git worktree remove --force` and `git branch -D` commands, or the
+`git branch -m` rename that keeps the work.
 
 ### The stop is yours to work in
 
@@ -410,6 +443,11 @@ spoolway task edit <task> --section Mockup --from -   # read the new content fro
 `--section` names a `##` heading without its `##`. The heading must already exist in the body.
 The whole section's content is replaced, the way editing the file by hand would. Run against a
 task that is neither `paused` nor `blocked`, it is refused.
+
+A `##` line inside a fenced code block stays part of the section. A `##` line outside a fence
+in the new content is written as `\## …`, so it stays text and does not start a section. New
+content that opens a fence and does not close it is refused. The file keeps its line endings:
+a task saved with CRLF stays CRLF, frontmatter included.
 
 Every choice a stop offers is printed key first, then the command that does the same thing:
 

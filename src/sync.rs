@@ -2328,7 +2328,9 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         // the file is left as it is. `sync` never edits a step, but without
         // this it would report the upgrade done
         // over a pipeline the next command refuses to load.
-        if let Ok(pipeline) = serde_norway::from_str::<crate::pipeline::Pipeline>(&on_disk) {
+        if let Ok(pipeline) =
+            serde_norway::from_str::<crate::pipeline::Pipeline>(crate::task::without_bom(&on_disk))
+        {
             let problems = pipeline.retired_shape_problems();
             if !problems.is_empty() {
                 outcomes.push(Outcome::blocked(
@@ -4405,6 +4407,28 @@ mod tests {
         assert!(refused[1].0.ends_with("mine.yml"), "{refused:?}");
         let (wrote, _) = dedup_paths(&outcomes);
         assert!(wrote.is_empty(), "{wrote:?}");
+    }
+
+    /// A pipeline saved with a byte order mark is read for its retired
+    /// shapes like one without; otherwise sync skips the check and reports
+    /// the upgrade done over a file the loader then refuses.
+    #[test]
+    fn a_pipeline_with_a_byte_order_mark_and_loop_zero_is_still_refused() {
+        let (repo, _root_guard) = fixture("pipeline-loop-zero-bom");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mine.yml"),
+            "\u{feff}steps:\n  - id: work\n    loop: 0\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert!(refused[0].1.starts_with("will not load"), "{refused:?}");
     }
 
     /// `end: true` and `on_pass: blocked` no longer load. A sync names each
