@@ -15,11 +15,12 @@
 //! sessions a person ran by hand in a watched root, by directory or one row
 //! per session. The screen adds a third, the trials table, which is not a
 //! population of its own: it lists the trials the lanes were arms of, and
-//! opening one narrows the lanes table to it. Under every `by` only the columns naming a row change: the
-//! figure columns stay put, so two groupings can be read against each other
-//! without relearning where anything is. Those figure columns come in two
-//! views, every row's totals or each total over the row's tasks — see
-//! [`Figures`] — and the exports carry both. A last line closes each table
+//! opening one narrows the lanes table to it. Under every `by` the columns
+//! naming a row change and, but for the `CTX PEAK` that `by task` alone
+//! draws, the figure columns stay put, so two groupings can be read against
+//! each other without relearning where anything is. Those figure columns
+//! come in two views, every row's totals or each total over the row's tasks
+//! — see [`Figures`] — and the exports carry both. A last line closes each table
 //! with only what adds up across its rows, built from the ledger rather than
 //! from the drawn cells: `Total`, the sums, in the totals view, and
 //! `Average`, those sums over its tasks or sessions, in the average view. A
@@ -771,7 +772,7 @@ impl CtxAvg {
     }
 }
 
-/// `CTX PEAK AVG`: each group's own peak — a lane's, or a session's — taken
+/// `CTX AVG`: each group's own peak — a lane's, or a session's — taken
 /// through [`ctx_peak_of`], then averaged. Where `CTX PEAK` says how close
 /// the worst lane came to its window, this says how close a typical one did.
 fn ctx_avg_of<'a, 'b: 'a>(
@@ -828,8 +829,8 @@ fn ctx_peak_of(lanes: &[&Entry], models: &dyn PriceBook) -> (Option<u64>, Option
     }
 }
 
-/// The `CTX PEAK` cell: a percentage of the model's window when one
-/// resolved, the raw peak in tokens when the model's window is unset, and
+/// A `CTX AVG` or `CTX PEAK` cell: a percentage of the model's window when
+/// one resolved, the raw peak in tokens when the model's window is unset, and
 /// `—` when no lane on the row banked a peak at all — never a guess, the same
 /// rule an unpriced model's cost cell follows.
 fn ctx_cell(tokens: Option<u64>, pct: Option<f64>) -> String {
@@ -840,7 +841,7 @@ fn ctx_cell(tokens: Option<u64>, pct: Option<f64>) -> String {
     }
 }
 
-/// Token counts for the `CTX PEAK` cell's raw fallback, rounded to a whole
+/// Token counts for a context cell's raw fallback, rounded to a whole
 /// unit — unlike [`crate::fmt::tokens_human`]'s one decimal place, because this
 /// column is squeezed beside a percentage the rest of the time and a bare
 /// `142k` reads as one figure rather than two.
@@ -911,9 +912,9 @@ struct LaneRow {
     metrics: Metrics,
 }
 
-/// The columns naming a row under each `by` — the only part of the table
-/// that changes with it — each beside the export column a sort on it reads:
-/// see [`lane_sort_value`].
+/// The columns naming a row under each `by` — the part of the table that
+/// changes with it, beside the `CTX PEAK` [`draws_ctx_peak`] adds — each
+/// beside the export column a sort on it reads: see [`lane_sort_value`].
 fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
     match by {
         EvalBy::Group => &[("GROUP", "group")],
@@ -933,17 +934,17 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// The figure columns the per-task view draws, identical under every `by`,
-/// in the order [`lane_figures`] draws them — each beside the export column
-/// a sort on it reads. A per-task cell sorts on its per-task figure, not the
-/// total beside it in an export. Each token class is followed by its cost at
+/// The figure columns the per-task view draws under every `by`, before
+/// [`lane_figure_columns`] adds `CTX PEAK` under `task`, in the order
+/// [`lane_figures`] draws them — each beside the export column a sort on it
+/// reads. A per-task cell sorts on its per-task figure, not the total beside
+/// it in an export. Each token class is followed by its cost at
 /// today's prices — see [`ClassCost`].
-const LANE_FIGURE_COLUMNS: [(&str, &str); 16] = [
+const LANE_FIGURE_COLUMNS: [(&str, &str); 15] = [
     ("TASKS", "tasks"),
     ("PASS", "pass"),
     ("BLOCKS/TASK", "blocks_per_task"),
-    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
-    ("CTX PEAK", "ctx_peak_pct"),
+    ("CTX AVG", "ctx_avg_pct"),
     ("IN/TASK", "in_per_task"),
     ("IN USD/TASK", "in_usd_per_task"),
     ("OUT/TASK", "out_per_task"),
@@ -963,12 +964,11 @@ const LANE_FIGURE_COLUMNS: [(&str, &str); 16] = [
 /// thing per task would be the one per-task figure left in a view of totals.
 /// `USD` stays last among the costs, as the banked total the four class
 /// costs before it are priced apart from — see [`ClassCost`].
-const LANE_TOTAL_COLUMNS: [(&str, &str); 15] = [
+const LANE_TOTAL_COLUMNS: [(&str, &str); 14] = [
     ("TASKS", "tasks"),
     ("PASS", "pass"),
     ("BLOCKS", "blocks"),
-    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
-    ("CTX PEAK", "ctx_peak_pct"),
+    ("CTX AVG", "ctx_avg_pct"),
     ("IN", "in_tokens"),
     ("IN USD", "in_usd"),
     ("OUT", "out_tokens"),
@@ -981,12 +981,34 @@ const LANE_TOTAL_COLUMNS: [(&str, &str); 15] = [
     ("TIME", "time_s"),
 ];
 
-/// The lanes table's figure columns in either view — see [`Figures`].
-fn lane_figure_columns(figures: Figures) -> &'static [(&'static str, &'static str)] {
-    match figures {
-        Figures::Totals => &LANE_TOTAL_COLUMNS,
-        Figures::Average => &LANE_FIGURE_COLUMNS,
+/// The `CTX PEAK` column, drawn right after `CTX AVG` where
+/// [`draws_ctx_peak`] says so.
+const CTX_PEAK_COLUMN: (&str, &str) = ("CTX PEAK", "ctx_peak_pct");
+
+/// Whether the lanes table draws `CTX PEAK` under `by`: only where a row is
+/// one task. There the peak is that task's worst lane, worth a warning; on a
+/// row of a whole pipeline or step it is one outlier lane out of hundreds,
+/// near 100% whatever the typical lane did, and `CTX AVG` says more.
+fn draws_ctx_peak(by: EvalBy) -> bool {
+    by == EvalBy::Task
+}
+
+/// The lanes table's figure columns under `by` in either view — see
+/// [`Figures`] — with [`CTX_PEAK_COLUMN`] after `CTX AVG` where
+/// [`draws_ctx_peak`] draws it.
+fn lane_figure_columns(by: EvalBy, figures: Figures) -> Vec<(&'static str, &'static str)> {
+    let mut columns = match figures {
+        Figures::Totals => LANE_TOTAL_COLUMNS.to_vec(),
+        Figures::Average => LANE_FIGURE_COLUMNS.to_vec(),
+    };
+    if draws_ctx_peak(by) {
+        let avg = columns
+            .iter()
+            .position(|(_, key)| *key == "ctx_avg_pct")
+            .expect("both views draw CTX AVG");
+        columns.insert(avg + 1, CTX_PEAK_COLUMN);
     }
+    columns
 }
 
 /// Every column the lanes table draws over `rows`, left to right: `PROJECT`
@@ -1003,7 +1025,7 @@ fn drawn_lane_columns(
         columns.push(("PROJECT", "project"));
     }
     columns.extend(lane_columns(by));
-    columns.extend(lane_figure_columns(figures));
+    columns.extend(lane_figure_columns(by, figures));
     columns
 }
 
@@ -1409,16 +1431,16 @@ struct Table {
 /// Separator between two columns everywhere in every table.
 const SEP: &str = "  ";
 
-/// The per-task view's figure columns, identical under every `by`. Every
-/// column is as wide as its own title, apart from `USD`, which is eight
-/// wide as in the totals view.
-fn lane_figures(cells: [&str; 16]) -> String {
+/// The per-task view's figure columns, identical under every `by` but for
+/// `peak`, the `CTX PEAK` cell drawn after `CTX AVG` only where
+/// [`draws_ctx_peak`] gives it a column. Every column is as wide as its own
+/// title, apart from `USD`, which is eight wide as in the totals view.
+fn lane_figures(cells: [&str; 15], peak: Option<&str>) -> String {
     let [
         tasks,
         pass,
         blocks,
         avg,
-        peak,
         inp,
         inp_usd,
         out,
@@ -1432,24 +1454,32 @@ fn lane_figures(cells: [&str; 16]) -> String {
         time,
     ] = cells;
     format!(
-        "{SEP}{tasks:>5}{SEP}{pass:>4}{SEP}{blocks:>11}{SEP}{avg:>12}{SEP}{peak:>8}{SEP}{inp:>7}\
+        "{SEP}{tasks:>5}{SEP}{pass:>4}{SEP}{blocks:>11}{SEP}{avg:>7}{}{SEP}{inp:>7}\
          {SEP}{inp_usd:>11}{SEP}{out:>8}{SEP}{out_usd:>12}{SEP}{cr:>12}{SEP}{cr_usd:>16}\
-         {SEP}{cw:>12}{SEP}{cw_usd:>16}{SEP}{usd:>8}{SEP}{usd_task:>8}{SEP}{time:>9}"
+         {SEP}{cw:>12}{SEP}{cw_usd:>16}{SEP}{usd:>8}{SEP}{usd_task:>8}{SEP}{time:>9}",
+        ctx_peak_cell(peak)
     )
+}
+
+/// `CTX PEAK`'s cell padded to its own column, eight wide like its title,
+/// or nothing at all where the table draws no such column.
+fn ctx_peak_cell(peak: Option<&str>) -> String {
+    peak.map(|peak| format!("{SEP}{peak:>8}"))
+        .unwrap_or_default()
 }
 
 /// The figure columns of the totals view — see [`LANE_TOTAL_COLUMNS`] —
 /// padded the way [`lane_figures`] pads the per-task ones. Each token column
 /// is seven wide, room for `149.71M`, each class cost as wide as its own
 /// title, and `USD` and `TIME` eight, room for `128h 39m`. A wider cell
-/// pushes the rest of its row right, as a wide per-task cell does.
-fn lane_total_figures(cells: [&str; 15]) -> String {
+/// pushes the rest of its row right, as a wide per-task cell does. `peak`
+/// is drawn the way [`lane_figures`] draws it.
+fn lane_total_figures(cells: [&str; 14], peak: Option<&str>) -> String {
     let [
         runs,
         pass,
         blocks,
         avg,
-        peak,
         inp,
         inp_usd,
         out,
@@ -1462,9 +1492,10 @@ fn lane_total_figures(cells: [&str; 15]) -> String {
         time,
     ] = cells;
     format!(
-        "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{avg:>12}{SEP}{peak:>8}{SEP}{inp:>7}\
+        "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{avg:>7}{}{SEP}{inp:>7}\
          {SEP}{inp_usd:>6}{SEP}{out:>7}{SEP}{out_usd:>7}{SEP}{cr:>7}{SEP}{cr_usd:>11}\
-         {SEP}{cw:>7}{SEP}{cw_usd:>11}{SEP}{usd:>8}{SEP}{time:>8}"
+         {SEP}{cw:>7}{SEP}{cw_usd:>11}{SEP}{usd:>8}{SEP}{time:>8}",
+        ctx_peak_cell(peak)
     )
 }
 
@@ -1538,12 +1569,14 @@ fn lanes_table(
         })
         .collect();
 
+    let peak = draws_ctx_peak(by);
+    let peak_title = peak.then_some(CTX_PEAK_COLUMN.0);
     let header = format!(
         "{}{}",
         naming(&headers, &widths),
         match figures {
-            Figures::Totals => lane_total_figures(LANE_TOTAL_COLUMNS.map(|(h, _)| h)),
-            Figures::Average => lane_figures(LANE_FIGURE_COLUMNS.map(|(h, _)| h)),
+            Figures::Totals => lane_total_figures(LANE_TOTAL_COLUMNS.map(|(h, _)| h), peak_title),
+            Figures::Average => lane_figures(LANE_FIGURE_COLUMNS.map(|(h, _)| h), peak_title),
         }
     );
     let (header, lead) = marked_header(header, &drawn_lane_columns(by, rows, figures), sort);
@@ -1557,110 +1590,118 @@ fn lanes_table(
                 percent(m.pass_share()),
                 m.blocked.to_string(),
             );
-            let (avg, peak) = (
-                m.ctx_avg.cell(),
-                ctx_cell(m.ctx_peak_tokens, m.ctx_peak_pct),
-            );
+            let avg = m.ctx_avg.cell();
+            let peak_cell = peak.then(|| ctx_cell(m.ctx_peak_tokens, m.ctx_peak_pct));
+            let peak_cell = peak_cell.as_deref();
             let usd = cost_of(m.cost, m.lines, m.unpriced);
             let figures = match figures {
                 Figures::Totals => {
                     let [in_usd, out_usd, cr_usd, cw_usd] = m.class_cost.cells(|usd| usd);
-                    lane_total_figures([
-                        &runs,
-                        &pass,
-                        &blocks,
-                        &avg,
-                        &peak,
-                        &tokens_cell(m.tokens.input),
-                        &in_usd,
-                        &tokens_cell(m.tokens.output),
-                        &out_usd,
-                        &tokens_cell(m.tokens.cache_read),
-                        &cr_usd,
-                        &tokens_cell(m.tokens.cache_write()),
-                        &cw_usd,
-                        &usd,
-                        &crate::status::human_secs(m.time_s),
-                    ])
+                    lane_total_figures(
+                        [
+                            &runs,
+                            &pass,
+                            &blocks,
+                            &avg,
+                            &tokens_cell(m.tokens.input),
+                            &in_usd,
+                            &tokens_cell(m.tokens.output),
+                            &out_usd,
+                            &tokens_cell(m.tokens.cache_read),
+                            &cr_usd,
+                            &tokens_cell(m.tokens.cache_write()),
+                            &cw_usd,
+                            &usd,
+                            &crate::status::human_secs(m.time_s),
+                        ],
+                        peak_cell,
+                    )
                 }
                 Figures::Average => {
                     let [in_usd, out_usd, cr_usd, cw_usd] =
                         m.class_cost.cells(|usd| m.per_task(usd));
-                    lane_figures([
-                        &runs,
-                        &pass,
-                        &format!("{:.2}", m.blocks_per_task()),
-                        &avg,
-                        &peak,
-                        &tokens_cell(m.tokens_per_task(m.tokens.input)),
-                        &in_usd,
-                        &tokens_cell(m.tokens_per_task(m.tokens.output)),
-                        &out_usd,
-                        &tokens_cell(m.tokens_per_task(m.tokens.cache_read)),
-                        &cr_usd,
-                        &tokens_cell(m.tokens_per_task(m.tokens.cache_write())),
-                        &cw_usd,
-                        &usd,
-                        // Dividing a floor by its run count is still a floor,
-                        // but `cost_of` prints the same plain number either
-                        // way.
-                        &cost_of(m.cost_per_task(), m.lines, m.unpriced),
-                        &crate::status::human_secs(m.time_per_task_s().round() as i64),
-                    ])
+                    lane_figures(
+                        [
+                            &runs,
+                            &pass,
+                            &format!("{:.2}", m.blocks_per_task()),
+                            &avg,
+                            &tokens_cell(m.tokens_per_task(m.tokens.input)),
+                            &in_usd,
+                            &tokens_cell(m.tokens_per_task(m.tokens.output)),
+                            &out_usd,
+                            &tokens_cell(m.tokens_per_task(m.tokens.cache_read)),
+                            &cr_usd,
+                            &tokens_cell(m.tokens_per_task(m.tokens.cache_write())),
+                            &cw_usd,
+                            &usd,
+                            // Dividing a floor by its run count is still a floor,
+                            // but `cost_of` prints the same plain number either
+                            // way.
+                            &cost_of(m.cost_per_task(), m.lines, m.unpriced),
+                            &crate::status::human_secs(m.time_per_task_s().round() as i64),
+                        ],
+                        peak_cell,
+                    )
                 }
             };
             format!("{}{figures}", naming(cells, &widths))
         })
         .collect();
-    // `PASS` and both `CTX PEAK` cells stay blank in either view: a share
-    // or a peak summed over rows, or averaged over rows of different
-    // sizes, is not a figure of the whole table.
+    // `PASS`, `CTX AVG` and, under `--by task`, `CTX PEAK` stay blank in
+    // either view: a share or a peak summed over rows, or averaged over rows
+    // of different sizes, is not a figure of the whole table.
     let runs = total.runs.to_string();
+    let total_peak = peak.then_some("");
     let t = &total.tokens;
     let total_figures = match figures {
         Figures::Totals => {
             let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.cells(|usd| usd);
-            lane_total_figures([
-                &runs,
-                "",
-                &total.blocked.to_string(),
-                "",
-                "",
-                &tokens_cell(t.input),
-                &in_usd,
-                &tokens_cell(t.output),
-                &out_usd,
-                &tokens_cell(t.cache_read),
-                &cr_usd,
-                &tokens_cell(t.cache_write()),
-                &cw_usd,
-                &cost_of(total.cost, total.lines, total.unpriced),
-                &crate::status::human_secs(total.time_s),
-            ])
+            lane_total_figures(
+                [
+                    &runs,
+                    "",
+                    &total.blocked.to_string(),
+                    "",
+                    &tokens_cell(t.input),
+                    &in_usd,
+                    &tokens_cell(t.output),
+                    &out_usd,
+                    &tokens_cell(t.cache_read),
+                    &cr_usd,
+                    &tokens_cell(t.cache_write()),
+                    &cw_usd,
+                    &cost_of(total.cost, total.lines, total.unpriced),
+                    &crate::status::human_secs(total.time_s),
+                ],
+                total_peak,
+            )
         }
         // `USD` is left blank here: a total has no place on a line of
         // averages, and `USD/TASK` beside it carries the average.
         Figures::Average => {
             let [in_usd, out_usd, cr_usd, cw_usd] =
                 total.class_cost.cells(|usd| total.per_task(usd));
-            lane_figures([
-                &runs,
-                "",
-                &format!("{:.2}", total.per_task(total.blocked as f64)),
-                "",
-                "",
-                &tokens_cell(total.tokens_per_task(t.input)),
-                &in_usd,
-                &tokens_cell(total.tokens_per_task(t.output)),
-                &out_usd,
-                &tokens_cell(total.tokens_per_task(t.cache_read)),
-                &cr_usd,
-                &tokens_cell(total.tokens_per_task(t.cache_write())),
-                &cw_usd,
-                "",
-                &cost_of(total.per_task(total.cost), total.lines, total.unpriced),
-                &crate::status::human_secs(total.per_task(total.time_s as f64).round() as i64),
-            ])
+            lane_figures(
+                [
+                    &runs,
+                    "",
+                    &format!("{:.2}", total.per_task(total.blocked as f64)),
+                    "",
+                    &tokens_cell(total.tokens_per_task(t.input)),
+                    &in_usd,
+                    &tokens_cell(total.tokens_per_task(t.output)),
+                    &out_usd,
+                    &tokens_cell(total.tokens_per_task(t.cache_read)),
+                    &cr_usd,
+                    &tokens_cell(total.tokens_per_task(t.cache_write())),
+                    &cw_usd,
+                    "",
+                    &cost_of(total.per_task(total.cost), total.lines, total.unpriced),
+                    &crate::status::human_secs(total.per_task(total.time_s as f64).round() as i64),
+                ],
+                total_peak,
+            )
         }
     };
     let total = format!("{}{total_figures}", naming(&total_cells, &widths))
@@ -1714,8 +1755,8 @@ fn lanes_csv_header(by: EvalBy) -> String {
         "blocks",
         "ctx_peak_tokens",
         "ctx_peak_pct",
-        "ctx_peak_avg_tokens",
-        "ctx_peak_avg_pct",
+        "ctx_avg_tokens",
+        "ctx_avg_pct",
         "in_tokens",
         "out_tokens",
         "cache_read_tokens",
@@ -1856,8 +1897,8 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
                 "blocks": m.blocked,
                 "ctx_peak_tokens": m.ctx_peak_tokens,
                 "ctx_peak_pct": m.ctx_peak_pct,
-                "ctx_peak_avg_tokens": m.ctx_avg.tokens,
-                "ctx_peak_avg_pct": m.ctx_avg.pct,
+                "ctx_avg_tokens": m.ctx_avg.tokens,
+                "ctx_avg_pct": m.ctx_avg.pct,
                 "in_tokens": t.input,
                 "out_tokens": t.output,
                 "cache_read_tokens": t.cache_read,
@@ -2171,8 +2212,8 @@ fn parse_sort(by: EvalBy, text: &str) -> Result<Sort> {
 /// A row's raw figure under one column.
 enum SortValue {
     /// A number, in a tier: every row in tier `0` sorts before every row in
-    /// tier `1`, whichever way the sort runs. Only a `CTX PEAK` column uses
-    /// a second tier — see [`ctx_sort_value`].
+    /// tier `1`, whichever way the sort runs. Only `CTX AVG` and `CTX PEAK`
+    /// use a second tier — see [`ctx_sort_value`].
     Figure(u8, f64),
     Text(String),
     /// A `pipeline_version`, compared through [`version_order`] so `1.10`
@@ -2217,10 +2258,10 @@ fn sort_rows<T>(rows: &mut [T], sort: &Sort, value: impl Fn(&T) -> Option<SortVa
     });
 }
 
-/// A `CTX PEAK` figure: the share of the window where one resolved, and the
-/// raw peak in tokens where it did not — the same fallback [`ctx_cell`]
-/// draws. The two are not on one scale, so every share sorts before every
-/// raw count, and a row with neither is blank.
+/// A `CTX AVG` or `CTX PEAK` figure: the share of the window where one
+/// resolved, and the raw peak in tokens where it did not — the same fallback
+/// [`ctx_cell`] draws. The two are not on one scale, so every share sorts
+/// before every raw count, and a row with neither is blank.
 fn ctx_sort_value(tokens: Option<f64>, pct: Option<f64>) -> Option<SortValue> {
     match (tokens, pct) {
         (_, Some(pct)) => Some(SortValue::Figure(0, pct)),
@@ -2238,7 +2279,7 @@ fn shown_sort<'a>(sort: Option<&'a Sort>, columns: &[(&str, &str)]) -> Option<&'
 
 /// Where each column of a table's header line starts, in characters. Two
 /// spaces at least separate any two columns — [`SEP`] — and no header name
-/// holds more than one in a row (`CTX PEAK AVG`), so a run of two spaces is
+/// holds more than one in a row (`CACHE R USD`), so a run of two spaces is
 /// always a column boundary.
 fn column_starts(header: &str) -> Vec<usize> {
     let chars: Vec<char> = header.chars().collect();
@@ -2308,8 +2349,8 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
         "blocks_per_task" => SortValue::figure(m.blocks_per_task()),
         "ctx_peak_tokens" => m.ctx_peak_tokens.and_then(|n| SortValue::figure(n as f64)),
         "ctx_peak_pct" => ctx_sort_value(m.ctx_peak_tokens.map(|n| n as f64), m.ctx_peak_pct),
-        "ctx_peak_avg_tokens" => m.ctx_avg.tokens.and_then(SortValue::figure),
-        "ctx_peak_avg_pct" => ctx_sort_value(m.ctx_avg.tokens, m.ctx_avg.pct),
+        "ctx_avg_tokens" => m.ctx_avg.tokens.and_then(SortValue::figure),
+        "ctx_avg_pct" => ctx_sort_value(m.ctx_avg.tokens, m.ctx_avg.pct),
         "in_tokens" => SortValue::figure(t.input as f64),
         "out_tokens" => SortValue::figure(t.output as f64),
         "cache_read_tokens" => SortValue::figure(t.cache_read as f64),
@@ -2702,7 +2743,7 @@ fn dir_rows(
 /// The directory table's figure columns under `by dir` in the per-session
 /// view — see [`lane_figures`] for why `SESSIONS` is drawn one wider than
 /// its title. Each class cost is as wide as its own title.
-fn dir_figures(cells: [&str; 14]) -> String {
+fn dir_figures(cells: [&str; 13]) -> String {
     let [
         sessions,
         inp,
@@ -2716,19 +2757,18 @@ fn dir_figures(cells: [&str; 14]) -> String {
         usd,
         usd_s,
         avg,
-        peak,
         time,
     ] = cells;
     format!(
         "{SEP}{sessions:>9}{SEP}{inp:>10}{SEP}{inp_usd:>14}{SEP}{out:>11}{SEP}{out_usd:>15}\
          {SEP}{cr:>15}{SEP}{cr_usd:>19}{SEP}{cw:>15}{SEP}{cw_usd:>19}{SEP}{usd:>8}\
-         {SEP}{usd_s:>11}{SEP}{avg:>12}{SEP}{peak:>8}{SEP}{time:>12}"
+         {SEP}{usd_s:>11}{SEP}{avg:>7}{SEP}{time:>12}"
     )
 }
 
 /// The `by dir` table's figure columns in the totals view — see
 /// [`lane_total_figures`] for the widths, which this table shares.
-fn dir_total_figures(cells: [&str; 13]) -> String {
+fn dir_total_figures(cells: [&str; 12]) -> String {
     let [
         sessions,
         inp,
@@ -2741,13 +2781,12 @@ fn dir_total_figures(cells: [&str; 13]) -> String {
         cw_usd,
         usd,
         avg,
-        peak,
         time,
     ] = cells;
     format!(
         "{SEP}{sessions:>9}{SEP}{inp:>7}{SEP}{inp_usd:>6}{SEP}{out:>7}{SEP}{out_usd:>7}\
          {SEP}{cr:>7}{SEP}{cr_usd:>11}{SEP}{cw:>7}{SEP}{cw_usd:>11}{SEP}{usd:>8}\
-         {SEP}{avg:>12}{SEP}{peak:>8}{SEP}{time:>8}"
+         {SEP}{avg:>7}{SEP}{time:>8}"
     )
 }
 
@@ -2755,7 +2794,7 @@ fn dir_total_figures(cells: [&str; 13]) -> String {
 /// beside the export column a sort on it reads — see [`dir_sort_value`].
 /// Each token class is followed by its cost at today's prices, as on the
 /// lanes table — see [`ClassCost`].
-const DIR_COLUMNS: [(&str, &str); 15] = [
+const DIR_COLUMNS: [(&str, &str); 14] = [
     ("DIR", "dir"),
     ("SESSIONS", "sessions"),
     ("IN/SESSION", "in_per_session"),
@@ -2768,14 +2807,13 @@ const DIR_COLUMNS: [(&str, &str); 15] = [
     ("CACHE W USD/SESSION", "cache_write_usd_per_session"),
     ("USD", "cost_usd"),
     ("USD/SESSION", "cost_per_session"),
-    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
-    ("CTX PEAK", "ctx_peak_pct"),
+    ("CTX AVG", "ctx_avg_pct"),
     ("TIME/SESSION", "time_per_session_s"),
 ];
 
 /// The columns `by dir` draws in the totals view. No `USD/SESSION`, for the
 /// reason [`LANE_TOTAL_COLUMNS`] has no `USD/TASK`.
-const DIR_TOTAL_COLUMNS: [(&str, &str); 14] = [
+const DIR_TOTAL_COLUMNS: [(&str, &str); 13] = [
     ("DIR", "dir"),
     ("SESSIONS", "sessions"),
     ("IN", "in_tokens"),
@@ -2787,8 +2825,7 @@ const DIR_TOTAL_COLUMNS: [(&str, &str); 14] = [
     ("CACHE W", "cache_write_tokens"),
     ("CACHE W USD", "cache_write_usd"),
     ("USD", "cost_usd"),
-    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
-    ("CTX PEAK", "ctx_peak_pct"),
+    ("CTX AVG", "ctx_avg_pct"),
     ("TIME", "time_s"),
 ];
 
@@ -2884,8 +2921,7 @@ fn dir_sort_value(row: &DirRow, key: &str) -> Option<SortValue> {
             .per_session(row.cost)
             .filter(|_| priced)
             .and_then(SortValue::figure),
-        "ctx_peak_avg_pct" => ctx_sort_value(row.ctx_avg.tokens, row.ctx_avg.pct),
-        "ctx_peak_pct" => ctx_sort_value(row.ctx_peak_tokens.map(|n| n as f64), row.ctx_peak_pct),
+        "ctx_avg_pct" => ctx_sort_value(row.ctx_avg.tokens, row.ctx_avg.pct),
         "time_per_session_s" => row
             .per_session(row.time_s as f64)
             .and_then(SortValue::figure),
@@ -2944,8 +2980,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
             "CACHE W",
             "CACHE W USD",
             "USD",
-            "CTX PEAK AVG",
-            "CTX PEAK",
+            "CTX AVG",
             "TIME",
         ]),
         Figures::Average => dir_figures([
@@ -2960,8 +2995,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
             "CACHE W USD/SESSION",
             "USD",
             "USD/SESSION",
-            "CTX PEAK AVG",
-            "CTX PEAK",
+            "CTX AVG",
             "TIME/SESSION",
         ]),
     };
@@ -2973,10 +3007,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
         .map(|row| {
             let sessions = row.sessions.to_string();
             let usd = cost_of(row.cost, row.lines, row.unpriced);
-            let (avg, peak) = (
-                row.ctx_avg.cell(),
-                ctx_cell(row.ctx_peak_tokens, row.ctx_peak_pct),
-            );
+            let avg = row.ctx_avg.cell();
             let [in_usd, out_usd, cr_usd, cw_usd] = row.class_cells(figures);
             let figures = match figures {
                 Figures::Totals => {
@@ -2994,7 +3025,6 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
                         &cw_usd,
                         &usd,
                         &avg,
-                        &peak,
                         &if ran {
                             crate::status::human_secs(row.time_s)
                         } else {
@@ -3018,7 +3048,6 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
                         &row.per_session(row.cost)
                             .map_or_else(dash, |c| cost_of(c, row.lines, row.unpriced)),
                         &avg,
-                        &peak,
                         &row.per_session(row.time_s as f64)
                             .map_or_else(dash, |t| crate::status::human_secs(t.round() as i64)),
                     ])
@@ -3027,7 +3056,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
             format!("{:<dw$}{figures}", row.dir)
         })
         .collect();
-    // Both `CTX PEAK` cells stay blank, as on the lanes table's own line;
+    // `CTX AVG` stays blank, as on the lanes table's own line;
     // a table whose watched roots have run no session yet draws `—` for its
     // token, class-cost and time figures, the same as each of those rows does.
     let total = dirs_total(rows);
@@ -3049,7 +3078,6 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
                 &tok(t.cache_write()),
                 &cw_usd,
                 &cost_of(total.cost, total.lines, total.unpriced),
-                "",
                 "",
                 &if ran {
                     crate::status::human_secs(total.time_s)
@@ -3076,7 +3104,6 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
                 &total
                     .per_session(total.cost)
                     .map_or_else(dash, |c| cost_of(c, total.lines, total.unpriced)),
-                "",
                 "",
                 &total
                     .per_session(total.time_s as f64)
@@ -3267,8 +3294,8 @@ const DIRS_CSV_HEADER: &str = "by,dir,sessions,in_tokens,out_tokens,cache_read_t
                                out_usd,cache_read_usd,cache_write_usd,in_usd_per_session,\
                                out_usd_per_session,cache_read_usd_per_session,\
                                cache_write_usd_per_session,cost_usd,cost_per_session,\
-                               unpriced,ctx_peak_tokens,ctx_peak_pct,ctx_peak_avg_tokens,\
-                               ctx_peak_avg_pct,time_s,time_per_session_s";
+                               unpriced,ctx_peak_tokens,ctx_peak_pct,ctx_avg_tokens,\
+                               ctx_avg_pct,time_s,time_per_session_s";
 
 /// No `_per_session` twins here: one session per row, so each would repeat
 /// the figure beside it.
@@ -6355,7 +6382,7 @@ mod tests {
 
     /// Across models with different windows, `CTX PEAK` is the lane nearest
     /// its own window, not the largest raw reading — so it can never sit
-    /// below `CTX PEAK AVG`.
+    /// below `CTX AVG`.
     #[test]
     fn ctx_peak_is_the_highest_share_when_the_row_mixes_window_sizes() {
         let mut models = sized_models(100_000);
@@ -6379,11 +6406,11 @@ mod tests {
         assert!(m.ctx_peak_pct.unwrap() >= m.ctx_avg.pct.unwrap());
     }
 
-    /// `CTX PEAK AVG` is the mean of each lane's own peak — a lane that
+    /// `CTX AVG` is the mean of each lane's own peak — a lane that
     /// banked two lines counts its larger reading once, not both — each as a
     /// share of its model's window.
     #[test]
-    fn ctx_peak_avg_is_the_mean_of_each_lane_s_own_peak() {
+    fn ctx_avg_is_the_mean_of_each_lane_s_own_peak() {
         let mut a1 = lane("login", "implement", 1, Some("pass"));
         a1.model = "sized".into();
         a1.ctx_peak = Some(20_000);
@@ -6781,7 +6808,7 @@ mod tests {
             unpriced: 0,
             time_s: 0,
         };
-        const FIGURES: &str = "TASKS  PASS  BLOCKS/TASK  CTX PEAK AVG  CTX PEAK  IN/TASK  \
+        const FIGURES: &str = "TASKS  PASS  BLOCKS/TASK  CTX AVG{PEAK}  IN/TASK  \
                                IN USD/TASK  OUT/TASK  OUT USD/TASK  CACHE R/TASK  \
                                CACHE R USD/TASK  CACHE W/TASK  CACHE W USD/TASK       USD  \
                                USD/TASK  TIME/TASK";
@@ -6810,9 +6837,11 @@ mod tests {
         ];
         for (by, cells, naming) in cases {
             let table = lanes_table(by, &[named(cells)], &total, None, Figures::Average);
+            // `CTX PEAK` follows `CTX AVG` only where a row is one task.
+            let peak = if by == EvalBy::Task { "  CTX PEAK" } else { "" };
             assert_eq!(
                 table.header,
-                format!("{naming}{FIGURES}"),
+                format!("{naming}{}", FIGURES.replace("{PEAK}", peak)),
                 "by {}",
                 by.label()
             );
@@ -6850,7 +6879,7 @@ mod tests {
         );
         assert_eq!(
             table.rows[0],
-            "impl          2  100%         0.00           32%       52%      642         0.00    \
+            "impl          2  100%         0.00      32%      642         0.00    \
              155.8k          2.34        41.91M             12.57        799.4k              3.00     \
              33.80     16.90     1h 12m"
         );
@@ -6859,7 +6888,7 @@ mod tests {
         // `USD/TASK` carrying the average.
         assert_eq!(
             table.total,
-            "Average       2               0.00                              642         0.00    \
+            "Average       2               0.00               642         0.00    \
              155.8k          2.34        41.91M             12.57        799.4k              3.00               \
              16.90     1h 12m"
         );
@@ -6893,21 +6922,100 @@ mod tests {
         let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
         assert_eq!(
             table.header,
-            "PIPELINE  TASKS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD      OUT  \
+            "PIPELINE  TASKS  PASS  BLOCKS  CTX AVG       IN  IN USD      OUT  \
              OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME"
         );
         // Each class cost is its tokens at today's rates — 311.6k out at
         // $15 a million is 4.67 — and need not add up to the banked `USD`.
         assert_eq!(
             table.rows[0],
-            "impl          2  100%       0           32%       52%     1.3k    0.00   311.6k     \
+            "impl          2  100%       0      32%     1.3k    0.00   311.6k     \
              4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
         assert_eq!(
             table.total,
-            "Total         2             0                             1.3k    0.00   311.6k     \
+            "Total         2             0              1.3k    0.00   311.6k     \
              4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
+    }
+
+    /// `CTX PEAK` is drawn right after `CTX AVG` under `--by task` alone, in
+    /// either view, and every line of the lanes table and of `by dir` is as
+    /// wide as its header: the rows are padded by hand, so a column the
+    /// header gains or loses has to go from every row and the last line too.
+    #[test]
+    fn ctx_peak_is_drawn_per_task_only_and_every_line_is_as_wide_as_its_header() {
+        // Two lanes per task, so a task's `CTX PEAK`, its worst lane, reads
+        // apart from its `CTX AVG`.
+        let mut entries = Vec::new();
+        for (task, step, peak) in [
+            ("t0", "implement", 12_000),
+            ("t0", "review", 30_000),
+            ("t1", "implement", 52_000),
+            ("t1", "review", 60_000),
+        ] {
+            let mut e = lane(task, step, 1, Some("pass"));
+            e.model = "sized".into();
+            e.ctx_peak = Some(peak);
+            e.tokens.output = 155_800;
+            entries.push(e);
+        }
+        let models = priced_models(100_000);
+        let total = total_of_with(&entries, &models);
+        let width = |line: &str| line.chars().count();
+        for by in [EvalBy::Pipeline, EvalBy::Task] {
+            let rows = rows_by_with(&entries, by, &models);
+            for figures in [Figures::Totals, Figures::Average] {
+                let table = lanes_table(by, &rows, &total, None, figures);
+                let label = format!("by {}, {}", by.label(), figures.label(TableKind::Lanes));
+                assert_eq!(
+                    table.header.contains("CTX AVG  CTX PEAK"),
+                    by == EvalBy::Task,
+                    "{label}: {}",
+                    table.header
+                );
+                assert_eq!(
+                    table.header.matches("CTX").count(),
+                    if by == EvalBy::Task { 2 } else { 1 },
+                    "{label}: {}",
+                    table.header
+                );
+                for line in table.rows.iter().chain([&table.total]) {
+                    assert_eq!(width(line), width(&table.header), "{label}: {line}");
+                }
+                if by == EvalBy::Task {
+                    let ctx: Vec<(String, String)> = table
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            (
+                                cell_under(&table.header, row, "CTX AVG"),
+                                cell_under(&table.header, row, "CTX PEAK"),
+                            )
+                        })
+                        .collect();
+                    let ctx: HashSet<(&str, &str)> =
+                        ctx.iter().map(|(a, p)| (a.as_str(), p.as_str())).collect();
+                    assert_eq!(
+                        ctx,
+                        HashSet::from([("21%", "30%"), ("56%", "60%")]),
+                        "{label}"
+                    );
+                }
+            }
+        }
+
+        let a = dir_line("/w/proj", "s1", "2026-09-01T09:00:00+00:00", 0.70);
+        let b = dir_line("/w/other", "s2", "2026-09-01T10:00:00+00:00", 0.18);
+        let rows = dir_rows(&[&a, &b], &[], &no_models(), &HashMap::new());
+        for figures in [Figures::Totals, Figures::Average] {
+            let table = dirs_table(&rows, None, figures);
+            assert!(table.header.contains("  CTX AVG  "), "{}", table.header);
+            assert!(!table.header.contains("CTX PEAK"), "{}", table.header);
+            for line in table.rows.iter().chain([&table.total]) {
+                assert_eq!(width(line), width(&table.header), "by dir: {line}");
+            }
+        }
     }
 
     /// The cell `row` draws under `title` in `header`. Every class-cost
@@ -7161,13 +7269,13 @@ mod tests {
         assert_eq!(
             table.header,
             "DIR       SESSIONS       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  \
-             CACHE W USD       USD  CTX PEAK AVG  CTX PEAK      TIME"
+             CACHE W USD       USD  CTX AVG      TIME"
         );
         assert_eq!(
             table.rows[0].split_whitespace().collect::<Vec<_>>(),
             [
                 "/w/proj", "2", "0", "0.00", "20", "0.00", "0", "0.00", "0", "0.00", "0.88", "—",
-                "—", "0s"
+                "0s"
             ]
         );
     }
@@ -7325,7 +7433,7 @@ mod tests {
         assert_eq!(
             lanes_csv_header(EvalBy::Step),
             "project,by,pipeline,step,pipeline_version,tasks,lanes,pass,blocks,ctx_peak_tokens,\
-             ctx_peak_pct,ctx_peak_avg_tokens,ctx_peak_avg_pct,in_tokens,out_tokens,\
+             ctx_peak_pct,ctx_avg_tokens,ctx_avg_pct,in_tokens,out_tokens,\
              cache_read_tokens,cache_write_tokens,in_per_task,out_per_task,cache_read_per_task,\
              cache_write_per_task,in_usd,out_usd,cache_read_usd,cache_write_usd,in_usd_per_task,\
              out_usd_per_task,cache_read_usd_per_task,cache_write_usd_per_task,cost_usd,\
@@ -7497,8 +7605,8 @@ mod tests {
 
     /// The mockup's own `by dir` header, and its last line in either view:
     /// the sums on `Total`, and on `Average` each sum over the table's
-    /// sessions with `USD` left blank. Neither `CTX PEAK` adds up, so both
-    /// stay blank on both.
+    /// sessions with `USD` left blank. `CTX AVG` does not add up, so it stays
+    /// blank on both.
     #[test]
     fn the_dirs_table_is_the_mockup_s_own() {
         let a = dir_line(
@@ -7519,19 +7627,19 @@ mod tests {
             table.header,
             "DIR                         SESSIONS  IN/SESSION  IN USD/SESSION  OUT/SESSION  \
              OUT USD/SESSION  CACHE R/SESSION  CACHE R USD/SESSION  CACHE W/SESSION  \
-             CACHE W USD/SESSION       USD  USD/SESSION  CTX PEAK AVG  CTX PEAK  TIME/SESSION"
+             CACHE W USD/SESSION       USD  USD/SESSION  CTX AVG  TIME/SESSION"
         );
         assert_eq!(
             table.total,
             "Average                            2           0            0.00           10             \
              0.00                0                 0.00                0                 0.00                   \
-             0.44                                    0s"
+             0.44                     0s"
         );
         let table = dirs_table(&rows, None, Figures::Totals);
         assert_eq!(
             table.total,
             "Total                              2        0    0.00       20     0.00        0         \
-             0.00        0         0.00      0.88                                0s"
+             0.00        0         0.00      0.88                 0s"
         );
     }
 
@@ -10285,8 +10393,8 @@ mod screen_tests {
     #[test]
     fn a_sort_survives_tab_refresh_and_a_new_by_and_each_table_keeps_its_own() {
         let (repo, _root_guard) = fixture_to_sort("screen-sort-survives");
-        // `USD` is the fifteenth column under `by pipeline`.
-        let to_usd = DOWN.repeat(15);
+        // `USD` is the fourteenth column under `by pipeline`.
+        let to_usd = DOWN.repeat(14);
         let text = screen(&repo, &format!("d{to_usd}\r\t\t\trf{RIGHT}\rq"));
         let all = frames(&text);
         let sorted = |f: &str| f.contains("▼USD");
@@ -10380,6 +10488,65 @@ mod screen_tests {
             header(&filters).contains("▲STEP"),
             "the sort was set aside, not cleared"
         );
+    }
+
+    /// A sort on `CTX PEAK` holds under `--by task`, the one `by` that draws
+    /// the column, is set aside under any other `by` — default order, no
+    /// mark — and comes back with `--by task`.
+    #[test]
+    fn a_ctx_peak_sort_is_set_aside_by_a_by_without_the_column() {
+        let mut entries = Vec::new();
+        for (i, (task, peak)) in [("low", 10_000), ("high", 90_000)].into_iter().enumerate() {
+            let mut entry = lane_entry(task, "implement");
+            entry.ts = format!("2026-08-01T0{i}:00:00+00:00");
+            entry.ctx_peak = Some(peak);
+            entries.push(entry);
+        }
+        let loaded = loaded(entries);
+        let pipelines = Pipelines::builtin();
+        let mut filters = no_filters();
+        filters.by = EvalBy::Task;
+        filters.lane_sort = Some(Sort {
+            key: "ctx_peak_pct".into(),
+            descending: false,
+        });
+        let header = |filters: &Filters| match &view_lines(
+            &loaded,
+            filters,
+            &pipelines,
+            TableKind::Lanes,
+        )[0]
+        {
+            Line::Head(lead, text) => format!("{lead}{text}"),
+            _ => panic!("a table opens on its header"),
+        };
+        let tasks = |filters: &Filters| {
+            let (rows, _) = screen_lane_rows(
+                &loaded,
+                filters,
+                &pipelines,
+                &scoped_entries(&loaded, filters),
+            );
+            rows.iter().map(|r| r.cells[0].clone()).collect::<Vec<_>>()
+        };
+        assert!(header(&filters).contains("▲CTX PEAK"));
+        assert_eq!(tasks(&filters), ["low", "high"], "ascending peak");
+
+        filters.by = EvalBy::Pipeline;
+        let shown = header(&filters);
+        assert!(!shown.contains("CTX PEAK"), "{shown}");
+        assert!(
+            !shown.contains('▲'),
+            "no CTX PEAK column to sort by: {shown}"
+        );
+
+        filters.by = EvalBy::Task;
+        assert!(
+            header(&filters).contains("▲CTX PEAK"),
+            "the sort was set aside, not cleared"
+        );
+        filters.figures = Figures::Average;
+        assert!(header(&filters).contains("▲CTX PEAK"), "per task too");
     }
 
     /// `e` writes the rows in the order the screen shows them, on both
@@ -11243,9 +11410,8 @@ mod screen_tests {
     #[test]
     fn t_carries_the_sort_to_the_matching_column() {
         let (repo, _root_guard) = fixture_to_sort("screen-t-sort");
-        // default order, PIPELINE, TASKS, PASS, BLOCKS, CTX PEAK AVG,
-        // CTX PEAK, then IN.
-        let to_in = DOWN.repeat(7);
+        // default order, PIPELINE, TASKS, PASS, BLOCKS, CTX AVG, then IN.
+        let to_in = DOWN.repeat(6);
         let text = screen(&repo, &format!("d{to_in}\rtq"));
         let last = last_frame(&text);
         assert!(header_of(last).contains(" ▼IN/TASK"), "{last}");
@@ -11260,7 +11426,7 @@ mod screen_tests {
         assert!(popup.contains("│    CACHE W USD/TASK"), "{popup}");
 
         // `IN USD` is the one after `IN`, in either view.
-        let to_in_usd = DOWN.repeat(8);
+        let to_in_usd = DOWN.repeat(7);
         let text = screen(&repo, &format!("d{to_in_usd}\rq"));
         let last = last_frame(&text);
         assert!(header_of(last).contains(" ▼IN USD "), "{last}");
@@ -11270,7 +11436,7 @@ mod screen_tests {
 
         // Per task, `USD/TASK` is nine further on than `IN/TASK`: each token
         // class has its cost beside it.
-        let to_usd_task = DOWN.repeat(16);
+        let to_usd_task = DOWN.repeat(15);
         let text = screen(&repo, &format!("td{to_usd_task}\r"));
         let last = last_frame(&text);
         assert!(header_of(last).contains("▼USD/TASK"), "{last}");

@@ -521,9 +521,10 @@ fn grouped_listing(base: &clap::Command) -> String {
     out
 }
 
-/// What one row of `spoolway eval`'s lanes table stands for. Only the
-/// columns naming a row change with it — the figure columns are the same
-/// under every one, which is what lets two `by`s be read side by side.
+/// What one row of `spoolway eval`'s lanes table stands for. The columns
+/// naming a row change with it, and `Task` alone adds `CTX PEAK` — every
+/// other figure column is the same under every one, which is what lets two
+/// `by`s be read side by side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum EvalBy {
     /// A task's `group:` — every run its tasks made.
@@ -568,7 +569,8 @@ impl EvalBy {
 #[command(
     long_about = "What each pipeline costs to run, grouped one way at a time.\n\n\
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
-        pipeline, step or version instead; only the columns naming a row change with it. A \
+        pipeline, step or version instead; the columns naming a row change with it, and \
+        --by task alone adds CTX PEAK. A \
         Total line closes the table with what adds up: distinct TASKS, BLOCKS, and the sums of \
         IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
         calendar time the lanes took. With --per-task the table ends on an Average line \
@@ -585,14 +587,15 @@ impl EvalBy {
         spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
         TASKS counts every task that touched the row. PASS is the share of lanes that \n  \
-        reported pass, and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest \n  \
-        context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
-        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R, \n  \
-        CACHE W, USD and TIME are each the row's total. With --per-task, IN/TASK, OUT/TASK, \n  \
-        CACHE R/TASK, CACHE W/TASK, USD/TASK and TIME/TASK are each that total over TASKS. \n  \
-        IN USD, OUT USD, CACHE R USD and CACHE W USD price the column before each at \n  \
-        today's price table, so together they can differ from USD, which was banked when \n  \
-        the lane settled. With --per-task each is divided by TASKS like the rest.\n\n  \
+        reported pass, and BLOCKS is how many lanes ended blocked. CTX AVG is the mean of \n  \
+        every lane's own peak context reading, each as a share of its model's window. \n  \
+        Under --by task alone, CTX PEAK beside it is the highest share any one of the \n  \
+        task's lanes reached. IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's \n  \
+        total. With --per-task, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, USD/TASK \n  \
+        and TIME/TASK are each that total over TASKS. IN USD, OUT USD, CACHE R USD and \n  \
+        CACHE W USD price the column before each at today's price table, so together \n  \
+        they can differ from USD, which was banked when the lane settled. With \n  \
+        --per-task each is divided by TASKS like the rest.\n\n  \
         Every figure is a floor: an agent does not always write every request it makes \n  \
         to its transcript, and what it leaves out is missing here.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
@@ -600,11 +603,11 @@ impl EvalBy {
         their four USD columns, USD and TIME. Its TIME is lane time added up, not the \n  \
         calendar time the lanes took. With --per-task the line is Average: each sum over \n  \
         the table's distinct TASKS, with USD blank and USD/TASK carrying the average. \n  \
-        PASS and the CTX PEAK columns stay blank on either."
+        PASS, CTX AVG and CTX PEAK stay blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under
-    /// every one.
+    /// every one, but for the `CTX PEAK` that `task` alone draws.
     #[arg(long, value_enum, value_name = "BY", default_value_t = EvalBy::Pipeline)]
     pub by: EvalBy,
 
