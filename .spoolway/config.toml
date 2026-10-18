@@ -47,6 +47,11 @@
 backend = "herdr"
 lane_quiet = "15m"
 auto_commit = true
+priority = "group"
+lane_child_ceiling = "1h"
+visible_lanes = 5
+hide_commands = true
+lane_layout = "panes"
 
 [unattended]
 enabled = true
