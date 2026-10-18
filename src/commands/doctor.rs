@@ -4987,14 +4987,15 @@ mod tests {
         );
 
         // A script of our own, so the stderr line does not depend on the
-        // locale the way `ls`'s message does.
+        // locale the way `ls`'s message does. It runs through `sh` rather
+        // than being executed itself: a file written and then exec'd at once
+        // fails with "Text file busy" whenever another test thread forks
+        // while the write's descriptor is still open.
         let tool = repo.checkout.join("lapsed-tool.sh");
-        std::fs::write(&tool, "#!/bin/sh\necho 'lapsed: log in' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        std::fs::write(&tool, "echo 'lapsed: log in' >&2\nexit 1\n").unwrap();
         std::fs::write(
             hooks_dir.join("lapsed.sh"),
-            format!("# spoolway-login: {} status\n", tool.display()),
+            format!("# spoolway-login: sh {} status\n", tool.display()),
         )
         .unwrap();
         let findings = login_checks(&repo.checkout, "lapsed.sh", true);
@@ -5003,7 +5004,7 @@ mod tests {
         };
         assert_eq!(label, "lapsed.sh login");
         let err = err.to_string();
-        let shown = tool.display();
+        let shown = format!("sh {}", tool.display());
         assert!(
             err.contains(&format!("`{shown} status` failed: lapsed: log in")),
             "{err}"
