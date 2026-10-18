@@ -177,7 +177,8 @@ task, in this order:
 
 | Item | What it does |
 |---|---|
-| `open` | Open the task in your editor |
+| `open task` | Open the task in your editor |
+| `open plan` | Open the task's `plan:` page in your default browser. Listed only when `plan:` is set and not empty |
 | `gate` | Set or clear a `gate_at` on the task |
 
 Over the groups pane it offers these for the highlighted group, and a group with no tasks says
@@ -1758,7 +1759,7 @@ A `FAIL` row labelled ``task template of pipeline `<name>` `` names a pipeline w
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
 
-Under `-v`, one `editor` row names the editor the TUI's `open` runs. A setting that cannot work
+Under `-v`, one `editor` row names the editor the TUI's `open task` runs. A setting that cannot work
 prints a note with the fix and is never a failure. See [Editor](dispatcher.md#editor).
 
 ```

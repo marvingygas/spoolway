@@ -14,14 +14,16 @@
 # unit test can stand up — the last section covers it.
 #
 # Row actions are reached through `o`, which opens a menu of what the
-# cursor's row can take: open, pause, restart, unqueue. The menu runs the
-# action's own check again on `enter`, so each section picks its item and
-# then answers the panel it opens. `p`, `s`, `u` and `U` are no longer board
-# keys; `U` gets one pass that proves it does nothing, and
+# cursor's row can take: open task, open plan, pause, restart, unqueue. The
+# menu runs the action's own check again on `enter`, so each section picks
+# its item and then answers the panel it opens. `p`, `s`, `u` and `U` are no
+# longer board keys; `U` gets one pass that proves it does nothing, and
 # `spoolway queue unqueue --all` does its job.
 #
-# Open is checked once, for the popup a refused open shows: an editor that
-# is not on `PATH` is refused before anything is started.
+# Open task is checked once, for the popup a refused open shows: an editor
+# that is not on `PATH` is refused before anything is started. Open plan is
+# checked only for being listed, under open task, on a task with a `plan:`:
+# picking it would start the machine's real browser.
 #
 # Pausing from the menu and the dispatch tab's stop popup carry most of the
 # suite, since pausing and stopping with `i` are the two answers that can
@@ -223,10 +225,11 @@ cursor_to() {
   return 1
 }
 
-# The item the open options menu's cursor is on.
+# The item the open options menu's cursor is on, every word of it: `open
+# task` and `open plan` differ only in their second word.
 _menu_choice() {
   local at
-  at=$(grep -oE '│  > [a-z]+ ' < <(_frame_now) | head -1)
+  at=$(grep -oE '│  > [a-z]+( [a-z]+)* ' < <(_frame_now) | head -1)
   at=${at#│  > }
   printf '%s' "${at% }"
 }
@@ -234,16 +237,17 @@ _menu_left() { [ "$(_menu_choice)" != "$1" ]; }
 
 # pick_item <item>
 #
-# Open the options menu on the cursor's row and take `item` — open, pause,
-# restart or unqueue — off it by name. Which items a menu lists depends on
-# the row, so the walk down it reads the menu's own cursor rather than
-# counting. Each key waits for the screen to show the last one landed, which
-# also keeps `o` and the arrow behind it from being read as one sequence.
+# Open the options menu on the cursor's row and take `item` — open task,
+# open plan, pause, restart or unqueue — off it by name. Which items a menu
+# lists depends on the row, so the walk down it reads the menu's own cursor
+# rather than counting. Each key waits for the screen to show the last one
+# landed, which also keeps `o` and the arrow behind it from being read as
+# one sequence.
 pick_item() {
   local item=$1 i sel
   press o
-  poll_until 10 _now_says "│  > open " || return 1
-  for ((i = 0; i < 4; i++)); do
+  poll_until 10 _now_says "│  > open task " || return 1
+  for ((i = 0; i < 5; i++)); do
     sel=$(_menu_choice)
     if [ "$sel" = "$item" ]; then
       press $'\r'
@@ -446,7 +450,9 @@ _row_time() {
 # nothing at all — exactly what the TIME-unchanged check below needs a real,
 # non-dash figure to hold still. Same incantation disaster.sh uses.
 echo 4000 > "$CTL/transcript"
-queue_hang mid-turn
+# `plan:` names a page that is never written: the menu lists `open plan`
+# without looking for the file.
+queue_hang mid-turn "plan: $LIVE/mid-turn-plan.html"
 board_start
 LANE_PID=$(lane_pid "mid-turn · implement" 30)
 if [ -n "$LANE_PID" ]; then ok "the lane is really mid-turn"
@@ -455,10 +461,12 @@ draws "the board draws the run" "mid-turn"
 
 # The cursor starts on the first row on its own now — mid-turn is the only
 # row here — so the menu reaches it with no `down` needed first. It lists
-# open, pause and restart for a running row, with the cursor on open.
+# open task, open plan, pause and restart for a running row with a `plan:`,
+# with the cursor on open task.
 press o
 draws "\`o\` over a live lane opens a menu titled with the task" "╭─ mid-turn ─"
-draws "listing open first, under the cursor" "> open"
+draws "listing open task first, under the cursor" "> open task"
+draws "then open plan, for a task with a plan:" "    open plan"
 draws "then pause" "  pause"
 draws "then restart" "  restart"
 draws "under the shared key row" "[enter] confirm   [esc] close"
@@ -466,14 +474,14 @@ stage_stays "the task file is untouched while the menu is open" mid-turn impleme
 press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"
 
-# ------------------------------------------- open with a missing editor
+# -------------------------------------- open task with a missing editor
 # An `editor.toml` naming a program that is not on `PATH` refuses the open,
 # and the board shows the refusal, remedy and all, in a popup closed with
 # `enter` alone. Under `$HOME`, which fixture.sh points at a scratch folder.
 mkdir -p "$HOME/.spoolway"
 printf '[editor]\ncommand = "notepd.exe"\n' > "$HOME/.spoolway/editor.toml"
 OPEN_MARK=$(wc -l < "$BOARD_LOG")
-pick_item open
+pick_item "open task"
 draws_since_waited "a refused open shows a popup titled open task" \
   "╭─ open task ─" "$OPEN_MARK"
 draws_since "naming the program that is not on PATH" \
@@ -679,12 +687,12 @@ must "pausing late by hand" "$SPOOLWAY" queue pause late
 # ----------------------------------------------- a paused row is a no-op
 MARK=$(wc -l < "$BOARD_LOG")
 press o
-shows "│  > open " 10
-draws_since "the menu on an already-paused row opens" "> open" "$MARK"
+shows "│  > open task " 10
+draws_since "the menu on an already-paused row opens" "> open task" "$MARK"
 draws_since "and offers restart" "  restart" "$MARK"
 never_draws "but offers no pause to pick" "    pause    " "$MARK"
 press $'\x1b'
-poll_while 10 _now_says "│  > open "
+poll_while 10 _now_says "│  > open task "
 
 # ------------------------------- pausing a task that never started at all
 # Nothing live, nothing declared for `queued` in any pipeline, so this parks
@@ -717,10 +725,10 @@ MARK=$(wc -l < "$BOARD_LOG")
 # the mark. The menu is closed again before anything else is typed.
 press U
 press o
-shows "│  > open " 10
+shows "│  > open task " 10
 never_draws "\`U\` opens no unqueue-all panel" "tasks have not started:" "$MARK"
 press $'\x1b'
-poll_while 10 _now_says "│  > open "
+poll_while 10 _now_says "│  > open task "
 stage_stays "and writes nothing" stalled queued
 stage_stays "to any queued task" never-run queued
 

@@ -370,17 +370,18 @@ pub struct Frontmatter {
     /// The issue a planning skill read through `spoolway issue show`,
     /// whenever a task started at one — the issue a person filed stays
     /// theirs, so this is never overwritten with the enhanced version spoolway
-    /// wrote from it. A page argued that shape too, in that case, and its own
-    /// path moves to [`Self::plan`] instead of colliding with this one; with
-    /// no issue behind it, a plan page's path stays here, exactly as before
-    /// `plan:` existed.
+    /// wrote from it. A plan page's path goes in [`Self::plan`] whenever a
+    /// page was written, issue or not; with no issue behind it, the page's
+    /// path sits here as well. The `o` menu's `open plan` reads `plan:` and
+    /// never this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
     /// The plan page that argued this task's shape, as an absolute path —
-    /// set only when a page was written *and* [`Self::source`] holds an
-    /// issue instead of it. Nothing in spoolway parses this either; it is
-    /// carried for a person to follow back, same as `source`.
+    /// set whenever a page was written, whatever [`Self::source`] holds.
+    /// The `o` menu's `open plan`, on the board and on the queue screen's
+    /// tasks pane, opens it in the default browser; nothing else in
+    /// spoolway reads it, and it is never required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 

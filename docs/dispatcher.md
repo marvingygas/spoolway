@@ -417,7 +417,7 @@ cursor sits on a row it can resume.
 Every menu and panel these keys open lists its answers under its text, with `>` on the
 cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
 with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
-such as `open` or `pause now`, and on the `(next)` step in the resume picker.
+such as `open task` or `pause now`, and on the `(next)` step in the resume picker.
 
 ### Options menu
 
@@ -426,7 +426,8 @@ in this order, and the cursor opens on the first item:
 
 ```
 ╭─ cart-empty-state ──────────────╮
-│  > open                         │
+│  > open task                    │
+│    open plan                    │
 │    pause                        │
 │    restart                      │
 │                                 │
@@ -436,15 +437,24 @@ in this order, and the cursor opens on the first item:
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `open` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
+| `open task` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
+| `open plan` | A row whose task sets `plan:` to a value that is not empty. | Open the plan page `plan:` names in your default browser. |
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
 | `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 
-So a running row lists `open`, `pause` and `restart`. A paused row that can be resumed lists
-`open` and `restart`, and is resumed with `r`. A queued row lists `open`, `pause` and `unqueue`,
-and a done row lists `open` alone. A row whose task file is gone opens the menu with
+So a running row lists `open task`, `pause` and `restart`. A paused row that can be resumed
+lists `open task` and `restart`, and is resumed with `r`. A queued row lists `open task`, `pause`
+and `unqueue`, and a done row lists `open task` alone. A row whose task sets `plan:` also lists
+`open plan`, directly under `open task`. A row whose task file is gone opens the menu with
 `nothing to do here` over `[esc] close`.
+
+`open plan` reads `plan:` alone, never `source:`. The menu lists it without checking that the
+page exists. Picking it starts the browser in the background, so the board keeps drawing and
+nothing waits on the browser. macOS uses `open`, WSL uses `wslview` or else `explorer.exe`, and
+any other Linux uses `xdg-open`. When the page is gone, or the platform's program is not on
+`PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
+The queue screen's tasks pane lists `open plan` the same way. The routines pane does not.
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
@@ -453,7 +463,7 @@ from a shell.
 
 ### Editor
 
-`open` runs one editor, chosen in this order. The first one that is set wins.
+`open task` runs one editor, chosen in this order. The first one that is set wins.
 
 | Order | Source |
 |---|---|
@@ -462,10 +472,10 @@ from a shell.
 | 3 | `$EDITOR` |
 | 4 | `vim` |
 
-The same choice serves every `open` in the terminal screens: the board, the queue screen's tasks
-and routines panes, and the jobs routine picker. `spoolway config edit` and `spoolway config
-override` do not use it. They wait for the editor to close and then check the file, so they keep
-their own order: `$VISUAL`, then `$EDITOR`, then `vi`. Setting `editor.toml` does not change them.
+The same choice serves every item that opens a task file in the terminal screens. These are
+`open task` on the board and on the queue screen's tasks and routines panes, and `open` on the jobs
+routine picker. `spoolway config edit` and `spoolway config override` do not use it. They wait for
+the editor to close and then check the file, so they keep their own order: `$VISUAL`, then `$EDITOR`, then `vi`. Setting `editor.toml` does not change them.
 
 `editor.toml` is written by hand. This example opens tasks in Notepad:
 
@@ -499,7 +509,7 @@ note covers a program that is not on `PATH`, an `editor.toml` that does not pars
 open in. It is never a failure and does not change the count of checks passed. The
 warnings screen shown before a run does not include it.
 
-`open` refuses and starts nothing in these cases:
+`open task` refuses and starts nothing in these cases:
 
 | Case | What the refusal says |
 |---|---|

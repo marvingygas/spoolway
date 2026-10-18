@@ -947,6 +947,7 @@ fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          title: \"type(scope): a short sentence naming what this task does\"   # quoted: YAML reads a bare `: ` as a key\n\
          group: group-name            # required — a lane runs in the tab its group shares with its siblings\n\
          # source: where this came from — an issue URL, a plan page path, never parsed\n\
+         # plan: /abs/path/plan.html  # the plan page, whenever one was written — the `o` menu's open plan opens it\n\
          depends_on: []               # sibling task ids that must finish first\n\
          # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
          {pipeline_row}\n\
@@ -4416,12 +4417,13 @@ impl OptionsMenu {
 }
 
 /// One thing the queue and routines screens' options menu can do to the
-/// focused row. Each runs what its own key used to: `o` open, `g` gate,
-/// `t` trial, `s` save as routine, and the routines tab's `n` new job and
-/// `x` delete.
+/// focused row. Each runs what its own key used to: `o` open task, `g`
+/// gate, `t` trial, `s` save as routine, and the routines tab's `n` new job
+/// and `x` delete. Open plan alone never had a key of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowOption {
     Open,
+    OpenPlan,
     Gate,
     Trial,
     SaveRoutine,
@@ -4430,11 +4432,12 @@ enum RowOption {
 }
 
 impl RowOption {
-    /// The item's line in the menu: its verb alone, since the menu's own
-    /// title already names the row.
+    /// The item's line in the menu: its verb, and for the two opens what
+    /// each one opens, since the menu's own title already names the row.
     fn label(self) -> &'static str {
         match self {
-            RowOption::Open => "open",
+            RowOption::Open => "open task",
+            RowOption::OpenPlan => "open plan",
             RowOption::Gate => "gate",
             RowOption::Trial => "trial",
             RowOption::SaveRoutine => "save as routine",
@@ -6206,17 +6209,22 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 
 /// `o` on the pending screen: the menu for the row the focused pane
 /// highlights, titled with that row's name. Over the tasks pane a task
-/// offers open and then gate. Over the groups pane a group offers trial and
-/// then save as routine, both only where [`trial_target`] allows them, so a
-/// group with no tasks opens the menu with nothing in it. `None`, and no
-/// menu, when the focused pane highlights no row at all: an empty pending
+/// offers open task, then open plan where [`super::pending::plan_of`]
+/// finds a `plan:` on it, then gate. Over the groups pane a group offers
+/// trial and then save as routine, both only where [`trial_target`] allows
+/// them, so a group with no tasks opens the menu with nothing in it.
+/// `None`, and no menu, when the focused pane highlights no row at all: an empty pending
 /// directory, a filter that matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let (title, row, items) = match state.focus {
         Focus::Tasks => {
             let task = group.tasks.get(state.task_cursor)?;
-            let items = vec![RowOption::Open, RowOption::Gate];
+            let plan = super::pending::plan_of(&task.path).map(|_| RowOption::OpenPlan);
+            let items = [Some(RowOption::Open), plan, Some(RowOption::Gate)]
+                .into_iter()
+                .flatten()
+                .collect();
             (task.id.clone(), task_key(task), items)
         }
         Focus::Groups => {
@@ -6250,8 +6258,8 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 /// highlights, titled with that row's name. A routine offers new job and
 /// then delete; new job only where [`super::jobs::NewJobWalk::for_routine`]
 /// can point a job at the folder, the same check `n` made. A routine's task
-/// offers open. `None`, and no menu, with no routine or no task under the
-/// focused pane's cursor.
+/// offers open task, and never open plan. `None`, and no menu, with no
+/// routine or no task under the focused pane's cursor.
 fn routine_options(
     pipelines: &Pipelines,
     routines: &[RoutineFolder],
@@ -6327,7 +6335,10 @@ impl Picked<'_> {
                     }),
                 // The pending screen's items are never put on a routine's
                 // menu.
-                RowOption::Gate | RowOption::Trial | RowOption::SaveRoutine => closed,
+                RowOption::OpenPlan
+                | RowOption::Gate
+                | RowOption::Trial
+                | RowOption::SaveRoutine => closed,
             };
         }
         if pending_row(groups, state).as_deref() != Some(menu.row.as_str()) {
@@ -6335,6 +6346,7 @@ impl Picked<'_> {
         }
         match item {
             RowOption::Open => open_highlighted(self.repo, groups, state),
+            RowOption::OpenPlan => open_highlighted_plan(groups, state),
             RowOption::Gate => Mode::Gate {
                 cursor: 0,
                 dependents: gate_dependents(self.repo, self.pipelines, groups, state),
@@ -6562,7 +6574,7 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
     Some(task_key(group.tasks.get(state.task_cursor)?))
 }
 
-/// The pending screen's open: open the highlighted task in the editor
+/// The pending screen's open task: open the highlighted task in the editor
 /// `crate::editor::open` picks — offered, as gate is, only with the tasks
 /// pane focused on a task, which the options menu checks before this is
 /// reached. Never blocks: a terminal editor runs in a pane the multiplexer
@@ -6576,8 +6588,8 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 /// actually live, the same file every other read of the screen uses.
 ///
 /// A refused open is surfaced through [`Mode::Outcome`] rather than lost: an
-/// `Err` this discarded would leave a person picking open with no sign it did
-/// anything at all. Among the refusals are a terminal editor on a backend
+/// `Err` this discarded would leave a person picking open task with no sign it
+/// did anything at all. Among the refusals are a terminal editor on a backend
 /// with no pane to open one in — headless, which refuses the way
 /// `Mux::open_command`'s default does — an `editor.toml` that does not parse,
 /// an editor program that is not on `PATH`, and a path `wslpath` cannot
@@ -6598,14 +6610,41 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     }
 }
 
-/// Open over the routines pane's own tasks pane: open the highlighted
+/// Open plan over the pending screen: open the page the highlighted task's
+/// `plan:` names in the default browser, through
+/// [`crate::browser::open_plan`], which starts it in the background so the
+/// screen never waits on it.
+///
+/// `plan:` is read off the task file again here, not trusted from when the
+/// menu opened: a task that lost it since then gets nothing done. A page
+/// that is gone, or a machine with no opener, comes back as the
+/// [`Mode::Outcome`] popup, for the reason [`open_highlighted`] gives.
+fn open_highlighted_plan(groups: &[Group], state: &ScreenState) -> Mode {
+    let Some(task) =
+        highlighted_tasks(groups, state).and_then(|tasks| tasks.get(state.task_cursor))
+    else {
+        return Mode::Browsing;
+    };
+    let Some(plan) = super::pending::plan_of(&task.path) else {
+        return Mode::Browsing;
+    };
+    match crate::browser::open_plan(&plan) {
+        None => Mode::Browsing,
+        Some(notice) => Mode::Outcome {
+            notice,
+            routines: None,
+        },
+    }
+}
+
+/// Open task over the routines pane's own tasks pane: open the highlighted
 /// task in the picked editor — the same shape [`open_highlighted`] gives
 /// the pending screen, including the same [`Mode::Outcome`] a refused open is
 /// surfaced through — drawn over this pane, and
 /// closed back onto it. Returns to [`Mode::Routines`]
 /// with `nav` exactly as it was rather than [`Mode::Browsing`], since
-/// picking open here never leaves the pane, where the pending screen's open
-/// has no pane of this kind to stay in.
+/// picking open task here never leaves the pane, where the pending screen's
+/// open task has no pane of this kind to stay in.
 fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNav) -> Mode {
     let Some(task) = highlighted_routine_task(routines, nav) else {
         return Mode::Routines(nav.clone());
@@ -13352,9 +13391,9 @@ mod tests {
     }
 
     /// `o` lists what the focused row can do, titled with its name: over
-    /// the tasks pane a task offers open then gate, over the groups pane a
-    /// group offers trial then save as routine. A group with no tasks has
-    /// neither and opens the menu with nothing in it, and a pane with no
+    /// the tasks pane a task offers open task then gate, over the groups
+    /// pane a group offers trial then save as routine. A group with no tasks
+    /// has neither and opens the menu with nothing in it, and a pane with no
     /// row under its cursor opens no menu at all.
     #[test]
     fn the_options_menu_lists_what_the_focused_row_can_do() {
@@ -13391,6 +13430,127 @@ mod tests {
         assert!(pending_options(&[], &ScreenState::new()).is_none());
     }
 
+    /// Over the tasks pane, `open plan` is listed straight under `open task`
+    /// exactly when the task's `plan:` is set and not empty, and the file it
+    /// names is not looked for.
+    #[test]
+    fn the_tasks_menu_lists_open_plan_only_with_a_plan_key() {
+        let (repo, _root_guard) = fixture("screen-options-open-plan");
+        for (id, plan, expected) in [
+            (
+                "planned",
+                "plan: /nowhere/plan.html\n",
+                &[RowOption::Open, RowOption::OpenPlan, RowOption::Gate][..],
+            ),
+            (
+                "blank",
+                "plan: \"\"\n",
+                &[RowOption::Open, RowOption::Gate][..],
+            ),
+            ("bare", "", &[RowOption::Open, RowOption::Gate][..]),
+        ] {
+            write_pending(
+                &repo,
+                id,
+                &task_text(id, &format!("group: {id}\n{plan}"), BODY),
+            );
+            let groups = listed(&repo);
+            let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
+            assert_eq!(menu.items, expected, "{id}");
+        }
+        assert_eq!(RowOption::Open.label(), "open task");
+        assert_eq!(RowOption::OpenPlan.label(), "open plan");
+    }
+
+    /// The tasks pane's menu on a task with a `plan:` draws `open task`,
+    /// `open plan` and `gate`, in that order, the cursor on the first.
+    #[test]
+    fn the_tasks_menu_draws_open_plan_under_open_task() {
+        let (repo, _root_guard) = fixture("screen-options-draws-plan");
+        write_pending(
+            &repo,
+            "cart-totals",
+            &task_text(
+                "cart-totals",
+                "group: cart\nplan: /plans/2026-10-17-cart.html\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "cart-totals");
+        state.mode = Mode::Options(pending_options(&groups, &state).unwrap());
+        let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
+        assert_eq!(
+            panel,
+            [
+                format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
+                "│  > open task                    │".to_string(),
+                "│    open plan                    │".to_string(),
+                "│    gate                         │".to_string(),
+                "│                                 │".to_string(),
+                "│  [enter] confirm   [esc] close  │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
+    }
+
+    /// Picking `open plan` opens a page that exists and goes back to the
+    /// screen, shows the `open plan` popup for one that is gone, and does
+    /// nothing for a task whose `plan:` was taken off after `o`.
+    #[test]
+    fn picking_open_plan_opens_the_page_or_says_why_not() {
+        let (repo, _root_guard) = fixture("screen-open-plan");
+        let page = repo.root.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        let with_plan =
+            |plan: &str| task_text("cart-totals", &format!("group: cart\nplan: {plan}\n"), BODY);
+        let pipelines = Pipelines::builtin();
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+        let pick = || {
+            let groups = listed(&repo);
+            let state = on_pending_task(&groups, "cart-totals");
+            let menu = pending_options(&groups, &state).unwrap();
+            picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan)
+        };
+
+        write_pending(&repo, "cart-totals", &with_plan(page.to_str().unwrap()));
+        let mode = pick();
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert_eq!(crate::browser::opened(), std::slice::from_ref(&page));
+
+        write_pending(&repo, "cart-totals", &with_plan("/nowhere/plan.html"));
+        let Mode::Outcome { notice, routines } = pick() else {
+            panic!("a missing page shows no popup");
+        };
+        assert_eq!(notice.title, "open plan");
+        assert!(
+            notice
+                .text
+                .starts_with("o: the plan page is gone.\n/nowhere/plan.html\n"),
+            "{}",
+            notice.text
+        );
+        assert!(routines.is_none());
+
+        write_pending(&repo, "cart-totals", &with_plan(page.to_str().unwrap()));
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "cart-totals");
+        let menu = pending_options(&groups, &state).unwrap();
+        write_pending(
+            &repo,
+            "cart-totals",
+            &task_text("cart-totals", "group: cart\n", BODY),
+        );
+        let mode = picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan);
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert_eq!(crate::browser::opened().len(), 1, "nothing more opened");
+    }
+
     /// The menu draws over the screen titled with the focused row, the
     /// cursor on its first item, and the ordinary key line stays under the
     /// frame.
@@ -13401,7 +13561,7 @@ mod tests {
 
         let last = last_frame(&screen(&repo, listed(&repo), "\to")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ wire ")), "{last}");
-        assert!(last.contains("│  > open  "), "{last}");
+        assert!(last.contains("│  > open task  "), "{last}");
         assert!(last.contains("│    gate  "), "{last}");
         assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
         assert!(last.contains("[o] options   [tab] groups"), "{last}");
@@ -13471,12 +13631,23 @@ mod tests {
     }
 
     /// On the routines tab, `o` over the list offers new job then delete,
-    /// titled with the routine; over the tasks pane it offers open, titled
-    /// with the task.
+    /// titled with the routine; over the tasks pane it offers open task,
+    /// titled with the task, and never open plan, even for a task with a
+    /// `plan:`.
     #[test]
     fn the_routine_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("routine-options-lists");
         seed_two_routines(&repo);
+        write_routine(
+            &repo,
+            "maintenance",
+            "prune",
+            &task_text(
+                "prune",
+                "group: maintenance\nplan: /plans/2026-10-17-prune.html\n",
+                BODY,
+            ),
+        );
         let routines = super::super::routines::list_routines(&repo).unwrap();
         let pipelines = Pipelines::builtin();
         let mut nav = RoutineNav::new();
@@ -13500,7 +13671,7 @@ mod tests {
         assert!(last.contains("[o] options   [tab] tasks"), "{last}");
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
-        assert!(last.contains("│  > open  "), "{last}");
+        assert!(last.contains("│  > open task  "), "{last}");
         assert!(last.contains("[o] options   [tab] routines"), "{last}");
     }
 
@@ -13574,7 +13745,7 @@ mod tests {
 
     /// A popup over the routines tab keeps `←`, `→` and `q` for itself, the
     /// rule the queue tab keeps: here the headless refusal that picking open
-    /// off the tasks pane's menu opens, which reads nothing but `enter`.
+    /// task off the tasks pane's menu opens, which reads nothing but `enter`.
     #[test]
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
@@ -17596,7 +17767,7 @@ mod tests {
     // ----------------------------------------------------------- the open key
 
     /// With the groups pane focused, `o` opens the group's menu, which
-    /// offers no open, rather than opening whatever task the group cursor
+    /// offers no open task, rather than opening whatever task the group cursor
     /// happens to sit on. Never touches a multiplexer, so this passes
     /// whatever backend the fixture's default config names.
     #[test]
@@ -17618,8 +17789,8 @@ mod tests {
     /// Opening a terminal editor on a headless run finds no pane to open it
     /// in — headless refuses it the way `Mux::open_command`'s default does — and
     /// the refusal is surfaced through `Mode::Outcome` rather than lost: an `Err` this
-    /// discarded would leave a person picking open on a headless run with no
-    /// sign it did anything at all.
+    /// discarded would leave a person picking open task on a headless run with
+    /// no sign it did anything at all.
     #[test]
     fn picking_open_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("screen-open-headless");
@@ -17628,7 +17799,7 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        // `Tab` moves focus onto the tasks pane, whose menu offers open
+        // `Tab` moves focus onto the tasks pane, whose menu offers open task
         // first — see `pending_options`.
         let drawn = screen(&repo, groups, "\to\r");
 
@@ -18416,9 +18587,10 @@ mod tests {
     }
 
     /// New job is offered only over the routine list: the tasks pane's menu
-    /// does not list it, and `down` then `enter` there still picks open, its
-    /// one item, rather than a schedule popup. Headless, so open surfaces
-    /// its refusal instead of opening an editor pane in a real multiplexer.
+    /// does not list it, and `down` then `enter` there still picks open task,
+    /// its one item, rather than a schedule popup. Headless, so open task
+    /// surfaces its refusal instead of opening an editor pane in a real
+    /// multiplexer.
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
         let (mut repo, _root_guard) = fixture("routine-new-job-tasks-pane");

@@ -7,7 +7,8 @@
 //! when `wslview` is missing), and any other Unix gets `xdg-open`.
 //!
 //! The choice is a pure function over [`Inputs`], so a test can cover every
-//! route without starting a browser. [`open`] is the one caller that spawns.
+//! route without starting a browser. [`open`] is the one caller that spawns,
+//! and [`open_plan`] is how the `o` menus reach it.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -72,15 +73,40 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
     Ok(format!("xdg-open {}", crate::platform::quote(&shown)))
 }
 
+/// The `o` menu's `open plan` on `plan`, a task's `plan:` value: open the
+/// page through [`open`], or the popup saying why it could not be, titled
+/// `open plan` and closed with `enter`. Built here, once, so the board and
+/// the pending screen cannot word the same refusal differently.
+///
+/// A page that is gone is caught before any program starts: a browser
+/// handed a missing file opens a "file not found" tab of its own, which
+/// tells a person nothing about the task that pointed there. A relative
+/// path skips that check, since it would be resolved against this
+/// process's directory, and [`plan`] refuses it with its own advice.
+pub(crate) fn open_plan(plan: &str) -> Option<crate::screen::Notice> {
+    let file = Path::new(plan);
+    if file.is_absolute() && !file.exists() {
+        return Some(crate::screen::Notice::new(
+            "open plan",
+            format!(
+                "o: the plan page is gone.\n{plan}\n\
+                 Pick open task to fix or remove plan: in the task file."
+            ),
+        ));
+    }
+    open(file)
+        .err()
+        .map(|err| crate::screen::Notice::new("open plan", format!("o: {err:#}")))
+}
+
 /// Open the existing file at the absolute path `file` in the default browser
 /// and return at once.
 ///
 /// The browser starts in a session of its own, so quitting spoolway never
 /// closes it, and nothing waits on it: a failure after the start shows in
-/// the browser. Nothing calls this yet; the `open plan` menu item will.
-#[allow(dead_code)]
-#[cfg(unix)]
-pub(crate) fn open(file: &Path) -> Result<()> {
+/// the browser.
+#[cfg(all(unix, not(test)))]
+fn open(file: &Path) -> Result<()> {
     let inputs = Inputs {
         macos: cfg!(target_os = "macos"),
         wsl: crate::platform::on_wsl(),
@@ -96,10 +122,45 @@ pub(crate) fn open(file: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-#[allow(dead_code)]
-pub(crate) fn open(_file: &Path) -> Result<()> {
+#[cfg(all(not(unix), not(test)))]
+fn open(_file: &Path) -> Result<()> {
     bail!("opening a browser needs a Unix platform")
+}
+
+/// Test-only [`open`]: records `file` instead of starting a browser, so a
+/// test that picks `open plan` never opens a real window on the developer's
+/// machine, or refuses with the text [`refuse_opens`] pinned.
+#[cfg(test)]
+fn open(file: &Path) -> Result<()> {
+    if let Some(refusal) = test_opens::REFUSAL.with(|r| r.borrow().clone()) {
+        bail!(refusal);
+    }
+    test_opens::OPENED.with(|o| o.borrow_mut().push(file.to_path_buf()));
+    Ok(())
+}
+
+#[cfg(test)]
+mod test_opens {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        pub(super) static OPENED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+        pub(super) static REFUSAL: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+}
+
+/// Test-only: every file this thread's [`open`] was handed, in order.
+#[cfg(test)]
+pub(crate) fn opened() -> Vec<std::path::PathBuf> {
+    test_opens::OPENED.with(|o| o.borrow().clone())
+}
+
+/// Test-only: make this thread's [`open`] refuse with `text`, the way
+/// [`plan`] refuses on a machine with no opener.
+#[cfg(test)]
+pub(crate) fn refuse_opens(text: &str) {
+    test_opens::REFUSAL.with(|r| *r.borrow_mut() = Some(text.to_string()));
 }
 
 #[cfg(test)]
@@ -147,6 +208,46 @@ mod tests {
             path,
             wslpath,
         }
+    }
+
+    /// A page that exists is handed to the opener, and no popup is shown.
+    #[test]
+    fn open_plan_opens_an_existing_page() {
+        let d = dir();
+        let page = d.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        assert!(open_plan(page.to_str().unwrap()).is_none());
+        assert_eq!(opened(), std::slice::from_ref(&page));
+    }
+
+    /// A page that is gone gets the `open plan` popup naming the path and
+    /// what to do, and no opener is started.
+    #[test]
+    fn open_plan_on_a_missing_page_names_it() {
+        let notice = open_plan("/nowhere/2026-10-17-cart.html").unwrap();
+        assert_eq!(notice.title, "open plan");
+        assert_eq!(
+            notice.text,
+            "o: the plan page is gone.\n/nowhere/2026-10-17-cart.html\n\
+             Pick open task to fix or remove plan: in the task file."
+        );
+        assert!(opened().is_empty());
+    }
+
+    /// An opener that refuses shows its whole text under the `open plan`
+    /// title, the remedy and the path included.
+    #[test]
+    fn open_plan_carries_the_openers_refusal() {
+        let d = dir();
+        let page = d.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        refuse_opens("could not open the plan page: xdg-open is not on PATH.");
+        let notice = open_plan(page.to_str().unwrap()).unwrap();
+        assert_eq!(notice.title, "open plan");
+        assert_eq!(
+            notice.text,
+            "o: could not open the plan page: xdg-open is not on PATH."
+        );
     }
 
     /// `open` on macOS runs without a PATH search, and quotes the path.

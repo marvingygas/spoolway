@@ -166,7 +166,8 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 
 ```
 ╭─ cart-totals ───────────────────╮
-│  > open                         │
+│  > open task                    │
+│    open plan                    │
 │    gate                         │
 │                                 │
 │  [enter] confirm   [esc] close  │
@@ -175,7 +176,8 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `open` | A task. | Open the task in your editor. |
+| `open task` | A task. | Open the task in your editor. |
+| `open plan` | A task whose `plan:` is set and not empty. | Open the plan page `plan:` names in your default browser. See [Options menu](dispatcher.md#options-menu). |
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
 | `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |
@@ -248,7 +250,7 @@ highlighted row's name:
 |---|---|---|
 | `new job` | A routine. | Make a job from the routine. See [Jobs](jobs.md). |
 | `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
-| `open` | A task in the tasks pane. | Open the task in your editor. |
+| `open task` | A task in the tasks pane. | Open the task in your editor. |
 
 A routine folder that holds a `*.md` file that does not parse is not queued. The popup names each
 such file with a `spoolway task contract --from "<file>"` command that prints the reason, and

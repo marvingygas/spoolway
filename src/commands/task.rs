@@ -156,15 +156,14 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "source",
         "Where this task came from — an issue URL, a plan page path, anything — \
          kept but never parsed. The issue a planning skill read through `spoolway \
-         issue show`, whenever there was one; a plan page's own path only when \
-         there was no issue behind it.",
+         issue show`, whenever there was one; a plan page's own path when there \
+         was no issue behind it, beside the same path in `plan:`.",
     ),
     (
         "plan",
         "The plan page that argued this task's shape, as an absolute path — set \
-         only when a page was written and an issue also holds `source:`, since a \
-         page with no issue behind it keeps its own path in `source:` instead. \
-         Kept but never parsed, and never required.",
+         whenever a page was written, whatever `source:` holds. The `o` menu's \
+         `open plan` opens it in the default browser. Never required.",
     ),
     (
         "depends_on",
