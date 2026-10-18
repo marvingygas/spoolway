@@ -11,9 +11,9 @@
 # spoolway-login: acli jira auth status
 #
 # The `gh` floor is `done`'s own: it looks up the pull request to comment
-# with through `gh pr view`, the same tool and the same floor `github.sh`
-# already declares. Nothing else in this file touches `gh` at all — Jira's
-# own tool is `acli` throughout.
+# with, or to find there is none, through `gh pr view`, the same tool and the
+# same floor `github.sh` already declares. Nothing else in this file touches
+# `gh` at all — Jira's own tool is `acli` throughout.
 #
 # 3.2 is stock macOS's own bash, not a round number picked for looks: the
 # trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR
@@ -27,7 +27,7 @@
 # reads that way. Two more things a site can still differ on, and each is a
 # one-line edit at the head of this file if yours does: that `Blocks` and
 # `Relates` are your project's own spelling for "this one comes first" and
-# "this is the same piece of work as that", and that the three status names
+# "this is the same piece of work as that", and that the four status names
 # match the ones `acli` sees. Jira answers in the language of the account
 # `acli` is logged in as: a German account sees `Entwurf` and `In Arbeit`
 # where this file says `Draft` and `In Progress`, and a transition asked for
@@ -88,8 +88,13 @@ trap 'hook_trace "$LINENO" "$BASH_COMMAND"' ERR
 # reading it wrong or re-running a side effect a command substitution
 # inside it already had. The line number is real, and the source text is
 # usually enough to find the call in the file next to it.
+#
+# A caller that has already read a command's exit code and now means to stop
+# on it, as `done` does after sorting one `gh pr view` failure from another,
+# passes that code as the third argument. The trace then reads the same as
+# one the trap printed itself.
 hook_trace() {
-  code=$?
+  code=${3:-$?}
   line=$1
   cmd=$2
   if [ "$BASH_SUBSHELL" -gt 0 ]; then
@@ -113,7 +118,7 @@ project=$SPOOLWAY_PROJECT_KEY             # `[issue_tracking] project_key`
 # The work item types and link types this project's Jira site names — a
 # company-managed project spells the sub-task type `Sub-task`, not
 # `Subtask`, so this is the one edit a project like that needs to make here.
-# The three status names below are the site's own workflow names, not
+# The four status names below are the site's own workflow names, not
 # spoolway's — nothing proves them ahead of time any more; a name this site
 # does not have surfaces as a failed transition on the real event that hits
 # it, with the trace naming the call that failed. `open` never transitions
@@ -129,6 +134,7 @@ link_relates=Relates
 status_draft=Draft
 status_progress="In Progress"
 status_review=Review
+status_done=Done
 
 # The browse host this account's site actually answers on — `acli jira auth
 # status` prints it as `  Site: <host>`. `workitem view`'s own `.self` field
@@ -391,6 +397,40 @@ to_adf_file() {
   }
 }
 
+# The `done` path for a branch with no pull request. The comment goes in
+# before the move so the Sub-task never sits in `status_done` without saying
+# why. The Story follows only on the group's last task, and only when no
+# sibling under it is still outside `status_done`: a sibling that went to
+# review stays there until its own pull request merges, so closing the Story
+# ahead of it would hide that work. The search leaves this task's own
+# Sub-task out by key, because Jira's search may not yet see the move made
+# just above and would list it as open, leaving the Story behind on the
+# commonest case, a group of one.
+#
+# The search is allowed to fail, and a failed or empty answer reads as
+# "something may still be open", so the Story stays where it is. A Story left
+# in review by mistake costs one manual move. A Story moved to done over a
+# search that merely failed would hide open work.
+close_without_pull_request() {
+  done_md=$(printf 'Done. No pull request on %s.' "$SPOOLWAY_BRANCH")
+  done_adf=$(mktemp "${TMPDIR:-/tmp}/jira-hook-adf.XXXXXX")
+  # An EXIT trap rather than a plain `rm` after the call: a failing `acli`
+  # exits through the ERR trap before any later line runs, and would leave
+  # the file behind in `TMPDIR`.
+  trap 'rm -f "$done_adf"' EXIT
+  to_adf_file "$done_md" "$done_adf"
+  acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body-file "$done_adf"
+  acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_done" --yes
+  if [ "$SPOOLWAY_GROUP_LAST" = 1 ] && [ -n "$SPOOLWAY_EPIC" ]; then
+    none_open=$(acli jira workitem search \
+      --jql "project = $project AND parent = $SPOOLWAY_EPIC AND key != $SPOOLWAY_TICKET AND status != \"$status_done\"" \
+      --json 2>/dev/null | jq 'length == 0' 2>/dev/null) || true
+    if [ "$none_open" = true ]; then
+      acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_done" --yes
+    fi
+  fi
+}
+
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
   fields=$(acli jira workitem view "$SPOOLWAY_REF" --fields "summary,status,labels,description" \
              --json) && [ -n "$fields" ] || {
@@ -613,15 +653,32 @@ case "$SPOOLWAY_EVENT" in
     ;;
   done)
     # The pull request this hand-off names, looked up before anything else
-    # on `done` touches the ticket — a `done` this hook fires for always has
-    # one behind it by then (`spoolway stack` already opened it), so no
-    # result is as much a failure as a nonzero exit is, the same rule
-    # `github.sh`'s own `hand_off_for_review` follows. Every hook here runs
-    # with the repository's own checkout as its working directory, so
-    # `gh pr view` finds the pull request with no `-R` needed to name one —
-    # unlike `github.sh`, which always passes `-R "$repo"` because it holds
-    # no checkout of its own to infer one from.
-    pr=$(gh pr view "$SPOOLWAY_BRANCH" --json url --jq .url)
+    # on `done` touches the ticket. Every hook here runs with the
+    # repository's own checkout as its working directory, so `gh pr view`
+    # finds the pull request with no `-R` needed to name one — unlike
+    # `github.sh`, which always passes `-R "$repo"` because it holds no
+    # checkout of its own to infer one from.
+    #
+    # A branch with no pull request, such as a release, has nothing left to
+    # review, so its Sub-task is moved to `status_done` instead. Only `gh`'s
+    # own "no pull requests found" answer counts as that. Any other failure,
+    # such as `gh` not being logged in, still stops the hook, and so does a
+    # lookup that succeeds with no URL: moving a Sub-task to done over a
+    # lookup that merely failed would hide work still waiting for review.
+    lookup_err=$(mktemp "${TMPDIR:-/tmp}/jira-hook-gh.XXXXXX")
+    if pr=$(gh pr view "$SPOOLWAY_BRANCH" --json url --jq .url 2>"$lookup_err"); then
+      rm -f "$lookup_err"
+    else
+      code=$?
+      if grep -q 'no pull requests found' "$lookup_err"; then
+        rm -f "$lookup_err"
+        close_without_pull_request
+        exit 0
+      fi
+      cat "$lookup_err" >&2
+      rm -f "$lookup_err"
+      hook_trace "$LINENO" 'pr=$(gh pr view "$SPOOLWAY_BRANCH" ...)' "$code"
+    fi
     [ -n "$pr" ] || {
       echo "jira.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
       exit 1
