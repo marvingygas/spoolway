@@ -256,7 +256,7 @@ pipeline's first step.
 | `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
-| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
+| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. A copy of a routine is deleted instead, and the command names the routine file, when that file still exists. `--all` and `--force` reach the rest. |
 
 A queue file that does not parse is skipped. A queue file that holds an id another file holds is
 skipped too, as is a queue file whose id is already in the archive. The file whose name is the id

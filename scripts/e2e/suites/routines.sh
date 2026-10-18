@@ -110,6 +110,20 @@ on_screen '\x1b[C\t n' /dev/null
 works "tab reaches a nested task under its routine, and a solo pick queues it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
 
+# Unqueuing that copy deletes it. The routine is still in the checkout for the
+# routines tab to queue again, so a draft in pending would only be a duplicate
+# of it on the queue tab.
+UNQUEUE_COPY="$LIVE/routine-unqueue.out"
+must "unqueuing a routine copy succeeds" \
+  bash -c '"$1" queue unqueue prune-2 >"$2" 2>&1' _ "$SPOOLWAY" "$UNQUEUE_COPY"
+has "and says the copy was deleted" "deleted \`prune-2\`" "$UNQUEUE_COPY"
+has "naming the routine file" ".spoolway/routines/maintenance/weekly/prune.md" "$UNQUEUE_COPY"
+works "the copy's queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
+works "nothing was written to pending for it" \
+  bash -c '! ls "$1"/pending/prune* >/dev/null 2>&1' _ "$SPOOLWAY_PROJECT_HOME"
+works "and the routine file is untouched" \
+  test -f .spoolway/routines/maintenance/weekly/prune.md
+
 # A pending group, saved as a routine: `o`, down, `enter` opens the panel over `release`,
 # already named after the group; `enter` accepts that name and copies its
 # one document into `.spoolway/routines/release/`, unchanged; the screen

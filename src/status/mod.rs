@@ -1289,8 +1289,10 @@ impl Board {
                     .map(|row| row.id)
                     .collect();
                 let next = next_cursor_after_chain(&before, &chain);
-                for entry in &chain {
-                    unqueue_task(repo, &entry.id)?;
+                let ids: Vec<String> = chain.iter().map(|e| e.id.clone()).collect();
+                let drafted = drafted_in_batch(repo, &ids)?;
+                for id in &ids {
+                    unqueue_in(repo, id, &drafted)?;
                 }
                 self.cursor = next;
             }
@@ -2325,7 +2327,8 @@ struct ChainEntry {
 
 /// `id`, then every not-started task that reaches it through `depends_on`,
 /// however many hops away — what `unqueue`'s panel lists and carries back to
-/// pending together. Breadth first, each new level sorted by id, so the
+/// pending together (a routine copy that a drafted task depends on included;
+/// see [`drafted_in_batch`]). Breadth first, each new level sorted by id, so the
 /// panel reads the way a person would explain the chain: the task under the
 /// cursor, then what leans on it, then what leans on that.
 ///
@@ -2377,7 +2380,8 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
         .collect()
 }
 
-/// Move one task from the queue back to pending, dropping every
+/// Move one task from the queue back to pending (or delete a routine copy, see
+/// below), dropping every
 /// [`crate::commands::RESERVED_KEYS`] field from its frontmatter so `queue
 /// add --from` accepts it exactly as it would a task that had never been
 /// queued — the same fields `queue_add::parse_submission` refuses to see set
@@ -2397,6 +2401,14 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
 /// exactly where it is rather than risk carrying an archived task back
 /// to pending.
 ///
+/// A copy of a routine whose routine file still exists is deleted rather than
+/// carried: the routine is still in `.spoolway/routines/` for the routines tab
+/// to queue again, so a draft in pending would be a duplicate of it. The copy
+/// is carried as any other task when that file is gone, because the copy is
+/// then the only record of the task. The rule is decided per task, so a batch
+/// that mixes both kinds treats each its own way; [`drafted_in_batch`] names the
+/// one exception, a copy that a task drafted alongside it depends on.
+///
 /// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
 /// `queued` with no `--force` — the same body a keypress and the command
 /// share, exactly as [`resume_task`] is for `r` and `queue resume`. A
@@ -2404,27 +2416,109 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
 /// --force` goes around this function's own `not_started` gate and calls
 /// [`carry_to_pending`] directly, once its own teardown has cleared the
 /// checkout — see `commands::queue::queue_unqueue`.
-pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
+pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<Unqueued> {
+    unqueue_in(repo, id, &[])
+}
+
+/// The ids in `ids` that [`unqueue_in`] must write to pending, whatever they
+/// are, when the whole of `ids` is unqueued together.
+///
+/// A routine copy is deleted only if nothing drafted in the same batch
+/// depends on it. A drafted dependent keeps its `depends_on:` naming the copy,
+/// and `queue add` refuses a task whose dependency is in neither the queue nor
+/// the archive, so deleting the copy would leave that draft stuck until a
+/// person edited it. Carried to pending together, both queue again as they did
+/// before. The same holds up the chain: a copy kept for a dependent that is
+/// itself drafted is a drafted dependent for the copy under it.
+pub(crate) fn drafted_in_batch(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
+    let tasks = repo.tasks()?;
+    let in_batch: Vec<&crate::task::Task> = tasks
+        .iter()
+        .filter(|t| ids.iter().any(|id| id == t.id()) && not_started(t))
+        .collect();
+    let deletable = |t: &crate::task::Task| {
+        t.routine()
+            .and_then(|routine| crate::commands::routine_file(repo, routine))
+            .is_some()
+    };
+    // Every task in the batch that will be written to pending. Grown until no
+    // copy is left that one of them depends on.
+    let mut drafted: Vec<&str> = in_batch
+        .iter()
+        .filter(|t| !deletable(t))
+        .map(|t| t.id())
+        .collect();
+    loop {
+        let before = drafted.len();
+        for t in &in_batch {
+            let needed = in_batch.iter().any(|d| {
+                drafted.contains(&d.id()) && d.front.depends_on.iter().any(|x| x == t.id())
+            });
+            if needed && !drafted.contains(&t.id()) {
+                drafted.push(t.id());
+            }
+        }
+        if drafted.len() == before {
+            break;
+        }
+    }
+    Ok(drafted.into_iter().map(str::to_string).collect())
+}
+
+/// [`unqueue_task`] for one task of a batch: `drafted` is
+/// [`drafted_in_batch`]'s answer for the whole batch, and a routine copy in it
+/// is written to pending rather than deleted.
+pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Unqueued> {
     // The same per-task lock the dispatcher and `spoolway report` take, so
     // this rename cannot land in the middle of one of their read-modify-
     // writes. See [`crate::lock::TaskLock`] and review finding 49.
     let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
 
     let Ok(task) = repo.task(id) else {
-        return Ok(());
+        return Ok(Unqueued::Untouched);
     };
     if !not_started(&task) {
-        return Ok(());
+        return Ok(Unqueued::Untouched);
+    }
+    if let Some(routine_file) = task
+        .routine()
+        .and_then(|routine| crate::commands::routine_file(repo, routine))
+        .filter(|_| !drafted.iter().any(|d| d == id))
+    {
+        std::fs::remove_file(&task.path)
+            .with_context(|| format!("removing {}", task.path.display()))?;
+        // The same teardown `carry_to_pending` ends with: left behind, the
+        // next queue of the routine would read this copy's old exit codes.
+        crate::tracking::stop_and_reclaim(repo, task.id());
+        return Ok(Unqueued::Deleted { routine_file });
     }
     // The reason goes to the problem log rather than breaking the board
     // loop this runs inside: the row simply stays queued.
-    if carry_to_pending(repo, &task)?.is_none() {
-        crate::problem_log::append(
-            repo,
-            &format!("did not unqueue `{id}`: a newer draft is already in the pending directory"),
-        );
+    match carry_to_pending(repo, &task)? {
+        Some(dest) => Ok(Unqueued::Drafted(dest)),
+        None => {
+            crate::problem_log::append(
+                repo,
+                &format!(
+                    "did not unqueue `{id}`: a newer draft is already in the pending directory"
+                ),
+            );
+            Ok(Unqueued::NewerDraft)
+        }
     }
-    Ok(())
+}
+
+/// What [`unqueue_task`] did, for the command that tells a person.
+pub(crate) enum Unqueued {
+    /// Written to pending at this path, the queue file removed.
+    Drafted(PathBuf),
+    /// A routine copy removed outright; `routine_file` is the routine it was
+    /// copied from, still under `.spoolway/routines/`.
+    Deleted { routine_file: PathBuf },
+    /// Left queued: a task already sits in pending under this id.
+    NewerDraft,
+    /// Nothing changed: the task is gone or has started.
+    Untouched,
 }
 
 /// The move itself, shared with `spoolway queue unqueue`: `task`'s task
@@ -12656,6 +12750,176 @@ mod tests {
                 .contains("the newer draft"),
             "the pending draft is untouched"
         );
+    }
+
+    /// Queue a copy of `routine` numbered `id`, the way the routines tab
+    /// does: an ordinary queued task whose frontmatter carries `routine:`.
+    /// The routine's own file is written under `.spoolway/routines/` only
+    /// when `file` is true.
+    fn add_routine_copy(repo: &Repo, id: &str, routine: &str, file: bool) -> PathBuf {
+        let path = repo
+            .routines_dir()
+            .join(routine)
+            .join(format!("{routine}.md"));
+        if file {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!("---\nid: {routine}\ngroup: {routine}\npipeline: default\n---\n## Goal\n\nDo it.\n"),
+            )
+            .unwrap();
+        }
+        add_to(repo, id, &[], None, Some(routine));
+        let mut copy = repo.task(id).unwrap();
+        copy.front.routine = Some(routine.into());
+        copy.save().unwrap();
+        path
+    }
+
+    /// Unqueuing a copy of a routine that still has its file deletes the
+    /// copy. Writing it to pending would leave a duplicate of a routine that
+    /// never left `.spoolway/routines/`, listed on the queue tab, and the
+    /// routine file is left as it was.
+    #[test]
+    fn unqueuing_a_routine_copy_deletes_it_instead_of_drafting_it() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-deleted");
+        let routine_file = add_routine_copy(&repo, "nightly-3", "nightly", true);
+        let before = std::fs::read_to_string(&routine_file).unwrap();
+
+        unqueue_task(&repo, "nightly-3").unwrap();
+
+        assert!(
+            !repo.queue_dir().join("nightly-3.md").exists(),
+            "the copy's queue file is gone"
+        );
+        assert!(
+            !repo.pending_dir().join("nightly-3.md").exists(),
+            "nothing is written to pending for the copy"
+        );
+        assert_eq!(std::fs::read_to_string(&routine_file).unwrap(), before);
+    }
+
+    /// A copy whose routine file has been deleted or renamed since it was
+    /// queued is the only copy of that task, so unqueuing it carries it to
+    /// pending as a draft with its `routine:` dropped.
+    #[test]
+    fn unqueuing_a_routine_copy_whose_routine_is_gone_carries_it_to_pending() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-orphan");
+        add_routine_copy(&repo, "gone-2", "gone", false);
+
+        unqueue_task(&repo, "gone-2").unwrap();
+
+        assert!(!repo.queue_dir().join("gone-2.md").exists());
+        let draft = std::fs::read_to_string(repo.pending_dir().join("gone-2.md")).unwrap();
+        assert!(!draft.contains("routine:"));
+    }
+
+    /// The rule is decided per task: unqueuing a batch that mixes an
+    /// ordinary task with a routine copy drafts the ordinary one and deletes
+    /// the copy.
+    #[test]
+    fn unqueuing_a_mixed_batch_drafts_ordinary_tasks_and_deletes_routine_copies() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-mixed");
+        add(&repo, "solo", &[], None);
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+
+        unqueue_task(&repo, "solo").unwrap();
+        unqueue_task(&repo, "nightly-1").unwrap();
+
+        assert!(repo.pending_dir().join("solo.md").exists());
+        assert!(!repo.queue_dir().join("nightly-1.md").exists());
+        assert!(!repo.pending_dir().join("nightly-1.md").exists());
+    }
+
+    /// A routine copy that a drafted task depends on is carried to pending
+    /// with it, not deleted: the draft keeps `depends_on:` naming the copy,
+    /// and `queue add` refuses a task whose dependency is in neither the
+    /// queue nor the archive. The copy under it in the chain is carried too,
+    /// but a copy only other copies depend on is still deleted.
+    #[test]
+    fn unqueuing_a_chain_keeps_the_copies_a_drafted_task_depends_on() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-chain");
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+        // A group is one chain, so a second copy of a routine has to
+        // depend on the first, the way a routine's own tasks do.
+        let chained = |id: &str, after: &str, routine: &str| {
+            add_to(&repo, id, &[after], None, Some(routine));
+            let mut copy = repo.task(id).unwrap();
+            copy.front.routine = Some(routine.into());
+            copy.save().unwrap();
+        };
+        chained("nightly-2", "nightly-1", "nightly");
+        add_to(&repo, "after", &["nightly-2"], None, Some("nightly"));
+        add_routine_copy(&repo, "weekly-1", "weekly", true);
+        chained("weekly-2", "weekly-1", "weekly");
+
+        let ids = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let batch = ids(&["nightly-1", "nightly-2", "after", "weekly-1", "weekly-2"]);
+        let drafted = drafted_in_batch(&repo, &batch).unwrap();
+        for id in &batch {
+            unqueue_in(&repo, id, &drafted).unwrap();
+        }
+
+        for kept in ["nightly-1", "nightly-2", "after"] {
+            assert!(
+                repo.pending_dir().join(format!("{kept}.md")).exists(),
+                "{kept} goes to pending with the task that depends on it"
+            );
+        }
+        for deleted in ["weekly-1", "weekly-2"] {
+            assert!(!repo.queue_dir().join(format!("{deleted}.md")).exists());
+            assert!(!repo.pending_dir().join(format!("{deleted}.md")).exists());
+        }
+    }
+
+    /// The board's `unqueue` on a routine copy with an ordinary task behind
+    /// it carries both to pending, so the pair queues again together.
+    #[test]
+    fn picking_unqueue_on_a_routine_copy_with_a_dependent_carries_both() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-dependent");
+        let pipelines = Pipelines::builtin();
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+        add_to(&repo, "after", &["nightly-1"], None, Some("nightly"));
+
+        let mut board = Board::for_test();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
+        board.cursor = Some("nightly-1".into());
+        pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+
+        assert!(repo.pending_dir().join("nightly-1.md").exists());
+        assert!(repo.pending_dir().join("after.md").exists());
+        assert!(!repo.queue_dir().join("nightly-1.md").exists());
+    }
+
+    /// Deleting a routine copy also stops and reclaims its hook runs, or the
+    /// next queue of the routine would read the old exit code.
+    #[test]
+    fn deleting_a_routine_copy_forgets_the_hook_runs_of_the_old_run() {
+        let (repo, _root_guard) = fixture("unqueue-routine-copy-tracking");
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        let exit = repo.tracking_dir().join("nightly-1 · queued.exit");
+        let other = repo.tracking_dir().join("nightly-2 · queued.exit");
+        std::fs::write(&exit, "1\n").unwrap();
+        std::fs::write(&other, "1\n").unwrap();
+
+        unqueue_task(&repo, "nightly-1").unwrap();
+
+        assert!(!repo.queue_dir().join("nightly-1.md").exists());
+        assert!(!exit.exists(), "the old run's exit code must be gone");
+        assert!(other.exists(), "another task's run must be left alone");
     }
 
     /// The `starts_from:` spoolway stamped at a cut does not travel back to

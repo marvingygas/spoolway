@@ -496,6 +496,19 @@ files under `tracking/` are removed. `spoolway queue add --from` takes the resul
 on it; this command has no panel
 to list a chain on, so it refuses instead.
 
+A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
+copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
+the routine file's path, and the routine stays there to queue again.
+
+```
+$ spoolway queue unqueue prune-1
+deleted `prune-1`, a copy of the routine in /path/to/repo/.spoolway/routines/maintenance/weekly/prune.md — it is still there to queue again
+```
+
+A copy whose routine file is gone goes to the pending directory like any other task. A copy that a
+task going to pending in the same `--all` batch depends on goes there too. See
+[Routines](planning.md#routines).
+
 ```
 spoolway queue unqueue <task>
 spoolway queue unqueue --all
