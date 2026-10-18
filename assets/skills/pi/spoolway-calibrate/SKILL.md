@@ -24,9 +24,10 @@ or both.
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
 - Collect every `Follow-up:` and `Sibling:` line lanes left in a Handoff. Each is a defect a lane
   saw outside its task; one that no later task fixed is a finding of its own.
-- Read `spoolway eval --by step --per-run --since <window>`. Check pass rates, block counts,
-  context pressure, tokens per run, cost and time. Use `--step` to inspect a troubled step and
-  `spoolway eval --by task --since <window>` to connect its figures to task records. Use
+- Read `spoolway eval --by step --per-task --since <window>`. Check pass rates, block counts,
+  context pressure (the `CTX AVG` column), tokens per task, cost and time. Use `--step` to inspect
+  a troubled step and `spoolway eval --by task --since <window>` to connect its figures to task
+  records. Read a single task's peak context as `CTX PEAK` there. Use
   figures where they help; do not make them a gate for findings. `eval` has no rows for command
   steps, and BLOCKS counts lane blocks only: count gate and suite failures and arrivals at
   `blocked` from each archived task's `steps:` edges and Status Log.
