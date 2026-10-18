@@ -470,14 +470,14 @@ new default only applies where the key is absent. Delete the line, or set it to 
 up the default.
 
 The script is called once per task per event. A non-zero exit on `queued`, `started` or `done`
-pauses the task with the reason `issue_tracking hook exited N`. The task file gains a
+moves the task to `hook_failed` with the reason `issue_tracking hook exited N`. The task file gains a
 `## Hook error` section holding the run's last 15 log lines under `Last output:`, appended on
 each failure. `spoolway resume` forgets that run, so the hook fires again. A non-zero exit on
 `blocked` or `paused` only records the failure, since both stages are already stopped for a
 person.
 
 A `queued`, `started` or `done` hook that is still running after 10 minutes is stopped and the
-task is paused. The reason names the hook and the limit:
+task moves to `hook_failed`. The reason names the hook and the limit:
 
 ```
 issue_tracking hook `started` ran 10m and was stopped at the limit of 10m
@@ -492,16 +492,19 @@ While such a hook runs, the task's row names it and how long it has run. The NEX
 A `blocked` or `paused` hook that is still running after 10 minutes is stopped and recorded as
 exit code 124. It is not fired again, and the dispatcher prints a line for it once.
 
-Every task paused by a hook adds a line to the dispatcher's problems, whether the hook exited
-non-zero or ran past its limit:
+Every task a hook moves to `hook_failed` adds a line to the dispatcher's problems, whether the
+hook exited non-zero or ran past its limit:
 
 ```
-paused `t5`: issue_tracking hook exited 3. Fix the hook, then resume.
+`t5`'s `done` hook failed: issue_tracking hook exited 3. Fix the hook, then resume the task to run it again.
 ```
+
+The board shows such a task as `● hook failed`, with `[r] rerun hook` in NEXT. No hook event
+fires for the `hook_failed` stage, so a failing hook is never asked to report its own failure.
 
 A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
 again on the next pass. The pass report says so. If three runs in a row are killed this way, the
-hook is not fired again. For the `queued`, `started` and `done` events the task is then paused
+hook is not fired again. For the `queued`, `started` and `done` events the task then moves to `hook_failed`
 with the reason `issue_tracking hook was killed 3 times in a row without an exit code`. `spoolway resume` clears
 that count along with the run. A re-fired hook can repeat whatever the killed run already did,
 such as opening a ticket.
@@ -510,11 +513,11 @@ such as opening a ticket.
 |---|---|---|---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue | Yes | 60 s | Refuses the command |
 | `open` | `spoolway queue add` opens a ticket per task | Yes | 60 s | Refuses the whole batch |
-| `queued` | A task arrives in the queue | No | 10 min | Pauses the task |
-| `started` | A queued task is ready and about to leave `queued` for its entry step | No | 10 min | Pauses the task |
+| `queued` | A task arrives in the queue | No | 10 min | Moves the task to `hook_failed` |
+| `started` | A queued task is ready and about to leave `queued` for its entry step | No | 10 min | Moves the task to `hook_failed` |
 | `blocked` | A task comes to rest on `blocked` | No | 10 min | Records the failure |
 | `paused` | A task arrives on the persisted `paused` stage | No | 10 min | Records the failure |
-| `done` | A task finishes | No | 10 min | Pauses the task |
+| `done` | A task finishes | No | 10 min | Moves the task to `hook_failed` |
 
 The time limits are fixed. No key changes them. A hook that is still running at its limit is
 stopped together with every process it started.
@@ -527,7 +530,7 @@ flowchart LR
   A[dispatcher pass] -->|task reaches queued, started, blocked, paused or done| B[.spoolway/hooks/hook]
   B --> C[log in ~/.spoolway/project/tracking/]
   C -->|non-zero exit| D{queued, started or done?}
-  D -->|yes| E[task paused]
+  D -->|yes| E[task moves to hook_failed]
   D -->|no| F[failure recorded]
   E --> G[named by doctor and the before-dispatching popup]
   F --> G
@@ -545,7 +548,7 @@ popup, under `problems`. The row gives the event, the task, the exit code, what 
 log path:
 
 ```
-issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 ```
 
 For a `queued`, `started` or `done` hook, `spoolway resume <task>` clears the row. A failed
@@ -632,7 +635,7 @@ refuses. A `fetch` hook that is still running after 60 seconds is stopped and th
 `queued` fires on a task's first pass through the queue, even while it still waits on a
 dependency. `started` fires once, the moment a task actually leaves `queued` for its entry
 step. It carries the same variables `queued`, `blocked`, `paused` and `done` do. The task
-launches only once this hook exits clean. A non-zero exit pauses the task, exactly as a
+launches only once this hook exits clean. A non-zero exit moves the task to `hook_failed`, exactly as a
 failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm never fires
 `started`, the same as `queued` and `done`.
 
@@ -680,7 +683,7 @@ notice once for that minute and queues its tasks with `tracking: off`. See
 Both shipped scripts run under `bash`, with `set -eE` and an ERR trap. A command that fails
 outside an `if`, an `&&`/`||` list, or one marked `|| true` stops the script and writes a trace
 to the run's own log: the command, its line, the case arm it ran in, and the functions that
-called it. That log is what a paused task's `## Hook error` reads its tail from.
+called it. That log is what a failed hook's `## Hook error` reads its tail from.
 
 | Script | Needs | What it does |
 |---|---|---|
@@ -946,7 +949,7 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
 | `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
 | `dispatch.keep_finished_lanes` | `dispatch.visible_lanes`. `true` loads as `"all"` and `false` as `1`. |
-| `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
+| `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always moves its task to `hook_failed`. |
 | `[pipeline_gen]` | Nothing |
 | `models.<glob>.exclusive` | Nothing. Serving one model at a time, and sizing `slots` and `concurrency` to match, is up to you. |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.prompt_cache_ttl` |

@@ -577,13 +577,13 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_by: Option<String>,
 
-    /// `"queued"` or `"done"` — which reserved stage's issue-tracking hook
-    /// paused this task, set the moment [`crate::dispatch::Dispatcher::
-    /// tracking_gate`] finds one exited non-zero, or killed
-    /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row without leaving an
-    /// exit code at all. Unlike [`paused_by`] this
-    /// is not one of a gate's two roads — a hook pause answers no question a
-    /// person releases past, it stops the task until the hook itself is
+    /// `"queued"`, `"started"` or `"done"` — which issue-tracking hook moved
+    /// this task to `hook_failed`, set the moment
+    /// [`crate::dispatch::Dispatcher::tracking_gate`] finds one exited
+    /// non-zero, or killed [`crate::tracking::MAX_HOOK_KILLS`] times in a row
+    /// without leaving an exit code at all. Unlike [`paused_by`] this is not
+    /// one of a gate's two roads — a hook stop answers no question a person
+    /// releases past, it stops the task until the hook itself is
     /// made to run again — so it needs its own field rather than a third
     /// value squeezed into that one.
     ///
@@ -598,6 +598,15 @@ pub struct Frontmatter {
     /// `spoolway queue route` only read it, and leave it set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_paused: Option<String>,
+
+    /// Why the hook [`Frontmatter::hook_paused`] names failed, in the words
+    /// the dispatcher wrote: `issue_tracking hook exited 1`, say. Written and
+    /// cleared together with that field. It is what the board's RECENT line
+    /// says after `<event> hook failed:`, since the board reads the front
+    /// matter and never the body, where the same reason sits in the status
+    /// log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_error: Option<String>,
 
     /// The start branch that was missing when the dispatcher paused this task
     /// instead of cutting its worktree — the pause's own reason, which
@@ -1022,6 +1031,16 @@ impl Task {
                     *front.arrivals.entry(to.to_string()).or_insert(0) += n;
                 }
             }
+        }
+
+        // A binary from before `hook_failed` existed stopped a task over a
+        // failing hook on `paused`, with `hook_paused:` naming the hook. Read
+        // as `paused`, that task would show as an ordinary hold and could be
+        // parked or picked over as one. `hook_paused:` is only ever written
+        // together with that move, so the pair can only mean a hook stop,
+        // and the next save writes it in the new shape.
+        if front.stage == crate::pipeline::PAUSED && front.hook_paused.is_some() {
+            front.stage = crate::pipeline::HOOK_FAILED.to_string();
         }
 
         // `queue add` checks this too, and is not the only way a file gets here:
@@ -2180,6 +2199,32 @@ mod tests {
         let rendered = task.render().unwrap();
         assert!(rendered.contains("steps:"), "{rendered}");
         assert!(!rendered.contains("prompts:"), "{rendered}");
+    }
+
+    /// A task file an older binary stopped over a failed hook — `paused`,
+    /// with `hook_paused:` naming the hook — is read as `hook_failed`, and
+    /// saved that way, so `spoolway resume` still reruns the hook rather
+    /// than treating it as an ordinary hold.
+    #[test]
+    fn an_old_hook_pause_is_read_as_hook_failed() {
+        let raw = "---\nid: demo\nstage: paused\nhook_paused: done\narrived_from: done\n\
+                   ---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(task.front.hook_paused.as_deref(), Some("done"));
+        assert_eq!(task.front.arrived_from.as_deref(), Some("done"));
+
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("stage: hook_failed"), "{rendered}");
+    }
+
+    /// A `paused` task with no `hook_paused:` is an ordinary hold, and stays
+    /// one: only the pair means a hook stopped it.
+    #[test]
+    fn a_plain_pause_is_left_paused() {
+        let raw = "---\nid: demo\nstage: paused\nparked_from: review\n---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
     }
 
     /// A task file already on disk carrying `rounds:` but no `arrivals:` of

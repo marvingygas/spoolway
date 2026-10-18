@@ -100,6 +100,11 @@ pub enum State {
     /// waiting to be let past. Next to `blocked` rather than inside it,
     /// since a paused step passed and a blocked one did not.
     Paused,
+    /// The task's own stage is `hook_failed`: its issue-tracking hook failed
+    /// on `queued`, `started` or `done`, and `r` runs that hook again. Apart
+    /// from `Paused` so a task whose `done` hook failed never reads as
+    /// finished work someone parked.
+    HookFailed,
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
     Running,
@@ -891,7 +896,9 @@ impl Board {
     ///
     /// Two roads skip the picker and resume at once, because neither has a
     /// step to choose: a task that never started goes back onto `queued`,
-    /// and a task its `done` hook paused goes back onto `done`. `--stage`
+    /// and a task whose `done` hook failed goes back onto `done`. Every
+    /// `hook_failed` row takes one of the two, since its `queued` or
+    /// `started` hook failed before it ever started. `--stage`
     /// names neither, so a picker there could offer only the one answer.
     fn resume_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
@@ -1022,7 +1029,7 @@ impl Board {
     /// [`BoardMode::ConfirmPause`] first — titled with its id — only when
     /// that task's own step has an agent turn or a command run live right
     /// now. A no-op on a task the queue no longer has, or on one
-    /// [`pausable`] refuses — a `paused` one.
+    /// [`pausable`] refuses — a `paused` or `hook_failed` one.
     fn begin_pause(&mut self, repo: &Repo, pipelines: &Pipelines, id: String) -> Result<()> {
         let tasks = repo.tasks()?;
         let Some(i) = tasks.iter().position(|t| t.id() == id) else {
@@ -1473,13 +1480,14 @@ fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAc
 }
 
 /// Whether the options menu's `pause` acts on `task`: everywhere but a
-/// `paused` row. That one is already stopped and already waiting on a
-/// person, so parking it again would only overwrite `parked_from` with the
-/// state it is already stuck in. A `blocked` row has no such guard — the
-/// unblocker can be mid-turn on it, and `pause` reaches that turn exactly
-/// as it does any other live step.
+/// `paused` or `hook_failed` row. Each is already stopped and already
+/// waiting on a person, so parking it again would only overwrite
+/// `parked_from` with the state it is already stuck in, and on
+/// `hook_failed` would leave the failed hook for no resume to run again. A
+/// `blocked` row has no such guard — the unblocker can be mid-turn on it,
+/// and `pause` reaches that turn exactly as it does any other live step.
 fn pausable(task: &crate::task::Task) -> bool {
-    task.stage() != crate::pipeline::PAUSED
+    task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::HOOK_FAILED
 }
 
 /// [`BoardMode::ConfirmPause`]'s state: what pausing task `id` would
@@ -2169,14 +2177,21 @@ pub(crate) enum ParkedBy {
 /// Shared by the board's `pause`, a stop and `spoolway queue pause`, so a rule
 /// learned by one reaches the others; a caller that must refuse a task the
 /// queue no longer has checks for it first, as `queue_pause` does.
-/// `by` picks the log line and, for a stop, sets the mark.
-pub(crate) fn park_under_lock(repo: &Repo, id: &str, by: ParkedBy) -> Result<()> {
+/// `by` picks the log line and, for a stop, sets the mark. The answer says
+/// what was found under the lock, so a caller that reports the pause says
+/// what happened rather than what it read before taking the lock.
+pub(crate) fn park_under_lock(repo: &Repo, id: &str, by: ParkedBy) -> Result<Parked> {
     let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
     let Ok(mut task) = repo.task(id) else {
-        return Ok(());
+        return Ok(Parked::Gone);
     };
     if task.stage() == crate::pipeline::PAUSED {
-        return Ok(());
+        return Ok(Parked::Paused);
+    }
+    // A hook-failed task is already held for a person, and parking it would
+    // move it off the stage that tells `spoolway resume` to rerun its hook.
+    if task.stage() == crate::pipeline::HOOK_FAILED {
+        return Ok(Parked::HookFailed);
     }
     match by {
         ParkedBy::Stop => {
@@ -2186,7 +2201,19 @@ pub(crate) fn park_under_lock(repo: &Repo, id: &str, by: ParkedBy) -> Result<()>
         ParkedBy::Board => park(&mut task, "paused from the board", false),
         ParkedBy::QueuePause => park(&mut task, "paused via `spoolway queue pause`", false),
     }
-    task.save()
+    task.save()?;
+    Ok(Parked::Paused)
+}
+
+/// What [`park_under_lock`] found once it held the task's lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Parked {
+    /// On `paused` now, parked by this call or already there before it.
+    Paused,
+    /// Left on `hook_failed`, where `spoolway resume` reruns its hook.
+    HookFailed,
+    /// The queue no longer has the task.
+    Gone,
 }
 
 /// Send one task through `spoolway resume`'s body, as a person typing the
@@ -2466,6 +2493,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         // the run being left behind, and a copy that kept `hook_paused` would
         // be sent straight to `done` by its first `resume`.
         map.remove("hook_paused");
+        map.remove("hook_error");
         map.remove("missing_start_branch");
     }
     let yaml =
@@ -3891,12 +3919,12 @@ fn paused_arrow(task: &crate::task::Task) -> Option<String> {
 /// answer its OUT, COST and TIME: `task.stage()` itself, except on a row
 /// that is stopped, where it is the step the stop came from.
 ///
-/// A stopped task sits on `paused` or `blocked`, and the row's STATE already
-/// says which, so a STEP repeating it would leave the step the stop came
-/// from off the row entirely. `paused` is never a step a lane banks under,
-/// and at an unstaffed `blocked` no lane ran for this stop: `spent_at`,
-/// `cost_at` and `lane_time_at` all filter on `entry.step`, and the lane
-/// that stopped banked under the step it ran.
+/// A stopped task sits on `paused`, `hook_failed` or `blocked`, and the
+/// row's STATE already says which, so a STEP repeating it would leave the
+/// step the stop came from off the row entirely. `paused` is never a step a
+/// lane banks under, and at an unstaffed `blocked` no lane ran for this
+/// stop: `spent_at`, `cost_at` and `lane_time_at` all filter on
+/// `entry.step`, and the lane that stopped banked under the step it ran.
 ///
 /// `paused` reads `parked_from` first: a board park moves the task with
 /// `set_stage_unbanked`, which leaves `arrived_from` naming the step before
@@ -3925,6 +3953,14 @@ fn origin_step(task: &crate::task::Task, parked_on_blocked: bool) -> &str {
             .blocked_from
             .as_deref()
             .or(front.arrived_from.as_deref()),
+        // The stage the hook stopped it on: `queued` for a `queued` or
+        // `started` hook, which both fire before the task leaves it, and
+        // `done` for a `done` hook. `hook_paused` names the hook instead,
+        // for a file with no `arrived_from`.
+        crate::pipeline::HOOK_FAILED => front
+            .arrived_from
+            .as_deref()
+            .or(front.hook_paused.as_deref()),
         _ => None,
     };
     origin.unwrap_or_else(|| task.stage())
@@ -4211,14 +4247,20 @@ fn build_rows(
                         // Nothing to name: `paused_at` or `parked_from`
                         // names a step the pipeline no longer has, a gated step has no pass
                         // destination, or neither `paused_at` nor
-                        // `parked_from` is set, as on a task an issue-tracking
-                        // hook paused on `done`. The row must still say
+                        // `parked_from` is set. The row must still say
                         // something, and `r` may resume at once with no picker.
                         (None, true) => "[r] resume".to_string(),
                         (None, false) => "no step named".to_string(),
                     };
                     (State::Paused, next, resumable)
                 }
+            }
+            // Always resumable: rerunning a hook races no lane, since a
+            // `queued` or `started` hook fires before any lane starts and a
+            // `done` hook after every lane has finished. `r` skips the
+            // picker here, as `resume_cursor` says.
+            None if task.stage() == crate::pipeline::HOOK_FAILED => {
+                (State::HookFailed, "[r] rerun hook".to_string(), true)
             }
             None if task.stage() == crate::pipeline::DONE => {
                 // The `done` hook runs before the task archives, so a hung
@@ -5197,7 +5239,7 @@ fn arrival_event(now: &str, id: &str, was: &str, stage: &str, queue: &QueueView)
 /// arrival time to tell the two apart, so a lane that never reports on a
 /// return visit is read by what it reported on the visit before.
 fn classify(was: &str, stage: &str, task: &crate::task::Task, queue: &QueueView) -> Move {
-    use crate::pipeline::{BLOCKED, PAUSED, QUEUED};
+    use crate::pipeline::{BLOCKED, DONE, HOOK_FAILED, PAUSED, QUEUED};
 
     let pipeline = queue.pipelines.for_task(task).ok();
     // An outcome this binary cannot parse is no word at all, and is read as
@@ -5210,12 +5252,28 @@ fn classify(was: &str, stage: &str, task: &crate::task::Task, queue: &QueueView)
         .and_then(|r| r.outcome.parse::<Outcome>().ok());
 
     if stage == PAUSED {
-        return into_paused(was, task, pipeline, report);
+        return into_paused(was, task, report);
+    }
+    if stage == HOOK_FAILED {
+        let event = task.front.hook_paused.clone();
+        // A `done` hook fails on a task that just passed its last step, and
+        // the line says which, as it would for the move to `done` itself. A
+        // reading that saw the task on `done` first still names that step:
+        // `finished_from` reads the one step whose pass reaches `done`.
+        let passed = match event.as_deref() {
+            Some(DONE) => finished_from(was, pipeline),
+            _ => None,
+        };
+        return Move::HookFailed {
+            passed,
+            event,
+            reason: task.front.hook_error.clone(),
+        };
     }
     let to = stage.to_string();
     match (was, pipeline) {
         (QUEUED, _) => Move::Started { to },
-        (PAUSED, _) => Move::Resumed { to },
+        (PAUSED | HOOK_FAILED, _) => Move::Resumed { to },
         (BLOCKED, _) => Move::Unblocked {
             to,
             by_lane: report == Some(Outcome::Pass),
@@ -5230,14 +5288,9 @@ fn classify(was: &str, stage: &str, task: &crate::task::Task, queue: &QueueView)
 
 /// [`classify`] for a move into `paused`. The checks run in order, and the
 /// first that matches wins.
-fn into_paused(
-    was: &str,
-    task: &crate::task::Task,
-    pipeline: Option<&crate::pipeline::Pipeline>,
-    report: Option<Outcome>,
-) -> Move {
+fn into_paused(was: &str, task: &crate::task::Task, report: Option<Outcome>) -> Move {
     use crate::commands::Gate;
-    use crate::pipeline::{BLOCKED, DONE, PAUSED, QUEUED, STARTED};
+    use crate::pipeline::{BLOCKED, PAUSED, QUEUED};
 
     let front = &task.front;
     let stopped = |cause| Move::Stopped {
@@ -5262,13 +5315,11 @@ fn into_paused(
         }
     };
 
-    // Nothing has started, so nothing but the dispatcher's own two checks
-    // before a start, and a person's park, stops a task here. `started` is
-    // a hook fired on the way out of `queued`, before the task moves.
+    // Nothing has started, so nothing but the dispatcher's own check before
+    // a start, and a person's park, stops a task here. A failed `queued` or
+    // `started` hook moves it to `hook_failed`, not here.
     if was == QUEUED {
-        let cause = if matches!(front.hook_paused.as_deref(), Some(QUEUED | STARTED)) {
-            Cause::HookFailed
-        } else if let Some(branch) = &front.missing_start_branch {
+        let cause = if let Some(branch) = &front.missing_start_branch {
             Cause::BranchMissing(branch.clone())
         } else {
             Cause::Manually
@@ -5276,20 +5327,6 @@ fn into_paused(
         return Move::Stopped {
             from: None,
             cause: Some(cause),
-        };
-    }
-
-    // `done`'s own hook pauses a task already on `done`, so this move's own
-    // `set_stage` wrote `arrived_from: done` — whether or not a reading ever
-    // saw the task there.
-    if front.hook_paused.as_deref() == Some(DONE) && front.arrived_from.as_deref() == Some(DONE) {
-        return match finished_from(was, pipeline) {
-            Some(step) => Move::Passed {
-                from: step,
-                to: PAUSED.to_string(),
-                cause: Some(Cause::HookFailed),
-            },
-            None => stopped(Some(Cause::HookFailed)),
         };
     }
 
@@ -7722,6 +7759,43 @@ mod tests {
         assert_eq!(row("park-run").arrivals, 1);
     }
 
+    /// A task a failed hook stopped reads `hook failed` in STATE, offers
+    /// `[r] rerun hook` in NEXT, and keeps the stage the hook stopped it on
+    /// in STEP: `done` for its `done` hook, `queued` for its `queued` hook.
+    #[test]
+    fn a_hook_failed_row_reads_hook_failed_and_offers_a_rerun() {
+        use crate::pipeline::{DONE, HOOK_FAILED, QUEUED};
+        let (repo, _root_guard) = fixture("hook-failed-row");
+        let pipelines = Pipelines::builtin();
+        let fail = |id: &str, event: &str| {
+            add_to(&repo, id, &[], None, Some(id));
+            let mut task = repo.task(id).unwrap();
+            if event == DONE {
+                task.set_stage("handover", None);
+                task.set_stage(DONE, None);
+            }
+            task.front.hook_paused = Some(event.into());
+            task.front.hook_error = Some("issue_tracking hook exited 1".into());
+            task.set_stage(HOOK_FAILED, Some("issue_tracking hook exited 1"));
+            task.save().unwrap();
+        };
+        fail("release", DONE);
+        fail("retry-flag", QUEUED);
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+
+        for (id, step) in [("release", DONE), ("retry-flag", QUEUED)] {
+            assert_eq!(row(id).stage, step, "{id}");
+            assert!(matches!(row(id).state, State::HookFailed), "{id}");
+            assert_eq!(row(id).state.word(), "● hook failed", "{id}");
+            assert_eq!(row(id).next, "[r] rerun hook", "{id}");
+            assert!(row(id).resumable, "{id}");
+        }
+    }
+
     /// A `blocked` an unblocker lane staffs is the step at work, so a running
     /// row on it keeps STEP `blocked` even with `blocked_from` on file.
     #[test]
@@ -8956,8 +9030,21 @@ mod tests {
         assert_eq!(line, "passed implement, moved to paused (scheduled)");
     }
 
-    /// `done`'s hook, as `Dispatcher::pause_for_hook_failure` writes it, on
-    /// a task the board last saw on `handover` and never saw on `done`.
+    /// What `Dispatcher::stop_on_hook_failure` writes over a failed
+    /// `event` hook, on the task `line_after` set up.
+    fn fail_hook(repo: &Repo, event: &str) {
+        let mut task = repo.task("t").unwrap();
+        task.front.hook_paused = Some(event.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.set_stage(
+            crate::pipeline::HOOK_FAILED,
+            Some("issue_tracking hook exited 1"),
+        );
+        task.save().unwrap();
+    }
+
+    /// `done`'s hook failing on a task the board last saw on `handover` and
+    /// never saw on `done`: the line names the pass, the hook and its reason.
     #[test]
     fn a_failed_done_hook_reads_hook_failed() {
         let line = line_after(
@@ -8967,18 +9054,17 @@ mod tests {
             |repo, _| {
                 let mut task = repo.task("t").unwrap();
                 task.set_stage(crate::pipeline::DONE, None);
-                task.front.hook_paused = Some(crate::pipeline::DONE.into());
-                task.set_stage(
-                    crate::pipeline::PAUSED,
-                    Some("issue_tracking hook exited 1"),
-                );
                 task.save().unwrap();
+                fail_hook(repo, crate::pipeline::DONE);
             },
         );
-        assert_eq!(line, "passed handover, moved to paused (hook failed)");
+        assert_eq!(
+            line,
+            "passed handover, done hook failed: issue_tracking hook exited 1"
+        );
     }
 
-    /// The same pause, seen from `done`: the step that passed is the one
+    /// The same failure, seen from `done`: the step that passed is the one
     /// step whose `on_pass` is `done`.
     #[test]
     fn a_failed_done_hook_seen_from_done_names_the_step_that_passed() {
@@ -8986,39 +9072,25 @@ mod tests {
             "road-hook-done-seen",
             crate::pipeline::DONE,
             |_| {},
-            |repo, _| {
-                let mut task = repo.task("t").unwrap();
-                task.front.hook_paused = Some(crate::pipeline::DONE.into());
-                task.set_stage(
-                    crate::pipeline::PAUSED,
-                    Some("issue_tracking hook exited 1"),
-                );
-                task.save().unwrap();
-            },
+            |repo, _| fail_hook(repo, crate::pipeline::DONE),
         );
-        assert_eq!(line, "passed handover, moved to paused (hook failed)");
+        assert_eq!(
+            line,
+            "passed handover, done hook failed: issue_tracking hook exited 1"
+        );
     }
 
+    /// A `queued` hook fails before anything has passed, so the line names
+    /// only the hook and why.
     #[test]
     fn a_failed_queued_hook_reads_hook_failed_before_starting() {
         let line = line_after(
             "road-hook-queued",
             "queued",
             |_| {},
-            |repo, _| {
-                let mut task = repo.task("t").unwrap();
-                task.front.hook_paused = Some(crate::pipeline::QUEUED.into());
-                task.set_stage(
-                    crate::pipeline::PAUSED,
-                    Some("issue_tracking hook exited 1"),
-                );
-                task.save().unwrap();
-            },
+            |repo, _| fail_hook(repo, crate::pipeline::QUEUED),
         );
-        assert_eq!(
-            line,
-            "stopped before starting, moved to paused (hook failed)"
-        );
+        assert_eq!(line, "queued hook failed: issue_tracking hook exited 1");
     }
 
     /// The board's `pause`. An Escape in the pane parks through the same
@@ -9029,7 +9101,9 @@ mod tests {
             "road-manual",
             "implement",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", ParkedBy::Board).unwrap(),
+            |repo, _| {
+                park_under_lock(repo, "t", ParkedBy::Board).unwrap();
+            },
         );
         assert_eq!(line, "stopped on implement, moved to paused (manually)");
     }
@@ -9040,7 +9114,9 @@ mod tests {
             "road-manual-queued",
             "queued",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", ParkedBy::Board).unwrap(),
+            |repo, _| {
+                park_under_lock(repo, "t", ParkedBy::Board).unwrap();
+            },
         );
         assert_eq!(line, "stopped before starting, moved to paused (manually)");
     }
@@ -9051,7 +9127,9 @@ mod tests {
             "road-stop",
             "implement",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", ParkedBy::Stop).unwrap(),
+            |repo, _| {
+                park_under_lock(repo, "t", ParkedBy::Stop).unwrap();
+            },
         );
         assert_eq!(
             line,
@@ -10591,6 +10669,31 @@ mod tests {
         assert_eq!(task.stage(), "implement");
         assert_eq!(task.front.resume.as_deref(), Some("implement"));
         assert!(!task.front.parked_by_stop, "the resume spends the mark");
+    }
+
+    /// A task on `hook_failed` is held for its hook, and a park would move
+    /// it to `paused` with `parked_from: hook_failed`, which `resume` sends
+    /// back onto `hook_failed` without rerunning the hook. Neither the
+    /// board's `pause` nor any park touches it.
+    #[test]
+    fn a_park_leaves_a_hook_failed_task_where_it_is() {
+        let (repo, _root_guard) = fixture("park-hook-failed");
+        add_to(&repo, "hooked", &[], None, None);
+        let mut task = repo.task("hooked").unwrap();
+        task.front.hook_paused = Some(crate::pipeline::DONE.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.set_stage_unbanked(crate::pipeline::HOOK_FAILED, "test setup");
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+
+        assert!(!pausable(&repo.task("hooked").unwrap()));
+        for by in [ParkedBy::Board, ParkedBy::Stop, ParkedBy::QueuePause] {
+            assert_eq!(
+                park_under_lock(&repo, "hooked", by).unwrap(),
+                Parked::HookFailed
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
     }
 
     /// A start resumes only what a stop parked. A task a person paused with

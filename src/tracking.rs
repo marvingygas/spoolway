@@ -1,19 +1,21 @@
 //! The `[issue_tracking]` hook: one script a project names, run on seven
 //! events. Four are stages a task can come to rest on — `queued`, `blocked`,
-//! `paused` and `done` — see `crate::pipeline::RESERVED`, which lists exactly
-//! them: they are the states nothing inside a pipeline file can already put a
-//! `run:` step on, since none of them is a step a pipeline may declare. The
-//! other three are not task stages at all: `open`, which [`open_ticket`] runs
+//! `paused` and `done` — which `crate::pipeline::RESERVED` lists along with
+//! `hook_failed`: they are the states nothing inside a pipeline file can
+//! already put a `run:` step on, since none of them is a step a pipeline may
+//! declare. `hook_failed` fires no event of its own, because the hook that
+//! would report it is the one that just failed. The other three are not task
+//! stages at all: `open`, which [`open_ticket`] runs
 //! synchronously from `queue add` itself, before any of the four could ever
 //! fire; `fetch`, which [`fetch_issue`] runs synchronously from `spoolway
 //! issue show`, before any task tied to the issue it names even exists; and
 //! `started`, which [`fire`] runs once a task actually leaves `queued` for
 //! its entry step — see `crate::pipeline::STARTED` for why this is not a
-//! fifth reserved stage, only ever fired and gated from inside the `queued`
+//! reserved stage, only ever fired and gated from inside the `queued`
 //! arm of `crate::dispatch::Dispatcher::route_reserved_stage`. A hook proves
 //! itself on these real events alone — there is no `check` event asking it
-//! to prove itself ahead of time; a failing event already pauses the task
-//! with the reason named (see `crate::dispatch::Dispatcher::tracking_gate`).
+//! to prove itself ahead of time; a failing event already stops the task on
+//! `hook_failed` with the reason named (see `crate::dispatch::Dispatcher::tracking_gate`).
 //! No hook runs unbounded: `open` and `fetch` stop at [`OPEN_FETCH_TIMEOUT`],
 //! every event that fires on a task — `queued`, `started`, `done`, `blocked`
 //! and `paused` — at [`LIFECYCLE_TIMEOUT`], both fixed.
@@ -33,8 +35,9 @@
 //! [`MAX_HOOK_KILLS`] runs in a row, so a hook that did open a ticket before
 //! a reboot killed it may open a second one. The one caller that ever calls
 //! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued`, `started` or
-//! `done` pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
-//! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
+//! `done` moves the task to `hook_failed` (see
+//! `crate::dispatch::Dispatcher::tracking_gate`), and [`forget`] is what
+//! `spoolway resume` calls to undo that hold, so the very
 //! next pass's [`fire`] starts the hook over rather than reading the same
 //! stale exit code forever. [`open_ticket`] needs none of that: its callers are
 //! `queue add` and a job firing a routine, and each means "run this now" every time
@@ -132,11 +135,11 @@ const TIMED_OUT_CODE: i32 = 124;
 /// so, kill it and answer how long it ran, so the dispatcher can say so.
 /// `None` for a run that is not going, or is still inside its limit.
 ///
-/// For `queued`, `started` and `done` the caller pauses the task and the
-/// run's files are left cleared. A `blocked` or `paused` hook holds nothing,
-/// so nothing pauses; it is recorded as exited [`TIMED_OUT_CODE`] instead,
-/// the way a non-zero exit is, so [`fire`] does not start it again and
-/// [`failures`] names it.
+/// For `queued`, `started` and `done` the caller moves the task to
+/// `hook_failed` and the run's files are left cleared. A `blocked` or
+/// `paused` hook holds nothing, so nothing stops; it is recorded as exited
+/// [`TIMED_OUT_CODE`] instead, the way a non-zero exit is, so [`fire`] does
+/// not start it again and [`failures`] names it.
 pub fn stop_if_overdue(repo: &Repo, task: &Task, event: &str) -> Option<Duration> {
     let key = Runs::key(event, task.id());
     let runs = runs(repo);
@@ -148,9 +151,9 @@ pub fn stop_if_overdue(repo: &Repo, task: &Task, event: &str) -> Option<Duration
         return None;
     }
     // The log is kept — `stop` clears the pid and exit files only — so the
-    // pause can still quote what the hook printed before it hung.
+    // stop can still quote what the hook printed before it hung.
     runs.stop(&key);
-    if !PAUSING_EVENTS.contains(&event) {
+    if !STOPPING_EVENTS.contains(&event) {
         let _ = runs.record_exit(&key, TIMED_OUT_CODE);
     }
     Some(ran)
@@ -874,7 +877,7 @@ pub(crate) fn crlf_first_line_problem(path: &Path) -> Option<String> {
     (bytes.len() > first.len() && first.ends_with(b"\r")).then(|| {
         format!(
             "{} has Windows (CRLF) line endings, so `queue add` fails with exit 127 and \
-             every lifecycle event pauses its task — convert it with `sed -i 's/\\r$//' {}`",
+             every lifecycle event stops its task on `hook_failed` — convert it with `sed -i 's/\\r$//' {}`",
             path.display(),
             path.display()
         )
@@ -891,7 +894,7 @@ pub(crate) fn not_executable_problem(path: &Path) -> Option<String> {
     (mode & 0o111 == 0).then(|| {
         format!(
             "{} has mode {mode:03o} and is not executable, so `queue add` fails with exit 126 \
-             and every lifecycle event pauses its task — run `chmod +x {}`",
+             and every lifecycle event stops its task on `hook_failed` — run `chmod +x {}`",
             path.display(),
             path.display()
         )
@@ -975,8 +978,8 @@ pub fn fire(repo: &Repo, task: &Task, event: &str, group_open: usize) -> Result<
 /// has stopped starting it again. `None` otherwise, including while a run
 /// that replaced a killed one is still going.
 ///
-/// The dispatcher pauses the task on this the way it does on a non-zero
-/// exit, and [`forget`] — what `spoolway resume` calls — clears the count.
+/// The dispatcher moves the task to `hook_failed` on this the way it does
+/// on a non-zero exit, and [`forget`] — what `spoolway resume` calls — clears the count.
 pub fn killed(repo: &Repo, task: &Task, event: &str) -> Option<u32> {
     let key = Runs::key(event, task.id());
     let runs = runs(repo);
@@ -1000,10 +1003,11 @@ pub fn exit_code(repo: &Repo, task: &Task, event: &str) -> Option<i32> {
 
 /// Forget this task's `event` hook run, so [`fire`]'s own [`RunState::Fresh`]
 /// check lets it start over on the next pass — what `spoolway resume` calls
-/// on a task a failing hook paused (see [`crate::task::Frontmatter::
-/// hook_paused`]), the road out of a hold now that every failing hook pauses
-/// its task: a person repairs whatever the hook's own log names, then
-/// resumes, rather than a clock retrying an endpoint that may still be down.
+/// on a task a failing hook stopped (see [`crate::task::Frontmatter::
+/// hook_paused`]), the road out of a hold now that every failing hook moves
+/// its task to `hook_failed`: a person repairs whatever the hook's own log
+/// names, then resumes, rather than a clock retrying an endpoint that may
+/// still be down.
 pub fn forget(repo: &Repo, task: &Task, event: &str) {
     let key = Runs::key(event, task.id());
     let _ = runs(repo).forget(&key);
@@ -1049,15 +1053,15 @@ pub struct HookFailure {
     pub log: PathBuf,
 }
 
-/// The events whose failing hook pauses its task, so `spoolway resume` is
-/// what clears it: [`forget`] is called for exactly the event
-/// `crate::task::Frontmatter::hook_paused` names. The other events —
+/// The events whose failing hook moves its task to `hook_failed`, so
+/// `spoolway resume` is what clears it: [`forget`] is called for exactly the
+/// event `crate::task::Frontmatter::hook_paused` names. The other events —
 /// `blocked` and `paused`, which only record a failure, and `open`, which
 /// fails `queue add` itself — hold nothing, and their run files stay until
 /// [`reclaim`] takes them when the task is archived.
 /// `crate::dispatch::Dispatcher::tracking_gate` is the gate these three
 /// share.
-pub const PAUSING_EVENTS: &[&str] = &[
+pub const STOPPING_EVENTS: &[&str] = &[
     crate::pipeline::QUEUED,
     crate::pipeline::STARTED,
     crate::pipeline::DONE,
@@ -1067,7 +1071,7 @@ pub const PAUSING_EVENTS: &[&str] = &[
 ///
 /// A hook run is left exactly as it exited until something removes it, so
 /// its `.exit` file staying non-zero is the only evidence of a failure. For
-/// one of [`PAUSING_EVENTS`] that is `spoolway resume`, which reads and
+/// one of [`STOPPING_EVENTS`] that is `spoolway resume`, which reads and
 /// forgets the run (see [`forget`]); a `blocked`, `paused` or `open` run
 /// stays until [`reclaim`] takes it when the task is archived.
 ///
@@ -1295,6 +1299,7 @@ mod tests {
             paused_at: None,
             paused_by: None,
             hook_paused: None,
+            hook_error: None,
             missing_start_branch: None,
             launched_at: None,
             steps: Default::default(),
@@ -1926,7 +1931,7 @@ mod tests {
         );
     }
 
-    /// [`forget`] is the whole road out of a hook pause: a failed run stays
+    /// [`forget`] is the whole road out of a hook stop: a failed run stays
     /// failed until this clears it, and the next `fire` sees `Fresh` again
     /// and actually restarts it.
     #[test]

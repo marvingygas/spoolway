@@ -137,6 +137,7 @@ impl State {
     pub fn word(self) -> &'static str {
         match self {
             State::Paused => "● paused",
+            State::HookFailed => "● hook failed",
             State::Running => "● running",
             State::Silent { .. } => "● silent",
             State::Starting => "◌ starting",
@@ -157,6 +158,10 @@ impl State {
             // is now the one thing on the board a person can act on — whether
             // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
+            // Amber, and bold, like `Paused`: the task waits on a person's
+            // key, and the work behind it may well have gone fine — only the
+            // hook reporting it to the tracker did not.
+            State::HookFailed => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
             // Amber, as the stops a person answers are, but not bold like
             // them: a silent lane may be a usage limit that clears by
@@ -256,7 +261,17 @@ pub(crate) enum Move {
     /// `to`, `blocked`, for the unblocker lane. An attended run parks the same
     /// stop on `paused`, which is [`Move::Stopped`] with [`Cause::Escalated`].
     Escalated { from: String, to: String },
-    /// The task was on `paused`.
+    /// An issue-tracking hook failed and the task moved to `hook_failed`.
+    /// `event` is the hook that failed, from `hook_paused:`, and `reason` is
+    /// why, from `hook_error:`; either is `None` on a file that lacks it.
+    /// `passed` names the step whose pass carried the task to `done`, when
+    /// it was the `done` hook that failed and the step can be told.
+    HookFailed {
+        passed: Option<String>,
+        event: Option<String>,
+        reason: Option<String>,
+    },
+    /// The task was on `paused` or `hook_failed`.
     Resumed { to: String },
     /// The task was on `blocked`. `by_lane` when the report that moved it
     /// came from a lane working `blocked` itself, rather than a person's
@@ -283,9 +298,6 @@ pub(crate) enum Cause {
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,
-    /// An issue-tracking hook exited non-zero, or was killed three times in a
-    /// row without an exit code.
-    HookFailed,
     /// A person parked it: the board's `pause`, or an Escape in the pane.
     Manually,
     /// The dispatch tab's stop popup parked it.
@@ -309,7 +321,6 @@ impl Cause {
         match self {
             Cause::Gate => "gate".into(),
             Cause::Scheduled => "scheduled".into(),
-            Cause::HookFailed => "hook failed".into(),
             Cause::Manually => "manually".into(),
             Cause::DispatchingStopped => "dispatching stopped".into(),
             Cause::Escalated => "escalated".into(),
@@ -2368,7 +2379,9 @@ fn recent_line(at: &str, id: &str, id_width: usize, sentence: &str) -> String {
 /// prints about a move is written here and nowhere else, so two kinds of
 /// move can never drift into two phrasings of the same thing. Each sentence
 /// names what happened on which step first and where the task went last,
-/// always as `moved to <step>`, then the cause in brackets when there is one.
+/// as `moved to <step>`, then the cause in brackets when there is one. A
+/// failed hook is the one exception: the task's STEP stays where the hook
+/// stopped it, so the sentence names the hook and why it failed instead.
 pub(crate) fn sentence(change: &Move) -> String {
     use crate::pipeline::PAUSED;
 
@@ -2417,6 +2430,25 @@ pub(crate) fn sentence(change: &Move) -> String {
             format!("stopped on {from}, moved to {to}"),
             Some(&Cause::Escalated),
         ),
+        Move::HookFailed {
+            passed,
+            event,
+            reason,
+        } => {
+            let passed = passed
+                .as_ref()
+                .map(|step| format!("passed {step}, "))
+                .unwrap_or_default();
+            let hook = event
+                .as_ref()
+                .map(|event| format!("{event} hook failed"))
+                .unwrap_or_else(|| "hook failed".to_string());
+            let why = reason
+                .as_ref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default();
+            (format!("{passed}{hook}{why}"), None)
+        }
         Move::Resumed { to } => (format!("resumed, moved to {to}"), None),
         Move::Unblocked { to, by_lane: false } => (format!("unblocked, moved to {to}"), None),
         Move::Unblocked { to, by_lane: true } => {
@@ -2532,13 +2564,17 @@ mod tests {
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop
     /// `Paused` is, and no state on this board is red at all now that the
-    /// dead-end state is gone. `Prompt` takes `Paused`'s own bold amber,
-    /// because a prompt is the same kind of stop too.
+    /// dead-end state is gone. `Prompt` and `HookFailed` take `Paused`'s
+    /// own bold amber, because each is the same kind of stop too.
     #[test]
     fn blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour() {
         assert_eq!(State::Blocked.dot(), format!("{ORANGE}● blocked{RESET}"));
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
         assert_eq!(State::Prompt.dot(), format!("{AMBER}{BOLD}● prompt{RESET}"));
+        assert_eq!(
+            State::HookFailed.dot(),
+            format!("{AMBER}{BOLD}● hook failed{RESET}")
+        );
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
         assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
@@ -2548,6 +2584,7 @@ mod tests {
         );
         for state in [
             State::Paused,
+            State::HookFailed,
             State::Running,
             State::Silent { secs: 60 },
             State::Starting,
@@ -5036,7 +5073,6 @@ mod tests {
             None,
             Some(Cause::Gate),
             Some(Cause::Scheduled),
-            Some(Cause::HookFailed),
             Some(Cause::Manually),
             Some(Cause::DispatchingStopped),
             Some(Cause::Escalated),
@@ -5115,6 +5151,15 @@ mod tests {
                 to: t,
                 by_lane: true,
             }));
+        }
+        for passed in [Some("<step>".to_string()), None] {
+            for event in ["<event>", "queued", "started", "done"] {
+                written.insert(sentence(&Move::HookFailed {
+                    passed: passed.clone(),
+                    event: Some(event.to_string()),
+                    reason: Some("<reason>".to_string()),
+                }));
+            }
         }
 
         for row in documented {

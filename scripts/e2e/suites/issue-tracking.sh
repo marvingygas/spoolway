@@ -23,8 +23,8 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task with the reason `issue_tracking hook exited N`, and the task gains a `## Hook error` section holding the run's last output; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
-# covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and pause the task with a problem line the dispatcher prints
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `issue_tracking hook exited N`, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
+# covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and move the task to `hook_failed` with a problem line the dispatcher prints
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
 # covers: the shipped github.sh and jira.sh run in bash under `set -eE` with an ERR trap, no `check` branch and no `|| exit $?`; a failing command's trace — command, line, case arm, callers — lands in the hook's own log, which `## Hook error` reads its tail from
@@ -637,13 +637,13 @@ works "while asked-a, ticked through the same checklist, fired none" \
 must "the hook is switched back to the one that only answers open" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
-# ------------------------------------------------- a failing hook pauses
+# ------------------------------------------- a failing hook stops the task
 # A hook that always fails, on each of the four events by hand: a non-zero
-# exit on `queued` or `done` pauses the task now, with the reason keeping
-# only the exit code and the hook's own last output landing under the
-# task's `## Hook error` instead, and only records the failure on `blocked`
-# and `paused` — both already stopped for a person, so nothing about pausing
-# them again would mean anything.
+# exit on `queued` or `done` moves the task to `hook_failed`, with the
+# reason keeping only the exit code and the hook's own last output landing
+# under the task's `## Hook error` instead, and only records the failure on
+# `blocked` and `paused` — both already stopped for a person, so nothing
+# about stopping them again would mean anything.
 #
 # `open` is the one event it lets through, and the exemption is the point:
 # a failing `open` refuses the whole `queue add` outright — the block right
@@ -662,11 +662,14 @@ task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
 must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
-if drive hook-queued paused 60; then
-  ok "a failing queued hook lands the task on paused"
+if drive hook-queued hook_failed 60; then
+  ok "a failing queued hook lands the task on hook_failed"
 else
-  bad "a failing queued hook lands the task on paused (at \`$(stage_of hook-queued)\`)"
+  bad "a failing queued hook lands the task on hook_failed (at \`$(stage_of hook-queued)\`)"
 fi
+"$SPOOLWAY" queue list --json > "$LIVE/hook-list.json" 2>&1
+has "queue list --json names the state hook_failed" '"state": "hook_failed"' \
+  "$LIVE/hook-list.json"
 has "the reason keeps only the exit code" "issue_tracking hook exited 1" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 # The old reason began with these same words, so the line above alone would
@@ -714,6 +717,16 @@ has "the blocked event's hook ran and failed" "1" "$TRACKING/hook-blocked · blo
 has "the paused event's hook ran and failed" "1" "$TRACKING/hook-paused · paused.exit"
 has "the done event's hook ran and failed" "1" "$TRACKING/hook-done · done.exit"
 
+# Many passes have looked at `hook-queued` on `hook_failed` by now, and the
+# hook that failed must not have been asked to report that: no `paused` run,
+# and no run for `hook_failed` itself, was ever started for it.
+if ls "$TRACKING"/"hook-queued · paused".* "$TRACKING"/"hook-queued · hook_failed".* \
+    >/dev/null 2>&1; then
+  bad "a task on hook_failed fires no hook event ($(ls "$TRACKING" | grep 'hook-queued'))"
+else
+  ok "a task on hook_failed fires no hook event"
+fi
+
 if [ "$(stage_of hook-blocked)" = blocked ]; then
   ok "a failing hook on blocked only records the failure"
 else
@@ -724,23 +737,24 @@ if [ "$(stage_of hook-paused)" = paused ]; then
 else
   bad "a failing hook on paused only records the failure (at \`$(stage_of hook-paused)\`)"
 fi
-if drive hook-done paused 60; then
-  ok "a failing done hook pauses the task, out of the archive"
+if drive hook-done hook_failed 60; then
+  ok "a failing done hook lands the task on hook_failed, out of the archive"
 else
-  bad "a failing done hook pauses the task, out of the archive (at \`$(stage_of hook-done)\`)"
+  bad "a failing done hook lands the task on hook_failed, out of the archive \
+(at \`$(stage_of hook-done)\`)"
 fi
 
 # --------------------------------------------------- resume re-runs the hook
-# The road out of a hook pause: fixing whatever the hook's own log named,
+# The road out of `hook_failed`: fixing whatever the hook's own log named,
 # then `spoolway resume` — it forgets the failed run, so the very next pass's
 # `fire` starts it over rather than reading the same stale exit code and
-# pausing the task right back. A `queued` pause resumes onto `queued`, where
-# it is gated like any other; a `done` pause resumes straight back to `done`,
-# not to `queued` or a step.
+# stopping the task right back. A failed `queued` hook resumes onto `queued`,
+# where it is gated like any other; a failed `done` hook resumes straight
+# back to `done`, not to `queued` or a step.
 must "the hook is fixed" "$SPOOLWAY" config set issue_tracking.hook record.sh
 dispatcher_restart   # the next pass reads record.sh on its own, but a pass
                       # already under way when the config set lands still
-                      # holds fail.sh, and would re-fire it and pause the
+                      # holds fail.sh, and would re-fire it and stop the
                       # task right back.
 
 # Held at `implement` for a while. A stand-in's whole turn fits inside a poll
@@ -748,11 +762,11 @@ dispatcher_restart   # the next pass reads record.sh on its own, but a pass
 # archive between two of `drive`'s looks, and the check fails on a task that
 # did exactly what it should. Step-scoped, so it governs this one turn.
 echo linger:15 > "$CTL/hook-queued.implement"
-must "resume clears the queued pause" "$SPOOLWAY" resume hook-queued
+must "resume clears the failed queued hook" "$SPOOLWAY" resume hook-queued
 if drive hook-queued implement 60; then
-  ok "resuming a queued hook pause re-runs the hook and lets the task start"
+  ok "resuming a failed queued hook re-runs the hook and lets the task start"
 else
-  bad "resuming a queued hook pause re-runs the hook and lets the task start \
+  bad "resuming a failed queued hook re-runs the hook and lets the task start \
 (at \`$(stage_of hook-queued)\`)"
 fi
 # The task moving on is the effect; this is the cause. `record.sh` leaves
@@ -761,11 +775,11 @@ fi
 has "and the fixed hook really ran for the resumed queued event" \
   "SPOOLWAY_EVENT=queued" "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md.env.queued"
 
-must "resume clears the done pause" "$SPOOLWAY" resume hook-done
+must "resume clears the failed done hook" "$SPOOLWAY" resume hook-done
 if drive hook-done gone 60; then
-  ok "resuming a done hook pause re-runs the hook and lets the task archive"
+  ok "resuming a failed done hook re-runs the hook and lets the task archive"
 else
-  bad "resuming a done hook pause re-runs the hook and lets the task archive \
+  bad "resuming a failed done hook re-runs the hook and lets the task archive \
 (still at \`$(stage_of hook-done)\`)"
 fi
 has "and the fixed hook really ran for the resumed done event" \
@@ -988,7 +1002,7 @@ has "and carries the status log section, not the whole task file" \
 # `GH_STUB_FAIL_EDIT` makes the stub's `issue edit` fail the way a real `gh`
 # would over a permissions error, which is the one call `mark_in_progress`
 # makes on `started`. No hand-written fixture hook here — this is what proves
-# the trace this task added actually reaches a paused task's own file.
+# the trace this task added actually reaches a stopped task's own file.
 export GH_STUB_FAIL_EDIT=1
 dispatcher_restart
 task_doc "$LIVE/github-trace.md" github-trace "$BODY" \
@@ -996,10 +1010,11 @@ task_doc "$LIVE/github-trace.md" github-trace "$BODY" \
   "group_description: proving the ERR trap's own trace reaches Hook error"
 must "queuing it opens a ticket; open never calls the failing edit" \
   "$SPOOLWAY" queue add --from "$LIVE/github-trace.md"
-if drive github-trace paused 60; then
-  ok "the real github.sh's started event fails and pauses the task"
+if drive github-trace hook_failed 60; then
+  ok "the real github.sh's started event fails and stops the task on hook_failed"
 else
-  bad "the real github.sh's started event fails and pauses the task (at \`$(stage_of github-trace)\`)"
+  bad "the real github.sh's started event fails and stops the task on hook_failed \
+(at \`$(stage_of github-trace)\`)"
 fi
 TRACE_TASK="$SPOOLWAY_PROJECT_HOME/queue/github-trace.md"
 has "the reason keeps only the exit code" "issue_tracking hook exited 1" "$TRACE_TASK"

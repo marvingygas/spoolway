@@ -377,13 +377,14 @@ const PROMPT_SKELETON: &str = "\
 /// The step a task not standing on a step is going to run, which is the step
 /// its contract is for.
 ///
-/// `queued`, `paused` and `done` are stages, not steps, so none can be looked
-/// up in the pipeline. A paused task is sent where `spoolway resume` sends it,
-/// read through the same [`crate::commands::resume_road`] that `queue route`
-/// prints: the step after the gate it is held at, not the gate itself. A
-/// queued task, or a paused one that never started, runs the first agent step
-/// once its dependencies clear. A `done` task runs nothing, so it is refused
-/// in words rather than as a step the pipeline lacks.
+/// `queued`, `paused`, `hook_failed` and `done` are stages, not steps, so
+/// none can be looked up in the pipeline. A paused or hook-failed task is
+/// sent where `spoolway resume` sends it, read through the same
+/// [`crate::commands::resume_road`] that `queue route` prints: the step after
+/// the gate it is held at, not the gate itself. A queued task, or a held one
+/// that never started, runs the first agent step once its dependencies
+/// clear. A `done` task runs nothing, so it is refused in words rather than
+/// as a step the pipeline lacks, and so is one stopped by its `done` hook.
 fn next_step<'a>(
     repo: &Repo,
     pipeline: &'a Pipeline,
@@ -407,6 +408,15 @@ fn next_step<'a>(
     };
     match landing.as_str() {
         crate::pipeline::QUEUED => first_agent(),
+        // A failed `done` hook resumes onto `done`, but the task is not done
+        // yet: saying so would hide the one thing left to do, which is that
+        // hook.
+        crate::pipeline::DONE if task.stage() == crate::pipeline::HOOK_FAILED => bail!(
+            "task `{id}` is stopped on `hook_failed`: its `done` hook failed, and no step runs \
+             next, so there is no prompt to write for it. Run `spoolway resume {id}` to run \
+             that hook again, or name a step with `--step` to see that step's contract.",
+            id = task.id()
+        ),
         crate::pipeline::DONE => bail!(
             "task `{}` is done: nothing runs next, so there is no prompt to write for it. Name \
              a step with `--step` to see that step's contract instead.",
@@ -429,9 +439,10 @@ fn subject<'a>(
         let step = match &args.step {
             Some(id) => pipeline.require_step(id)?,
             None => match task.stage() {
-                crate::pipeline::QUEUED | crate::pipeline::PAUSED | crate::pipeline::DONE => {
-                    next_step(repo, pipeline, pipelines, &task)?
-                }
+                crate::pipeline::QUEUED
+                | crate::pipeline::PAUSED
+                | crate::pipeline::HOOK_FAILED
+                | crate::pipeline::DONE => next_step(repo, pipeline, pipelines, &task)?,
                 stage => pipeline.require_step(stage)?,
             },
         };
@@ -1341,6 +1352,43 @@ mod tests {
         );
         let err = write("d1", "done", "").unwrap_err();
         assert!(format!("{err:#}").contains("is done"), "{err:#}");
+    }
+
+    /// A task stopped by its `done` hook resumes onto `done`, but it is not
+    /// done: the refusal names the stop and the resume that reruns the hook.
+    /// One stopped by its `queued` hook never started, so it still runs the
+    /// first agent step once resumed.
+    #[test]
+    fn contract_for_a_hook_failed_task_names_the_failed_hook() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("prompt-contract-hook-failed");
+        let pipelines = Pipelines::builtin();
+        let first_agent = pipelines
+            .get("default")
+            .unwrap()
+            .steps
+            .iter()
+            .find(|step| step.kind() == StepKind::Agent)
+            .unwrap()
+            .id
+            .clone();
+        let write = |id: &str, extra: &str| {
+            let raw = format!(
+                "---\nid: {id}\nstage: hook_failed\npipeline: default\ngroup: g\n{extra}---\n"
+            );
+            std::fs::write(repo.queue_dir().join(format!("{id}.md")), raw).unwrap();
+            let args = crate::cli::PromptContractArgs {
+                step: None,
+                pipeline: None,
+                task: Some(id.to_string()),
+            };
+            subject(&repo, &pipelines, &args).map(|(_, step, _, _)| step.id.clone())
+        };
+
+        let err = format!("{:#}", write("h1", "hook_paused: done\n").unwrap_err());
+        assert!(!err.contains("is done"), "{err}");
+        assert!(err.contains("stopped on `hook_failed`"), "{err}");
+        assert!(err.contains("`spoolway resume h1`"), "{err}");
+        assert_eq!(write("h2", "hook_paused: queued\n").unwrap(), first_agent);
     }
 
     /// `init` is advised only for a prompt it writes; any other name is the

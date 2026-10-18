@@ -174,6 +174,7 @@ fn state_label(state: crate::status::State) -> &'static str {
     use crate::status::State::*;
     match state {
         Paused => "paused",
+        HookFailed => "hook_failed",
         Running => "running",
         Silent { .. } => "silent",
         Starting => "starting",
@@ -277,7 +278,7 @@ fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<R
     let (state, at) = route_state(task, pipeline);
     let held = matches!(
         task.stage(),
-        crate::pipeline::PAUSED | crate::pipeline::BLOCKED
+        crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED
     );
     let (resumes_to, resume_error) = match held {
         false => (None, None),
@@ -326,8 +327,8 @@ fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<R
 
 /// Where `task` stands, in words, and the step to mark for it.
 ///
-/// A held task is marked at the step it stopped on rather than at `paused` or
-/// `blocked`, neither of which is an entry here: `paused_at` for a gate,
+/// A held task is marked at the step it stopped on rather than at `paused`,
+/// `hook_failed` or `blocked`, none of which is an entry here: `paused_at` for a gate,
 /// `parked_from` for a park, and for a block the step [`crate::commands::
 /// resume_target`] reads back as the one it stopped on. A blocked task parked
 /// by `pause` carries `parked_from: blocked`, which names no entry either, so
@@ -355,8 +356,6 @@ fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
                 }
             } else if let Some(step) = &front.parked_from {
                 (format!("paused at {step}"), Some(step.clone()))
-            } else if let Some(stage) = &front.hook_paused {
-                (format!("paused: its `{stage}` hook failed"), None)
             } else {
                 ("paused before it started".to_string(), None)
             }
@@ -365,6 +364,21 @@ fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
             Some(origin) => (format!("blocked at {origin}"), Some(origin)),
             None => ("blocked before it started".to_string(), None),
         },
+        // No step is marked: a hook fails on `queued` or `done`, neither of
+        // which is an entry here.
+        crate::pipeline::HOOK_FAILED => {
+            let at = front
+                .hook_paused
+                .as_deref()
+                .map(|event| format!(" at {event}"))
+                .unwrap_or_default();
+            let why = front
+                .hook_error
+                .as_deref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default();
+            (format!("hook failed{at}{why}"), None)
+        }
         step if pipeline.step(step).is_none() => (
             format!("at `{step}`, a step this pipeline does not have"),
             None,
@@ -1246,6 +1260,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // submitted document, `hook_paused: done` would send the task's first
     // block and `resume` straight to `done`, past every step it never ran.
     front.hook_paused = None;
+    front.hook_error = None;
     front.missing_start_branch = None;
     front.resume = None;
     front.restart = None;
@@ -4091,7 +4106,8 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
 
 /// `spoolway queue pause <id>`: interrupt any live agent lane the task owns,
 /// then park it on `paused` — always, not only when something was actually
-/// interrupted.
+/// interrupted. A task on `hook_failed` is the one left where it is, since
+/// parking it would lose the rerun of its hook, and the line printed says so.
 ///
 /// The board's own `pause` parks unconditionally too — see
 /// `Board::begin_pause` — so the two agree on every state but one: a
@@ -4108,6 +4124,12 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
 /// refuses instead, unless `--force` says the caller already knows what it is
 /// choosing.
 pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
+    println!("{}", pause_line(repo, pipelines, id, force)?);
+    Ok(())
+}
+
+/// [`queue_pause`]'s body, answering the line it prints.
+fn pause_line(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<String> {
     let tasks = repo.tasks()?;
     let idx = tasks
         .iter()
@@ -4147,7 +4169,20 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     if task.path.starts_with(repo.archive_dir()) {
         bail!("no queued task `{id}` — it finished and was archived");
     }
-    crate::status::park_under_lock(repo, id, crate::status::ParkedBy::QueuePause)?;
+    // The line printed is decided by what the park found under the task's
+    // lock, not by the snapshot read above: the dispatcher can move the task
+    // onto `hook_failed` in between, and the park then leaves it there.
+    match crate::status::park_under_lock(repo, id, crate::status::ParkedBy::QueuePause)? {
+        crate::status::Parked::Paused => {}
+        crate::status::Parked::HookFailed => {
+            return Ok(format!(
+                "`{id}` is already held on `hook_failed`; `spoolway resume {id}` reruns its hook"
+            ));
+        }
+        crate::status::Parked::Gone => {
+            bail!("no queued task `{id}` — it left the queue before it could be paused")
+        }
+    }
 
     // Stopped only once the task is on disk as paused. Between the kill and
     // the run's files being cleared the run reads as one that died without an
@@ -4158,8 +4193,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
     for cr in &running {
         runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
     }
-    println!("paused `{id}`");
-    Ok(())
+    Ok(format!("paused `{id}`"))
 }
 
 /// Whether `id` is still queued, or has a live agent lane or running command
@@ -11547,6 +11581,35 @@ mod tests {
         let task = queued(&repo, "solo");
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
+    }
+
+    /// A task on `hook_failed` is already held, and parking it would lose
+    /// the rerun of its hook: `queue pause` leaves it there with its marker
+    /// and says so, instead of printing a pause that did not happen.
+    #[test]
+    fn queue_pause_leaves_a_hook_failed_task_where_it_is() {
+        let (repo, _root_guard) = fixture("queue-pause-hook-failed");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "hooked", &[]);
+        let mut task = queued(&repo, "hooked");
+        task.front.hook_paused = Some(crate::pipeline::QUEUED.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.set_stage_unbanked(crate::pipeline::HOOK_FAILED, "test setup");
+        task.save().unwrap();
+
+        let line = pause_line(&repo, &pipelines, "hooked", false).unwrap();
+
+        assert_eq!(
+            line,
+            "`hooked` is already held on `hook_failed`; `spoolway resume hooked` reruns its hook"
+        );
+        let task = queued(&repo, "hooked");
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(
+            task.front.hook_paused.as_deref(),
+            Some(crate::pipeline::QUEUED)
+        );
+        assert_eq!(task.front.parked_from, None);
     }
 
     /// `queue pause` on a `blocked` task with the unblocker mid-turn
@@ -23190,6 +23253,43 @@ body\n";
         assert_eq!(
             route_then_resume(&repo, &pipelines, "fresh"),
             crate::pipeline::QUEUED
+        );
+    }
+
+    /// A task a failed `done` hook stopped says which hook failed and why,
+    /// marks no step, and resumes back onto `done` to run the hook again.
+    /// `queue list --json` names its state `hook_failed`, and STEP the
+    /// stage the hook stopped it on.
+    #[test]
+    fn route_and_list_name_a_failed_hook() {
+        let (repo, _root_guard) = fixture("route-hook-failed");
+        let pipelines = route_pipelines();
+        add(&repo, "release", &[]);
+        let mut task = queued(&repo, "release");
+        task.set_stage(crate::pipeline::DONE, None);
+        task.front.hook_paused = Some(crate::pipeline::DONE.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.set_stage(
+            crate::pipeline::HOOK_FAILED,
+            Some("issue_tracking hook exited 1"),
+        );
+        task.save().unwrap();
+
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let json = QueueRowJson::from(rows.iter().find(|r| r.id == "release").unwrap());
+        assert_eq!(json.state, "hook_failed");
+        assert_eq!(json.stage, crate::pipeline::DONE);
+
+        let text = render_route(&route_view(&queued(&repo, "release"), &pipelines, 0).unwrap());
+        assert!(
+            text.starts_with("default — hook failed at done: issue_tracking hook exited 1\n"),
+            "{text}"
+        );
+        assert!(!text.contains('▸'), "nothing to mark: {text}");
+
+        assert_eq!(
+            route_then_resume(&repo, &pipelines, "release"),
+            crate::pipeline::DONE
         );
     }
 

@@ -244,10 +244,24 @@ pub const BLOCKED: &str = "blocked";
 /// past.
 pub const PAUSED: &str = "paused";
 
+/// The stage a task sits on after its own issue-tracking hook failed on
+/// [`QUEUED`], [`STARTED`] or [`DONE`]. Reserved, not declared.
+///
+/// Apart from [`PAUSED`] because the two say opposite things about the work.
+/// A pause is a person's hold, or a gate waiting to be let past; a hook stop
+/// says nothing about the work at all, only that the script reporting it to
+/// the tracker did not finish. On `paused`, a task whose `done` hook failed
+/// read as finished work that was stuck. `Frontmatter::hook_paused` names
+/// which hook it was, and `spoolway resume` runs that hook again.
+///
+/// No hook event fires for it: the hook that would report this stop is the
+/// one that just failed. See `crate::dispatch::Dispatcher::route_reserved_stage`.
+pub const HOOK_FAILED: &str = "hook_failed";
+
 /// The moment a task leaves [`QUEUED`] for its entry step — an
 /// `[issue_tracking]` hook event, not a stage: nothing ever writes this to a
 /// task's own `stage:` field, so it never joins [`RESERVED`] the way
-/// `QUEUED`, `DONE`, `BLOCKED` and `PAUSED` do. A pipeline step is free to
+/// `QUEUED`, `DONE`, `BLOCKED`, `PAUSED` and `HOOK_FAILED` do. A pipeline step is free to
 /// use this name — there is no stage for it to collide with — because
 /// `on_pass`/`on_fail` never name it as a destination in the first place;
 /// see `crate::dispatch::Dispatcher::route_reserved_stage`, which fires it
@@ -257,7 +271,7 @@ pub const STARTED: &str = "started";
 
 /// Stage names a pipeline may not give a step, because the dispatcher already
 /// means something by them.
-pub const RESERVED: &[&str] = &[QUEUED, DONE, BLOCKED, PAUSED];
+pub const RESERVED: &[&str] = &[QUEUED, DONE, BLOCKED, PAUSED, HOOK_FAILED];
 
 /// The description every materialised `blocked` step carries — the same
 /// wherever it runs, because `description` is not one of the five keys a
@@ -1224,6 +1238,26 @@ impl Pipeline {
             bail!("pipeline has no steps");
         }
 
+        // Nothing may claim a name the dispatcher already means something by —
+        // except `blocked`, which a pipeline may now declare as an ordinary
+        // agent step, staffed only in an unattended run. `queued`, `done`,
+        // `paused` and `hook_failed` stay off limits: nothing routes a lane
+        // to those, and `graph.rs` still reads a bare `blocked` (undeclared
+        // here) as the dispatcher's own parked state. Checked ahead of the
+        // character rule below, which `hook_failed`'s underscore would
+        // otherwise trip first, telling a pipeline that named a step that to
+        // respell it rather than that the name is taken.
+        for step in &self.steps {
+            if step.id != BLOCKED && RESERVED.contains(&step.id.as_str()) {
+                bail!(
+                    "step `{}` uses a reserved stage name (reserved: {}) — those are states \
+                     the dispatcher already means something by, not steps to declare",
+                    step.id,
+                    RESERVED.join(", ")
+                );
+            }
+        }
+
         let mut seen = HashSet::new();
         for step in &self.steps {
             // A step id is a path component before it is a graph node: it names
@@ -1233,23 +1267,6 @@ impl Pipeline {
             crate::config::check_step_id(&step.id)?;
             if !seen.insert(step.id.as_str()) {
                 bail!("duplicate step id `{}`", step.id);
-            }
-        }
-
-        // Nothing may claim a name the dispatcher already means something by —
-        // except `blocked`, which a pipeline may now declare as an ordinary
-        // agent step, staffed only in an unattended run. `queued`, `done` and
-        // `paused` stay off limits: nothing routes a lane to those, and
-        // `graph.rs` still reads a bare `blocked` (undeclared here) as the
-        // dispatcher's own parked state.
-        for step in &self.steps {
-            if step.id != BLOCKED && RESERVED.contains(&step.id.as_str()) {
-                bail!(
-                    "step `{}` uses a reserved stage name (reserved: {}) — those are states \
-                     the dispatcher already means something by, not steps to declare",
-                    step.id,
-                    RESERVED.join(", ")
-                );
             }
         }
 
@@ -2759,10 +2776,11 @@ mod tests {
         assert_eq!(pipeline.entry(), "implement");
         assert!(pipeline.step("review").is_some());
         assert!(pipeline.step("handover").is_some());
-        // `queued`, `done` and `paused` are the dispatcher's, so no pipeline
-        // declares them. `blocked` is the one exception — `Pipelines::builtin`
-        // assembles it from `[unattended]`'s own defaults, the same as a
-        // project's own pipelines get from config.toml.
+        // `queued`, `done`, `paused` and `hook_failed` are the dispatcher's,
+        // so no pipeline declares them. `blocked` is the one exception —
+        // `Pipelines::builtin` assembles it from `[unattended]`'s own
+        // defaults, the same as a project's own pipelines get from
+        // config.toml.
         for reserved in RESERVED {
             if reserved == &BLOCKED {
                 assert!(
@@ -3263,11 +3281,13 @@ mod tests {
         assert!(!pipeline.blocked_is_staffed(false));
     }
 
-    /// The other three reserved names are exactly as reserved as before —
-    /// `blocked` is the one carve-out, not a hole in the rule.
+    /// The other four reserved names are exactly as reserved as before —
+    /// `blocked` is the one carve-out, not a hole in the rule. `hook_failed`
+    /// is refused in the same words as the rest, so a pipeline that already
+    /// named a step that is told why.
     #[test]
-    fn queued_done_and_paused_stay_off_limits() {
-        for reserved in [QUEUED, DONE, PAUSED] {
+    fn queued_done_paused_and_hook_failed_stay_off_limits() {
+        for reserved in [QUEUED, DONE, PAUSED, HOOK_FAILED] {
             let err = parse(&format!(
                 "steps:\n  - id: {reserved}\n    agent: pi\n    on_pass: {reserved}\n"
             ))

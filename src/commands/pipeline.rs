@@ -432,7 +432,7 @@ struct ContractKeys {
     pipeline: &'static [&'static str],
     step: &'static [&'static str],
     refused: &'static [&'static str],
-    reserved_ids: [&'static str; 3],
+    reserved_ids: [&'static str; 4],
 }
 
 /// One of this project's own agent profiles, as `spoolway pipeline contract`
@@ -536,6 +536,7 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
                 crate::pipeline::QUEUED,
                 crate::pipeline::DONE,
                 crate::pipeline::PAUSED,
+                crate::pipeline::HOOK_FAILED,
             ],
         },
         fields: FIELD_SENTENCES.iter().copied().collect(),

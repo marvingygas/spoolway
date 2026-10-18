@@ -1440,8 +1440,8 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         {
             outcomes.push(Outcome::migrated(
                 &shown,
-                "migrated: issue_tracking.on_fail removed, every failing hook now pauses \
-                 its task; [issue_tracking] moved directly under [watch]",
+                "migrated: issue_tracking.on_fail removed, every failing hook now stops \
+                 its task on hook_failed; [issue_tracking] moved directly under [watch]",
                 "migrated: on_fail removed; [issue_tracking] moved under [watch]",
             ));
         }

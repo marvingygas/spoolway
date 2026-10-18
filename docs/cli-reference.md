@@ -406,7 +406,9 @@ dispatcher runs, NEXT is routed on the pipelines that dispatcher loaded at start
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 On a paused or blocked row, STEP and the `--json` `stage` name the step the stop came from, so a
-script that finds paused or blocked tasks matches `state`, not `stage`.
+script that finds paused or blocked tasks matches `state`, not `stage`. A task a failed issue hook
+stopped reads `● hook failed` in STATE and `hook_failed` in the `--json` `state`. Its STEP and
+`stage` read `queued` or `done`, the stage the hook stopped it on.
 
 A file in the queue that does not parse has no row. A file that holds an id another file holds,
 such as `dd1 - Copy.md` beside `dd1.md`, has no row either. The dispatcher skips both. Under the
@@ -443,7 +445,7 @@ spoolway queue route <task>
 spoolway queue route <task> --json
 ```
 
-The first line names the pipeline and says where the task stands. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
+The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: issue_tracking hook exited 1`, and no step is marked. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
 
 A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
@@ -463,7 +465,7 @@ To send it to another step, in your own shell:
   spoolway resume example --stage <step>
 ```
 
-The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
+The last lines apply to a task on `paused`, `blocked` or `hook_failed`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
 
 `--json` prints the same facts as one object.
 
@@ -471,7 +473,7 @@ While a dispatcher runs, the command routes on the pipelines that dispatcher loa
 
 ### `spoolway queue pause <task>`
 
-Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. `pause` in the board's options menu does the same.
+Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. A task on `hook_failed` stays as it is too. The command prints that the task is held on `hook_failed` and that `spoolway resume <task>` runs its hook again. `pause` in the board's options menu does the same.
 
 ```
 spoolway queue pause <task> [--force]
@@ -483,14 +485,14 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered. While a dispatcher runs, it routes on the pipelines that dispatcher loaded at start.
+Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked`, `paused` or `hook_failed` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered. While a dispatcher runs, it routes on the pipelines that dispatcher loaded at start.
 
 A task that is still `queued`, has a live lane or running command on its step, or is `blocked` with an unblocker lane that is live or starting is refused. An archived task is refused with "nothing to resume". The refusals are the ones `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
 ### `spoolway queue unqueue <task>`
 
 Carry a not-started task back to the pending directory, with every reserved key,
-`hook_paused:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
+`hook_paused:`, `hook_error:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
 files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
 `unqueue` in the board's options menu carries the same task and every unstarted task that depends
 on it; this command has no panel
@@ -817,10 +819,10 @@ transcript.
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task an [issue-tracking
-hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
-hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
-`queued`, and one paused on `done` resumes straight back to `done`. A task paused because its
+it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
+hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events), forgets that
+hook's failed run, so it fires again; a task its `queued` or `started` hook stopped resumes to
+`queued`, and one its `done` hook stopped resumes straight back to `done`. A task paused because its
 [start branch does not exist](tasks.md#a-start-branch-that-does-not-exist) resumes to `queued`
 with `missing_start_branch:` cleared.
 
@@ -833,7 +835,7 @@ These tasks are refused, each with a message that names the reason and what to d
 | On `blocked` while its unblocker lane is live or starting | Always, except `--stage done` with a live lane, which stops the lane | Run `spoolway queue pause <task>` to take the task from the unblocker, then `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage` puts the task back on `blocked` |
 | Archived | Always, with or without `--stage` | There is nothing to resume. Run `spoolway queue add` to queue a new task |
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
-| Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
+| Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked`, `paused` or `hook_failed`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
 | Names a step the task walks past | With `--stage` | Nothing is resumed. The message names the rule: `it is not last in its chain`, `it is not the root of its chain`, or `its own skip: names it` |
 | Stands on, is parked on, is held at the gate of, or is blocked on a step its pipeline does not define | Without `--stage` | The message names the missing step. Run `spoolway resume <task> --stage <step>` |
@@ -858,7 +860,7 @@ task. See [Closing a stuck task](tasks.md#closing-a-stuck-task).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--stage <STEP>` | | Resume at this step instead. `done` closes a `blocked` or `paused` task, skipping every step it has left |
+| `--stage <STEP>` | | Resume at this step instead. `done` closes a `blocked`, `paused` or `hook_failed` task, skipping every step it has left |
 | `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).
@@ -874,7 +876,7 @@ A `paused` task restarts the step it was parked or gated on. A task parked from 
 | Task | What the message says to do |
 |---|---|
 | On `queued` | It starts on its own. Run `spoolway queue pause <task>` to hold it back |
-| Paused by an issue-tracking hook | Run `spoolway resume <task>` |
+| On `hook_failed` | Run `spoolway resume <task>` |
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
 
@@ -927,8 +929,8 @@ See [A step that carries its own session](dispatcher.md#a-step-that-carries-its-
 
 ### `spoolway task edit <task>`
 
-Rewrite one section of a `paused` or `blocked` task, under its task lock. Refused
-against a task that is neither.
+Rewrite one section of a `paused`, `blocked` or `hook_failed` task, under its task lock. Refused
+against a task on any other stage.
 
 ```
 spoolway task edit <task> --section Mockup --from mockup.md
@@ -1859,7 +1861,7 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `-m`, `--message <TEXT>` | | One line for the status log |
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
 
-A report from a `queued` or `paused` task is refused, because no lane works at either state. The refusal names the next action: `spoolway resume <task>` for a paused task, and waiting for the dispatcher for a queued one.
+A report from a `queued`, `paused` or `hook_failed` task is refused, because no lane works at any of those stages. The refusal names the next action: `spoolway resume <task>` for a paused task, `spoolway resume <task>` to run the hook again for a `hook_failed` task, and waiting for the dispatcher for a queued one.
 
 While a dispatcher runs, the route comes from the pipelines it loaded at start. See [Editing a
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
