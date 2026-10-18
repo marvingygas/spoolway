@@ -1696,7 +1696,7 @@ marker](installation.md#the-retired-version-marker).
 
 The report lists refused files first. It then lists each file written or removed, and a line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings
-it kept, and each group of retired settings it dropped. See
+it kept, each group of settings it added, and each group of retired settings it dropped. See
 [Unknown keys](configuration.md#unknown-keys).
 
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes

@@ -500,35 +500,6 @@ pub struct DispatchConfig {
     #[serde(with = "human_duration")]
     pub lane_quiet: Duration,
 
-    /// How long a lane may be held open by a process it started — one still
-    /// running, past a settled turn that stopped writing to its transcript —
-    /// before the reminder loop stops excusing it and treats it as silent.
-    ///
-    /// A lane genuinely mid-tool-call is not silent, whatever its transcript
-    /// says, and [`crate::dispatch::Dispatcher::note_progress`] excuses it
-    /// for exactly that reason, on a backend able to say so via
-    /// [`crate::mux::Mux::lane_process_alive`]. But a process that never
-    /// exits — a server the turn started and forgot, a build looping on its
-    /// own — would excuse the lane forever with nothing here to say
-    /// otherwise, which is the ceiling this settles: not "is the lane
-    /// silent", answered already, but "for how long can not-silent excuse
-    /// it".
-    ///
-    /// An hour by default: long enough for a real build or test suite to
-    /// finish inside it, short enough that a lane wedged behind a runaway
-    /// child is still found the same afternoon.
-    ///
-    /// **Not written to `config.toml` while it holds its default**, for the
-    /// same reason as [`Self::priority`] below: a lane here routinely runs a
-    /// binary built from a branch behind main, and a binary before unknown keys
-    /// were tolerated (0.8.0 and earlier) refuses one with a hard parse error
-    /// rather than ignoring it.
-    #[serde(
-        with = "human_duration",
-        skip_serializing_if = "is_default_lane_child_ceiling"
-    )]
-    pub lane_child_ceiling: Duration,
-
     /// Retired: how a tmux run was laid out in the multiplexer. The tmux
     /// backend is gone — see [`Backend::Herdr`]'s own note — so there is no
     /// multiplexer left for this to lay out. Kept only so an existing config
@@ -627,14 +598,27 @@ pub struct DispatchConfig {
 
     /// Whether a free slot is filled from every ready task, or from the group
     /// already landing first. See [`Priority`].
-    ///
-    /// Not written to `config.toml` while it holds its default, for the same
-    /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
-    /// runs a binary built from a branch behind main, and a binary before
-    /// unknown keys were tolerated (0.8.0 and earlier) refuses one with a hard
-    /// parse error rather than ignoring it.
-    #[serde(skip_serializing_if = "Priority::is_group")]
     pub priority: Priority,
+
+    /// How long a lane may be held open by a process it started — one still
+    /// running, past a settled turn that stopped writing to its transcript —
+    /// before the reminder loop stops excusing it and treats it as silent.
+    ///
+    /// A lane genuinely mid-tool-call is not silent, whatever its transcript
+    /// says, and [`crate::dispatch::Dispatcher::note_progress`] excuses it
+    /// for exactly that reason, on a backend able to say so via
+    /// [`crate::mux::Mux::lane_process_alive`]. But a process that never
+    /// exits — a server the turn started and forgot, a build looping on its
+    /// own — would excuse the lane forever with nothing here to say
+    /// otherwise, which is the ceiling this settles: not "is the lane
+    /// silent", answered already, but "for how long can not-silent excuse
+    /// it".
+    ///
+    /// An hour by default: long enough for a real build or test suite to
+    /// finish inside it, short enough that a lane wedged behind a runaway
+    /// child is still found the same afternoon.
+    #[serde(with = "human_duration")]
+    pub lane_child_ceiling: Duration,
 
     /// How many of a task's lanes stay open in its tab, or `all`. Five by
     /// default. Each new agent step closes the task's oldest finished lanes
@@ -643,13 +627,6 @@ pub struct DispatchConfig {
     /// keeps the biggest area and the newest the smallest. A limit of 1 splits
     /// first and closes the old lane after, so the tab is never empty. See
     /// [`VisibleLanes`] for what is never closed.
-    ///
-    /// Not written to `config.toml` while it holds its default, for the same
-    /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
-    /// runs a binary built from a branch behind main, and a binary before
-    /// unknown keys were tolerated (0.8.0 and earlier) refuses one with a hard
-    /// parse error rather than ignoring it.
-    #[serde(skip_serializing_if = "VisibleLanes::is_default")]
     pub visible_lanes: VisibleLanes,
 
     /// Whether a command step runs detached, with no pane, so it never takes
@@ -661,18 +638,10 @@ pub struct DispatchConfig {
     /// the command exits. It then counts toward [`Self::visible_lanes`] and
     /// closes oldest first like a finished agent lane. A pane whose command is
     /// still running is never closed for the limit.
-    ///
-    /// Not written to `config.toml` while it is `true`, for the same reason as
-    /// [`Self::lane_child_ceiling`] above.
-    #[serde(skip_serializing_if = "is_true")]
     pub hide_commands: bool,
 
     /// Where a task's lanes are placed in its workspace: as panes of one tab,
     /// or one tab to a step. See [`LaneLayout`].
-    ///
-    /// Not written to `config.toml` while it is `panes`, for the same reason
-    /// as [`Self::lane_child_ceiling`] above.
-    #[serde(skip_serializing_if = "LaneLayout::is_panes")]
     pub lane_layout: LaneLayout,
 
     /// Retired: whether a finished step's agent stayed open in its own pane.
@@ -707,18 +676,6 @@ pub struct DispatchConfig {
     /// longer read; dropped unconditionally on the next save.
     #[serde(default, skip_serializing)]
     pub(crate) herdr_mode: Option<toml::Value>,
-}
-
-/// Skips a `true` on the way out — see [`DispatchConfig::hide_commands`] for
-/// why a key that holds its default is better off absent here.
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
-/// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
-/// for why a key that holds its default is better off absent here.
-fn is_default_lane_child_ceiling(value: &Duration) -> bool {
-    *value == Duration::from_secs(3600)
 }
 
 impl Default for DispatchConfig {
@@ -998,8 +955,10 @@ impl VisibleLanes {
     /// The count a key that is never set holds.
     pub const DEFAULT_COUNT: u32 = 5;
 
-    /// Whether this is the default, which the file leaves unwritten — see
-    /// [`DispatchConfig::visible_lanes`].
+    /// Whether this is the default. [`Config::migrate`] and the
+    /// `keep_finished_lanes` load note read it: a `visible_lanes` at its
+    /// default cannot be told from an absent one, so the retired key wins
+    /// over it.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -1104,14 +1063,6 @@ pub enum Priority {
     Any,
 }
 
-impl Priority {
-    /// Skips a `group` on the way out — see [`DispatchConfig::priority`] for
-    /// why a key that holds its default is better off absent from the file.
-    fn is_group(&self) -> bool {
-        matches!(self, Priority::Group)
-    }
-}
-
 /// Where a task's lanes are placed in its workspace.
 ///
 /// `panes` is the shipped default: every step is a pane of the task's one
@@ -1130,13 +1081,6 @@ pub enum LaneLayout {
 }
 
 impl LaneLayout {
-    /// Skips a `panes` on the way out — see [`DispatchConfig::lane_layout`]
-    /// for why a key that holds its default is better off absent from the
-    /// file.
-    fn is_panes(&self) -> bool {
-        matches!(self, LaneLayout::Panes)
-    }
-
     /// Whether each step gets a tab of its own.
     pub fn is_tabs(self) -> bool {
         matches!(self, LaneLayout::Tabs)
@@ -4018,18 +3962,20 @@ mod tests {
         });
     }
 
-    /// `lane_child_ceiling` stays out of a defaulted config so a lane running
-    /// a binary behind main — one that predates this key entirely — still
-    /// parses the file. Setting it away from its default puts it back.
+    /// `lane_child_ceiling` is written even while it holds its default, so a
+    /// person reading the file sees it. A custom value is written too.
     #[test]
-    fn lane_child_ceiling_stays_out_of_a_defaulted_config() {
+    fn lane_child_ceiling_is_written_in_a_defaulted_config() {
         let config = Config::default();
         assert_eq!(
             config.dispatch.lane_child_ceiling,
             Duration::from_secs(3600)
         );
         let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("lane_child_ceiling"), "{rendered}");
+        assert!(
+            rendered.contains("lane_child_ceiling = \"1h\""),
+            "{rendered}"
+        );
 
         let custom: Config = toml::from_str("[dispatch]\nlane_child_ceiling = \"30m\"\n").unwrap();
         assert_eq!(
@@ -4043,19 +3989,27 @@ mod tests {
         );
     }
 
-    /// `hide_commands` stays out of a defaulted config for the same reason,
-    /// and is written once a person turns it off.
+    /// `hide_commands` is written while it is `true`, and when a person turns
+    /// it off.
     #[test]
-    fn hide_commands_stays_out_of_a_defaulted_config() {
+    fn hide_commands_is_written_in_a_defaulted_config() {
         let config = Config::default();
         assert!(config.dispatch.hide_commands);
-        assert!(!toml::to_string(&config).unwrap().contains("hide_commands"));
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("hide_commands = true")
+        );
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
         assert!(absent.dispatch.hide_commands);
 
         let on: Config = toml::from_str("[dispatch]\nhide_commands = true\n").unwrap();
-        assert!(!toml::to_string(&on).unwrap().contains("hide_commands"));
+        assert!(
+            toml::to_string(&on)
+                .unwrap()
+                .contains("hide_commands = true")
+        );
 
         let off: Config = toml::from_str("[dispatch]\nhide_commands = false\n").unwrap();
         assert!(!off.dispatch.hide_commands);
@@ -4066,21 +4020,24 @@ mod tests {
         );
     }
 
-    /// `visible_lanes` stays out of a defaulted config, so a lane running an
-    /// older binary can still read the file. A count is written once a person
-    /// picks one, and `all` is written as a string.
+    /// `visible_lanes` is written while it holds its default. A count is
+    /// written as a number, and `all` is written as a string.
     #[test]
-    fn visible_lanes_stays_out_of_a_defaulted_config() {
+    fn visible_lanes_is_written_in_a_defaulted_config() {
         let config = Config::default();
         assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(5));
         let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("visible_lanes"), "{rendered}");
+        assert!(rendered.contains("visible_lanes = 5"), "{rendered}");
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
         assert_eq!(absent.dispatch.visible_lanes, VisibleLanes::default());
 
         let five: Config = toml::from_str("[dispatch]\nvisible_lanes = 5\n").unwrap();
-        assert!(!toml::to_string(&five).unwrap().contains("visible_lanes"));
+        assert!(
+            toml::to_string(&five)
+                .unwrap()
+                .contains("visible_lanes = 5")
+        );
 
         let two: Config = toml::from_str("[dispatch]\nvisible_lanes = 2\n").unwrap();
         assert_eq!(two.dispatch.visible_lanes, VisibleLanes::Count(2));
@@ -4201,15 +4158,69 @@ mod tests {
         }
     }
 
-    /// `dispatch.priority` parses from TOML, defaults to `group`, and stays
-    /// out of a defaulted config the same way `lane_child_ceiling` does —
-    /// so a lane behind main on this key still loads the file.
+    /// A rendered default config names all five formerly skipped keys, reads
+    /// back as the same values, and still leaves out a `concurrency` a profile
+    /// does not cap. `agrees_with` refuses a rewrite that changes a value, so
+    /// the round trip is what keeps `sync` and `config set` working.
     #[test]
-    fn priority_parses_defaults_to_group_and_stays_out_of_a_defaulted_config() {
+    fn a_rendered_default_config_writes_every_dispatch_key_and_reads_back() {
+        let config = Config::default();
+        let rendered = config.render().unwrap();
+        let body = rendered
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for line in [
+            "priority = \"group\"",
+            "lane_child_ceiling = \"1h\"",
+            "visible_lanes = 5",
+            "hide_commands = true",
+            "lane_layout = \"panes\"",
+        ] {
+            assert!(body.contains(line), "{line} missing from {body}");
+        }
+        assert!(!body.contains("concurrency"), "{body}");
+
+        let back: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(back.dispatch.priority, Priority::Group);
+        assert_eq!(back.dispatch.lane_child_ceiling, Duration::from_secs(3600));
+        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(5));
+        assert!(back.dispatch.hide_commands);
+        assert_eq!(back.dispatch.lane_layout, LaneLayout::Panes);
+        config.agrees_with(&rendered).unwrap();
+    }
+
+    /// Now that `visible_lanes = 5` is always written, the retired
+    /// `keep_finished_lanes` must still lose its place in the same rewrite:
+    /// a file holding only the old key renders `visible_lanes = "all"` and no
+    /// longer names it.
+    #[test]
+    fn rendering_a_keep_finished_lanes_file_writes_visible_lanes_and_drops_the_old_key() {
+        let dir = crate::scratch::root("config-render-keep-finished");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[dispatch]\nkeep_finished_lanes = true\n",
+        )
+        .unwrap();
+        let (config, _, _) = Config::load_with_notices(&dir, None).unwrap();
+        let rendered = config.render().unwrap();
+        assert!(rendered.contains("visible_lanes = \"all\""), "{rendered}");
+        let body: String = rendered.lines().filter(|l| !l.starts_with('#')).collect();
+        assert!(!body.contains("keep_finished_lanes"), "{body}");
+        let back: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::All);
+    }
+
+    /// `dispatch.priority` parses from TOML, defaults to `group`, and is
+    /// written in a defaulted config like every other `[dispatch]` key.
+    #[test]
+    fn priority_parses_defaults_to_group_and_is_written_in_a_defaulted_config() {
         let config = Config::default();
         assert_eq!(config.dispatch.priority, Priority::Group);
         let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("priority"), "{rendered}");
+        assert!(rendered.contains("priority = \"group\""), "{rendered}");
 
         let any: Config = toml::from_str("[dispatch]\npriority = \"any\"\n").unwrap();
         assert_eq!(any.dispatch.priority, Priority::Any);
@@ -4221,7 +4232,11 @@ mod tests {
 
         let group: Config = toml::from_str("[dispatch]\npriority = \"group\"\n").unwrap();
         assert_eq!(group.dispatch.priority, Priority::Group);
-        assert!(!toml::to_string(&group).unwrap().contains("priority"));
+        assert!(
+            toml::to_string(&group)
+                .unwrap()
+                .contains("priority = \"group\"")
+        );
     }
 
     /// A config written before the sandbox was retired must still open. The

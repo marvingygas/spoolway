@@ -143,8 +143,13 @@ fn unknown_keys_load_are_named_and_survive_set_and_sync() {
         after_sync.contains("[agents.typo]") && after_sync.contains("kind = \"Claude\""),
         "sync dropped a profile with an unknown kind: {after_sync}"
     );
+    // The profile may be named among the settings sync added, which is a
+    // statement about the new keys; no note about kept or dropped ones names it.
     assert!(
-        !text(&sync.stdout).contains("agents.typo"),
+        text(&sync.stdout)
+            .lines()
+            .filter(|line| !line.contains("this spoolway has and the file did not"))
+            .all(|line| !line.contains("agents.typo")),
         "{}",
         text(&sync.stdout)
     );

@@ -23,10 +23,9 @@ pub fn config_show(repo: &Repo) -> Result<()> {
 /// `repo.checkout` for the same reason [`config_get`] does.
 ///
 /// The list is [`crate::confkv::all_settings`], not `entries`: it also names
-/// the keys the file omits while they hold their default — the three flat
-/// `[dispatch]` ones, every profile's `concurrency`, and every `[models]`
-/// field of a glob the config already carries — so nothing that resolves to
-/// a value today is missing from it. A `[models]` glob nobody has named yet
+/// the keys the file omits — every profile's `concurrency` and every
+/// `[models]` field of a glob the config already carries — so nothing that
+/// resolves to a value today is missing from it. A `[models]` glob nobody has named yet
 /// is settable but unlistable, since that keyspace has no bound.
 ///
 /// The rows come out in key order, so a setting is where a person looks for
@@ -851,9 +850,8 @@ mod tests {
     /// `config list` runs both ways, prints `key = value` rows, and names
     /// every scalar key that resolves to a value today —
     /// `issue_tracking.key_in_names` (the criterion the feature has to meet),
-    /// the flat keys the file omits while they hold their default, a profile's
-    /// omitted `concurrency`, and a `[models]` glob's omitted fields — all of
-    /// it in key order.
+    /// a profile's omitted `concurrency`, and a `[models]` glob's omitted
+    /// fields — all of it in key order.
     #[test]
     fn config_list_prints_every_settable_key_as_key_equals_value() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("config-list");
@@ -884,17 +882,14 @@ mod tests {
                 "bad key in row: {line}"
             );
         }
-        // Every omitted-default key `get`/`set` accepts is listed too.
-        let expected = crate::confkv::OMITTED_DEFAULT_KEYS
-            .iter()
-            .map(|k| (*k).to_string())
-            .chain([
-                // A profile that omits `concurrency` — `pi` among the shipped
-                // ones — and an omitted `[models]` field of the glob above.
-                "agents.pi.concurrency".to_string(),
-                "models.demo-model-*.output".to_string(),
-                "models.demo-model-*.context_window".to_string(),
-            ]);
+        // Every omitted key `get`/`set` accepts is listed too.
+        let expected = [
+            // A profile that omits `concurrency` — `pi` among the shipped
+            // ones — and an omitted `[models]` field of the glob above.
+            "agents.pi.concurrency".to_string(),
+            "models.demo-model-*.output".to_string(),
+            "models.demo-model-*.context_window".to_string(),
+        ];
         for key in expected {
             assert!(
                 entries.iter().any(|e| e.key == key),

@@ -391,7 +391,7 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. A `claude` or `codex` profile with no `[models]` row for its glob gets a commented `prompt_cache_ttl` example. A row holding only `prompt_cache_ttl = ""` is dropped. |
+| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. The `[dispatch]` keys `priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` are added at their defaults when the file lacks them. A `claude` or `codex` profile with no `[models]` row for its glob gets a commented `prompt_cache_ttl` example. A row holding only `prompt_cache_ttl = ""` is dropped. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, when it matches an older shipped copy. A key reference that matches no shipped copy is refused. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that matches an older shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. A skill file that matches no shipped copy is refused. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
@@ -469,6 +469,7 @@ anything:
 ╭─ new version installed, apply updates ───────────────────────╮
 │                                                                │
 │  write   .spoolway/config.toml                                │
+│          (added 1 setting(s): dispatch.lane_layout)           │
 │  remove  .spoolway/templates/task-log.md                      │
 │          (no longer written to a task file)                   │
 │                                                                │
@@ -489,7 +490,7 @@ write, `sync` writes straight away and draws no panel.
 
 The report lists every refused file first, then every file written or removed, then one line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings
-it kept, and each group of retired settings it dropped:
+it kept, each group of settings it added, and each group of retired settings it dropped:
 
 ```
 refused .spoolway/pipelines/bugfix.yml — spoolway's key reference starts with `# >>> spoolway >>>` and never ends — restore the `# <<< spoolway <<<` marker, or delete the block and run this again
@@ -499,12 +500,13 @@ removed .spoolway/templates/task-log.md
 
 (set issue_tracking.key_in_names = true, the default)
 (kept 1 setting(s) this spoolway does not know, with their comments: unatended — a newer spoolway may read them, otherwise they are typos)
+(1 setting(s) this spoolway has and the file did not: dispatch.lane_layout)
 (1 retired setting(s) dropped: sandbox.enabled)
 
 Files were overwritten; your config values, prompts and task skeletons were kept.
 ```
 
-With `--dry-run`, the words read `would write` and `would remove`. When `sync` refused a file
+With `--dry-run`, the words read `would write` and `would remove`, and the same notes print under them. When `sync` refused a file
 and wrote nothing else, the last line is `Nothing else updating; the refused files above were left
 as they are.`
 

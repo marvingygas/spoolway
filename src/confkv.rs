@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
-use crate::config::{Config, LaneLayout, Priority};
+use crate::config::Config;
 
 /// One editable setting.
 #[derive(Debug, Clone, PartialEq)]
@@ -419,28 +419,12 @@ pub fn entries(config: &Config) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// The flat `[dispatch]` keys `get` and `set` accept that [`entries`]
-/// never lists, because they are skipped from the file while they hold their
-/// default — see [`unset_value`], which resolves each. [`all_settings`] adds
-/// these plus the per-entry omissions (`[models]` zeros, an absent
-/// `agents.<profile>.concurrency`) for every profile and model glob the
-/// config already carries; only a `[models]` glob nobody has named yet stays
-/// off the list, and no list could show that open-ended keyspace.
-pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
-    "dispatch.lane_child_ceiling",
-    "dispatch.priority",
-    "dispatch.visible_lanes",
-    "dispatch.hide_commands",
-    "dispatch.lane_layout",
-];
-
 /// Every scalar setting `config get`/`set` resolves for a key that already
-/// names something: [`entries`] plus the omitted-default keys it skips — the
-/// flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
-/// that omits it, and every price/limit field of every `[models]` glob the
-/// config already carries. This is the list `spoolway config list` prints, so
-/// its promise to name every settable scalar key holds for every key that
-/// resolves to a value today.
+/// names something: [`entries`] plus the omissions it skips — the
+/// `concurrency` of every profile that omits it, and every price/limit field
+/// of every `[models]` glob the config already carries. This is the list
+/// `spoolway config list` prints, so its promise to name every settable scalar
+/// key holds for every key that resolves to a value today.
 ///
 /// A `[models]` glob the config has never named is still settable — [`set`]
 /// creates it on first write — so that keyspace is open-ended and no list can
@@ -473,9 +457,6 @@ pub fn all_settings(config: &Config) -> Result<Vec<Entry>> {
         });
     };
 
-    for key in OMITTED_DEFAULT_KEYS {
-        push_omitted(&mut out, (*key).to_string());
-    }
     for profile in config.agents.keys() {
         push_omitted(&mut out, format!("agents.{profile}.concurrency"));
     }
@@ -614,39 +595,11 @@ fn retired_hint(key: &str) -> Option<&'static str> {
     }
 }
 
-/// What an omitted key reads as, for the two kinds of key that may be omitted.
+/// What an omitted key reads as, for the two kinds of key that may be omitted:
+/// a `[models]` field left at zero and a profile's `concurrency`.
 ///
 /// `None` for anything else, which is how a typo stays a typo.
 fn unset_value(config: &Config, key: &str) -> Option<String> {
-    // A `[dispatch]` value that is skipped on the way out while it holds its
-    // default. Absence *is* the default here rather than a zero, so this reads
-    // the value off the struct: a reader who asks what the setting currently is
-    // gets its default, not "no such key". The write path needs it too — `set`
-    // refuses a key that does not resolve, so without this the key would be
-    // documented in the reference table and settable by nothing.
-    if key == "dispatch.lane_child_ceiling" {
-        return Some(crate::config::format_duration(
-            config.dispatch.lane_child_ceiling,
-        ));
-    }
-    if key == "dispatch.priority" {
-        return Some(match config.dispatch.priority {
-            Priority::Group => "group".to_string(),
-            Priority::Any => "any".to_string(),
-        });
-    }
-    if key == "dispatch.visible_lanes" {
-        return Some(config.dispatch.visible_lanes.spelled());
-    }
-    if key == "dispatch.hide_commands" {
-        return Some(config.dispatch.hide_commands.to_string());
-    }
-    if key == "dispatch.lane_layout" {
-        return Some(match config.dispatch.lane_layout {
-            LaneLayout::Panes => "panes".to_string(),
-            LaneLayout::Tabs => "tabs".to_string(),
-        });
-    }
     let Some(parts) = models_key(config, key) else {
         concurrency_key(config, key)?;
         return Some("0".to_string());
@@ -693,12 +646,6 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
                 // Every other key has to already exist, so that a typo is a
                 // refusal rather than a setting nothing will ever read.
                 get(config, key)?;
-                // …and one of them can pass that check while still being
-                // absent from the rendered document: a `[dispatch]` key
-                // skipped on the way out while it holds its default. `get`
-                // answers for it out of the struct, so the walk below has to
-                // have something to write into.
-                ensure_dispatch_default(&mut value, key, config);
             }
             key.split('.').collect()
         }
@@ -1230,40 +1177,6 @@ fn concurrency_key<'a>(config: &Config, key: &'a str) -> Option<&'a str> {
 /// Put `concurrency = 0` on a profile that omits it, so the generic walk below
 /// has something to write into. Zero because that is what its absence already
 /// means — the value is overwritten a moment later either way.
-/// Put a `[dispatch]` key that is omitted while it holds its default back into
-/// the rendered document, so [`set`] has a slot to write into.
-///
-/// The value seeded is the one the key currently *means* — read off the config
-/// rather than assumed — because the very next thing [`set`] does is overwrite
-/// it, and a wrong seed would only matter if the write failed.
-///
-/// Silent when the key is not one of these: the caller has already established
-/// that it resolves, and a key that resolves *and* is present needs nothing.
-fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
-    let Some(field) = key.strip_prefix("dispatch.") else {
-        return;
-    };
-    let seed = match field {
-        "priority" => Value::try_from(config.dispatch.priority)
-            .expect("Priority always serialises to a string"),
-        "lane_child_ceiling" => Value::String(crate::config::format_duration(
-            config.dispatch.lane_child_ceiling,
-        )),
-        // Only so `set` finds a slot to overwrite. `set` takes this key's
-        // input as text without calling `coerce`, so the seed is never read
-        // back. A string because `VisibleLanes` reads a digit string as a
-        // count as well as `all`.
-        "visible_lanes" => Value::String(config.dispatch.visible_lanes.spelled()),
-        "hide_commands" => Value::Boolean(config.dispatch.hide_commands),
-        "lane_layout" => Value::try_from(config.dispatch.lane_layout)
-            .expect("LaneLayout always serialises to a string"),
-        _ => return,
-    };
-    if let Some(table) = value.get_mut("dispatch").and_then(Value::as_table_mut) {
-        table.entry(field).or_insert(seed);
-    }
-}
-
 fn ensure_concurrency(value: &mut Value, profile: &str) -> Result<()> {
     let Some(table) = value
         .get_mut("agents")
@@ -1389,6 +1302,7 @@ fn nearest(config: &Config, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{LaneLayout, Priority};
 
     #[test]
     fn every_scalar_setting_is_listed() {
@@ -1548,11 +1462,10 @@ mod tests {
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 
-    /// The same read/write-while-absent mechanism, for `visible_lanes`: a
-    /// count or `all`, absent from the file while it is 5, and `0` refused
-    /// with the wording a person is told to act on.
+    /// `visible_lanes` is a count or `all`, written even while it is 5, and
+    /// `0` is refused with the wording a person is told to act on.
     #[test]
-    fn visible_lanes_is_readable_and_writable_while_absent() {
+    fn visible_lanes_is_readable_and_writable_at_its_default() {
         use crate::config::VisibleLanes;
         let config = Config::default();
         assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "5");
@@ -1577,7 +1490,11 @@ mod tests {
 
         let back = set(&all, "dispatch.visible_lanes", "5").unwrap();
         assert_eq!(back.dispatch.visible_lanes, VisibleLanes::default());
-        assert!(!toml::to_string(&back).unwrap().contains("visible_lanes"));
+        assert!(
+            toml::to_string(&back)
+                .unwrap()
+                .contains("visible_lanes = 5")
+        );
 
         let err = format!(
             "{:#}",
@@ -1597,10 +1514,9 @@ mod tests {
         assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
     }
 
-    /// The same read/write-while-absent mechanism, for `hide_commands`: a
-    /// bool that is absent from the file while it is `true`.
+    /// `hide_commands` is a bool, written even while it is `true`.
     #[test]
-    fn hide_commands_is_readable_and_writable_while_absent() {
+    fn hide_commands_is_readable_and_writable_at_its_default() {
         let config = Config::default();
         assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "true");
 
@@ -1615,16 +1531,24 @@ mod tests {
 
         let back = set(&shown, "dispatch.hide_commands", "true").unwrap();
         assert!(back.dispatch.hide_commands);
-        assert!(!toml::to_string(&back).unwrap().contains("hide_commands"));
+        assert!(
+            toml::to_string(&back)
+                .unwrap()
+                .contains("hide_commands = true")
+        );
         assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
     }
 
-    /// The same read/write-while-absent mechanism, for `lane_layout`.
+    /// `lane_layout` is written even while it is `panes`.
     #[test]
-    fn lane_layout_is_readable_and_writable_while_absent() {
+    fn lane_layout_is_readable_and_writable_at_its_default() {
         let config = Config::default();
         assert_eq!(get(&config, "dispatch.lane_layout").unwrap(), "panes");
-        assert!(!toml::to_string(&config).unwrap().contains("lane_layout"));
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("lane_layout = \"panes\"")
+        );
 
         let tabs = set(&config, "dispatch.lane_layout", "tabs").unwrap();
         assert_eq!(tabs.dispatch.lane_layout, LaneLayout::Tabs);
@@ -1637,7 +1561,11 @@ mod tests {
 
         let panes = set(&tabs, "dispatch.lane_layout", "panes").unwrap();
         assert_eq!(panes.dispatch.lane_layout, LaneLayout::Panes);
-        assert!(!toml::to_string(&panes).unwrap().contains("lane_layout"));
+        assert!(
+            toml::to_string(&panes)
+                .unwrap()
+                .contains("lane_layout = \"panes\"")
+        );
         assert!(set(&config, "dispatch.lane_layout", "windows").is_err());
     }
 
@@ -1650,15 +1578,15 @@ mod tests {
         assert!(set(&Config::default(), "dispatch.keep_finished_lanes", "false").is_err());
     }
 
-    /// The same read/write-while-absent mechanism, for `lane_child_ceiling`.
+    /// `lane_child_ceiling` is written even while it is an hour.
     #[test]
-    fn lane_child_ceiling_is_readable_and_writable_while_absent() {
+    fn lane_child_ceiling_is_readable_and_writable_at_its_default() {
         let config = Config::default();
         assert_eq!(get(&config, "dispatch.lane_child_ceiling").unwrap(), "1h");
         assert!(
-            !toml::to_string(&config)
+            toml::to_string(&config)
                 .unwrap()
-                .contains("lane_child_ceiling")
+                .contains("lane_child_ceiling = \"1h\"")
         );
 
         let changed = set(&config, "dispatch.lane_child_ceiling", "30m").unwrap();
@@ -1679,18 +1607,22 @@ mod tests {
             std::time::Duration::from_secs(3600)
         );
         assert!(
-            !toml::to_string(&back)
+            toml::to_string(&back)
                 .unwrap()
-                .contains("lane_child_ceiling")
+                .contains("lane_child_ceiling = \"1h\"")
         );
     }
 
-    /// The same read/write-while-absent mechanism, for `priority`.
+    /// `priority` is written even while it is `group`.
     #[test]
-    fn priority_is_readable_and_writable_while_absent() {
+    fn priority_is_readable_and_writable_at_its_default() {
         let config = Config::default();
         assert_eq!(get(&config, "dispatch.priority").unwrap(), "group");
-        assert!(!toml::to_string(&config).unwrap().contains("priority"));
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("priority = \"group\"")
+        );
 
         let any = set(&config, "dispatch.priority", "any").unwrap();
         assert_eq!(any.dispatch.priority, Priority::Any);
@@ -1703,7 +1635,11 @@ mod tests {
 
         let group = set(&any, "dispatch.priority", "group").unwrap();
         assert_eq!(group.dispatch.priority, Priority::Group);
-        assert!(!toml::to_string(&group).unwrap().contains("priority"));
+        assert!(
+            toml::to_string(&group)
+                .unwrap()
+                .contains("priority = \"group\"")
+        );
     }
 
     /// A negative or non-finite price or cost limit is refused by name; zero

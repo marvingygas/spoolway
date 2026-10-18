@@ -99,11 +99,11 @@ pub enum Outcome {
         path: String,
         detail: String,
     },
-    /// A note about a file this run changed, spelled out in the report: what
-    /// dropping a retired setting means for the project — see [`config`]'s own
-    /// `issue_tracking.on_fail` and `dispatch.worktree_root` notes — a value
-    /// `sync` set that the file never named, or a pipeline key block it
-    /// replaced. Its own
+    /// A note about a file this run changed, spelled out in the report: the
+    /// settings it added, what dropping a retired setting means for the
+    /// project — see [`config`]'s own `issue_tracking.on_fail` and
+    /// `dispatch.worktree_root` notes — a value `sync` set that the file never
+    /// named, unknown settings it kept, or a pipeline key block it replaced. Its own
     /// variant rather than another [`Outcome::Wrote`], because its detail is
     /// one of the few this
     /// report actually prints, after every file line, in both the
@@ -1334,10 +1334,18 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         ));
     }
     if !refresh.added.is_empty() {
-        outcomes.push(Outcome::wrote(
+        // A `Migrated`, not a `Wrote`: a `Wrote`'s detail is never printed,
+        // and a sync that adds settings while naming none leaves a person
+        // diffing the file to learn what arrived.
+        outcomes.push(Outcome::migrated(
             &shown,
             format!(
-                "{} setting(s) this spoolway has and it did not: {}",
+                "{} setting(s) this spoolway has and the file did not: {}",
+                refresh.added.len(),
+                listed(&refresh.added)
+            ),
+            format!(
+                "added {} setting(s): {}",
                 refresh.added.len(),
                 listed(&refresh.added)
             ),
@@ -3021,28 +3029,91 @@ mod tests {
         .unwrap();
 
         let outcomes = scan(&repo, &args()).unwrap();
-        let mut written: Vec<&str> = Vec::new();
-        for outcome in &outcomes {
-            if let Outcome::Wrote { path, .. } = outcome
-                && !written.contains(&path.as_str())
-            {
-                written.push(path);
-            }
-        }
+        // Every record, repeats kept: this rewrite leaves two `Migrated`
+        // notes for the same file, the settings it adds and the
+        // `key_in_names` value it sets.
+        let written: Vec<&str> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Wrote { path, .. } | Outcome::Migrated { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        let (deduped, _) = dedup_paths(&outcomes);
 
         assert!(written.contains(&".spoolway/config.toml"), "{written:?}");
         // One rewrite can add a setting and drop a retired one at once. Two
         // records, one file, and the report says the file once.
         assert_eq!(
-            written.len(),
+            deduped.len(),
             written
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            "a path printed twice reads as two files: {written:?}"
+            "a path printed twice reads as two files: {deduped:?}"
         );
         assert!(KEPT.contains("config values"), "{KEPT}");
         assert!(KEPT.contains("prompts"), "{KEPT}");
+    }
+
+    /// A rewrite that adds settings names them, once under the one config row,
+    /// in the report and in the confirm panel, and a rewrite that adds none
+    /// says nothing of the kind. Before the note was a `Migrated`, the added
+    /// keys were a `Wrote` detail that no surface printed.
+    #[test]
+    fn a_rewrite_names_the_settings_it_adds_and_only_then() {
+        let (repo, _root_guard) = fixture("names-added");
+        std::fs::write(
+            crate::config::Config::path_in(&repo.root),
+            "[dispatch]\nlane_quiet = \"45m\"\n",
+        )
+        .unwrap();
+
+        let outcomes = scan(&repo, &args()).unwrap();
+        let (wrote, removed) = dedup_paths(&outcomes);
+        let notes = migration_notes(&outcomes);
+        let config = ".spoolway/config.toml";
+        assert_eq!(wrote.iter().filter(|p| **p == config).count(), 1);
+
+        let (report, panel) = notes
+            .get(config)
+            .into_iter()
+            .flatten()
+            .find(|(report, _)| report.contains("this spoolway has and the file did not"))
+            .unwrap_or_else(|| panic!("no note naming the added settings: {notes:?}"));
+        assert!(report.contains("dispatch.lane_layout"), "{report}");
+        assert!(panel.starts_with("added "), "{panel}");
+
+        let body = panel_body(&[], &wrote, &notes, &removed);
+        let row = body.iter().position(|l| l.contains(config)).unwrap();
+        assert!(body[row + 1].contains("(added "), "{body:?}");
+        assert!(
+            body.iter().all(|l| l.chars().count() <= MAX_LINE),
+            "{body:?}"
+        );
+
+        // A file that is current but for one retired key is rewritten, adds
+        // nothing, and so says nothing of added settings.
+        let current = crate::config::Config::default().render().unwrap();
+        let stale = current.replacen("[dispatch]\n", "[dispatch]\nherdr_mode = true\n", 1);
+        assert_ne!(stale, current);
+        std::fs::write(crate::config::Config::path_in(&repo.root), stale).unwrap();
+        let outcomes = scan(&repo, &args()).unwrap();
+        let notes = migration_notes(&outcomes);
+        let reports: Vec<&str> = notes.values().flatten().map(|(r, _)| *r).collect();
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.contains("retired setting(s) dropped")),
+            "the fixture must be a rewrite: {:?}",
+            outcome_lines(&outcomes)
+        );
+        assert!(
+            reports
+                .iter()
+                .all(|r| !r.contains("this spoolway has and the file did not")),
+            "{reports:?}"
+        );
     }
 
     /// A dry run with nothing to do used to say `DRY_RUN` anyway — "Run
@@ -3087,7 +3158,7 @@ mod tests {
         assert!(
             outcome_lines(&outcomes)
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("auto_commit")),
+                .any(|line| line.starts_with("migrated") && line.contains("auto_commit")),
             "{:?}",
             outcome_lines(&outcomes)
         );
@@ -3435,6 +3506,39 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// `visible_lanes = 5` is written whatever the file held, so a retired
+    /// `keep_finished_lanes` has to be converted and dropped in the same
+    /// rewrite: left beside a default-valued `visible_lanes` it would be read
+    /// as the old choice again, or survive as an unknown key.
+    #[test]
+    fn a_sync_turns_keep_finished_lanes_into_visible_lanes_and_drops_the_old_key() {
+        for (old, written) in [
+            ("true", "visible_lanes = \"all\""),
+            ("false", "visible_lanes = 1"),
+        ] {
+            let (repo, _root_guard) = fixture(&format!("config-keep-finished-{old}"));
+            let path = crate::config::Config::path_in(&repo.root);
+            std::fs::write(
+                &path,
+                format!("[dispatch]\nbackend = \"headless\"\nkeep_finished_lanes = {old}\n"),
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            let after = std::fs::read_to_string(&path).unwrap();
+
+            assert!(after.lines().any(|line| line == written), "{old}: {after}");
+            assert!(
+                !after
+                    .lines()
+                    .any(|line| !line.starts_with('#') && line.contains("keep_finished_lanes")),
+                "{old}: {after}"
+            );
+            assert_eq!(after.matches("\nvisible_lanes = ").count(), 1, "{after}");
+        }
     }
 
     /// A key this binary does not know — one typo'd inside a table, a whole
