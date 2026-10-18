@@ -9499,15 +9499,37 @@ mod screen_tests {
         root
     }
 
+    /// The hidden line Claude Code writes when a skill's text loads from
+    /// `dir`, linked to its claim by `link`: `("parentUuid", uuid)` for a
+    /// typed command's line, `("sourceToolUseID", id)` for a Skill call. A
+    /// marker or Skill call without one is not counted — see
+    /// `usage::skill_markers`.
+    fn skill_loaded(link: (&str, &str), dir: &str) -> serde_json::Value {
+        let mut line = serde_json::json!({
+            "type": "user",
+            "isMeta": true,
+            "timestamp": "2026-09-01T09:00:01.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text":
+                format!("Base directory for this skill: {dir}\n\n# a skill")}]},
+        });
+        line[link.0] = link.1.into();
+        line
+    }
+
     fn skill_transcript() -> String {
         format!(
-            "{}\n",
+            "{}\n{}\n",
             serde_json::json!({
                 "type": "user",
+                "uuid": "u-plan",
                 "timestamp": "2026-09-01T09:00:00.000Z",
                 "message": {"role": "user", "content":
                     "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
             }),
+            skill_loaded(
+                ("parentUuid", "u-plan"),
+                "/w/spoolway/.claude/skills/spoolway-plan"
+            ),
         )
     }
 
@@ -9576,7 +9598,7 @@ mod screen_tests {
         );
         bank_dir(&repo, "2026-09-02T09:00:00+00:00", "/w/notes", "s2", 0.18);
         let lines = format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2026-09-01T09:05:00.000Z",
@@ -9595,6 +9617,10 @@ mod screen_tests {
                 "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1"}]},
                 "sourceToolUseID": "toolu_1"
             }),
+            skill_loaded(
+                ("sourceToolUseID", "toolu_1"),
+                "/w/spoolway/.claude/skills/spoolway-plan"
+            ),
         );
         let home = claude_home_with("skill-tool-filter", "s1", &lines);
 
@@ -9631,14 +9657,17 @@ mod screen_tests {
             "s1",
             0.70,
         );
+        let dir = "/w/spoolway/.claude/skills/spoolway-plan";
         let lines = format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             serde_json::json!({
                 "type": "user",
+                "uuid": "u-plan",
                 "timestamp": "2026-09-01T09:00:00.000Z",
                 "message": {"role": "user", "content":
                     "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
             }),
+            skill_loaded(("parentUuid", "u-plan"), dir),
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2026-09-01T09:05:00.000Z",
@@ -9650,6 +9679,7 @@ mod screen_tests {
                     ]
                 }
             }),
+            skill_loaded(("sourceToolUseID", "toolu_1"), dir),
         );
         let home = claude_home_with("both-forms", "s1", &lines);
 
@@ -9710,7 +9740,7 @@ mod screen_tests {
         let subagents_dir = project.join(parent).join("subagents");
         std::fs::create_dir_all(&subagents_dir).unwrap();
         let subagent_lines = format!(
-            "{}\n",
+            "{}\n{}\n",
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2026-09-01T09:05:10.000Z",
@@ -9722,6 +9752,10 @@ mod screen_tests {
                     ]
                 }
             }),
+            skill_loaded(
+                ("sourceToolUseID", "toolu_2"),
+                "/home/someone/.claude/skills/spoolway-tasks"
+            ),
         );
         std::fs::write(
             subagents_dir.join(format!("{subagent}.jsonl")),
@@ -9785,7 +9819,7 @@ mod screen_tests {
         let subagents_dir = project.join(parent).join("subagents");
         std::fs::create_dir_all(&subagents_dir).unwrap();
         let subagent_lines = format!(
-            "{}\n",
+            "{}\n{}\n",
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2026-09-01T09:05:10.000Z",
@@ -9797,6 +9831,10 @@ mod screen_tests {
                     ]
                 }
             }),
+            skill_loaded(
+                ("sourceToolUseID", "toolu_3"),
+                "/home/someone/.claude/skills/other-skill"
+            ),
         );
         std::fs::write(
             subagents_dir.join(format!("{subagent}.jsonl")),
@@ -9834,19 +9872,27 @@ mod screen_tests {
 
     /// One session's own transcript, plus its one subagent's, sized to make a
     /// transcript read and a directory walk show up in a timing, not just a
-    /// correctness check.
+    /// correctness check. The `n_lines` lines are typed commands each followed
+    /// by its load line, so every command counts as a skill; an odd last line
+    /// is left off, so the file is never larger than asked for.
     fn perf_lines(tag: &str, n_lines: usize) -> String {
         let mut out = String::new();
-        for j in 0..n_lines {
+        for j in 0..n_lines / 2 {
+            let uuid = format!("{tag}-{j}");
             out += &format!(
-                "{}\n",
+                "{}\n{}\n",
                 serde_json::json!({
                     "type": "user",
+                    "uuid": uuid,
                     "timestamp": format!("2026-09-01T09:{:02}:{:02}.000Z", (j / 60) % 60, j % 60),
                     "message": {"role": "user", "content": format!(
                         "<command-name>/perf-{tag}-{j}</command-name>\n<command-args></command-args>"
                     )},
                 }),
+                skill_loaded(
+                    ("parentUuid", &uuid),
+                    &format!("/w/.claude/skills/perf-{tag}-{j}")
+                ),
             );
         }
         out
@@ -10072,7 +10118,7 @@ mod screen_tests {
                 // and mtime both move.
                 std::fs::write(
                     project.join("perf-0000.jsonl"),
-                    perf_lines("perf-0000", LINES_PER_SESSION) + &perf_lines("new", 1),
+                    perf_lines("perf-0000", LINES_PER_SESSION) + &perf_lines("new", 2),
                 )
                 .unwrap();
                 // perf-0001's own transcript and its one subagent's are both

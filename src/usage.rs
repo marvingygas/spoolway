@@ -4125,16 +4125,26 @@ fn span_in_raw(
     Some((first?, last?))
 }
 
-/// Every `<command-name>` a session's transcript holds, verbatim and without
-/// its surrounding `<command-args>`, plus every skill a Skill tool call named
-/// — a skill named mid-sentence runs through that tool instead of a typed
-/// slash command, and writes no `<command-name>` marker at all (see the
-/// task's own context). Either form marks only where a skill started and
-/// never where it ended, so this only ever answers "did this session run
-/// that skill at all", which [`crate::eval`]'s own skill filter is the one
-/// thing that asks. The two forms are not normalized against each other
-/// here — [`crate::eval::normalize_skill`] is where a typed command's
-/// leading slash is dropped so both read as the same skill.
+/// Every skill a session's transcript shows loading from a folder: the
+/// `<command-name>` of a typed command, verbatim and without its surrounding
+/// `<command-args>`, and the skill a Skill tool call named — a skill named
+/// mid-sentence runs through that tool instead of a typed slash command, and
+/// writes no `<command-name>` marker at all. Either form marks only where a
+/// skill started and never where it ended, so this only ever answers "did
+/// this session run that skill at all", which [`crate::eval`]'s own skill
+/// filter is the one thing that asks. The two forms are not normalized
+/// against each other here — [`crate::eval::normalize_skill`] is where a
+/// typed command's leading slash is dropped so both read as the same skill.
+///
+/// A marker or a tool call is only a claim. What makes it count is the load
+/// line Claude Code writes after it: a `"type":"user"` line with
+/// `"isMeta":true` holding the skill's own text, linked by its `parentUuid`
+/// to a typed command's line `uuid`, or by its `sourceToolUseID` to the
+/// Skill `tool_use` block's `id` — see [`loaded_from_folder`]. A built-in
+/// like `/clear` writes `<local-command-stdout>` instead, and a Skill call
+/// for a name that does not exist gets only an error result, so neither
+/// counts. The link is matched by id, never by position, because another
+/// line (an `attachment`, say) can sit between a claim and its load line.
 ///
 /// The `<command-name>` marker is literal text inside a user message's
 /// `content`, so each line is parsed and only a `"type":"user"` line's own
@@ -4143,6 +4153,11 @@ fn span_in_raw(
 /// source code that holds the same tag, and none of that is a skill the
 /// session ran. The Skill tool call is a structured `tool_use` block, read
 /// from the same per-line parse.
+///
+/// No skill folder is read to decide any of this — see the note on
+/// [`crate::agent::Adapter::skills`] — so a skill deleted since the session
+/// ran still counts, and one a plugin keeps where spoolway cannot list it
+/// counts too.
 ///
 /// `crate::eval::load` now reads a session's markers through
 /// [`read_sessions`] instead, which shares the walk and the read with the
@@ -4163,26 +4178,36 @@ pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
 /// against bytes it already has in hand, rather than paying for a second
 /// `read_to_string` of the same transcript.
 fn markers_in_raw(raw: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+    // Claims and proofs are gathered apart and joined at the end, so a load
+    // line counts wherever it sits in the file relative to its claim.
+    let mut typed: Vec<(String, String)> = Vec::new();
+    let mut called: Vec<(String, String)> = Vec::new();
+    let mut loaded_parents: HashSet<String> = HashSet::new();
+    let mut loaded_tool_uses: HashSet<String> = HashSet::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let content = value.pointer("/message/content");
-        if value.get("type").and_then(|t| t.as_str()) == Some("user") {
-            match content {
-                Some(serde_json::Value::String(text)) => command_names_in(text, &mut out),
-                Some(serde_json::Value::Array(blocks)) => {
-                    for block in blocks {
-                        if block.get("type").and_then(|t| t.as_str()) != Some("text") {
-                            continue;
-                        }
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            command_names_in(text, &mut out);
-                        }
-                    }
+        let is_user = value.get("type").and_then(|t| t.as_str()) == Some("user");
+        if is_user && value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
+            if loaded_from_folder(content) {
+                if let Some(parent) = value.get("parentUuid").and_then(|p| p.as_str()) {
+                    loaded_parents.insert(parent.to_string());
                 }
-                _ => {}
+                if let Some(id) = value.get("sourceToolUseID").and_then(|i| i.as_str()) {
+                    loaded_tool_uses.insert(id.to_string());
+                }
+            }
+        } else if is_user {
+            // A line with no `uuid` has nothing a load line could link to,
+            // so its markers could never be proven and are not collected.
+            if let Some(uuid) = value.get("uuid").and_then(|u| u.as_str()) {
+                let mut names = BTreeSet::new();
+                for text in own_texts(content) {
+                    command_names_in(text, &mut names);
+                }
+                typed.extend(names.into_iter().map(|n| (n, uuid.to_string())));
             }
         }
         for block in content.and_then(|c| c.as_array()).into_iter().flatten() {
@@ -4192,12 +4217,57 @@ fn markers_in_raw(raw: &str) -> BTreeSet<String> {
             if block.get("name").and_then(|n| n.as_str()) != Some("Skill") {
                 continue;
             }
-            if let Some(skill) = block.pointer("/input/skill").and_then(|s| s.as_str()) {
-                out.insert(skill.to_string());
+            let skill = block.pointer("/input/skill").and_then(|s| s.as_str());
+            let id = block.get("id").and_then(|i| i.as_str());
+            if let (Some(skill), Some(id)) = (skill, id) {
+                called.push((skill.to_string(), id.to_string()));
             }
         }
     }
-    out
+    let typed = typed
+        .into_iter()
+        .filter(|(_, uuid)| loaded_parents.contains(uuid));
+    let called = called
+        .into_iter()
+        .filter(|(_, id)| loaded_tool_uses.contains(id));
+    typed.chain(called).map(|(name, _)| name).collect()
+}
+
+/// A user line's own text: its `content` string, or the `text` blocks of its
+/// `content` list. A `tool_result` block is left out — it holds what a tool
+/// returned, which can quote any tag at all.
+fn own_texts(content: Option<&serde_json::Value>) -> Vec<&str> {
+    match content {
+        Some(serde_json::Value::String(text)) => vec![text.as_str()],
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a load line's text says its skill came from a real folder. Claude
+/// Code opens a skill's loaded text with `Base directory for this skill:
+/// <path>` when it read the skill from a folder: the repo's, the home's or a
+/// plugin's. A skill bundled with Claude Code either has no such line at all
+/// (`/loop`, `update-config`) or names Claude Code's own temporary copy under
+/// `bundled-skills/<version>/<hash>/` (`claude-api`, `run`, as 2.1.287 and
+/// 2.1.293 wrote it). Neither is a skill the person wrote or installed, and
+/// telling them apart by the path rather than by a list of names keeps this
+/// right across Claude Code releases that add or drop a bundled skill.
+fn loaded_from_folder(content: Option<&serde_json::Value>) -> bool {
+    const BASE: &str = "Base directory for this skill:";
+    let Some(text) = own_texts(content).into_iter().next() else {
+        return false;
+    };
+    let Some(rest) = text.strip_prefix(BASE) else {
+        return false;
+    };
+    let path = rest.lines().next().unwrap_or("").trim();
+    // Split on both separators so a Windows path is judged the same way.
+    !path.is_empty() && !path.split(['/', '\\']).any(|part| part == "bundled-skills")
 }
 
 /// Adds every `<command-name>…</command-name>` in `text` to `out`, verbatim.
@@ -6649,9 +6719,9 @@ mod tests {
 
     /// A transcript in the shape Claude Code writes: a slash command as a
     /// user record, then the assistant turns it spent. [`read_transcript`]
-    /// still only totals — the markers are [`skill_markers`]'s own reading of
-    /// this same shape — but the settled-lane tests below also use this to
-    /// build a transcript with more than one turn in it.
+    /// only totals, and the marker carries no load line, so
+    /// [`skill_markers`] would not count it — the settled-lane tests below
+    /// use this to build a transcript with more than one turn in it.
     fn transcript(records: &[(&str, u64)]) -> String {
         let mut out = String::new();
         for (n, (marker, output)) in records.iter().enumerate() {
@@ -9134,97 +9204,177 @@ mod tests {
         assert_eq!(sessions.len(), writers, "every writer's line must survive");
     }
 
-    /// Every `<command-name>` a transcript holds comes back, deduplicated and
-    /// stripped of its surrounding `<command-args>` — what `spoolway eval`'s
-    /// own `skill` filter cycles over.
+    /// A typed slash command's own user line, with the `uuid` its load line
+    /// links back to.
+    fn typed_command(uuid: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-08-04T06:14:15.000Z",
+            "message": {"role": "user", "content":
+                format!("<command-message>{name}</command-message>\n<command-name>{name}</command-name>\n<command-args></command-args>")},
+        })
+    }
+
+    /// An assistant line calling the Skill tool for `skill`, its `tool_use`
+    /// block carrying the `id` a load line links back to.
+    fn skill_call(id: &str, skill: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-08-04T06:14:20.000Z",
+            "message": {
+                "model": "claude-opus-5",
+                "usage": {"input_tokens": 2, "output_tokens": 10},
+                "content": [{"type": "tool_use", "id": id, "name": "Skill", "input": {"skill": skill}}]
+            }
+        })
+    }
+
+    /// The hidden line Claude Code writes when a skill's text loads, in the
+    /// shape it writes it: `isMeta`, the text in one `text` block, and linked
+    /// to its claim by `parentUuid` for a typed command or `sourceToolUseID`
+    /// for a Skill call.
+    fn load_line(link: SkillLink, text: &str) -> serde_json::Value {
+        let mut line = serde_json::json!({
+            "type": "user",
+            "isMeta": true,
+            "uuid": format!("load-{text:.8}"),
+            "timestamp": "2026-08-04T06:14:21.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        });
+        match link {
+            SkillLink::Parent(uuid) => line["parentUuid"] = uuid.into(),
+            SkillLink::ToolUse(id) => {
+                line["parentUuid"] = "some-other-line".into();
+                line["sourceToolUseID"] = id.into();
+            }
+        }
+        line
+    }
+
+    /// What a [`load_line`] links back to.
+    enum SkillLink<'a> {
+        Parent(&'a str),
+        ToolUse(&'a str),
+    }
+
+    /// The loaded text of a skill read from `dir`'s own folder.
+    fn from_folder(dir: &str) -> String {
+        format!("Base directory for this skill: {dir}\n\n# a skill\n\nDo the thing.")
+    }
+
+    /// One JSON value per line, the way a transcript holds them.
+    fn jsonl(lines: &[serde_json::Value]) -> String {
+        lines.iter().map(|v| format!("{v}\n")).collect()
+    }
+
+    /// `skill_markers` over `lines`, written as one claude session's
+    /// transcript under a scratch home named `name`.
+    fn markers_of(name: &str, lines: &[serde_json::Value]) -> BTreeSet<String> {
+        let session = "0198e2c0-8888-4000-8000-00000000d0ff";
+        let home = claude_home_with(name, session, &jsonl(lines));
+        let markers =
+            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
+        std::fs::remove_dir_all(&home).ok();
+        markers
+    }
+
+    /// Every typed command whose skill loaded from a folder comes back,
+    /// deduplicated and stripped of its surrounding `<command-args>` — what
+    /// `spoolway eval`'s own `skill` filter cycles over.
     #[test]
     fn skill_markers_reads_every_command_name_a_transcript_holds() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let session = "0198e2c0-8888-4000-8000-00000000d008";
-        let lines = format!(
-            "{}\n{}\n{}\n",
-            serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":"<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"}}),
-            serde_json::json!({"type":"assistant","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"output_tokens":10}}}),
-            serde_json::json!({"type":"user","timestamp":"2026-08-04T06:20:00.000Z","message":{"role":"user","content":"<command-name>/spoolway-tasks</command-name>\n<command-args></command-args>"}}),
+        let markers = markers_of(
+            "skills",
+            &[
+                typed_command("u-plan", "/spoolway-plan"),
+                load_line(
+                    SkillLink::Parent("u-plan"),
+                    &from_folder("/w/spoolway/.claude/skills/spoolway-plan"),
+                ),
+                serde_json::json!({"type":"assistant","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"output_tokens":10}}}),
+                typed_command("u-tasks", "/spoolway-tasks"),
+                load_line(
+                    SkillLink::Parent("u-tasks"),
+                    &from_folder("/w/spoolway/.claude/skills/spoolway-tasks"),
+                ),
+                typed_command("u-plan-again", "/spoolway-plan"),
+                load_line(
+                    SkillLink::Parent("u-plan-again"),
+                    &from_folder("/w/spoolway/.claude/skills/spoolway-plan"),
+                ),
+            ],
         );
-        let home = claude_home_with("skills", session, &lines);
-        let markers =
-            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
         assert_eq!(
             markers,
             BTreeSet::from(["/spoolway-plan".to_string(), "/spoolway-tasks".to_string()])
         );
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A skill named mid-sentence runs through the Skill tool rather than a
     /// slash command, and writes an assistant `tool_use` block
     /// (`name: "Skill"`, `input.skill: "spoolway-plan"`, no leading slash)
     /// instead of a `<command-name>` marker. `skill_markers` must count that
-    /// the same as a typed `/spoolway-plan` — see the task's own context.
+    /// the same as a typed `/spoolway-plan` once its load line, linked by
+    /// `sourceToolUseID`, shows the skill's text loading from a folder.
     #[test]
     fn skill_markers_reads_a_skill_named_mid_sentence_through_the_skill_tool() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let session = "0198e2c0-8888-4000-8000-00000000d010";
-        let lines = format!(
-            "{}\n{}\n",
-            serde_json::json!({
-                "type":"assistant",
-                "timestamp":"2026-08-04T06:14:20.000Z",
-                "message":{
-                    "model":"claude-opus-5",
-                    "usage":{"input_tokens":2,"output_tokens":10},
-                    "content":[
-                        {"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"spoolway-plan"}}
-                    ]
-                }
-            }),
-            serde_json::json!({
-                "type":"user",
-                "isMeta":true,
-                "timestamp":"2026-08-04T06:14:21.000Z",
-                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]},
-                "sourceToolUseID":"toolu_1"
-            }),
+        let markers = markers_of(
+            "skill-tool",
+            &[
+                skill_call("toolu_1", "spoolway-plan"),
+                serde_json::json!({
+                    "type":"user",
+                    "timestamp":"2026-08-04T06:14:21.000Z",
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Launching skill: spoolway-plan"}]},
+                    "sourceToolUseID":"toolu_1"
+                }),
+                load_line(
+                    SkillLink::ToolUse("toolu_1"),
+                    &from_folder("/home/someone/.claude/skills/spoolway-plan"),
+                ),
+            ],
         );
-        let home = claude_home_with("skill-tool", session, &lines);
-        let markers =
-            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
         assert_eq!(
             markers,
             BTreeSet::from(["spoolway-plan".to_string()]),
             "a skill run through the Skill tool must be read the same as a typed slash command"
         );
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A `<command-name>` tag counts only when it is in a user line's own
     /// text, whether that content is a plain string or a list of `text`
     /// blocks. The same tag inside a `tool_result` block (source code a tool
     /// returned) or inside an assistant message was only read by the
-    /// session, never run, and must not come back as a skill.
+    /// session, never run, and must not come back as a skill — even when a
+    /// load line links to the line that quotes it.
     #[test]
     fn skill_markers_counts_only_a_command_name_in_a_user_lines_own_text() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let session = "0198e2c0-8888-4000-8000-00000000d011";
         let tag = |name: &str| format!("<command-name>{name}</command-name>");
-        let lines = format!(
-            "{}\n",
-            [
-                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":tag("/typed-as-string")}}),
-                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:16.000Z","message":{"role":"user","content":[{"type":"text","text":tag("/typed-as-text-block")}]}}),
-                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:17.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":format!("const OPEN: &str = \"{}\";", tag("{marker}"))}]}}),
-                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:18.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":tag("/perf-{tag}-{j}")}]}]}}),
-                serde_json::json!({"type":"assistant","timestamp":"2026-08-04T06:14:19.000Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":tag("/said-by-assistant")}]}}),
-            ]
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        let loaded = |uuid: &str| {
+            load_line(
+                SkillLink::Parent(uuid),
+                &from_folder(&format!("/w/.claude/skills/{uuid}")),
+            )
+        };
+        let markers = markers_of(
+            "skills-user-text-only",
+            &[
+                serde_json::json!({"type":"user","uuid":"u1","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":tag("/typed-as-string")}}),
+                loaded("u1"),
+                serde_json::json!({"type":"user","uuid":"u2","timestamp":"2026-08-04T06:14:16.000Z","message":{"role":"user","content":[{"type":"text","text":tag("/typed-as-text-block")}]}}),
+                loaded("u2"),
+                serde_json::json!({"type":"user","uuid":"u3","timestamp":"2026-08-04T06:14:17.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":format!("const OPEN: &str = \"{}\";", tag("{marker}"))}]}}),
+                loaded("u3"),
+                serde_json::json!({"type":"user","uuid":"u4","timestamp":"2026-08-04T06:14:18.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":tag("/perf-{tag}-{j}")}]}]}}),
+                loaded("u4"),
+                serde_json::json!({"type":"assistant","uuid":"u5","timestamp":"2026-08-04T06:14:19.000Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":tag("/said-by-assistant")}]}}),
+                loaded("u5"),
+            ],
         );
-        let home = claude_home_with("skills-user-text-only", session, &lines);
-        let markers =
-            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
         assert_eq!(
             markers,
             BTreeSet::from([
@@ -9232,7 +9382,129 @@ mod tests {
                 "/typed-as-text-block".to_string()
             ])
         );
-        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A built-in command loads no skill text: `/clear` is followed by its
+    /// `<local-command-stdout>` line, not a load line. A Skill call for a
+    /// name with no skill behind it writes no load line either. Neither is a
+    /// skill the session ran.
+    #[test]
+    fn skill_markers_skips_a_built_in_command_and_a_skill_call_that_never_loaded() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let markers = markers_of(
+            "skills-built-in",
+            &[
+                typed_command("u-clear", "/clear"),
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "u-clear-out",
+                    "parentUuid": "u-clear",
+                    "timestamp": "2026-08-04T06:14:16.000Z",
+                    "message": {"role": "user", "content": "<local-command-stdout></local-command-stdout>"},
+                }),
+                skill_call("toolu_missing", "no-such-skill"),
+                serde_json::json!({
+                    "type": "user",
+                    "parentUuid": "a1",
+                    "timestamp": "2026-08-04T06:14:21.000Z",
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_missing", "is_error": true, "content": "Unknown skill: no-such-skill"}]},
+                    "sourceToolUseID": "toolu_missing"
+                }),
+            ],
+        );
+        assert!(markers.is_empty(), "{markers:?}");
+    }
+
+    /// A skill bundled with Claude Code is not one the person has: its
+    /// loaded text either has no base directory line at all, or names
+    /// Claude Code's own temporary copy under `bundled-skills/`. Both drop
+    /// out, for a typed command and a Skill call alike, with no list of
+    /// bundled names to keep up to date.
+    #[test]
+    fn skill_markers_skips_a_skill_bundled_with_claude_code() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let markers = markers_of(
+            "skills-bundled",
+            &[
+                typed_command("u-loop", "/loop"),
+                load_line(
+                    SkillLink::Parent("u-loop"),
+                    "# /loop — schedule a recurring or self-paced prompt\n\nRun it.",
+                ),
+                skill_call("toolu_cfg", "update-config"),
+                load_line(
+                    SkillLink::ToolUse("toolu_cfg"),
+                    "# Update Config Skill\n\nModify settings.json.",
+                ),
+                typed_command("u-run", "/run"),
+                load_line(
+                    SkillLink::Parent("u-run"),
+                    &from_folder("/tmp/claude-1000/bundled-skills/2.1.293/9f8e7d6c/run"),
+                ),
+                skill_call("toolu_api", "claude-api"),
+                load_line(
+                    SkillLink::ToolUse("toolu_api"),
+                    &from_folder("/tmp/claude-1000/bundled-skills/2.1.287/0a1b2c3d/claude-api"),
+                ),
+            ],
+        );
+        assert!(markers.is_empty(), "{markers:?}");
+    }
+
+    /// A plugin's skill loads from the plugin's own folder under
+    /// `~/.claude/plugins/`, which spoolway cannot list — but the load line
+    /// names that folder, so the skill counts like any other.
+    #[test]
+    fn skill_markers_counts_a_plugin_skill_that_loaded_from_its_folder() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let markers = markers_of(
+            "skills-plugin",
+            &[
+                skill_call("toolu_plugin", "plugin:skill"),
+                load_line(
+                    SkillLink::ToolUse("toolu_plugin"),
+                    &from_folder(
+                        "/home/someone/.claude/plugins/cache/market/plugin/1.0.0/skills/skill",
+                    ),
+                ),
+            ],
+        );
+        assert_eq!(markers, BTreeSet::from(["plugin:skill".to_string()]));
+    }
+
+    /// A load line is found by the id it links to, not by sitting on the line
+    /// right after its claim: an `attachment` line, or any other, can come
+    /// between them.
+    #[test]
+    fn skill_markers_finds_a_load_line_that_is_not_the_next_line() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let attachment = serde_json::json!({
+            "type": "attachment",
+            "uuid": "u-attach",
+            "parentUuid": "u-pr",
+            "timestamp": "2026-08-04T06:14:15.500Z",
+        });
+        let markers = markers_of(
+            "skills-not-adjacent",
+            &[
+                typed_command("u-pr", "/create-pr"),
+                skill_call("toolu_h", "herdr"),
+                attachment,
+                typed_command("u-clear", "/clear"),
+                load_line(
+                    SkillLink::ToolUse("toolu_h"),
+                    &from_folder("/home/someone/.claude/skills/herdr"),
+                ),
+                load_line(
+                    SkillLink::Parent("u-pr"),
+                    &from_folder("/w/.claude/skills/create-pr"),
+                ),
+            ],
+        );
+        assert_eq!(
+            markers,
+            BTreeSet::from(["/create-pr".to_string(), "herdr".to_string()])
+        );
     }
 
     /// A session with no transcript at all holds no markers — absence, not a
@@ -9351,21 +9623,19 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A transcript for a session `<command-name>/spoolway-plan</command-name>`
-    /// marks, timestamped so `session_span` has something to read — used by
-    /// the `read_sessions` equivalence test above for its subagent, kept
-    /// separate from [`skill_transcript`] (`eval`'s own copy, not reachable
-    /// from here).
+    /// A transcript for a session that typed `/spoolway-plan` and loaded it
+    /// from a folder, timestamped so `session_span` has something to read —
+    /// used by the `read_sessions` equivalence test above for its subagent,
+    /// kept separate from [`skill_transcript`] (`eval`'s own copy, not
+    /// reachable from here).
     fn skill_transcript_for_test() -> String {
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "user",
-                "timestamp": "2026-09-01T09:00:00.000Z",
-                "message": {"role": "user", "content":
-                    "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
-            }),
-        )
+        jsonl(&[
+            typed_command("u-plan", "/spoolway-plan"),
+            load_line(
+                SkillLink::Parent("u-plan"),
+                &from_folder("/w/spoolway/.claude/skills/spoolway-plan"),
+            ),
+        ])
     }
 
     /// Two files can carry the same session id when a transcript rolled over
