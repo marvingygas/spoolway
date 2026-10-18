@@ -502,6 +502,10 @@ was cut from, and registers the GitHub stack. It uses git and `gh` only, so no m
 no tokens are spent. The command does not impose a step name or pipeline position; where or
 whether you call it is up to you.
 
+`spoolway stack` is deprecated and may be removed in a future release. `spoolway doctor` and
+`spoolway sync` name every step that still runs it. See
+[Checking the setup](installation.md#checking-the-setup).
+
 ```mermaid
 flowchart LR
   A[commit leftovers] --> B[squash to one commit] --> H{base branch on origin?}

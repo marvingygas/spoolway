@@ -294,6 +294,20 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
             println!("({report})");
         }
     }
+    // Read the way `doctor` reads it, so both name the same steps. Quietly,
+    // because a stale override is `doctor`'s to report. A load that fails
+    // drops only the note: the note writes no file, and must never change
+    // sync's exit code.
+    let pipelines = crate::pipeline::Pipelines::load_quietly(&repo.checkout, &repo.config);
+    if let Some(sentences) = pipelines
+        .ok()
+        .as_ref()
+        .and_then(crate::commands::stack_deprecation)
+    {
+        for line in stack_note_lines(&sentences) {
+            println!("{line}");
+        }
+    }
 
     println!();
     let nothing_else = wrote.is_empty() && removed.is_empty();
@@ -308,13 +322,30 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     Ok(())
 }
 
+/// The deprecation note as `sync` prints it: under its own `note` word, so it
+/// never reads as a file line that wrote or refused something, and each
+/// sentence on a line of its own, wrapped to [`MAX_LINE`] and indented under
+/// the first.
+fn stack_note_lines(sentences: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for sentence in sentences {
+        for line in crate::screen::wrap(sentence, MAX_LINE) {
+            let word = if lines.is_empty() { "note" } else { "" };
+            lines.push(format!("{word:<8}{line}"));
+        }
+    }
+    lines
+}
+
 /// What `spoolway sync` says when the panel was answered with esc or ctrl-c.
 const CANCELLED: &str = "Nothing was changed.";
 
 /// Every body line, truncated to this many characters before
 /// [`crate::screen::panel`] sizes the box around it — so the panel's total
 /// width, its two border columns included, never exceeds 80 columns whatever
-/// the paths in it are.
+/// the paths in it are. The deprecation note's text wraps to this width too,
+/// after its 8-column `note` gutter, so one of its lines can reach 82
+/// columns: the width the note is drawn at.
 const MAX_LINE: usize = 74;
 
 /// The confirm panel's title.
@@ -3059,6 +3090,32 @@ mod tests {
         assert_eq!(closing_line(false, true, Refused::Files), REFUSED_ONLY);
         assert_eq!(closing_line(false, false, Refused::Files), KEPT);
         assert!(!NOOP.contains("--dry-run"), "{NOOP}");
+    }
+
+    /// The deprecation note prints under its own `note` word, each sentence
+    /// starting a line and the fix wrapped under the first, so it can never
+    /// be read as a file sync wrote or refused.
+    #[test]
+    fn the_stack_note_prints_under_its_own_word_one_sentence_a_line() {
+        let raw = "steps:\n  - id: handover\n    run: spoolway stack\n    on_pass: done\n";
+        let mut pipelines = std::collections::BTreeMap::new();
+        for name in ["default", "bugfix"] {
+            pipelines.insert(name.to_string(), serde_norway::from_str(raw).unwrap());
+        }
+        let pipelines = crate::pipeline::Pipelines {
+            pipelines,
+            ignored_overrides: Vec::new(),
+        };
+        let sentences = crate::commands::stack_deprecation(&pipelines).unwrap();
+        assert_eq!(
+            stack_note_lines(&sentences),
+            [
+                "note    `spoolway stack` is deprecated and may be removed in a future release.",
+                "        Still run by: bugfix · handover, default · handover.",
+                "        Run `spoolway init` to add the `create-pr` prompt, then replace each step",
+                "        with an agent step on it — see docs/migrations.md",
+            ]
+        );
     }
 
     /// The sync nothing used to perform: a config written before a setting

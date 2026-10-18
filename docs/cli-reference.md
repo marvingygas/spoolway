@@ -1680,6 +1680,10 @@ for each replaced key block, each value `sync` set on its own, each group of unk
 it kept, and each group of retired settings it dropped. See
 [Unknown keys](configuration.md#unknown-keys).
 
+When a step runs `spoolway stack`, the report ends with a `note` that names each
+`pipeline · step`, above the closing line. See
+[Keeping a project's files current](installation.md#keeping-a-projects-files-current).
+
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
 a project that `sync` would change.
 
@@ -1764,6 +1768,9 @@ prints a note with the fix and is never a failure. See [Editor](dispatcher.md#ed
 ```
   ok    editor — notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths
 ```
+
+A note names each `pipeline · step` that runs `spoolway stack`, and says the command is
+deprecated. See [Checking the setup](installation.md#checking-the-setup).
 
 A note names each file `sync` refuses, on its own line with the reason. A refused file is not
 counted in the `file(s) are behind this spoolway` note. See [Files spoolway

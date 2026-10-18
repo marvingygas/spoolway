@@ -537,16 +537,25 @@ fn screen_stop_reason(ceiling: &crate::dispatch::Ceiling) -> String {
 /// [`crate::commands::doctor`]'s own `reaches_forge` reuses this same
 /// answer for the other thing that step needs, `gh`.
 pub(crate) fn stack_step(pipelines: &Pipelines) -> Option<&str> {
+    stack_steps(pipelines).first().map(|(_, step)| *step)
+}
+
+/// Every step whose `run:` calls `spoolway stack`, as `(pipeline, step)`
+/// pairs in pipeline-name order — what `doctor` and `sync` name in their
+/// deprecation note. [`stack_step`] is its first entry, so the note and the
+/// `gh` and git-identity checks never disagree about which steps count.
+pub(crate) fn stack_steps(pipelines: &Pipelines) -> Vec<(&str, &str)> {
     pipelines
         .pipelines
-        .values()
-        .flat_map(|pipeline| &pipeline.steps)
-        .find(|step| {
+        .iter()
+        .flat_map(|(name, pipeline)| pipeline.steps.iter().map(move |step| (name, step)))
+        .filter(|(_, step)| {
             step.run
                 .as_deref()
                 .is_some_and(|run| run.contains("spoolway stack"))
         })
-        .map(|step| step.id.as_str())
+        .map(|(name, step)| (name.as_str(), step.id.as_str()))
+        .collect()
 }
 
 /// Why this project would ever run `git commit` on its own — `None` for a
@@ -1889,6 +1898,34 @@ mod tests {
         assert_eq!(stack_step(&Pipelines::builtin()), Some("handover"));
         let shipped = Pipelines::shipped(&crate::config::Config::default()).unwrap();
         assert_eq!(stack_step(&shipped), None);
+    }
+
+    /// `stack_steps` names every such step with its pipeline, two in one
+    /// pipeline included, skips a step that runs something else, and its
+    /// first entry is the one `stack_step` answers with.
+    #[test]
+    fn stack_steps_lists_every_stack_step_and_starts_with_stack_step() {
+        let parse = |raw: &str| -> Pipeline { serde_norway::from_str(raw).unwrap() };
+        let mut pipelines = std::collections::BTreeMap::new();
+        pipelines.insert(
+            "default".to_string(),
+            parse("steps:\n  - id: build\n    run: x\n    on_pass: land\n  - id: land\n    run: spoolway stack\n    on_pass: done\n"),
+        );
+        pipelines.insert(
+            "bugfix".to_string(),
+            parse("steps:\n  - id: a\n    run: spoolway stack\n    on_pass: b\n  - id: b\n    run: spoolway stack --squash\n    on_pass: done\n"),
+        );
+        let pipelines = Pipelines {
+            pipelines,
+            ignored_overrides: Vec::new(),
+        };
+        assert_eq!(
+            stack_steps(&pipelines),
+            [("bugfix", "a"), ("bugfix", "b"), ("default", "land")]
+        );
+        assert_eq!(stack_step(&pipelines), Some("a"));
+        let shipped = Pipelines::shipped(&crate::config::Config::default()).unwrap();
+        assert!(stack_steps(&shipped).is_empty());
     }
 
     /// A pipeline with no `spoolway stack` step and `auto_commit` off never

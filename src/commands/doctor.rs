@@ -232,7 +232,7 @@ pub(crate) enum Warning {
 /// `doctor()`'s own doc comment for the order these checks run in, which
 /// this mirrors except for the calls named below.
 ///
-/// Four more of `doctor()`'s own rows are left out on purpose, not merely
+/// Five more of `doctor()`'s own rows are left out on purpose, not merely
 /// skipped for being expensive:
 ///
 /// - The override-layer note has its own screen one step earlier, in
@@ -254,6 +254,9 @@ pub(crate) enum Warning {
 /// - [`unrouted_model_notes`] is never called: a `[models]` row no step routes
 ///   to is dead config that costs nothing at run time, so it is worth naming
 ///   in the `spoolway doctor` report but not worth stopping a run over.
+/// - [`stack_deprecation`] is never called either: a step that still runs
+///   `spoolway stack` still works, so its note is the report's to carry and
+///   no reason to hold a run.
 pub(crate) fn cheap_findings(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -522,6 +525,9 @@ pub fn doctor(
     let unattended = repo.unattended();
     report.record_all(model_health_checks(pipelines, &config, unattended));
     report.record_all(unrouted_model_notes(pipelines, &config));
+    if let Some(sentences) = stack_deprecation(pipelines) {
+        report.record(Finding::Note(sentences.join(" ")));
+    }
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines, unattended));
@@ -2144,6 +2150,34 @@ fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
         })
         .map(|glob| Finding::Note(format!("model `{glob}` routes to no step")))
         .collect()
+}
+
+/// The deprecation note for every step that still runs `spoolway stack`, as
+/// its three sentences: the deprecation, the steps by `pipeline · step`, and
+/// the fix. `None` when no step runs it, so a project that has already moved
+/// hears nothing. Kept as sentences rather than one string because `sync`
+/// starts each on a line of its own, while `doctor` joins them into one row.
+///
+/// Recorded in a report only by `doctor()` and printed by `sync::run`, never
+/// by [`cheap_findings`]: the command still works, so the note is worth
+/// reading in a report but not worth stopping a run at the dispatcher's
+/// warnings screen, the same call [`unrouted_model_notes`] makes.
+pub(crate) fn stack_deprecation(pipelines: &Pipelines) -> Option<[String; 3]> {
+    let steps = crate::commands::dispatch::stack_steps(pipelines);
+    if steps.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = steps
+        .iter()
+        .map(|(pipeline, step)| format!("{pipeline} · {step}"))
+        .collect();
+    Some([
+        "`spoolway stack` is deprecated and may be removed in a future release.".into(),
+        format!("Still run by: {}.", named.join(", ")),
+        "Run `spoolway init` to add the `create-pr` prompt, then replace each step \
+         with an agent step on it — see docs/migrations.md"
+            .into(),
+    ])
 }
 
 /// Every check and note that reads a model's own settings rather than an
@@ -5197,6 +5231,35 @@ mod tests {
         assert!(reaches_forge(&pipelines, &tracking("")));
     }
 
+    /// The deprecation note is one row naming every `pipeline · step` that
+    /// runs `spoolway stack`, not only the first one `stack_step` finds.
+    #[test]
+    fn stack_deprecation_names_every_step_that_runs_stack() {
+        let mut pipelines =
+            single_step_pipelines("  - id: handover\n    run: spoolway stack\n    on_pass: done\n");
+        let bugfix = single_step_pipelines(
+            "  - id: land\n    run: spoolway stack --squash\n    on_pass: done\n",
+        );
+        pipelines
+            .pipelines
+            .insert("bugfix".to_string(), bugfix.pipelines["default"].clone());
+        assert_eq!(
+            stack_deprecation(&pipelines).unwrap().join(" "),
+            "`spoolway stack` is deprecated and may be removed in a future release. \
+             Still run by: bugfix · land, default · handover. \
+             Run `spoolway init` to add the `create-pr` prompt, then replace each step \
+             with an agent step on it — see docs/migrations.md"
+        );
+    }
+
+    /// A project with no step running `spoolway stack` — the shipped pipelines
+    /// among them — hears nothing new.
+    #[test]
+    fn stack_deprecation_is_silent_without_a_stack_step() {
+        let shipped = Pipelines::shipped(&Config::default()).unwrap();
+        assert!(stack_deprecation(&shipped).is_none());
+    }
+
     /// An agent step on the shipped `create-pr` prompt opens its pull request
     /// with `gh`, so the shipped pipelines reach the forge on their own.
     #[test]
@@ -6347,6 +6410,26 @@ mod tests {
             warnings.iter().all(|w| match w {
                 Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
                     !t.starts_with("editor") && !t.contains("editor.toml"),
+            }),
+            "{warnings:?}"
+        );
+    }
+
+    /// A step still running `spoolway stack` still works, so its deprecation
+    /// note stays in the `doctor` report and off the warnings screen a
+    /// dispatcher shows before a run.
+    #[test]
+    fn cheap_findings_carries_no_stack_deprecation_note() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-stack");
+        let pipelines = Pipelines::builtin();
+        // The built-in fixture runs `spoolway stack`, so `doctor` would note it.
+        assert!(stack_deprecation(&pipelines).is_some());
+
+        let warnings = cheap_findings(&repo, &pipelines, &Config::default(), false);
+        assert!(
+            warnings.iter().all(|w| match w {
+                Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
+                    !t.contains("is deprecated"),
             }),
             "{warnings:?}"
         );

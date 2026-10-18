@@ -358,6 +358,16 @@ works "and the real run changed on disk exactly the files it reported" \
 
 lacks "sync refused no file of the 0.6.0 project as a copy it does not know" \
   "refused " "$WORK/0.6.0/real.out"
+
+# Both of 0.6.0's pipelines end in `spoolway stack`, so sync names the step to
+# change, in a dry run and a real one alike, and the note adds no file to the
+# lists compared above.
+has "the 0.6.0 dry run names the deprecated spoolway stack" \
+  "\`spoolway stack\` is deprecated" "$WORK/0.6.0/dry.out"
+has "and the real run names it too" \
+  "\`spoolway stack\` is deprecated" "$WORK/0.6.0/real.out"
+has "naming the step that still runs it, pipeline first" \
+  "Still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
 
@@ -500,6 +510,8 @@ for fixture_dir in "$FIXTURES"/*/; do
     bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
   lacks "sync refused no file of the $version project as a copy it does not know" \
     "refused " "$WORK/$version/real.out"
+  has "sync names the deprecated spoolway stack in the $version project" \
+    "\`spoolway stack\` is deprecated" "$WORK/$version/real.out"
   says "and a second sync of the $version project has nothing left to do" \
     "Nothing updating." \
     "$SPOOLWAY" sync
