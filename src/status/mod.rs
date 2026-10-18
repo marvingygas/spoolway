@@ -783,8 +783,8 @@ impl Board {
             BoardMode::ResumePicker(picker) => {
                 self.on_key_resume_picker(repo, pipelines, picker, key)?
             }
-            BoardMode::ConfirmUnqueue { chain, dir } => {
-                self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)?
+            BoardMode::ConfirmUnqueue { name, chain, dir } => {
+                self.on_key_unqueue_confirm(repo, pipelines, name, chain, dir, key)?
             }
             BoardMode::ConfirmRestart(confirm) => {
                 self.on_key_restart_confirm(repo, pipelines, confirm, key)?
@@ -822,7 +822,7 @@ impl Board {
     }
 
     /// `o`: open [`BoardMode::Options`] on the cursor's row, titled with its
-    /// task's id and listing only the [`RowAction`]s that row can take now
+    /// task's name and listing only the [`RowAction`]s that row can take now
     /// — see [`row_actions`]. A no-op with no cursor. A cursor on a task
     /// neither the queue nor the archive has still opens the menu, with
     /// nothing in it: `o` always answers with a popup, so a press never
@@ -832,8 +832,14 @@ impl Board {
             return Ok(());
         };
         let items = row_actions(repo, pipelines, &id)?;
+        // A task neither the queue nor the archive has still opens the
+        // menu, so its title falls back to the id the cursor carries.
+        let name = repo
+            .task(&id)
+            .map_or_else(|_| id.clone(), |task| task.display_name().to_string());
         self.mode = BoardMode::Options(OptionsMenu {
             id,
+            name,
             items,
             cursor: 0,
         });
@@ -942,6 +948,7 @@ impl Board {
         };
         self.mode = BoardMode::ResumePicker(ResumePicker {
             id: id.to_string(),
+            name: task.display_name().to_string(),
             hold: Hold::of(&task),
             header: format!("`{id}` cannot be resumed from the board right now."),
             rows: Vec::new(),
@@ -1019,7 +1026,7 @@ impl Board {
     }
 
     /// The options menu's `pause`: park task `id`, opening
-    /// [`BoardMode::ConfirmPause`] first — titled with its id — only when
+    /// [`BoardMode::ConfirmPause`] first — titled with its name — only when
     /// that task's own step has an agent turn or a command run live right
     /// now. A no-op on a task the queue no longer has, or on one
     /// [`pausable`] refuses — a `paused` one.
@@ -1046,7 +1053,7 @@ impl Board {
         let scheduled = tasks[i].front.gate_at.as_deref() == Some(aborts[0].step.as_str());
         self.mode = BoardMode::ConfirmPause(PauseConfirm {
             aborts,
-            id,
+            name: tasks[i].display_name().to_string(),
             scheduled,
             cursor: 0,
         });
@@ -1179,6 +1186,7 @@ impl Board {
         };
         self.mode = BoardMode::ConfirmRestart(RestartConfirm {
             id,
+            name: task.display_name().to_string(),
             step,
             ends,
             error: refused,
@@ -1257,6 +1265,7 @@ impl Board {
             return Ok(());
         }
         self.mode = BoardMode::ConfirmUnqueue {
+            name: task.display_name().to_string(),
             chain: unqueue_chain(&tasks, &id),
             dir: repo.pending_dir(),
         };
@@ -1267,6 +1276,7 @@ impl Board {
         &mut self,
         repo: &Repo,
         pipelines: &Pipelines,
+        name: String,
         chain: Vec<ChainEntry>,
         dir: PathBuf,
         key: crate::screen::Key,
@@ -1295,7 +1305,7 @@ impl Board {
                 self.cursor = next;
             }
             Key::Esc => {}
-            _ => self.mode = BoardMode::ConfirmUnqueue { chain, dir },
+            _ => self.mode = BoardMode::ConfirmUnqueue { name, chain, dir },
         }
         Ok(())
     }
@@ -1360,6 +1370,11 @@ enum BoardMode {
     /// same as every confirm panel here: a task a moment ago and the
     /// task now are not guaranteed to be the same file.
     ConfirmUnqueue {
+        /// What the title calls the chain's head: its
+        /// [`crate::task::Task::display_name`], so a routine copy reads as
+        /// its routine. The body keeps every task's id, since it names the
+        /// file each one goes back to.
+        name: String,
         chain: Vec<ChainEntry>,
         dir: PathBuf,
     },
@@ -1381,13 +1396,15 @@ impl BoardMode {
             BoardMode::Browsing => None,
             BoardMode::Options(menu) => Some(options_panel(menu)),
             BoardMode::ConfirmPause(confirm) => Some(pause_confirm_panel(
-                &confirm.id,
+                &confirm.name,
                 &confirm.aborts[0],
                 confirm.scheduled,
                 confirm.cursor,
             )),
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
-            BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
+            BoardMode::ConfirmUnqueue { name, chain, dir } => {
+                Some(unqueue_confirm_panel(name, chain, dir))
+            }
             BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
             // Wrapped no wider than the board has room for, so a narrow
             // terminal still sees the popup's right border: a notice line
@@ -1406,6 +1423,10 @@ impl BoardMode {
 /// frame; `enter` asks the picked action's own check again before acting.
 struct OptionsMenu {
     id: String,
+    /// What the title calls the task: its
+    /// [`crate::task::Task::display_name`], so a routine copy reads as its
+    /// routine. Everything the menu acts on goes by `id`.
+    name: String,
     items: Vec<RowAction>,
     cursor: usize,
 }
@@ -1433,10 +1454,10 @@ impl RowAction {
     }
 }
 
-/// The options menu for `menu`, titled with its task's id.
+/// The options menu for `menu`, titled with its task's name.
 fn options_panel(menu: &OptionsMenu) -> Vec<String> {
     let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
-    crate::screen::options(&menu.id, &items, menu.cursor)
+    crate::screen::options(&menu.name, &items, menu.cursor)
 }
 
 /// Every [`RowAction`] task `id` can take right now, in menu order.
@@ -1482,14 +1503,17 @@ fn pausable(task: &crate::task::Task) -> bool {
     task.stage() != crate::pipeline::PAUSED
 }
 
-/// [`BoardMode::ConfirmPause`]'s state: what pausing task `id` would
-/// abort, named, and nothing acted on yet. The cursor opens on `pause now`,
+/// [`BoardMode::ConfirmPause`]'s state: what pausing a task would abort,
+/// named, and nothing acted on yet. The cursor opens on `pause now`,
 /// which carries the pause out; the second answer leaves every named abort
 /// running and schedules its task's `gate_at` for the step it is on instead
 /// — or clears that schedule, while `scheduled` says it is already set.
 struct PauseConfirm {
     aborts: Vec<Abort>,
-    id: String,
+    /// What the title calls the task: its
+    /// [`crate::task::Task::display_name`], so a routine copy reads as its
+    /// routine. Everything the panel acts on goes by each abort's `task`.
+    name: String,
     /// Whether the task's `gate_at` already names the step it is on, read
     /// when `pause` opened the panel.
     scheduled: bool,
@@ -1515,6 +1539,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let picker = ResumePicker {
         id: "login".to_string(),
+        name: "login".to_string(),
         hold: Hold {
             stage: crate::pipeline::PAUSED.to_string(),
             paused_at: Some("review".to_string()),
@@ -1534,6 +1559,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let restart = RestartConfirm {
         id: "login".to_string(),
+        name: "login".to_string(),
         step: "implement".to_string(),
         ends: RestartEnds::Agent {
             lane: "login · implement".to_string(),
@@ -1543,6 +1569,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let restart_command = RestartConfirm {
         id: "login".to_string(),
+        name: "login".to_string(),
         step: "handover".to_string(),
         ends: RestartEnds::Command {
             elapsed: Some(Duration::from_secs(141)),
@@ -1570,17 +1597,22 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
         ),
         (
             "unqueue",
-            unqueue_confirm_panel(&[entry("login", &[])], pending),
+            unqueue_confirm_panel("login", &[entry("login", &[])], pending),
         ),
         (
             "unqueue, with a dependent",
-            unqueue_confirm_panel(&[entry("login", &[]), entry("logout", &["login"])], pending),
+            unqueue_confirm_panel(
+                "login",
+                &[entry("login", &[]), entry("logout", &["login"])],
+                pending,
+            ),
         ),
         ("resume picker", resume_picker_panel(&picker, None)),
         (
             "options",
             options_panel(&OptionsMenu {
                 id: "login".to_string(),
+                name: "login".to_string(),
                 items: vec![RowAction::Open, RowAction::Pause, RowAction::Restart],
                 cursor: 0,
             }),
@@ -1598,6 +1630,10 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
 struct ResumePicker {
     /// The task being resumed.
     id: String,
+    /// What the title calls the task: its
+    /// [`crate::task::Task::display_name`], so a routine copy reads as its
+    /// routine. Everything the picker acts on goes by `id`.
+    name: String,
     /// The task's hold when the picker opened — see [`Hold`].
     hold: Hold,
     /// Where the task stopped, in words — the line above the list.
@@ -1621,6 +1657,10 @@ struct ResumePicker {
 struct RestartConfirm {
     /// The task being restarted.
     id: String,
+    /// What the title calls the task: its
+    /// [`crate::task::Task::display_name`], so a routine copy reads as its
+    /// routine. Everything the panel acts on goes by `id`.
+    name: String,
     /// The step it would start over — [`crate::commands::restart_step`]'s.
     step: String,
     /// What the restart ends on that step, which decides the panel's form.
@@ -1945,6 +1985,7 @@ fn resume_picker(
         .unwrap_or(0);
     Ok(ResumePicker {
         id: task.id().to_string(),
+        name: task.display_name().to_string(),
         hold: Hold::of(task),
         header: picker_header(task, pipeline, stopped.as_deref()),
         rows,
@@ -5160,9 +5201,11 @@ struct QueueView<'a> {
 }
 
 /// A RECENT event for a task that just moved from `was` to `stage`, worded
-/// by [`view::sentence`] from what [`classify`] makes of the move.
+/// by [`view::sentence`] from what [`classify`] makes of the move, and named
+/// by the routine the task is a copy of when it is one.
 fn arrival_event(now: &str, id: &str, was: &str, stage: &str, queue: &QueueView) -> RecentEvent {
-    let change = match queue.tasks.iter().find(|t| t.id() == id) {
+    let task = queue.tasks.iter().find(|t| t.id() == id);
+    let change = match task {
         Some(task) => classify(was, stage, task, queue),
         // `build` only asks about an id it read out of this same queue, so
         // this is not reached; a move with no task file to read is named
@@ -5175,8 +5218,18 @@ fn arrival_event(now: &str, id: &str, was: &str, stage: &str, queue: &QueueView)
     RecentEvent::Arrival {
         at: now.to_string(),
         id: id.to_string(),
+        routine: task.and_then(routine_of),
         change,
     }
+}
+
+/// The routine `task` is a queued copy of, for [`RecentEvent::Arrival`]'s
+/// `routine`. Read through [`crate::task::Task::routine`], which is also
+/// what [`crate::task::Task::display_name`] falls back from, so a copy whose
+/// `routine:` was edited away or left blank is named by its id rather than
+/// drawn under an empty name.
+fn routine_of(task: &crate::task::Task) -> Option<String> {
+    task.routine().map(str::to_string)
 }
 
 /// What a task did to move from `was` to `stage`, read off its task file and
@@ -5623,6 +5676,9 @@ fn finished_from(was: &str, pipeline: Option<&crate::pipeline::Pipeline>) -> Opt
 /// last saw it on, classified against the archived file the way any other
 /// move is. One the board already saw on `done` has had its line, and would
 /// otherwise read as having passed `done` itself.
+///
+/// The archived file keeps a routine copy's `routine:`, so a finished copy
+/// is named by its routine too.
 fn finished_event(now: &str, id: &str, was: &str, queue: &QueueView) -> Option<RecentEvent> {
     use crate::pipeline::DONE;
 
@@ -5634,6 +5690,7 @@ fn finished_event(now: &str, id: &str, was: &str, queue: &QueueView) -> Option<R
     (archived.stage() == DONE).then(|| RecentEvent::Arrival {
         at: now.to_string(),
         id: id.to_string(),
+        routine: routine_of(&archived),
         change: classify(was, DONE, &archived, queue),
     })
 }
@@ -5641,20 +5698,19 @@ fn finished_event(now: &str, id: &str, was: &str, queue: &QueueView) -> Option<R
 /// Pushes one event onto the ticker's memory, keeping it to [`RECENT`] long.
 ///
 /// Kept oldest first; [`view::ticker`] draws it newest on top. An arrival
-/// first drops any earlier arrival for the same task already sitting in
-/// `recent`: two moves of the same task inside the window are one row, not
-/// two, and the later move is the one worth a task's single slot.
+/// first drops any earlier arrival on the same line already sitting in
+/// `recent` — the same task, or any copy of the same routine, see
+/// [`RecentEvent::key`]: two moves on one line inside the window are one
+/// row, not two, and the later move is the one worth its single slot. Every
+/// run of a routine is a new task id, so without the routine's own line a
+/// routine run every hour would fill the ticker with its own runs. Two live
+/// copies of one routine share the line the same way, and the later move
+/// keeps it.
 /// Dropping it before the ring-buffer trim below also means a coalesced
 /// arrival never itself evicts another task's news just because a task
 /// bounced between steps.
 fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
-    let RecentEvent::Arrival { id, .. } = &event;
-    recent.retain(|existing| {
-        let RecentEvent::Arrival {
-            id: existing_id, ..
-        } = existing;
-        existing_id != id
-    });
+    recent.retain(|existing| existing.key() != event.key());
     if recent.len() == RECENT {
         recent.pop_front();
     }
@@ -8436,6 +8492,7 @@ mod tests {
                 RecentEvent::Arrival {
                     at: "10:00".into(),
                     id: format!("task-{i}"),
+                    routine: None,
                     change: Move::Started {
                         to: format!("line {i}"),
                     },
@@ -8464,6 +8521,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:20".into(),
                 id: "other-task".into(),
+                routine: None,
                 change: Move::Started {
                     to: "review".into(),
                 },
@@ -8474,6 +8532,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:21".into(),
                 id: "gate-board".into(),
+                routine: None,
                 change: Move::Started { to: "task".into() },
             },
         );
@@ -8482,6 +8541,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:22".into(),
                 id: "gate-board".into(),
+                routine: None,
                 change: Move::Started {
                     to: "checks".into(),
                 },
@@ -8508,6 +8568,41 @@ mod tests {
             .position(|l| l.contains("gate-board"))
             .unwrap();
         assert!(gate_row < other_row, "the later move sits on top: {block}");
+    }
+
+    /// Two live copies of one routine share its one RECENT row, and the later
+    /// move keeps it, the same as two moves of one task. A plain task whose id
+    /// is the routine's name keeps a row of its own, and so does a copy with
+    /// no routine on file.
+    #[test]
+    fn copies_of_one_routine_share_a_row_and_a_plain_task_keeps_its_own() {
+        let event = |at: &str, id: &str, routine: Option<&str>, to: &str| RecentEvent::Arrival {
+            at: at.into(),
+            id: id.into(),
+            routine: routine.map(str::to_string),
+            change: Move::Started { to: to.into() },
+        };
+        let mut recent = VecDeque::new();
+        for moved in [
+            event("10:00", "release-8", Some("release"), "fixture"),
+            event("10:01", "release", None, "implement"),
+            event("10:02", "release-9", Some("release"), "review"),
+            event("10:03", "release-7", None, "test"),
+        ] {
+            push_recent(&mut recent, moved);
+        }
+
+        let block = strip(&ticker(&recent, 120, 10));
+        let lines: Vec<&str> = block.lines().skip(2).map(str::trim).collect();
+        assert_eq!(
+            lines,
+            [
+                "10:03   release-7   started, moved to test",
+                "10:02   release     started, moved to review",
+                "10:01   release     started, moved to implement",
+            ],
+            "{block}"
+        );
     }
 
     /// Entering the queue is not a step change: it is already a new row on
@@ -8646,6 +8741,48 @@ mod tests {
         let block = drawn(&board);
         assert!(
             block.contains("board-tabs   passed handover, moved to done"),
+            "{block}"
+        );
+    }
+
+    /// A routine copy's RECENT line names its routine, whether the move is a
+    /// live copy's or a finished copy's read back off the archive, and the
+    /// archived copy's line replaces the live one's. A copy whose `routine:`
+    /// was left blank keeps its id.
+    #[test]
+    fn a_routine_copy_reads_as_its_routine_live_and_archived() {
+        let (repo, _root_guard) = fixture("recent-routine");
+        let pipelines = Pipelines::builtin();
+        let queue_copy = |id: &str, stage: &str, routine: &str| {
+            add_to(&repo, id, &[], Some(stage), Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.front.routine = Some(routine.into());
+            task.save().unwrap();
+        };
+        queue_copy("review-prs-23", "implement", "review-prs");
+        queue_copy("review-prs-24", "handover", "review-prs");
+        queue_copy("fix-2", "implement", " ");
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        for id in ["review-prs-23", "fix-2"] {
+            let mut task = repo.task(id).unwrap();
+            task.set_stage("review", None);
+            task.save().unwrap();
+        }
+        read_once(&mut board, &repo, &pipelines);
+        let block = drawn(&board);
+        assert!(block.contains("review-prs   "), "{block}");
+        assert!(block.contains("fix-2   "), "{block}");
+        assert!(!block.contains("review-prs-23"), "{block}");
+
+        archive_on(&repo, "review-prs-24", crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+        let block = drawn(&board);
+        let lines: Vec<&str> = block.lines().filter(|l| l.contains("review-prs")).collect();
+        assert_eq!(lines.len(), 1, "{block}");
+        assert!(
+            lines[0].contains("review-prs   passed handover, moved to done"),
             "{block}"
         );
     }
@@ -11241,6 +11378,65 @@ mod tests {
                 )
                 .unwrap(),
         )
+    }
+
+    /// Every popup a row opens titles a routine copy with its routine's name,
+    /// never its numbered id: the options menu, and the pause, restart,
+    /// resume and unqueue panels. The unqueue panel's body still names the
+    /// file the copy goes back to by its id.
+    #[test]
+    fn every_row_popup_titles_a_routine_copy_by_its_routine() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("routine-popup-titles");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        let queue_copy = |id: &str, stage: Option<&str>, routine: &str| {
+            add_to(&repo, id, &[], stage, Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.front.routine = Some(routine.into());
+            task.save().unwrap();
+        };
+        queue_copy("review-prs-24", Some("implement"), "review-prs");
+        queue_copy("nightly-3", None, "nightly");
+        queue_copy("docs-5", None, "docs");
+        let mut held = repo.task("nightly-3").unwrap();
+        held.front.paused_at = Some("implement".into());
+        held.set_stage(crate::pipeline::PAUSED, None);
+        held.save().unwrap();
+        let (_mux, _name) =
+            live_headless_lane_at(&repo, "review-prs-24", "implement", "implementer");
+
+        // `Some` picks that action from the options menu; `None` presses
+        // `key` instead, `o` for the menu itself or `r` for the resume picker.
+        let mut board = Board::for_test();
+        let mut panel_on = |id: &str, open: Option<RowAction>, key: Key| {
+            board.cursor = Some(id.to_string());
+            match open {
+                Some(action) => pick(&mut board, &repo, &pipelines, action),
+                None => board.on_key(&repo, &pipelines, key).unwrap(),
+            }
+            let Some(panel) = board.mode.panel() else {
+                panic!("no popup opened on {id}");
+            };
+            board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+            assert!(matches!(board.mode, BoardMode::Browsing), "{panel:?}");
+            panel
+        };
+
+        let options = panel_on("review-prs-24", None, Key::Char('o'));
+        assert!(options[0].contains("─ review-prs ─"), "{options:?}");
+        let pause = panel_on("review-prs-24", Some(RowAction::Pause), Key::Esc);
+        assert!(pause[0].contains("─ pause review-prs ─"), "{pause:?}");
+        let restart = panel_on("review-prs-24", Some(RowAction::Restart), Key::Esc);
+        assert!(restart[0].contains("─ restart review-prs ─"), "{restart:?}");
+        let resume = panel_on("nightly-3", None, Key::Char('r'));
+        assert!(resume[0].contains("─ resume nightly ─"), "{resume:?}");
+        let unqueue = panel_on("docs-5", Some(RowAction::Unqueue), Key::Esc);
+        assert!(unqueue[0].contains("─ unqueue docs ─"), "{unqueue:?}");
+        assert!(
+            unqueue.iter().any(|line| line.contains("docs-5.md")),
+            "{unqueue:?}"
+        );
     }
 
     /// `restart` on the row list opens the restart panel, not the pause panel's

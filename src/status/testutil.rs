@@ -122,6 +122,7 @@ pub fn arrivals(n: usize) -> VecDeque<RecentEvent> {
         .map(|i| RecentEvent::Arrival {
             at: format!("10:0{i}"),
             id: format!("task-{i}"),
+            routine: None,
             change: Move::Started {
                 to: format!("note {i}"),
             },
@@ -213,11 +214,16 @@ fn headless_lane_running(
 
     let mux = crate::mux::backend(repo).unwrap();
     let pane = mux.create_pane(&repo.root, id).unwrap();
-    let name = crate::mux::run_key(step, id);
+    // Named as the dispatcher names it, which for a routine copy is its
+    // routine's name rather than its numbered id, and keyed by the id.
+    let key = crate::mux::run_key(step, id);
+    let name = repo
+        .task(id)
+        .map_or_else(|_| key.clone(), |task| crate::mux::lane_name(step, &task));
     mux.start_lane(
         &crate::mux::LaneSpec {
             name: &name,
-            key: &name,
+            key: &key,
             label,
             kind: "pi",
             pane_id: &pane.pane_id,

@@ -197,8 +197,47 @@ pub(crate) enum RecentEvent {
     Arrival {
         at: String,
         id: String,
+        /// The routine the task is a queued copy of, from
+        /// [`crate::task::Task::routine`], read off the task file the move
+        /// was classified against. RECENT draws it in place of `id` — see
+        /// [`RecentEvent::name`] — and keeps one line per routine on it —
+        /// see [`RecentEvent::key`]. `None` on a task queued any other way,
+        /// and on a copy whose line was edited away or left blank.
+        routine: Option<String>,
         change: Move,
     },
+}
+
+impl RecentEvent {
+    /// What the RECENT line names the task by: the routine a queued copy
+    /// was made from, and the id otherwise — the same rule as
+    /// [`Row::name`]. The id's `-N` only keeps two runs' files apart, and
+    /// RECENT is read by a person, never handed back to a command.
+    pub(crate) fn name(&self) -> &str {
+        let RecentEvent::Arrival { id, routine, .. } = self;
+        routine.as_deref().unwrap_or(id)
+    }
+
+    /// Which line of RECENT this event replaces: every copy of one routine
+    /// shares a line, and any other task has one of its own. The two kinds
+    /// are kept apart so a plain task whose id happens to equal a routine's
+    /// name never folds into that routine's line.
+    pub(crate) fn key(&self) -> RecentKey<'_> {
+        match self {
+            RecentEvent::Arrival {
+                routine: Some(routine),
+                ..
+            } => RecentKey::Routine(routine),
+            RecentEvent::Arrival { id, .. } => RecentKey::Task(id),
+        }
+    }
+}
+
+/// The line of RECENT an event belongs to — see [`RecentEvent::key`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecentKey<'a> {
+    Routine(&'a str),
+    Task(&'a str),
 }
 
 /// What a task did to move, and between which steps. Each variant is one
@@ -322,15 +361,15 @@ impl Cause {
     }
 }
 
-/// [`BoardMode::ConfirmPause`]'s panel, `pause`'s own: one abort, so the body
-/// names the step it is on directly rather than repeating the task id the
-/// title already carries. A command step adds two lines saying what pausing
+/// [`BoardMode::ConfirmPause`]'s panel, `pause`'s own, titled with the
+/// task's `name`: one abort, so the body names the step it is on directly
+/// rather than repeating the task the title already names. A command step adds two lines saying what pausing
 /// does to it, since unlike an agent's turn its process is ended and its run
 /// starts over; an agent step needs no such warning.
 ///
 /// Its answers are [`pause_answers`].
 pub(super) fn pause_confirm_panel(
-    id: &str,
+    name: &str,
     abort: &Abort,
     scheduled: bool,
     cursor: usize,
@@ -350,7 +389,7 @@ pub(super) fn pause_confirm_panel(
         body.push("Resuming restarts the command.".to_string());
     }
     crate::screen::ask(
-        &format!("pause {id}"),
+        &format!("pause {name}"),
         &body,
         &pause_answers(abort, scheduled),
         cursor,
@@ -443,7 +482,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
         );
     }
     crate::screen::ask(
-        &format!("restart {}", confirm.id),
+        &format!("restart {}", confirm.name),
         &body,
         &["restart".to_string()],
         0,
@@ -557,7 +596,7 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
         body.push(String::new());
         body.push(crate::screen::keys(&[("esc", "close")]));
         body.push(String::new());
-        return crate::screen::boxed(&format!("resume {}", picker.id), &body);
+        return crate::screen::boxed(&format!("resume {}", picker.name), &body);
     }
     let mut cursor_pinned = None;
     for i in picker.listed..picker.rows.len() {
@@ -577,7 +616,7 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
             .filter(|at| *at < window.shown)
             .map_or(usize::MAX, |at| listed_at + at),
     };
-    crate::screen::ask(&format!("resume {}", picker.id), &body, &answers, cursor)
+    crate::screen::ask(&format!("resume {}", picker.name), &body, &answers, cursor)
 }
 
 /// The fewest rows a scrolled picker list is drawn in while it can still
@@ -652,7 +691,11 @@ fn list_window(picker: &ResumePicker, room: usize) -> Window {
 /// and every unstarted task that reaches it through `depends_on` once there
 /// is more than one, each dependent annotated with what in the chain it
 /// depends on — see this task's own mockup.
-pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path) -> Vec<String> {
+pub(super) fn unqueue_confirm_panel(
+    name: &str,
+    chain: &[ChainEntry],
+    dir: &std::path::Path,
+) -> Vec<String> {
     let Some(head) = chain.first() else {
         return Vec::new();
     };
@@ -667,7 +710,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
             "The queue tab is what sends it again.".to_string(),
         ];
         return crate::screen::ask(
-            &format!("unqueue {}", head.id),
+            &format!("unqueue {name}"),
             &body,
             &["unqueue it".to_string()],
             0,
@@ -696,7 +739,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     body.push(String::new());
     body.push("The queue tab is what sends them again.".to_string());
     crate::screen::ask(
-        &format!("unqueue {}", head.id),
+        &format!("unqueue {name}"),
         &body,
         &["unqueue them".to_string()],
         0,
@@ -2336,19 +2379,20 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
     let shown = (rows - 2).min(recent.len());
     let events: Vec<&RecentEvent> = recent.iter().rev().take(shown).collect();
 
-    // The id column sized to the rows about to be drawn, not to a fixed
+    // The name column sized to the rows about to be drawn, not to a fixed
     // guess — the same reason the table's own STATE column is only as wide
     // as the states actually on the board (see
     // `the_state_column_is_only_as_wide_as_the_states_on_the_board`).
-    let id_width = events
+    let name_width = events
         .iter()
-        .map(|RecentEvent::Arrival { id, .. }| id.chars().count())
+        .map(|event| event.name().chars().count())
         .max()
         .unwrap_or(0);
 
     let mut block = format!("\n {DIM}RECENT{RESET}\n");
-    for RecentEvent::Arrival { at, id, change } in events {
-        let plain = recent_line(at, id, id_width, &sentence(change));
+    for event in events {
+        let RecentEvent::Arrival { at, change, .. } = event;
+        let plain = recent_line(at, event.name(), name_width, &sentence(change));
         // Cut to the pane, less the one leading column, so a sentence too
         // long for it ends in `…` rather than wrapping onto the next row.
         let plain = clip(&plain, pane.saturating_sub(1));
@@ -2357,11 +2401,12 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
     block
 }
 
-/// One RECENT line before it is clipped and dimmed: the time, the id padded
-/// to `id_width`, then the sentence. Apart from [`ticker`] so a test can lay
-/// out a sentence [`sentence`] does not draw yet against the same columns.
-fn recent_line(at: &str, id: &str, id_width: usize, sentence: &str) -> String {
-    format!("{at}{GUTTER}{id:<id_width$}{GUTTER}{sentence}")
+/// One RECENT line before it is clipped and dimmed: the time, the task's
+/// [`RecentEvent::name`] padded to `name_width`, then the sentence. Apart
+/// from [`ticker`] so a test can lay out a sentence [`sentence`] does not
+/// draw yet against the same columns.
+fn recent_line(at: &str, name: &str, name_width: usize, sentence: &str) -> String {
+    format!("{at}{GUTTER}{name:<name_width$}{GUTTER}{sentence}")
 }
 
 /// The sentence a RECENT line says about one move. Every word the ticker
@@ -4816,6 +4861,7 @@ mod tests {
     fn the_restart_panel_draws_its_mockup_within_eighty_columns() {
         let mut confirm = RestartConfirm {
             id: "prompt-cache-ttl-default".to_string(),
+            name: "prompt-cache-ttl-default".to_string(),
             step: "review-spec".to_string(),
             ends: RestartEnds::Agent {
                 lane: "prompt-cache-ttl-default · review-spec".to_string(),
@@ -4875,6 +4921,7 @@ mod tests {
     fn the_restart_panel_draws_its_command_form_within_eighty_columns() {
         let mut confirm = RestartConfirm {
             id: "solo".to_string(),
+            name: "solo".to_string(),
             step: "build".to_string(),
             ends: RestartEnds::Command {
                 elapsed: Some(Duration::from_secs(252)),
@@ -4977,7 +5024,7 @@ mod tests {
                 },
             })
             .collect();
-        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let panel = unqueue_confirm_panel("chain-task-1", &chain, std::path::Path::new("/pending"));
         for line in &panel {
             assert!(line.chars().count() <= 80, "{line}");
         }
@@ -5133,6 +5180,7 @@ mod tests {
         let recent = VecDeque::from([RecentEvent::Arrival {
             at: "09:41".into(),
             id: "board-tabs".into(),
+            routine: None,
             change: Move::Passed {
                 from: "review-spec".into(),
                 to: "review-code".into(),
@@ -5157,6 +5205,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "09:02".into(),
                 id: "auth-retry".into(),
+                routine: None,
                 change: Move::Started {
                     to: "implement".into(),
                 },
@@ -5164,6 +5213,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "10:05".into(),
                 id: "lane-boot".into(),
+                routine: None,
                 change: Move::Failed {
                     from: "review-code".into(),
                     to: "fix-code-review".into(),
@@ -5201,6 +5251,7 @@ mod tests {
         let recent = VecDeque::from([RecentEvent::Arrival {
             at: "14:22".into(),
             id: "gate-board".into(),
+            routine: None,
             change: Move::Passed {
                 from: "implement".into(),
                 to: "review".into(),
