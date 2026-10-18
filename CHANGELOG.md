@@ -17,6 +17,50 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.13.0
+
+### Highlights
+- The shipped pipelines end at a `create-pr` agent step, which pushes the branch and opens or updates one pull request with a plain-English summary of the diff. `spoolway stack` is deprecated, and `spoolway doctor` and `spoolway sync` name every step that still runs it. (#1037, #1043, #1047)
+- A failing issue hook stops its task on a `hook_failed` stage of its own, with the hook's last output in `spoolway queue route`. `[r]` on the board reruns the hook, and `[k]` or `spoolway resume <task> --skip-hook` carries the task on without it. (#1038, #1048, #1051)
+- A task cut from a plan page opens that page from the board: the `o` menu's new `open plan` item opens `plan:` in the default browser, chosen per platform, and the shipped planning skills write `plan:` whenever a page exists. (#1029, #1030, #1034, #1054, #1056)
+- The queue screen's options menu deletes a pending task or group, along with every pending task that depends on it, and unqueuing a routine copy deletes the copy instead of leaving a draft behind. The board names a routine copy by its routine. (#1032, #1055, #1059, #1061, #1065, #1067)
+- `spoolway eval` reads per task instead of per run, draws context as one average, exports exactly the table it draws, and counts only skills that really loaded. (#1033, #1039, #1058, #1063, #1068, #1069)
+
+### Breaking changes and migration
+- The shipped `default` and `bugfix` pipelines end at a `create-pr` agent step on the new `create-pr` prompt, where 0.12.0 ended at a `handover` command step running `spoolway stack`. `spoolway stack` still works but is deprecated and may be removed in a future release. `spoolway doctor`, `spoolway sync` and `sync --dry-run` note ``Still run by: <pipeline> · <step>`` for every step that runs it. `sync` changes no pipeline step, so an existing project keeps its `handover` step until you change it. Run `spoolway init` to add the missing `create-pr` prompt, then replace each `handover` step with an agent step on `prompt: create-pr` and give it a model. The new step spends an agent turn where `handover` ran without a model. (#1037, #1043, #1047)
+- A failing `queued`, `started` or `done` issue hook moves its task to the new `hook_failed` stage, where 0.12.0 paused it. `spoolway queue list --json` writes `state: "hook_failed"` for such a task, not `"paused"`, and moving there sets off no `paused` hook event. A script that finds held tasks should match `hook_failed` too. A task 0.12.0 paused on a hook is read as `hook_failed`. `spoolway resume <task>` reruns the hook as before. (#1038)
+- The shipped `github.sh` and `jira.sh` hooks close a task's ticket at `done` when its branch has no pull request, where 0.12.0's failed and stopped the task. `github.sh` comments and closes the issue, and the group issue on the group's last task. `jira.sh` moves the Sub-task, and the Story on the group's last task, to a new `status_done` status, `Done` by default. `spoolway sync` does not rewrite hooks. Run `spoolway sync --replace .spoolway/hooks/github.sh` or `.spoolway/hooks/jira.sh`, re-apply your own edits from the `.bak` file it saves, and set `status_done` to your Jira workflow's name. (#1031, #1041)
+- `spoolway eval --per-run` is now `--per-task`, and the old flag exits 2 naming the new one. The lanes table counts `TASKS` and `X/TASK` where 0.12.0 counted `RUNS` and `X/RUN`. In `--csv`, `--json` and `--sort`, `runs` is `tasks` and every `*_per_run` key is `*_per_task`. `CTX PEAK AVG` is now `CTX AVG`, and `ctx_peak_avg_tokens` and `ctx_peak_avg_pct` are `ctx_avg_tokens` and `ctx_avg_pct`. `CTX PEAK` is drawn only under `--by task`. The command steps table keeps `RUNS`. Rename the flag and keys in scripts and spreadsheets, and run `spoolway sync` so the shipped `spoolway-calibrate` skill stops calling `--per-run`. (#1058, #1063, #1068)
+- `spoolway eval --csv` and `--json` export only the columns the chosen view draws, in drawn order, where 0.12.0 exported totals and per-run figures together. Every row starts with `project`, and a `run` column follows it under `--by task`. `by`, `lanes`, `unpriced` and undrawn columns are dropped, and the closing row is labelled `total` or `average`. Add `--per-task` to export the per-task figures. `--sort by` is refused. The screen's `[e]` writes `eval-by-<by>-<view>-<stamp>.csv`, where 0.12.0 wrote `eval-by-<by>-<stamp>.csv`. Update anything that reads an export or matches its file name. (#1069)
+- Unqueuing a routine copy deletes it, where 0.12.0 turned it into a pending draft such as `nightly-3.md`. The routine itself stays, ready to queue again. This holds for the board's `unqueue`, `spoolway queue unqueue <id>`, `--all` and `--force` on a started copy, and the command prints ``deleted `<id>`, a copy of the routine in <path>`` in place of ``unqueued `<id>` → <path>``. A copy whose routine file is gone still goes to pending. Update scripts that expect the draft or parse the old line. (#1059, #1061, #1067)
+- `spoolway init` and `spoolway sync` write every `[dispatch]` key into `config.toml`, defaults included, where 0.12.0 left a key out while it held its default. The first `sync` adds `priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` and names each one it adds. No value changes. Commit what `sync` writes. (#1036, #1045)
+
+### Features
+- The shipped `create-pr` prompt commits anything left, pushes the branch as it is, titles the pull request after the task with its ticket key in front, and updates a pull request already open for the branch instead of opening a second. It never squashes, rebases, force-pushes or merges. `spoolway doctor` checks `gh` for a `create-pr` step as it does for `spoolway stack`. (#1037)
+- A `hook_failed` row on the board reads `● hook failed` with `[r] rerun hook  [k] skip hook`, and `k` asks before it skips. Skipping a `done` hook archives the task and leaves its ticket as it was; skipping a `queued` or `started` hook starts the task on its entry step. `spoolway queue route` prints the hook's last output and both ways on, and `queue route --json` carries it in a `hook` field. (#1038, #1048, #1051)
+- The `o` menu's `open` item is now `open task` on the board and the queue screen, and `open plan` sits under it when the task names a `plan:`. It opens the page with `open` on macOS, `wslview` or `explorer.exe` on WSL and `xdg-open` on other Linux, and names the tool to install when none is there. The shipped planning skills pick the opener the same way. (#1029, #1030, #1034)
+- The shipped `spoolway-plan` and `spoolway-tasks` skills write `source:` only for a tracker URL and `plan:` for the plan page's path, with or without an issue, and the task skeleton and field help say the same. A task that already holds a page path in `source:` still loads. (#1029, #1054, #1056)
+- `delete` on the queue screen's options menu removes a pending task, or a group's pending tasks, together with every pending task that depends on one of them in any group. The popup lists them first, and nothing is deleted when the pending tasks changed after it opened. (#1055, #1065)
+- The board's RECENT and its popup titles name a routine copy by its routine, such as `release-spoolway` for `release-spoolway-8`, and RECENT keeps one line per routine. The unqueue panel says a routine copy is deleted and where its routine stays. (#1032, #1067)
+- `spoolway sync` and `sync --dry-run` name each setting a `config.toml` rewrite adds, and the update panel shows them under the `config.toml` row. (#1045)
+- `spoolway eval --per-task` works beside `--csv` and `--json`, and the shipped `spoolway-calibrate` skill reads `--by step --per-task` and a task's own peak under `--by task`. (#1068, #1069)
+
+### Fixes
+- `spoolway eval`'s `SKILL` column and `skill` filter count a skill only when it loaded from a folder, so built-in commands, bundled Claude Code skills, Skill calls that never loaded, and skill names quoted in tool output no longer appear. (#1033, #1039)
+- The queue screen's key line keeps one order when `tab` switches between the tasks and groups panes. (#1060)
+- A missing `wslpath` is reported as not on `PATH`, with the fix, when spoolway opens a file on WSL. (#1030)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.13.0`, or run it without installing via `npx spoolway@0.13.0`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64; the GitHub release carries one archive per platform and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, run `spoolway sync --replace` on a tracker hook you use, replace each `handover` step with a `create-pr` agent step, update scripts that read `eval` exports, `--per-run` or held tasks' `state`, work through the breaking changes above, and restart the dispatcher. The 0.12.0 to 0.13.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.13.0
+
 ## 0.12.0
 
 ### Highlights
