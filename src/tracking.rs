@@ -2256,7 +2256,10 @@ mod tests {
     /// `stub/issue_edit_fail` for the label swap, `stub/issue_comment_fail`
     /// for the final "Ready for review" comment, `stub/label_list_fail` and
     /// `stub/label_create_fail` for the label tests — which is what the
-    /// failure-propagation tests below each need one of.
+    /// failure-propagation tests below each need one of. `stub/pr_view_none`
+    /// makes `pr view` answer the way real `gh` does for a branch with no
+    /// pull request, and `stub/open_children` lists the group issue's
+    /// tickets that are still open for the `gh api` sub-issue lookup.
     fn write_stub_gh(bin_dir: &std::path::Path) {
         std::fs::create_dir_all(bin_dir).unwrap();
         let script = r#"#!/bin/sh
@@ -2273,6 +2276,15 @@ done
 case "$1 $2" in
   "pr view")
     [ -f stub/pr_view_fail ] && exit 1
+    [ -f stub/pr_view_denied ] && {
+      echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+      exit 4
+    }
+    # What the real `gh pr view` says, on stderr, when the branch has none.
+    [ -f stub/pr_view_none ] && {
+      echo "no pull requests found for branch \"$3\"" >&2
+      exit 1
+    }
     cat stub/pr_url
     ;;
   "pr comment")
@@ -2291,6 +2303,11 @@ case "$1 $2" in
     ;;
   "issue close")
     echo "$*" >> stub/close.log
+    ;;
+  "api repos/"*"/issues/7/sub_issues")
+    # The group issue's tickets still open, one number per line, as the
+    # hook's `--jq` filter would leave them.
+    cat stub/open_children 2>/dev/null
     ;;
   "label list")
     [ -f stub/label_list_fail ] && exit 1
@@ -2363,6 +2380,15 @@ exit 0
                 .insert("ticket".into(), serde_norway::Value::String(ticket.into()));
         });
         (repo, t, stub, root_guard)
+    }
+
+    /// `t` with the group issue `open` is recorded as having answered, which
+    /// the `done` event hands the hook as `SPOOLWAY_EPIC`.
+    fn with_epic(mut t: Task, epic: &str) -> Task {
+        t.front
+            .extra
+            .insert("epic".into(), serde_norway::Value::String(epic.into()));
+        t
     }
 
     /// [`github_done_fixture`]'s own counterpart for the `open` branch's
@@ -2617,6 +2643,116 @@ exit 0
         );
 
         assert!(!stub.join("pr_comment.log").exists());
+    }
+
+    /// A task that reaches `done` with no pull request on its branch, such
+    /// as a release, has nothing left to review. The hook removes the
+    /// in-progress label, says so on the ticket, closes it as completed,
+    /// and exits 0 rather than holding finished work.
+    #[test]
+    fn github_sh_done_closes_the_ticket_as_completed_when_the_branch_has_no_pull_request() {
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-closes-no-pr", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_view_none"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+
+        let edit = std::fs::read_to_string(stub.join("issue_edit.log")).unwrap();
+        assert!(
+            edit.contains("--remove-label spoolway:in-progress"),
+            "{edit}"
+        );
+        assert!(!edit.contains("spoolway:review"), "{edit}");
+        let comment = std::fs::read_to_string(stub.join("issue_comment.received")).unwrap();
+        assert_eq!(comment, "Done. No pull request on task/demo.", "{comment}");
+        let close = std::fs::read_to_string(stub.join("close.log")).unwrap();
+        assert!(
+            close.contains("issue close https://github.com/o/r/issues/12"),
+            "{close}"
+        );
+        assert!(close.contains("--reason completed"), "{close}");
+    }
+
+    /// A `done` for the last task of its group closes the group issue too,
+    /// when no ticket nested under it is still open.
+    #[test]
+    fn github_sh_done_with_no_pull_request_closes_the_group_when_it_is_the_last_and_all_are_closed()
+    {
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-closes-group", "https://github.com/o/r/issues/12");
+        let t = with_epic(t, "https://github.com/o/r/issues/7");
+        std::fs::write(stub.join("pr_view_none"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+
+        let close = std::fs::read_to_string(stub.join("close.log")).unwrap();
+        assert!(
+            close.contains("issue close https://github.com/o/r/issues/7"),
+            "{close}"
+        );
+    }
+
+    /// A sibling still open under the group issue keeps the group open, as
+    /// does a `done` that is not the group's last.
+    #[test]
+    fn github_sh_done_with_no_pull_request_leaves_the_group_open_while_a_ticket_is_open() {
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-keeps-group", "https://github.com/o/r/issues/12");
+        let t = with_epic(t, "https://github.com/o/r/issues/7");
+        std::fs::write(stub.join("pr_view_none"), "").unwrap();
+        std::fs::write(stub.join("open_children"), "13\n").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+        let close = std::fs::read_to_string(stub.join("close.log")).unwrap();
+        assert!(!close.contains("issues/7"), "{close}");
+        assert!(close.contains("issues/12"), "{close}");
+    }
+
+    /// Only a group's last task may close the group issue.
+    #[test]
+    fn github_sh_done_with_no_pull_request_leaves_the_group_open_when_not_the_last() {
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-not-last", "https://github.com/o/r/issues/12");
+        let t = with_epic(t, "https://github.com/o/r/issues/7");
+        std::fs::write(stub.join("pr_view_none"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 2).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+        let close = std::fs::read_to_string(stub.join("close.log")).unwrap();
+        assert!(!close.contains("issues/7"), "{close}");
+    }
+
+    /// A lookup failing for any reason other than "no pull requests found",
+    /// such as `gh` not being logged in, must not read as a task with no
+    /// pull request: the ticket stays open and the hook fails.
+    #[test]
+    fn github_sh_done_does_not_close_the_ticket_when_the_lookup_fails_for_another_reason() {
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-lookup-denied", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_view_denied"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(4)
+        );
+        assert!(!stub.join("close.log").exists());
+        assert!(!stub.join("issue_comment.log").exists());
     }
 
     /// A failed label swap must stop before the final "Ready for review"

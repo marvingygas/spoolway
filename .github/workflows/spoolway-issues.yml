@@ -2,7 +2,9 @@ name: close merged spoolway issues
 
 # Spoolway's `done` event comments "Ready for review in <PR URL>" on the
 # task issue and leaves the pull request alone; delivery completes here,
-# only after GitHub says that pull request actually merged. A stack merge
+# only after GitHub says that pull request actually merged. A task whose
+# branch has no pull request is closed by `github.sh` itself and never
+# reaches this workflow. A stack merge
 # fires one `pull_request` closed event per pull request in the stack, at
 # nearly the same time, so this always sweeps the whole group named by the
 # merged branch, the same way .github/scripts/close-jira.sh sweeps a

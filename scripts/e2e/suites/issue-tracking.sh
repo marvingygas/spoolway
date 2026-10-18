@@ -1146,6 +1146,31 @@ has "the review label landed on the ticket" "spoolway:review" "$GH_STUB_ISSUES/$
 works "no comment was ever posted on the pull request itself" \
   test ! -e "$GH_STUB_PRS/$DONE_PR_NUM.comment"
 
+# A branch that never got a pull request, such as a release's, has nothing to
+# review: the same shipped `done` branch closes the ticket instead of failing.
+# No pull request is created on `NOPR_BRANCH`, so the stub answers `gh pr
+# view` with the real "no pull requests found" message.
+NOPR_TICKET=$(gh issue create -R acme/app -t "no pull request check" -F "$BODY")
+NOPR_NUM=${NOPR_TICKET##*/}
+NOPR_BRANCH=task/github-no-pr-check
+{
+  echo "---"; echo "id: github-no-pr-check"; echo "title: github-no-pr-check, done"
+  echo "stage: done"; echo "group: github-no-pr"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "ticket: $NOPR_TICKET"; echo "branch: $NOPR_BRANCH"
+  echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/github-no-pr-check.md"
+for _ in $(seq 1 150); do
+  [ -e "$GH_STUB_ISSUES/$NOPR_NUM.closed" ] && break
+  sleep 0.2
+done
+works "a done with no pull request on the branch closes the ticket" \
+  test -e "$GH_STUB_ISSUES/$NOPR_NUM.closed"
+has "and says why on the ticket" \
+  "Done. No pull request on $NOPR_BRANCH." "$GH_STUB_ISSUES/$NOPR_NUM.comment"
+lacks "without handing it to review" "spoolway:review" "$GH_STUB_ISSUES/$NOPR_NUM.labels"
+lacks "and without leaving it in progress" "spoolway:in-progress" "$GH_STUB_ISSUES/$NOPR_NUM.labels"
+
 # ------------------------------------------------------- jira.sh, real, open
 # The shipped script itself, not a hand-written stand-in, run through its
 # real `open` branch — `scripts/e2e/acli-stub.sh`'s own header explains why
@@ -1336,5 +1361,90 @@ fi
 has "the Sub-task transitioned to Review" "Review" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.status"
 works "no comment was ever posted on the pull request itself" \
   test ! -e "$GH_STUB_PRS/$JIRA_DONE_PR_NUM.comment"
+
+# A branch that never got a pull request, such as a release's, has nothing to
+# review: the same shipped `done` branch moves the Sub-task to `Done` with a
+# comment saying why, instead of failing and holding the task. No pull
+# request is created on `JIRA_NOPR_BRANCH`, so the stub answers `gh pr view`
+# with the real "no pull requests found" message.
+JIRA_NOPR_BRANCH=task/jira-no-pr-check
+JIRA_NOPR_KEY=KAN-9001
+JIRA_NOPR_EPIC=KAN-9000
+works "jira.sh's real done branch exits 0 with no pull request on the branch" env \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-no-pr-check SPOOLWAY_TICKET="$JIRA_NOPR_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_NOPR_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_NOPR_EPIC" \
+  SPOOLWAY_GROUP_LAST=0 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+has "a done with no pull request on the branch moves the Sub-task to Done" "Done" \
+  "$ACLI_STUB_DIR/$JIRA_NOPR_KEY.status"
+lacks "without handing it to review" "Review" "$ACLI_STUB_DIR/$JIRA_NOPR_KEY.status"
+has "and says why on the Sub-task" "Done. No pull request on $JIRA_NOPR_BRANCH." \
+  "$ACLI_STUB_DIR/$JIRA_NOPR_KEY.comment.json"
+works "and leaves the Story alone when it is not the group's last task" \
+  test ! -e "$ACLI_STUB_DIR/$JIRA_NOPR_EPIC.status"
+
+# The group's last task, with no Sub-task under the Story outside `Done` (the
+# stub's search answers with an empty list), also moves the Story to `Done`.
+JIRA_NOPR_LAST_KEY=KAN-9003
+JIRA_NOPR_LAST_EPIC=KAN-9002
+works "jira.sh's real done branch exits 0 for a group's last task with no pull request" env \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-no-pr-last SPOOLWAY_TICKET="$JIRA_NOPR_LAST_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_NOPR_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_NOPR_LAST_EPIC" \
+  SPOOLWAY_GROUP_LAST=1 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+has "the group's last task moves the Story to Done" "Done" \
+  "$ACLI_STUB_DIR/$JIRA_NOPR_LAST_EPIC.status"
+
+# A sibling Sub-task still outside `Done` (the stub's search answers with one
+# when `ACLI_STUB_OPEN_SUBTASKS=1`) keeps the Story where it is: that work
+# is still waiting for its own pull request.
+JIRA_NOPR_OPEN_KEY=KAN-9007
+JIRA_NOPR_OPEN_EPIC=KAN-9006
+works "jira.sh's real done branch exits 0 for a last task whose sibling is still open" env \
+  ACLI_STUB_OPEN_SUBTASKS=1 \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-no-pr-open SPOOLWAY_TICKET="$JIRA_NOPR_OPEN_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_NOPR_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_NOPR_OPEN_EPIC" \
+  SPOOLWAY_GROUP_LAST=1 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+has "the last task's own Sub-task still moves to Done" "Done" \
+  "$ACLI_STUB_DIR/$JIRA_NOPR_OPEN_KEY.status"
+works "and the Story stays open while a sibling is not Done" \
+  test ! -e "$ACLI_STUB_DIR/$JIRA_NOPR_OPEN_EPIC.status"
+
+# A Sub-task search that fails outright must not read as "nothing is open":
+# the task's own Sub-task still moves to `Done`, the hook still exits 0, and
+# the Story stays where it is.
+JIRA_NOPR_FAIL_KEY=KAN-9009
+JIRA_NOPR_FAIL_EPIC=KAN-9008
+works "jira.sh's real done branch exits 0 for a last task whose search fails" env \
+  ACLI_STUB_SEARCH_FAILS=1 \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-no-pr-fail SPOOLWAY_TICKET="$JIRA_NOPR_FAIL_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_NOPR_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_NOPR_FAIL_EPIC" \
+  SPOOLWAY_GROUP_LAST=1 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+has "the last task's own Sub-task still moves to Done when the search fails" "Done" \
+  "$ACLI_STUB_DIR/$JIRA_NOPR_FAIL_KEY.status"
+works "and the Story stays open when the search fails" \
+  test ! -e "$ACLI_STUB_DIR/$JIRA_NOPR_FAIL_EPIC.status"
+
+# A lookup failing for any reason other than "no pull requests found", such
+# as `gh` not being logged in, must not read as a task with no pull request:
+# the Sub-task is not moved and the hook fails.
+JIRA_DENIED_KEY=KAN-9005
+JIRA_DENIED_BIN=$(mktemp -d)
+cat > "$JIRA_DENIED_BIN/gh" <<'GH'
+#!/bin/sh
+echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+exit 4
+GH
+chmod +x "$JIRA_DENIED_BIN/gh"
+refuses "a failed pull request lookup that is not 'no pull requests found' fails the hook" "" env \
+  PATH="$JIRA_DENIED_BIN:$PATH" \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-denied-check SPOOLWAY_TICKET="$JIRA_DENIED_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_NOPR_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC=KAN-9004 \
+  SPOOLWAY_GROUP_LAST=0 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+works "and the Sub-task is not moved" test ! -e "$ACLI_STUB_DIR/$JIRA_DENIED_KEY.status"
+rm -rf "$JIRA_DENIED_BIN"
 
 finish

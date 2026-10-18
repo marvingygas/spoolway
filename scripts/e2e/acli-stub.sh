@@ -132,6 +132,19 @@ case "${1:-}" in
               *) exit 0 ;;
             esac
             ;;
+          search)
+            # `ACLI_STUB_OPEN_SUBTASKS=1` answers with one work item, as a
+            # search for Sub-tasks still outside Done would; unset, nothing
+            # matches, which also reads as "Story already left Draft".
+            # `ACLI_STUB_SEARCH_FAILS=1` is a search that errors out with
+            # no output, as one does when Jira is unreachable.
+            [ "${ACLI_STUB_SEARCH_FAILS:-}" = 1 ] && exit 1
+            if [ "${ACLI_STUB_OPEN_SUBTASKS:-}" = 1 ]; then
+              echo '[{"key":"KAN-1"}]'
+            else
+              echo '[]'
+            fi
+            ;;
           transition)
             shift 3
             ref="" status=""
