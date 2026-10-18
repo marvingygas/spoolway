@@ -604,7 +604,8 @@ fn queue_add_dry_run(
 /// `spoolway queue unqueue <id>` / `--all`: the command form of the board's
 /// `unqueue` — carry a not-started task back to the pending
 /// directory, with every reserved key stripped, so `queue add --from` takes
-/// it again unchanged. The move itself is [`crate::status::unqueue_task`]
+/// it again unchanged. A copy of a routine that still exists is deleted
+/// instead. The move itself is [`crate::status::unqueue_task`]
 /// (or, for `--all`, one call of it per not-started task) — this only adds
 /// the arguments a script needs that a keypress does not: a named refusal
 /// for everything the board's key silently declines, and `--force`, which a
@@ -631,8 +632,9 @@ pub fn queue_unqueue(repo: &Repo, pipelines: &Pipelines, args: &QueueUnqueueArgs
 
 /// `--all`: every not-started task at once — no
 /// per-task [`crate::status::depended_on_by_queued`] check, since anything
-/// depending on the set has not started either and is carried back in the
-/// same batch. Stops at the first one [`unqueue_or_bail`] cannot carry,
+/// depending on the set has not started either and is unqueued in the
+/// same batch, a routine copy a drafted task depends on being carried to
+/// pending rather than deleted (see [`crate::status::drafted_in_batch`]). Stops at the first one [`unqueue_or_bail`] cannot carry,
 /// leaving every task after it exactly where it was — the same all-or-
 /// nothing promise a single `--force` unqueue makes, read over the whole
 /// batch rather than one checkout.
@@ -647,8 +649,9 @@ fn queue_unqueue_all(repo: &Repo) -> Result<()> {
         println!("nothing to unqueue — no task has not started");
         return Ok(());
     }
+    let drafted = crate::status::drafted_in_batch(repo, &ids)?;
     for id in &ids {
-        unqueue_or_bail(repo, id)?;
+        report_unqueued(repo, id, crate::status::unqueue_in(repo, id, &drafted)?)?;
     }
     Ok(())
 }
@@ -732,25 +735,43 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
     queue_unqueue_forced(repo, pipelines, id, &stage, checkout.as_deref())
 }
 
-/// Write `id`'s task into pending through
-/// [`crate::status::unqueue_task`] — the same call the board's `unqueue`
-/// makes — then check the queue file is actually gone: that function is
-/// silent about a newer draft already sitting in pending, right for a
-/// keypress with a board to keep drawing but wrong for a script that named
-/// a task by hand and needs to know its unqueue did not happen.
+/// Unqueue `id` through [`crate::status::unqueue_task`] — the same call the
+/// board's `unqueue` makes — then say what it did. That function is silent
+/// about a newer draft already sitting in pending, right for a keypress with
+/// a board to keep drawing but wrong for a script that named a task by hand
+/// and needs to know its unqueue did not happen.
 fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
-    crate::status::unqueue_task(repo, id)?;
-    if repo.queue_dir().join(format!("{id}.md")).exists() {
-        bail!(
-            "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
-             then run this again.",
-            repo.pending_dir().join(format!("{id}.md")).display()
-        );
+    report_unqueued(repo, id, crate::status::unqueue_task(repo, id)?)
+}
+
+/// Print what [`crate::status::Unqueued`] says happened to `id`, or refuse
+/// when it stayed queued.
+fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> Result<()> {
+    use crate::status::Unqueued;
+    match outcome {
+        Unqueued::Deleted { routine_file } => {
+            println!(
+                "deleted `{id}`, a copy of the routine in {} — it is still there to queue again",
+                routine_file.display()
+            );
+        }
+        Unqueued::Drafted(dest) => {
+            println!("unqueued `{id}` → {}", dest.display());
+        }
+        Unqueued::NewerDraft => {
+            bail!(
+                "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
+                 then run this again.",
+                repo.pending_dir().join(format!("{id}.md")).display()
+            );
+        }
+        Unqueued::Untouched => {
+            bail!(
+                "did not unqueue `{id}`: it is no longer a queued task that has not started — \
+                 `spoolway queue list` shows where it is now. Nothing was changed."
+            );
+        }
     }
-    println!(
-        "unqueued `{id}` → {}",
-        repo.pending_dir().join(format!("{id}.md")).display()
-    );
     Ok(())
 }
 
@@ -759,7 +780,10 @@ fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
 /// [`crate::commands::auto_commit`], tear the checkout down through
 /// [`crate::dispatch::Dispatcher::tear_down_checkout`] and only then carry
 /// the task to pending — all or nothing, so a teardown this stops
-/// partway through leaves the task queued and its task untouched.
+/// partway through leaves the task queued and its task untouched. A copy of a
+/// routine that still exists is deleted instead of carried. The branch the
+/// teardown keeps for unpushed commits is named by the teardown's own line
+/// on standard error, which is all this road says about it.
 ///
 /// Refused while a live dispatcher holds the run lock: it re-reads the
 /// queue every pass, and a checkout this tears down out from under it is
@@ -793,8 +817,17 @@ fn queue_unqueue_forced(
     // nothing. `carry_to_pending` re-checks this at the end regardless — a
     // draft that lands in the gap between here and there is the one race
     // this cannot close.
+    //
+    // A routine copy whose routine file still exists is deleted, not carried,
+    // so a draft in pending is no obstacle to it. The same check
+    // `unqueue_in` makes, read before the teardown so the answer cannot
+    // change under it.
+    let routine_file = repo
+        .task(id)?
+        .routine()
+        .and_then(|routine| routine_file(repo, routine));
     let pending_dest = repo.pending_dir().join(format!("{id}.md"));
-    if pending_dest.exists() {
+    if routine_file.is_none() && pending_dest.exists() {
         bail!(
             "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
              then run this again. Nothing was torn down.",
@@ -857,7 +890,7 @@ fn queue_unqueue_forced(
     let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref);
     let mut report = crate::dispatch::Report::default();
     let borrowed = task.front.borrowed;
-    dispatcher.tear_down_checkout(&mut task, &mut report);
+    let torn_down = dispatcher.tear_down_checkout(&mut task, &mut report);
     // `tear_down_checkout` returns `false` and names the failure in `report`
     // when the worktree is still listed, still on disk or a removal call
     // failed. That is not enough for the line printed here: a borrowed
@@ -893,6 +926,24 @@ fn queue_unqueue_forced(
     task.front.pane_id = None;
     task.front.tab_id = None;
     task.front.spare_pane = None;
+
+    if let Some(routine_file) = routine_file {
+        // The routine is still there to queue again, so a draft in pending
+        // would only duplicate it. A worktree the teardown could not remove
+        // keeps the copy queued, so the standing checkout still has a task
+        // that names it and this can be run again once it is cleared.
+        if !torn_down {
+            bail!(
+                "`{id}`'s checkout could not be removed (see above) — the copy of the routine \
+                 in {} is still queued. Remove the worktree by hand, then run this again.",
+                routine_file.display()
+            );
+        }
+        std::fs::remove_file(&task.path)
+            .with_context(|| format!("removing {}", task.path.display()))?;
+        crate::tracking::stop_and_reclaim(repo, id);
+        return report_unqueued(repo, id, crate::status::Unqueued::Deleted { routine_file });
+    }
 
     match crate::status::carry_to_pending(repo, &task)? {
         Some(dest) => {
@@ -1752,6 +1803,18 @@ pub(crate) fn routine_names(repo: &Repo) -> std::collections::BTreeSet<String> {
         .flat_map(|folder| folder.tasks)
         .map(|task| task.id)
         .collect()
+}
+
+/// The file of the routine whose `id:` is `routine`, or `None` when no file
+/// under `.spoolway/routines/` has that id any more — the routine was deleted
+/// or renamed after a copy of it was queued.
+pub(crate) fn routine_file(repo: &Repo, routine: &str) -> Option<std::path::PathBuf> {
+    super::routines::list_routines(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|folder| folder.tasks)
+        .find(|task| task.id == routine)
+        .map(|task| task.path)
 }
 
 /// The refusal for an id that is a routine's name, or `None` when it is not.
@@ -11890,6 +11953,64 @@ mod tests {
         );
     }
 
+    /// A started copy of a routine that still has its file is deleted by a
+    /// forced unqueue, and a draft already in pending under the same id is no
+    /// reason to refuse: nothing is written there for it to collide with.
+    #[test]
+    fn a_forced_unqueue_deletes_a_started_routine_copy_past_a_pending_draft() {
+        let (repo, _root_guard) = fixture("unqueue-forced-routine-copy");
+        let pipelines = Pipelines::builtin();
+        let routine = repo.routines_dir().join("nightly").join("nightly.md");
+        std::fs::create_dir_all(routine.parent().unwrap()).unwrap();
+        std::fs::write(
+            &routine,
+            "---\nid: nightly\ngroup: nightly\npipeline: default\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        add(&repo, "nightly-3", &[]);
+        let mut copy = queued(&repo, "nightly-3");
+        copy.front.stage = "implement".to_string();
+        copy.front.routine = Some("nightly".into());
+        copy.save().unwrap();
+        let draft = repo.pending_dir().join("nightly-3.md");
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(&draft, "a newer draft\n").unwrap();
+
+        queue_unqueue_forced(&repo, &pipelines, "nightly-3", "implement", None).unwrap();
+
+        assert!(!copy.path.exists(), "the copy is deleted");
+        assert_eq!(std::fs::read_to_string(&draft).unwrap(), "a newer draft\n");
+        assert!(routine.exists(), "the routine file is untouched");
+    }
+
+    /// A started copy whose routine file is gone is the only record of the
+    /// task, so a forced unqueue carries it to pending as any other task,
+    /// and a draft already there still refuses it before anything is torn
+    /// down.
+    #[test]
+    fn a_forced_unqueue_carries_a_started_copy_whose_routine_is_gone() {
+        let (repo, _root_guard) = fixture("unqueue-forced-routine-gone");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "nightly-3", &[]);
+        let mut copy = queued(&repo, "nightly-3");
+        copy.front.stage = "implement".to_string();
+        copy.front.routine = Some("nightly".into());
+        copy.save().unwrap();
+        let draft = repo.pending_dir().join("nightly-3.md");
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(&draft, "a newer draft\n").unwrap();
+
+        let err =
+            queue_unqueue_forced(&repo, &pipelines, "nightly-3", "implement", None).unwrap_err();
+        assert!(format!("{err:#}").contains("newer draft"), "{err:#}");
+        assert!(copy.path.exists(), "the copy stays queued");
+
+        std::fs::remove_file(&draft).unwrap();
+        queue_unqueue_forced(&repo, &pipelines, "nightly-3", "implement", None).unwrap();
+        assert!(!copy.path.exists());
+        assert!(draft.exists(), "the copy was carried to pending");
+    }
+
     #[test]
     fn queue_resume_refuses_an_unknown_task() {
         let (repo, _root_guard) = fixture("queue-resume-unknown");
@@ -18847,9 +18968,10 @@ mod tests {
         assert!(repo.task("audit-deps-1").is_ok(), "the file keeps its id");
     }
 
-    /// Unqueueing a routine copy drops its `routine:` with the other keys
-    /// spoolway owns, so the pending task it leaves is an ordinary one: `queue
-    /// add` takes it, and what that queues has no routine of its own.
+    /// Unqueueing a routine copy whose routine file is gone drops its
+    /// `routine:` with the other keys spoolway owns, so the pending task it
+    /// leaves is an ordinary one: `queue add` takes it, and what that queues
+    /// has no routine of its own.
     #[test]
     fn unqueue_drops_routine_so_the_copy_queues_again_as_an_ordinary_task() {
         let (repo, _root_guard) = fixture("routine-name-unqueue");
@@ -18861,6 +18983,8 @@ mod tests {
         );
         routines_exit(&repo, " \r");
         assert!(queued(&repo, "audit-deps-1").front.routine.is_some());
+        // With the routine file in place the copy is deleted, not drafted.
+        std::fs::remove_dir_all(repo.routines_dir().join("nightly")).unwrap();
 
         crate::status::unqueue_task(&repo, "audit-deps-1").unwrap();
         let pending = repo.pending_dir().join("audit-deps-1.md");

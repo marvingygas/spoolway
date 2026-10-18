@@ -496,6 +496,21 @@ files under `tracking/` are removed. `spoolway queue add --from` takes the resul
 on it; this command has no panel
 to list a chain on, so it refuses instead.
 
+A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
+copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
+the routine file's path, and the routine stays there to queue again. `--force` does the same for a
+copy that has started, after it tears the checkout down. A branch with commits no remote has is
+kept, and the command prints its name.
+
+```
+$ spoolway queue unqueue prune-1
+deleted `prune-1`, a copy of the routine in /path/to/repo/.spoolway/routines/maintenance/weekly/prune.md — it is still there to queue again
+```
+
+A copy whose routine file is gone goes to the pending directory like any other task. A copy that a
+task going to pending in the same `--all` batch depends on goes there too. See
+[Routines](planning.md#routines).
+
 ```
 spoolway queue unqueue <task>
 spoolway queue unqueue --all
@@ -511,7 +526,9 @@ A task that has started is refused, naming its stage, its checkout when it has o
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
 checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
 refused too, with or without `--force`, naming that sibling. Unqueue the sibling first. A task already sitting in pending under the same id
-refuses the move and leaves the queue file in place.
+refuses the move and leaves the queue file in place. A copy of a routine is deleted whatever sits in
+pending. If `--force` cannot remove the copy's worktree, the copy stays queued. Remove the worktree
+by hand, then run the command again.
 
 ### `spoolway group list`
 

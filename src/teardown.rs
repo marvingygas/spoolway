@@ -287,8 +287,9 @@ impl<'a> Dispatcher<'a> {
             //
             // Said here and not in `tear_down_checkout`'s own problem line,
             // because that has other callers that do not hold the task:
-            // `unqueue --force` carries it to pending and `discard_arm`
-            // deletes it, and nothing would try again for either.
+            // `unqueue --force` carries it to pending (or, for a routine
+            // copy, deletes it) and `discard_arm` deletes it, and nothing
+            // would try again for either.
             report.problems.push(format!(
                 "{}: stays at `done`; cleanup removes its worktree again on the next pass",
                 task.id()
@@ -507,10 +508,11 @@ impl<'a> Dispatcher<'a> {
     /// worktree under it, and — if every commit on it has reached a remote —
     /// the local branch it was cut on.
     ///
-    /// Called only from [`Dispatcher::clean_up`], once a task has actually
-    /// finished — stopping the dispatcher never reaches here any more, since
-    /// [`Dispatcher::sweep_on_stop`] leaves an interrupted task's checkout
-    /// exactly where it stood.
+    /// Called from [`Dispatcher::clean_up`], once a task has actually
+    /// finished, and from `discard_arm` and `unqueue --force`, which tear a
+    /// checkout down on purpose. Stopping the dispatcher never reaches here
+    /// any more, since [`Dispatcher::sweep_on_stop`] leaves an interrupted
+    /// task's checkout exactly where it stood.
     ///
     /// `report` is where a branch kept because it is not fully pushed gets
     /// named — see the comment on the delete itself, below. It is also where a

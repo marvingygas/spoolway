@@ -789,6 +789,41 @@ has "the head's task lands back in pending" "id: chain-head" \
 has "and so does the dependent's" "id: chain-tail" \
   "$SPOOLWAY_PROJECT_HOME/pending/chain-tail.md"
 
+# --------------------------- unqueue on a routine copy says it is deleted
+# A copy queued from a routine is deleted by unqueue, because the routine file
+# stays in the checkout for the routines tab to queue again. The panel has to
+# say so, and name that file, rather than promise a draft in pending. A unit
+# test draws the panel from a made-up list; this reaches it through the real
+# board, from a real routine file on disk and a copy the dispatcher is holding.
+# `queue add` refuses a `routine:` line, since only the routines tab and jobs
+# set one, so the copy is written straight into the queue, as `routines.sh`
+# does for its fixtures.
+#
+# The copy waits on `chain-gate`, which is still mid-turn, so it stays
+# `queued`. Its group sorts with the gate's, and `nightly-1` sorts after
+# `chain-gate`, so one `down` reaches it.
+mkdir -p .spoolway/routines/nightly
+task_doc .spoolway/routines/nightly/nightly.md nightly "$BODY"
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/nightly-1.md" nightly-1 "$BODY" \
+  "stage: queued" "group: 0-chain" "routine: nightly" "depends_on: [chain-gate]"
+draws "the board draws the copy by its routine's name" "nightly"
+MARK=$(wc -l < "$BOARD_LOG")
+cursor_to nightly
+pick_item unqueue
+
+draws "unqueue on a routine copy is titled by the routine's name" "unqueue nightly"
+draws "and says the copy is deleted" "This copy is deleted. The"
+draws "naming the routine file that stays" ".spoolway/routines/nightly/nightly.md"
+draws "and where it is queued again" "The routines tab queues it again."
+never_draws "and does not promise a draft in pending" "The queue tab is what sends it again." "$MARK"
+stage_stays "nothing moves while the panel is open" nightly-1 queued
+
+press $'\r'
+if poll_until 25 _gone nightly-1; then ok "enter removes the copy from the queue"
+else bad "enter removes the copy from the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+works "no draft lands in pending" test ! -e "$SPOOLWAY_PROJECT_HOME/pending/nightly-1.md"
+works "and the routine file is untouched" test -f .spoolway/routines/nightly/nightly.md
+
 # ------------------------- pause reaches a blocked row with a live lane
 #
 # The reach this task adds: the unblocker can be mid-turn on a `blocked` row
