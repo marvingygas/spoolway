@@ -136,7 +136,7 @@ spoolway eval --since 2026-06-01 --until 7d    # a window
 ```
 
 ```
-PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
+PIPELINE   TASKS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
 impl          41   82%       3           32%       52%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
 impl_ui       15   79%       2           31%       50%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
 Total         56             5                            38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
@@ -144,12 +144,12 @@ Total         56             5                            38.5k    9.34M    2.51
 
 | Column | What it is |
 |---|---|
-| `RUNS` | Runs that touched this row |
+| `TASKS` | Tasks that touched this row |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each priced token class, summed over the row |
 | `USD` | Priced spend. Blank when no lane on the row has a price. See [Pricing](#pricing). |
 | `TIME` | Wall time, summed over the row |
 
-`spoolway eval --per-run` divides each token class and the time by `RUNS`. See
+`spoolway eval --per-task` divides each token class and the time by `TASKS`. See
 [Comparing pipelines](eval.md) for the full column set, `--by` and the rest of the flags.
 
 ## Pricing

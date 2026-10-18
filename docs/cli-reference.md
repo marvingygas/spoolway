@@ -743,7 +743,7 @@ unknown keys under `unknown_keys`. See [Jobs](jobs.md).
 ### `spoolway eval`
 
 What each pipeline costs to run, grouped one way at a time. It always prints the lanes table, on
-totals columns unless `--per-run` is given.
+totals columns unless `--per-task` is given.
 
 ```
 spoolway eval
@@ -758,7 +758,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `[tab]` | Cycle through the lanes, directory and trials tables |
 | `[↑↓]` | Move the cursor |
 | `[a]` / `[d]` | Open the sort popup, ascending or descending |
-| `[t]` | Switch the lanes and directory tables between totals and per run |
+| `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the rows on screen to `.spoolway/evals/eval-by-<by>-<date>-<time>.csv` |
 | `[r]` | Refresh |
@@ -780,7 +780,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV |
-| `--per-run` | | Print each token, cost and time figure divided by the row's runs. Not with `--csv`, `--json` or `--discard` |
+| `--per-task` | | Print each token, cost and time figure divided by the row's tasks. Not with `--csv`, `--json` or `--discard` |
 | `--sort <column>[:asc\|:desc]` | | Sort the rows by one column, descending when the direction is left off. Not with `--discard` |
 
 `--json` prints `{"by", "rows", "total", "commands"}` rather than a bare array, with an empty `rows` when no lane matches. `commands` holds the command steps table. `--csv` prints the lanes table only.
