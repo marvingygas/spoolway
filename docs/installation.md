@@ -469,6 +469,7 @@ anything:
 ╭─ new version installed, apply updates ───────────────────────╮
 │                                                                │
 │  write   .spoolway/config.toml                                │
+│          (added 1 setting(s): dispatch.lane_layout)           │
 │  remove  .spoolway/templates/task-log.md                      │
 │          (no longer written to a task file)                   │
 │                                                                │
@@ -489,7 +490,7 @@ write, `sync` writes straight away and draws no panel.
 
 The report lists every refused file first, then every file written or removed, then one line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings
-it kept, and each group of retired settings it dropped:
+it kept, each group of settings it added, and each group of retired settings it dropped:
 
 ```
 refused .spoolway/pipelines/bugfix.yml — spoolway's key reference starts with `# >>> spoolway >>>` and never ends — restore the `# <<< spoolway <<<` marker, or delete the block and run this again
@@ -499,12 +500,13 @@ removed .spoolway/templates/task-log.md
 
 (set issue_tracking.key_in_names = true, the default)
 (kept 1 setting(s) this spoolway does not know, with their comments: unatended — a newer spoolway may read them, otherwise they are typos)
+(1 setting(s) this spoolway has and the file did not: dispatch.lane_layout)
 (1 retired setting(s) dropped: sandbox.enabled)
 
 Files were overwritten; your config values, prompts and task skeletons were kept.
 ```
 
-With `--dry-run`, the words read `would write` and `would remove`. When `sync` refused a file
+With `--dry-run`, the words read `would write` and `would remove`, and the same notes print under them. When `sync` refused a file
 and wrote nothing else, the last line is `Nothing else updating; the refused files above were left
 as they are.`
 

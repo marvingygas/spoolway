@@ -348,6 +348,10 @@ works "a dry run changes no file in the 0.6.0 project" \
 must "spoolway sync runs against the 0.6.0 project" \
   bash -c '"$1" sync >"$2"' _ "$SPOOLWAY" "$WORK/0.6.0/real.out"
 snapshot "$WORK/0.6.0/after.sums"
+has "the 0.6.0 sync names dispatch.lane_layout among the settings it added" \
+  "dispatch.lane_layout" "$WORK/0.6.0/real.out"
+has "and the dry run names it too, under would write" \
+  "dispatch.lane_layout" "$WORK/0.6.0/dry.out"
 
 # What the dry run says it would change, what the real run says it did, and
 # what actually differs on disk: one list, three times over. Paths under `~`
@@ -510,6 +514,8 @@ for fixture_dir in "$FIXTURES"/*/; do
     bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
   lacks "sync refused no file of the $version project as a copy it does not know" \
     "refused " "$WORK/$version/real.out"
+  has "the $version sync names dispatch.lane_layout among the settings it added" \
+    "dispatch.lane_layout" "$WORK/$version/real.out"
   assert_dispatch_keys_written "$version"
   says "and a second sync of the $version project has nothing left to do" \
     "Nothing updating." \

@@ -370,7 +370,7 @@ lane_layout = "panes"
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
 
 A fresh `config.toml` holds every one of these keys with its value, and `spoolway sync` adds any that
-an older file lacks. `all` is written as `visible_lanes = "all"`.
+an older file lacks and names each one it adds in its report. `all` is written as `visible_lanes = "all"`.
 
 `keep_finished_lanes` is retired. See [Retired keys](#retired-keys).
 
