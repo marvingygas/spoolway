@@ -326,8 +326,15 @@ views.
 | `TIME` | That session's own wall time |
 
 A skill counts whether a session typed its command or ran it through the Skill tool; either
-way names the same skill. A subagent's tokens, cost and skills count on the session that ran
-it, not on a row of its own.
+way names the same skill. A typed command counts only when it is in the text of a message the
+user sent. Text that a tool returned or the assistant wrote never counts.
+
+A skill also counts only when the transcript shows its text loading from a skill folder. Built-in
+commands such as `/clear` and `/model` load no skill text, so they never count. A skill bundled
+with Claude Code loads without a folder of the user's own, so it never counts either. A skill
+from a plugin folder counts.
+
+A subagent's tokens, cost and skills count on the session that ran it, not on a row of its own.
 
 A summary line closes the `by dir` table and is pinned the same way as the lanes table's. In the
 totals view it is `Total`: the session count and the sums of every token class, the four class
@@ -340,7 +347,7 @@ Under `by session`, the `Total` line carries every token class, the four class c
 `TIME` in both views.
 
 Its filter panel has five rows: `by`, `dir`, `skill`, `since` and `until`. The `skill` filter
-keeps whole sessions whose transcript names that skill. There is no command-line flag for the
+keeps whole sessions that ran that skill, as counted above. There is no command-line flag for the
 directory table; it is read from the screen only.
 
 ## The trials table
