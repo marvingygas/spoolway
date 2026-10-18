@@ -7622,10 +7622,12 @@ pub(super) fn two_pane_frame(
 /// The ordinary line follows focus. It always leads with `space select`
 /// then `enter queue`, and the pane's own keys come after them, `o options`
 /// first: every action on a row is in that menu, which acts on the row the
-/// focused pane highlights. `tab` is named in both panes as the pane it
-/// leads to — the one way into the tasks pane inside bare `spoolway`, where
-/// `←`/`→` switch tabs instead — and the one way to a group's actions from
-/// the tasks pane.
+/// focused pane highlights. The order is the same in both panes, `tab`
+/// straight after `o options` and then `f find`, so a key stays in the same
+/// spot when focus moves; only the label on `tab` changes. `tab` is named
+/// as the pane it leads to — the one way into the tasks pane inside bare
+/// `spoolway`, where `←`/`→` switch tabs instead — and the one way to a
+/// group's actions from the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::NewJob`] — none
@@ -7692,7 +7694,7 @@ fn footer(state: &ScreenState) -> String {
             // `q` only inside bare `spoolway`'s queue tab, the one place it
             // quits — see `crate::screen::shell::quit_hint`.
             let pane: &[(&str, &str)] = match state.focus {
-                Focus::Groups => &[("o", "options"), ("f", "find"), ("tab", "tasks")],
+                Focus::Groups => &[("o", "options"), ("tab", "tasks"), ("f", "find")],
                 Focus::Tasks => &[("o", "options"), ("tab", "groups"), ("f", "find")],
             };
             let keys = [
@@ -13327,7 +13329,7 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
-        let groups_line = "[space] select   [enter] queue   [o] options   [f] find   [tab] tasks   \
+        let groups_line = "[space] select   [enter] queue   [o] options   [tab] tasks   [f] find   \
                            [h] show done tasks   [q] quit";
         let tasks_line = "[space] select   [enter] queue   [o] options   [tab] groups   [f] find   \
                           [h] show done tasks   [q] quit";
@@ -13346,8 +13348,50 @@ mod tests {
         let drawn = screen(&repo, listed(&repo), "\t\x1b");
         let last = crate::status::strip_ansi(last_frame(&drawn));
         assert!(
-            last.contains("[o] options   [f] find   [tab] tasks"),
+            last.contains("[o] options   [tab] tasks   [f] find"),
             "{last}"
+        );
+    }
+
+    /// The key line keeps one order whichever pane has focus: `o` options,
+    /// then `tab`, then `f` find, then `h`. Only the label on `tab` changes —
+    /// `tasks` over the groups pane, `groups` over the tasks pane — so a key
+    /// sits in the same spot when focus moves. Unhosted, so the line ends at
+    /// `[h]`.
+    #[test]
+    fn the_key_line_keeps_one_order_in_both_panes() {
+        let line = |focus, hide_scope| {
+            let mut state = ScreenState::new();
+            state.focus = focus;
+            state.hide_scope = hide_scope;
+            crate::status::strip_ansi(&footer(&state))
+        };
+
+        let groups = line(Focus::Groups, HideScope::Pending);
+        let tasks = line(Focus::Tasks, HideScope::Pending);
+        let rest = "[o] options   [tab] {}   [f] find   [h] show done tasks";
+        assert!(
+            groups.starts_with(" [space] select   [enter] queue   ")
+                && groups.contains(&rest.replace("{}", "tasks")),
+            "{groups}"
+        );
+        assert!(
+            tasks.starts_with(" [space] select   [enter] queue   ")
+                && tasks.contains(&rest.replace("{}", "groups")),
+            "{tasks}"
+        );
+
+        let shown = line(Focus::Tasks, HideScope::PlusDone);
+        assert!(
+            shown.contains("[o] options   [tab] groups   [f] find   [h] hide done tasks"),
+            "{shown}"
+        );
+
+        // Same keys in the same order; only the `tab` label differs.
+        assert_eq!(
+            groups.replace("[tab] tasks", "[tab] groups"),
+            tasks,
+            "the two lines may differ only in the `tab` label"
         );
     }
 
@@ -16384,7 +16428,7 @@ mod tests {
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
             opening.contains(
-                "[space] select   [enter] queue   [o] options   [f] find   [tab] tasks   \
+                "[space] select   [enter] queue   [o] options   [tab] tasks   [f] find   \
                  [h] show done tasks"
             ),
             "the groups pane's line must lead with `space` and `enter`:\n{opening}"
