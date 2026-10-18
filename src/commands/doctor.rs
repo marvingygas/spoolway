@@ -1179,10 +1179,11 @@ pub(crate) const HOOK_FAILURE_LABEL: &str = "issue_tracking hooks";
 /// second failure changes it and a hidden popup asks again.
 ///
 /// The remedy depends on the event. A failing `queued`, `started` or `done`
-/// hook pauses its task and `spoolway resume` forgets the run, so the row
-/// says to resume. A `blocked` or `paused` hook only records its failure and
-/// an `open` one fails `queue add` itself, so nothing holds the task and
-/// resuming forgets nothing: those runs stay until the task is archived.
+/// hook moves its task to `hook_failed` and `spoolway resume` forgets the
+/// run, so the row says to resume. A `blocked` or `paused` hook only records
+/// its failure and an `open` one fails `queue add` itself, so nothing holds
+/// the task and resuming forgets nothing: those runs stay until the task is
+/// archived.
 fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
     crate::tracking::failures(repo)
         .into_iter()
@@ -1193,10 +1194,10 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
                 exit_code,
                 log,
             } = failure;
-            let remedy = match crate::tracking::PAUSING_EVENTS.contains(&event.as_str()) {
+            let remedy = match crate::tracking::STOPPING_EVENTS.contains(&event.as_str()) {
                 true => format!(
-                    "so the task is paused. Fix what its log names, then run `spoolway resume \
-                     {task}`."
+                    "so the task stopped on `hook_failed`. Fix what its log names, then run \
+                     `spoolway resume {task}`."
                 ),
                 false => "which holds nothing, so `spoolway resume` does not clear it; it \
                           clears once the task is done and archived."
@@ -4591,8 +4592,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![format!(
-                "`started` failed for compact-ctx-launch (exit 1), so the task is paused. Fix \
-                 what its log names, then run `spoolway resume compact-ctx-launch`. Its log: {}",
+                "`started` failed for compact-ctx-launch (exit 1), so the task stopped on \
+                 `hook_failed`. Fix what its log names, then run `spoolway resume \
+                 compact-ctx-launch`. Its log: {}",
                 crate::repo::shorten_home(&log)
             )]
         );

@@ -137,6 +137,7 @@ impl State {
     pub fn word(self) -> &'static str {
         match self {
             State::Paused => "● paused",
+            State::HookFailed => "● hook failed",
             State::Running => "● running",
             State::Silent { .. } => "● silent",
             State::Starting => "◌ starting",
@@ -157,6 +158,10 @@ impl State {
             // is now the one thing on the board a person can act on — whether
             // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
+            // Amber, and bold, like `Paused`: the task waits on a person's
+            // key, and the work behind it may well have gone fine — only the
+            // hook reporting it to the tracker did not.
+            State::HookFailed => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
             // Amber, as the stops a person answers are, but not bold like
             // them: a silent lane may be a usage limit that clears by
@@ -295,7 +300,22 @@ pub(crate) enum Move {
     /// `to`, `blocked`, for the unblocker lane. An attended run parks the same
     /// stop on `paused`, which is [`Move::Stopped`] with [`Cause::Escalated`].
     Escalated { from: String, to: String },
-    /// The task was on `paused`.
+    /// An issue-tracking hook failed and the task moved to `hook_failed`.
+    /// `event` is the hook that failed, from `hook_paused:`, and `reason` is
+    /// why, from `hook_error:`; either is `None` on a file that lacks it.
+    /// `passed` names the step whose pass carried the task to `done`, when
+    /// it was the `done` hook that failed and the step can be told.
+    HookFailed {
+        passed: Option<String>,
+        event: Option<String>,
+        reason: Option<String>,
+    },
+    /// The hook `event` that held the task on `hook_failed` was skipped, by
+    /// `spoolway resume --skip-hook` or the board's `k`. `to` is where it
+    /// moved — `queued` first, then the step it starts on — or `None` for a
+    /// `done` hook's skip, which archives it.
+    HookSkipped { event: String, to: Option<String> },
+    /// The task was on `paused` or `hook_failed`.
     Resumed { to: String },
     /// The task was on `blocked`. `by_lane` when the report that moved it
     /// came from a lane working `blocked` itself, rather than a person's
@@ -322,9 +342,6 @@ pub(crate) enum Cause {
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,
-    /// An issue-tracking hook exited non-zero, or was killed three times in a
-    /// row without an exit code.
-    HookFailed,
     /// A person parked it: the board's `pause`, or an Escape in the pane.
     Manually,
     /// The dispatch tab's stop popup parked it.
@@ -348,7 +365,6 @@ impl Cause {
         match self {
             Cause::Gate => "gate".into(),
             Cause::Scheduled => "scheduled".into(),
-            Cause::HookFailed => "hook failed".into(),
             Cause::Manually => "manually".into(),
             Cause::DispatchingStopped => "dispatching stopped".into(),
             Cause::Escalated => "escalated".into(),
@@ -684,6 +700,50 @@ fn list_window(picker: &ResumePicker, room: usize) -> Window {
         shown,
         marked: true,
     }
+}
+
+/// [`BoardMode::ConfirmSkipHook`]'s panel: what skipping the failed hook
+/// does, titled with the hook's event as a question.
+///
+/// A `done` hook's form says the task is archived and its worktree removed,
+/// and that its ticket is left as it is. The ticket is named as `ticket:`
+/// stores it, since spoolway never reads its state or labels from the
+/// tracker; a task with no ticket gets no ticket line. A `queued` or
+/// `started` hook's form names the step the task starts on instead. A
+/// refusal, from opening the panel or from its answer, is printed under the
+/// body, above the one answer.
+pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> {
+    use crate::commands::SkipThen;
+    let id = &confirm.id;
+    let (mut body, answer) = match &confirm.then {
+        SkipThen::Archive { ticket } => {
+            let mut body = vec![format!("{id} is archived and its worktree removed.")];
+            if let Some(ticket) = ticket {
+                body.push(format!("Ticket {ticket} stays as it is."));
+            }
+            (body, "skip and archive".to_string())
+        }
+        SkipThen::Start { entry } => (
+            vec![format!(
+                "{id} starts on {entry}, without its {} hook.",
+                confirm.event
+            )],
+            format!("skip and start {entry}"),
+        ),
+    };
+    if let Some(err) = &confirm.error {
+        body.push(String::new());
+        body.extend(
+            err.lines()
+                .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
+        );
+    }
+    crate::screen::ask(
+        &format!("skip the {} hook?", confirm.event),
+        &body,
+        &[answer],
+        0,
+    )
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel. When `chain` names only the
@@ -1335,11 +1395,13 @@ pub(super) fn table_laid_out(
     };
 
     if let Some(pane) = style.clip_to {
-        // Whether the row fits, given NEXT gets at least one character once
-        // shown — `clip` guarantees that much even at `room == 1`, so a
-        // `show_next` this test passed under never overflows once the real
-        // room (which is usually far more than one character) is handed to
-        // it below.
+        // Whether the row fits, given NEXT gets at least the width of its
+        // own header once shown. `clip` would draw a cell in one character,
+        // but the header row spells `NEXT` out whole, so a pane with room
+        // for one character more than the rest would push that row past
+        // the pane's edge. A `show_next` this test passed under never
+        // overflows once the real room (usually far more) is handed to it
+        // below.
         let fits = |id_w: usize,
                     show_loop: bool,
                     show_pipeline: bool,
@@ -1373,7 +1435,7 @@ pub(super) fn table_laid_out(
                 w += GUTTER.len() + time_w;
             }
             if show_next {
-                w += GUTTER.len() + 1;
+                w += GUTTER.len() + "NEXT".len();
             }
             w <= pane
         };
@@ -2459,7 +2521,9 @@ fn recent_line(at: &str, name: &str, name_width: usize, sentence: &str) -> Strin
 /// prints about a move is written here and nowhere else, so two kinds of
 /// move can never drift into two phrasings of the same thing. Each sentence
 /// names what happened on which step first and where the task went last,
-/// always as `moved to <step>`, then the cause in brackets when there is one.
+/// as `moved to <step>`, then the cause in brackets when there is one. A
+/// failed hook is the one exception: the task's STEP stays where the hook
+/// stopped it, so the sentence names the hook and why it failed instead.
 pub(crate) fn sentence(change: &Move) -> String {
     use crate::pipeline::PAUSED;
 
@@ -2508,6 +2572,30 @@ pub(crate) fn sentence(change: &Move) -> String {
             format!("stopped on {from}, moved to {to}"),
             Some(&Cause::Escalated),
         ),
+        Move::HookFailed {
+            passed,
+            event,
+            reason,
+        } => {
+            let passed = passed
+                .as_ref()
+                .map(|step| format!("passed {step}, "))
+                .unwrap_or_default();
+            let hook = event
+                .as_ref()
+                .map(|event| format!("{event} hook failed"))
+                .unwrap_or_else(|| "hook failed".to_string());
+            let why = reason
+                .as_ref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default();
+            (format!("{passed}{hook}{why}"), None)
+        }
+        Move::HookSkipped { event, to: None } => (format!("skipped {event} hook, archived"), None),
+        Move::HookSkipped {
+            event,
+            to: Some(to),
+        } => (format!("skipped {event} hook, moved to {to}"), None),
         Move::Resumed { to } => (format!("resumed, moved to {to}"), None),
         Move::Unblocked { to, by_lane: false } => (format!("unblocked, moved to {to}"), None),
         Move::Unblocked { to, by_lane: true } => {
@@ -2623,13 +2711,17 @@ mod tests {
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop
     /// `Paused` is, and no state on this board is red at all now that the
-    /// dead-end state is gone. `Prompt` takes `Paused`'s own bold amber,
-    /// because a prompt is the same kind of stop too.
+    /// dead-end state is gone. `Prompt` and `HookFailed` take `Paused`'s
+    /// own bold amber, because each is the same kind of stop too.
     #[test]
     fn blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour() {
         assert_eq!(State::Blocked.dot(), format!("{ORANGE}● blocked{RESET}"));
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
         assert_eq!(State::Prompt.dot(), format!("{AMBER}{BOLD}● prompt{RESET}"));
+        assert_eq!(
+            State::HookFailed.dot(),
+            format!("{AMBER}{BOLD}● hook failed{RESET}")
+        );
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
         assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
@@ -2639,6 +2731,7 @@ mod tests {
         );
         for state in [
             State::Paused,
+            State::HookFailed,
             State::Running,
             State::Silent { secs: 60 },
             State::Starting,
@@ -3593,6 +3686,38 @@ mod tests {
                 "row {n} is {} columns: {line}",
                 line.chars().count()
             );
+        }
+    }
+
+    /// A `hook_failed` row's NEXT, `[r] rerun hook  [k] skip hook`, is the
+    /// widest NEXT a held row draws, and it follows the same rules as any
+    /// other: on a wide pane it reads whole, and on a narrower one the
+    /// columns shed before any row grows past the pane, so a row never
+    /// wraps.
+    #[test]
+    fn a_hook_failed_row_never_wraps_a_narrow_pane() {
+        let rows = vec![Row {
+            group: Some("gh-1024-release-spoolway".into()),
+            stage: "done".into(),
+            state: State::HookFailed,
+            next: "[r] rerun hook  [k] skip hook".into(),
+            ..row("release-spoolway")
+        }];
+        let totals = BTreeMap::new();
+
+        let wide = strip(&table(&rows, Style::board(120), &totals, None));
+        assert!(wide.contains("[r] rerun hook  [k] skip hook"), "{wide}");
+
+        for width in 40..120 {
+            let drawn = strip(&table(&rows, Style::board(width), &totals, None));
+            for line in drawn.lines() {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width} columns, a row of {}: {line}",
+                    line.chars().count()
+                );
+            }
+            assert!(drawn.contains("● hook failed"), "{width}: {drawn}");
         }
     }
 
@@ -5326,7 +5451,6 @@ mod tests {
             None,
             Some(Cause::Gate),
             Some(Cause::Scheduled),
-            Some(Cause::HookFailed),
             Some(Cause::Manually),
             Some(Cause::DispatchingStopped),
             Some(Cause::Escalated),
@@ -5405,6 +5529,23 @@ mod tests {
                 to: t,
                 by_lane: true,
             }));
+        }
+        for passed in [Some("<step>".to_string()), None] {
+            for event in ["<event>", "queued", "started", "done"] {
+                written.insert(sentence(&Move::HookFailed {
+                    passed: passed.clone(),
+                    event: Some(event.to_string()),
+                    reason: Some("<reason>".to_string()),
+                }));
+            }
+        }
+        for event in ["<event>", "queued", "started", "done"] {
+            for to in [None, Some("<step>".to_string())] {
+                written.insert(sentence(&Move::HookSkipped {
+                    event: event.to_string(),
+                    to,
+                }));
+            }
         }
 
         for row in documented {

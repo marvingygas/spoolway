@@ -323,9 +323,9 @@ refuses "in the other flag order too" "--all --force" \
 works "paused-route's checkout is untouched by either refusal" \
   test -n "$(worktree_of paused-route)"
 
-# ------------------------------------------------- a hook-paused task, requeued
-# A failing `queued` hook pauses the task and leaves `hook_paused:` and the
-# hook's exit file behind. Unqueued and queued again, the task has to start
+# ------------------------------------------------- a hook-failed task, requeued
+# A failing `queued` hook moves the task to `hook_failed` and leaves
+# `hook_paused:`, `hook_error:` and the hook's exit file behind. Unqueued and queued again, the task has to start
 # over: no pause record in the pending copy, no exit file under `tracking/`,
 # and both `queued` and `started` hooks fired anew rather than the old exit
 # code being read as the new run's answer.
@@ -348,17 +348,19 @@ echo hang > "$CTL/hook-requeue"
 task_doc "$LIVE/hook-requeue.md" hook-requeue "$BODY" "group: hook-requeue" \
   "group_description: a task under a hook that fails until told otherwise"
 must "a task queues under it" "$SPOOLWAY" queue add --from "$LIVE/hook-requeue.md"
-if drive hook-requeue paused 60; then ok "the failing queued hook pauses it"
-else bad "the failing queued hook pauses it (at \`$(stage_of hook-requeue)\`)"; fi
-has "with the pause recorded as a hook's" "hook_paused: queued" \
+if drive hook-requeue hook_failed 60; then ok "the failing queued hook stops it on hook_failed"
+else bad "the failing queued hook stops it on hook_failed (at \`$(stage_of hook-requeue)\`)"; fi
+has "with the stop recorded as a hook's" "hook_paused: queued" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-requeue.md"
 works "and the hook's exit file on disk" \
   test -f "$TRACKING/hook-requeue · queued.exit"
 dispatcher_stop
 
-must "a hook-paused task unqueues" \
+must "a hook-failed task unqueues" \
   "$SPOOLWAY" queue unqueue hook-requeue --force
 lacks "the pending copy carries no hook_paused" "hook_paused:" \
+  "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
+lacks "and no hook_error" "hook_error:" \
   "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
 lacks "and no missing_start_branch" "missing_start_branch:" \
   "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"

@@ -3903,10 +3903,10 @@ fn task_step_at<'a>(
 
 /// The step a task is on right now, read off its file: its `stage`, unless
 /// that is one of [`crate::pipeline::RESERVED`] — `paused`, `blocked`,
-/// `queued`, `done` — none of which is the step a person opening an agent
-/// in its worktree is working on. A held task names that step in
-/// `paused_at`, `parked_from` or `blocked_from`; the first that names a
-/// step is it, and `None` when none does. Banked under the hold's own name
+/// `hook_failed`, `queued`, `done` — none of which is the step a person
+/// opening an agent in its worktree is working on. A held task names that
+/// step in `paused_at`, `parked_from` or `blocked_from`; the first that
+/// names a step is it, and `None` when none does. Banked under the hold's own name
 /// instead, a session opened while a lane was paused — the ordinary way a
 /// person ends up fixing something by hand — would sit on a `paused` row of
 /// its own in `spoolway eval --by step`, and stay there, since later

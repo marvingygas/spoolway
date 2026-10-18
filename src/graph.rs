@@ -67,8 +67,8 @@ impl Graph {
         for task in tasks {
             // Still in the queue means not finished, even on `done`: that stage
             // is reached before cleanup and the `done` hook have run, and
-            // either can still park the task on `blocked` or `paused`. Only
-            // the archive says a dependency is complete.
+            // either can still park the task on `blocked`, `paused` or
+            // `hook_failed`. Only the archive says a dependency is complete.
             state.insert(task.front.id.clone(), DepState::Pending);
             edges.insert(task.front.id.clone(), task.front.depends_on.clone());
         }
@@ -577,6 +577,8 @@ mod tests {
                 paused_at: None,
                 paused_by: None,
                 hook_paused: None,
+                hook_error: None,
+                hook_skipped: None,
                 missing_start_branch: None,
                 launched_at: None,
                 steps: Default::default(),

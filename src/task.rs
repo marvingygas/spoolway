@@ -580,13 +580,13 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_by: Option<String>,
 
-    /// `"queued"` or `"done"` — which reserved stage's issue-tracking hook
-    /// paused this task, set the moment [`crate::dispatch::Dispatcher::
-    /// tracking_gate`] finds one exited non-zero, or killed
-    /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row without leaving an
-    /// exit code at all. Unlike [`paused_by`] this
-    /// is not one of a gate's two roads — a hook pause answers no question a
-    /// person releases past, it stops the task until the hook itself is
+    /// `"queued"`, `"started"` or `"done"` — which issue-tracking hook moved
+    /// this task to `hook_failed`, set the moment
+    /// [`crate::dispatch::Dispatcher::tracking_gate`] finds one exited
+    /// non-zero, or killed [`crate::tracking::MAX_HOOK_KILLS`] times in a row
+    /// without leaving an exit code at all. Unlike [`paused_by`] this is not
+    /// one of a gate's two roads — a hook stop answers no question a person
+    /// releases past, it stops the task until the hook itself is
     /// made to run again — so it needs its own field rather than a third
     /// value squeezed into that one.
     ///
@@ -601,6 +601,30 @@ pub struct Frontmatter {
     /// `spoolway queue route` only read it, and leave it set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_paused: Option<String>,
+
+    /// Why the hook [`Frontmatter::hook_paused`] names failed, in the words
+    /// the dispatcher wrote: `issue_tracking hook exited 1`, say. Written and
+    /// cleared together with that field. It is what the board's RECENT line
+    /// says after `<event> hook failed:`, since the board reads the front
+    /// matter and never the body, where the same reason sits in the status
+    /// log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_error: Option<String>,
+
+    /// `"queued"`, `"started"` or `"done"` — the hook event `spoolway resume
+    /// --skip-hook` (or the board's `k`) last carried this task past. Read by
+    /// the board alone, so its RECENT line can say `skipped <event> hook`:
+    /// the skip clears [`Frontmatter::hook_paused`], and nothing else left
+    /// in the file tells a skip from any other way off `hook_failed`.
+    ///
+    /// It has to outlive one more move than the skip itself. A skip at
+    /// `queued` or `started` puts the task back on `queued`, and the board
+    /// may first see it on the step the dispatcher moves it to next, so the
+    /// mark is still there on that move from `queued` onto a step — see
+    /// [`Task::set_stage`], which clears it on every other move.
+    /// [`Task::set_stage_unbanked`] clears it too. Nothing routes on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_skipped: Option<String>,
 
     /// The start branch that was missing when the dispatcher paused this task
     /// instead of cutting its worktree — the pause's own reason, which
@@ -1027,6 +1051,16 @@ impl Task {
             }
         }
 
+        // A binary from before `hook_failed` existed stopped a task over a
+        // failing hook on `paused`, with `hook_paused:` naming the hook. Read
+        // as `paused`, that task would show as an ordinary hold and could be
+        // parked or picked over as one. `hook_paused:` is only ever written
+        // together with that move, so the pair can only mean a hook stop,
+        // and the next save writes it in the new shape.
+        if front.stage == crate::pipeline::PAUSED && front.hook_paused.is_some() {
+            front.stage = crate::pipeline::HOOK_FAILED.to_string();
+        }
+
         // `queue add` checks this too, and is not the only way a file gets here:
         // a person edits one, a plan writes several. The id names this task's
         // worktree and every file a lane of it writes under the project's
@@ -1152,6 +1186,12 @@ impl Task {
         if from == crate::pipeline::BLOCKED {
             self.front.escalated = false;
         }
+        // A skipped hook's mark is read on the move from `queued` onto a
+        // step that follows the skip, and is stale on any other: a later
+        // stop of the same task would otherwise read on the board as a skip.
+        if from != crate::pipeline::QUEUED || crate::pipeline::RESERVED.contains(&stage) {
+            self.front.hook_skipped = None;
+        }
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.launched_at = None;
@@ -1197,6 +1237,10 @@ impl Task {
     /// Clearing a run is not counting an arrival: `rounds` stays as it was.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
+        // Every move this makes — a park, a put-back, a skip back onto
+        // `queued` — is a move away from the one a skip marked; a skip writes
+        // its own mark after this.
+        self.front.hook_skipped = None;
         self.front.attempts = 0;
         self.front.launched_at = None;
         self.front.launch_failures.remove(stage);
@@ -1461,11 +1505,10 @@ impl Task {
 
     /// Read a section's content, if present.
     ///
-    /// `#[cfg(test)]` only: spoolway writes a task's body and never reads it
-    /// back — nothing in `src/` outside a test asks a task file what it
-    /// says any more. Kept for what a test still needs to assert on: that a
-    /// writer put the right words under the right heading.
-    #[cfg(test)]
+    /// spoolway writes a task's body and reads almost none of it back. The
+    /// exception is `queue route`, which shows a stopped task's `## Hook
+    /// error` output; tests also use it to assert that a writer put the right
+    /// words under the right heading.
     pub fn section(&self, heading: &str) -> Option<&str> {
         self.find_section(heading)
             .map(|(start, end)| self.body[start..end].trim())
@@ -2183,6 +2226,58 @@ mod tests {
         let rendered = task.render().unwrap();
         assert!(rendered.contains("steps:"), "{rendered}");
         assert!(!rendered.contains("prompts:"), "{rendered}");
+    }
+
+    /// A task file an older binary stopped over a failed hook — `paused`,
+    /// with `hook_paused:` naming the hook — is read as `hook_failed`, and
+    /// saved that way, so `spoolway resume` still reruns the hook rather
+    /// than treating it as an ordinary hold.
+    #[test]
+    fn an_old_hook_pause_is_read_as_hook_failed() {
+        let raw = "---\nid: demo\nstage: paused\nhook_paused: done\narrived_from: done\n\
+                   ---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(task.front.hook_paused.as_deref(), Some("done"));
+        assert_eq!(task.front.arrived_from.as_deref(), Some("done"));
+
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("stage: hook_failed"), "{rendered}");
+    }
+
+    /// A `paused` task with no `hook_paused:` is an ordinary hold, and stays
+    /// one: only the pair means a hook stopped it.
+    #[test]
+    fn a_plain_pause_is_left_paused() {
+        let raw = "---\nid: demo\nstage: paused\nparked_from: review\n---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+    }
+
+    /// A skipped hook's `hook_skipped:` mark lives through exactly one more
+    /// move: the dispatcher's from `queued` onto a step, which the board reads
+    /// it on. Any other move clears it — the step's own pass, a move from
+    /// `queued` onto a stage that is not a step, a park — so a later stop
+    /// never reads as a skip.
+    #[test]
+    fn a_skip_mark_outlives_only_the_move_off_queued_onto_a_step() {
+        use crate::pipeline::{BLOCKED, QUEUED};
+        let raw = "---\nid: demo\nstage: queued\nhook_skipped: queued\n---\n## Goal\nx\n";
+        let marked = || Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+
+        let mut task = marked();
+        task.set_stage("implement", None);
+        assert_eq!(task.front.hook_skipped.as_deref(), Some(QUEUED));
+        task.set_stage("review", None);
+        assert_eq!(task.front.hook_skipped, None);
+
+        let mut task = marked();
+        task.set_stage(BLOCKED, None);
+        assert_eq!(task.front.hook_skipped, None);
+
+        let mut task = marked();
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "parked");
+        assert_eq!(task.front.hook_skipped, None);
     }
 
     /// A task file already on disk carrying `rounds:` but no `arrivals:` of

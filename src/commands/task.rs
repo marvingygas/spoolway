@@ -79,6 +79,8 @@ const IGNORED_KEYS: &[&str] = &[
     "paused_at",
     "paused_by",
     "hook_paused",
+    "hook_error",
+    "hook_skipped",
     "missing_start_branch",
     "launched_at",
     "steps",
@@ -576,13 +578,17 @@ pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
 
     let mut task = repo.task(&args.task)?;
     let stage = task.stage();
-    if stage != crate::pipeline::PAUSED && stage != crate::pipeline::BLOCKED {
+    if stage != crate::pipeline::PAUSED
+        && stage != crate::pipeline::BLOCKED
+        && stage != crate::pipeline::HOOK_FAILED
+    {
         bail!(
-            "task `{}` is at `{stage}`, not `{}` or `{}` — only a stopped task may \
+            "task `{}` is at `{stage}`, not `{}`, `{}` or `{}` — only a stopped task may \
              be rewritten this way.",
             args.task,
             crate::pipeline::PAUSED,
-            crate::pipeline::BLOCKED
+            crate::pipeline::BLOCKED,
+            crate::pipeline::HOOK_FAILED
         );
     }
 
@@ -1186,7 +1192,11 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("queued"), "{err:#}");
+        assert_eq!(
+            format!("{err:#}"),
+            "task `ship` is at `queued`, not `paused`, `blocked` or `hook_failed` — only a \
+             stopped task may be rewritten this way."
+        );
 
         let task = queued(&repo, "ship");
         assert_eq!(
@@ -1217,6 +1227,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(queued(&repo, "ship").section("## Goal").unwrap(), "fixed");
+    }
+
+    /// A task stopped by its hook is held for a person too, and an edit
+    /// leaves its hook's marker in place, so `resume` still reruns the hook.
+    #[test]
+    fn task_edit_accepts_a_hook_failed_task_and_keeps_its_hook_marker() {
+        let (repo, _root_guard) = fixture("edit-hook-failed");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.front.hook_paused = Some(crate::pipeline::QUEUED.into());
+        task.set_stage(crate::pipeline::HOOK_FAILED, None);
+        task.save().unwrap();
+
+        let from = write_doc(&repo, "mockup.txt", "fixed\n");
+        task_edit(
+            &repo,
+            &TaskEditArgs {
+                task: "ship".into(),
+                section: "Goal".into(),
+                from,
+            },
+        )
+        .unwrap();
+
+        let task = queued(&repo, "ship");
+        assert_eq!(task.section("## Goal").unwrap(), "fixed");
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(
+            task.front.hook_paused.as_deref(),
+            Some(crate::pipeline::QUEUED)
+        );
     }
 
     /// A heading the body does not have is refused by name, rather than

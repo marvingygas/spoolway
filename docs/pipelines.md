@@ -112,7 +112,7 @@ task on `implement`.
 
 ### Reserved stages
 
-Four stages belong to the dispatcher. No step may use `queued`, `done` or `paused` as its id.
+Five stages belong to the dispatcher. No step may use `queued`, `done`, `paused` or `hook_failed` as its id.
 Every pipeline may route to `done` and `blocked` without declaring them.
 
 | Stage | What it means |
@@ -121,8 +121,9 @@ Every pipeline may route to `done` and `blocked` without declaring them.
 | `done` | The task finished. Its worktree is removed and its file is archived. |
 | `blocked` | The task needs help. Attended, `spoolway resume <task>` resumes it. Unattended, a lane is started on it. See [Staffing `blocked`](#staffing-blocked). |
 | `paused` | The task passed a `gate:` step and waits for `spoolway resume <task>`. See [Gates](#gates). |
+| `hook_failed` | An `[issue_tracking]` hook failed on `queued`, `started` or `done`. `spoolway resume <task>` runs the hook again. `spoolway resume <task> --skip-hook`, or `k` on the board, carries the task on without it. |
 
-`started` is not one of these four. It is an `[issue_tracking]` hook event, fired the moment a
+`started` is not one of these five. It is an `[issue_tracking]` hook event, fired the moment a
 task actually leaves `queued` for its entry step — see
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Nothing
 ever writes it to a task's own `stage:`, so a step may still use `started` as its id.

@@ -62,6 +62,20 @@ pub fn refuse_from_lane(what: &str, in_lane: bool) -> Result<()> {
     Ok(())
 }
 
+/// A refusal that is the caller's to correct rather than a failure:
+/// `spoolway` exits 2 on it, where every other error exits 1, and prints the
+/// text as it stands under an `error:` label. See `main`.
+#[derive(Debug)]
+pub struct UsageRefusal(pub String);
+
+impl std::fmt::Display for UsageRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageRefusal {}
+
 mod agent;
 mod config;
 mod dispatch;

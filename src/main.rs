@@ -80,6 +80,12 @@ use repo::Repo;
 
 fn main() {
     if let Err(err) = run() {
+        // A refusal the caller corrects by typing something else, not a
+        // failure: exit 2, and no `spoolway:` prefix on the text.
+        if let Some(refusal) = err.downcast_ref::<commands::UsageRefusal>() {
+            eprintln!("error: {refusal}");
+            std::process::exit(2);
+        }
         // `{err:#}` prints the whole anyhow context chain, which is where the
         // useful part of a failure usually lives.
         eprintln!("spoolway: {err:#}");
