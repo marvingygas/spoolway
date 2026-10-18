@@ -154,17 +154,16 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "source",
-        "Where this task came from — an issue URL, a plan page path, anything — \
-         kept but never parsed. The issue a planning skill read through `spoolway \
-         issue show`, whenever there was one; a plan page's own path only when \
-         there was no issue behind it.",
+        "The URL of the tracker item this task came from — an issue, a pull \
+         request or a Jira item — kept but never parsed. The item a planning \
+         skill read through `spoolway issue show`, whenever there was one; a \
+         plan page's path goes in `plan:` instead.",
     ),
     (
         "plan",
         "The plan page that argued this task's shape, as an absolute path — set \
-         only when a page was written and an issue also holds `source:`, since a \
-         page with no issue behind it keeps its own path in `source:` instead. \
-         Kept but never parsed, and never required.",
+         whenever a page was written, with or without an issue behind it. Kept \
+         but never parsed, and never required.",
     ),
     (
         "depends_on",

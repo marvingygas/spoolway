@@ -47,6 +47,9 @@ command -v jq >/dev/null || { echo "queue-plan.sh needs jq" >&2; exit 2; }
 
 SPOOLWAY=${SPOOLWAY:-spoolway}
 
+# `plan:` holds an absolute path, and $PLAN is as typed — possibly relative.
+PLAN_ABS=$(cd "$(dirname "$PLAN")" && pwd)/$(basename "$PLAN")
+
 # The plan *is* the JSON block; the page around it is for the person who already
 # read it. Same block the skill reads, found the same way.
 json=$(sed -n '/<script type="application\/json" id="spoolway-plan">/,/<\/script>/p' "$PLAN" \
@@ -72,10 +75,10 @@ echo "queueing $selected of $count task(s) from $(basename "$PLAN") (pass $WANT_
 # lets `observer.html`'s `reads-doc` name `writes-doc` in `depends_on:`
 # while both are still in the same breath. The front matter keys are the
 # document's to set
-# (`id`, `pipeline`, `group`, `source`, `depends_on`);
+# (`id`, `pipeline`, `group`, `plan`, `depends_on`);
 # `group:` is the plan's own name, the key that groups the
-# board and drains the chain as one, and `source:` carries the page's path
-# for a person to follow back.
+# board and drains the chain as one, and `plan:` carries the page's absolute
+# path for a person to follow back.
 #
 # A group is one chain, and `queue add` refuses a group with two roots. So a
 # plan whose tasks are not one line — `gates.html`'s two independent flags,
@@ -131,7 +134,7 @@ for i in $(seq 0 $((count - 1))); do
   # jq's own @json, so an id or a glob with a quote in it survives.
   task_group=""
   [ -n "$group" ] && task_group=$(jq -r --arg id "$id" '.[$id]' <<<"$groups")
-  front=$(jq -r --arg source "$PLAN" --arg group "$task_group" '
+  front=$(jq -r --arg plan "$PLAN_ABS" --arg group "$task_group" '
     def list(name; xs): if (xs // []) | length > 0
       then name + ":\n" + ((xs) | map("- " + (. | @json)) | join("\n")) + "\n"
       else "" end;
@@ -139,7 +142,7 @@ for i in $(seq 0 $((count - 1))); do
     + "title: " + ((.title // (.goal | split(": ")[0] | split(". ")[0])) | @json) + "\n"
     + "pipeline: " + (.pipeline | @json) + "\n"
     + (if $group != "" then "group: " + ($group | @json) + "\n" else "" end)
-    + "source: " + ($source | @json) + "\n"
+    + "plan: " + ($plan | @json) + "\n"
     + list("depends_on"; .depends_on)
   ' <<<"$task")
 

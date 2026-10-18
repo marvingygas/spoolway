@@ -997,7 +997,8 @@ fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          id: name-this-task\n\
          title: \"type(scope): a short sentence naming what this task does\"   # quoted: YAML reads a bare `: ` as a key\n\
          group: group-name            # required — a lane runs in the tab its group shares with its siblings\n\
-         # source: where this came from — an issue URL, a plan page path, never parsed\n\
+         # source: tracker-url        # the URL of the tracker item this came from — never parsed\n\
+         # plan: /abs/page.md         # the plan page's absolute path, when one exists — never parsed\n\
          depends_on: []               # sibling task ids that must finish first\n\
          # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
          {pipeline_row}\n\
@@ -13076,6 +13077,22 @@ mod tests {
         assert_eq!(
             task.front.source.as_deref(),
             Some("https://github.com/x/y/issues/42")
+        );
+    }
+
+    /// A task written before `plan:` existed may hold a plan page's path in
+    /// `source:`. It is accepted, and the value is kept verbatim.
+    #[test]
+    fn a_page_path_in_source_is_still_accepted() {
+        let text = task_text(
+            "demo",
+            "group: demo\nsource: /home/me/.spoolway/p/plans/demo/page.html\n",
+            BODY,
+        );
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert_eq!(
+            task.front.source.as_deref(),
+            Some("/home/me/.spoolway/p/plans/demo/page.html")
         );
     }
 

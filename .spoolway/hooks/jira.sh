@@ -159,9 +159,10 @@ union_labels() {
 
 # Hangs $2 (an issue this hook just created, by its own key) as a Jira link
 # under $1, doing nothing at all unless $1 is a `.../browse/<key>` URL for
-# this same $project. $1 is SPOOLWAY_SOURCE most of the time, and spoolway
-# never parses that field — most of the time it names a plan page's path,
-# not an issue, and this is what lets it fall straight through untouched.
+# this same $project. $1 is SPOOLWAY_SOURCE, and spoolway never parses that
+# field — it holds a tracker URL, but a task written before `plan:` existed
+# may hold a plan page's path or nothing, and that falls straight through
+# untouched.
 hang_under() {
   child=$2
   [ -z "$child" ] && return 0
