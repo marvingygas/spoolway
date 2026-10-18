@@ -690,7 +690,7 @@ It starts no lane beyond the `concurrency` caps of that config. It reads the fil
 pass, so the error clears as soon as the file is valid.
 
 After each good load, the dispatcher writes the merged config to `<home>/dispatch-config.toml`.
-A lane's `spoolway report` and a `spoolway stack` step run on this record when `config.toml` or
+A lane's `spoolway report` runs on this record when `config.toml` or
 `overrides/config.toml` cannot be read. See
 [When the config will not parse](configuration.md#when-the-config-will-not-parse). A record is
 used only while the dispatcher that wrote it is running. The dispatcher writes it on the first
@@ -1222,7 +1222,7 @@ every task in every copy an arm under one shared `trial:` id. See [Trials](plann
 An arm is a disposable copy:
 
 - Its `queued`, `started` and `done` events never fire the `[issue_tracking]` hook.
-- `spoolway stack` is a no-op for it, so it opens no pull request.
+- The deprecated stack command is a no-op for it, so it opens no pull request.
 - Its branch is deleted at cleanup whether or not a remote has it.
 - It carries `trial_group:`, the source group a person tried. Every ledger line it banks stores
   that source group beside `trial:`. The field is absent on an ordinary task's lines.

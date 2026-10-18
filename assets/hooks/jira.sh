@@ -607,7 +607,7 @@ case "$SPOOLWAY_EVENT" in
   done)
     # The pull request this hand-off names, looked up before anything else
     # on `done` touches the ticket — a `done` this hook fires for always has
-    # one behind it by then (`spoolway stack` already opened it), so no
+    # one behind it by then (the pipeline already opened it), so no
     # result is as much a failure as a nonzero exit is, the same rule
     # `github.sh`'s own `hand_off_for_review` follows. Every hook here runs
     # with the repository's own checkout as its working directory, so

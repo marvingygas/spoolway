@@ -953,15 +953,14 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 
 ## When the config will not parse
 
-Every command stops on a config error except `spoolway doctor`, `spoolway report` and
-`spoolway stack`.
+Every command stops on a config error except `spoolway doctor` and `spoolway report`.
 
 `spoolway doctor` prints the error with its line and still runs the checks that read no
 settings.
 
-A lane's `spoolway report` and a `spoolway stack` step run while a dispatcher is running, so
-they can start while `config.toml` or `overrides/config.toml` is being edited. Both use the last
-good config that the dispatcher recorded. Each prints a note naming the file it could not read:
+A lane's `spoolway report` runs while a dispatcher is running, so it can start while
+`config.toml` or `overrides/config.toml` is being edited. It uses the last good config that the
+dispatcher recorded, and prints a note naming the file it could not read:
 
 ```
 note: running on the last good config, because it cannot be read now: …

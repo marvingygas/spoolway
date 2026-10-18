@@ -363,8 +363,7 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          in its section 4 (`SPOOLWAY_TASK`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_REPO`, \
          `SPOOLWAY_STEP`, `SPOOLWAY_WORKTREE`, `SPOOLWAY_SCRATCH`) and no \
          `spoolway report`, and nothing it calls reads one, so a person could \
-         run it by hand. Any other `SPOOLWAY_` name or subcommand is legal. \
-         The one exception is `spoolway stack` on a handover step.",
+         run it by hand. Any other `SPOOLWAY_` name or subcommand is legal.",
     ),
     (
         "timeout",
@@ -600,7 +599,7 @@ fn template() -> String {
          \x20\x20\x20\x20prompt: reviewer\n\
          \x20\x20\x20\x20model: {hosted_model}\n\
          \x20\x20\x20\x20effort: high\n\
-         \x20\x20\x20\x20on_pass: handover\n\
+         \x20\x20\x20\x20on_pass: check\n\
          \x20\x20\x20\x20on_fail: fix\n\
          \n\
          \x20\x20- id: fix\n\
@@ -618,9 +617,9 @@ fn template() -> String {
          \x20\x20# else `on_fail`. A `run:` line names none of the six variables in\n\
          \x20\x20# `spoolway prompt contract` section 4 and no `spoolway report`, and\n\
          \x20\x20# nothing it calls reads one; any other `SPOOLWAY_` name or subcommand is\n\
-         \x20\x20# legal. `spoolway stack` on a handover step is the one exception.\n\
-         \x20\x20- id: handover\n\
-         \x20\x20\x20\x20run: spoolway stack\n\
+         \x20\x20# legal.\n\
+         \x20\x20- id: check\n\
+         \x20\x20\x20\x20run: ./scripts/check.sh\n\
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
          \x20\x20\x20\x20# background: true         let the task move on; its exit never moves it\n\
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
@@ -4677,17 +4676,20 @@ mod tests {
                 fields["run"]
             );
         }
-        for phrase in ["spoolway report", "spoolway stack"] {
-            assert!(
-                fields["run"].contains(phrase),
-                "`run`'s sentence should mention `{phrase}`: {}",
-                fields["run"]
-            );
-        }
+        assert!(
+            fields["run"].contains("spoolway report"),
+            "`run`'s sentence should mention `spoolway report`: {}",
+            fields["run"]
+        );
+        assert!(
+            !fields["run"].contains("exception"),
+            "`run`'s sentence should state no exception: {}",
+            fields["run"]
+        );
     }
 
-    /// The annotated template carries the rule beside its command step and
-    /// still shows the one `run:` line the rule allows.
+    /// The annotated template carries the rule beside its command step, and
+    /// that step runs a plain script rather than a spoolway command.
     #[test]
     fn template_comments_the_portability_rule_on_its_command_step() {
         let template = template();
@@ -4695,7 +4697,8 @@ mod tests {
             template.contains("nothing it calls reads one"),
             "the template should state the portability rule"
         );
-        assert!(template.contains("run: spoolway stack"));
+        assert!(template.contains("run: ./scripts/check.sh"));
+        assert!(!template.contains("spoolway stack"));
     }
 
     /// The top-level `description` sentence asks for one sentence, not the

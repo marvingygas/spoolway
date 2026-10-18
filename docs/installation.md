@@ -326,13 +326,10 @@ spoolway doctor
 - the configured issue-tracking hook has Unix line endings and an executable bit
 - the configured backend is one `spoolway dispatch` accepts
 
-When a step runs `spoolway stack`, `doctor` prints one `note` line. It says the command is
-deprecated and names each `pipeline · step` that still runs it. It prints nothing when no step
-does. The shipped pipelines run no such step.
-
-```
-  note  `spoolway stack` is deprecated and may be removed in a future release. Still run by: bugfix · handover, default · handover. Run `spoolway init` to add the `create-pr` prompt, then replace each step with an agent step on it — see docs/migrations.md
-```
+When a step runs the deprecated stack command, `doctor` prints one `note` line. It says
+the command is deprecated and names each `pipeline · step` that runs it. It also says to run
+`spoolway init` to add the `create-pr` prompt and replace each such step with an agent step on
+it. It prints nothing when no step does. The shipped pipelines run no such step.
 
 Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section
 reads both.
@@ -519,18 +516,9 @@ as they are.`
 `sync` also deletes a leftover per-skill-file stamp, if it finds one. `spoolway doctor` notes a
 project that `sync` would change. Only `spoolway sync` writes the files.
 
-When a step runs `spoolway stack`, `sync` and `sync --dry-run` print the same deprecation note
-as `doctor`. It comes after the file lines, under the word `note`, and above the closing line.
-It writes no file and does not change the exit code.
-
-```
-note    `spoolway stack` is deprecated and may be removed in a future release.
-        Still run by: bugfix · handover, default · handover.
-        Run `spoolway init` to add the `create-pr` prompt, then replace each step
-        with an agent step on it — see docs/migrations.md
-
-Nothing updating.
-```
+When a step runs the deprecated stack command, `sync` and `sync --dry-run` print the same
+deprecation note as `doctor`. It comes after the file lines, under the word `note`, and above
+the closing line. It writes no file and does not change the exit code.
 
 ### Files spoolway refuses
 
