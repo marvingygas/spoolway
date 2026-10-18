@@ -22,3 +22,7 @@ __pycache__/
 
 # Assembled by site/build.sh; never committed.
 site/_src/
+
+# Captures the e2e step takes of the screens a change altered. The screenshots
+# step files the ones worth keeping into docs/screenshots/.
+.screenshots/

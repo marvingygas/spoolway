@@ -59,6 +59,25 @@ PATH is an older release.
      re-wraps.
 5. **Say what you added or updated, and why it needed a suite** rather than a unit test.
 
+## Screenshots
+
+When the change altered a screen, capture that screen into `.screenshots/<task>/`, where `<task>` is
+this task's `id:`. Capture only the screens it altered. Empty that folder before you capture, on
+every visit: a visit after `test` or `suite` sent the task back may have changed the screen, and a
+capture left from the earlier lap would be filed as it looked before the fix.
+
+Drive `./target/release/spoolway`, built from this worktree, on a scratch project with `HOME` set to
+a folder in your scratch space, as the Traps section below sets up. The `spoolway` on PATH is an
+older release, and run from the worktree it would open this repository's live queue. Run it inside
+a `tmux` server of your own, started with `tmux -L <task>`, and end only that server when you are
+done, never `tmux kill-server` on the default one. Render the pane with `freeze`, for example
+`tmux -L <task> capture-pane -ep | freeze -o .screenshots/<task>/<screen>.png`. Name each file for
+the screen it shows, such as `queue.png`.
+
+The folder is gitignored, and the `screenshots` step files the images that belong in
+`docs/screenshots/`. When `freeze` is not installed, capture nothing and say so in your handoff, so
+the `screenshots` step knows why the folder is empty.
+
 ## The upgrade suite
 
 `scripts/e2e/suites/upgrade.sh` asks one question, and it is the only suite that asks it: does

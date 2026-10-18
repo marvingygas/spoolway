@@ -119,7 +119,7 @@ steps:
     on_pass: review-prose
 
   # Reinstalls every copy this repo carries and fails on any diff, so an edit
-  # made only to an installed copy cannot reach handover.
+  # made only to an installed copy cannot reach create-pr.
   - id: check
     description: Rebuild, reinstall the skill copies, and fail on any drift.
     run: >-
@@ -130,7 +130,7 @@ steps:
       && cargo test --locked install::
       && ./target/release/spoolway pipeline check
     timeout: 45m
-    on_pass: handover
+    on_pass: create-pr
     on_fail: fix-check
 
   - id: fix-check
@@ -143,9 +143,11 @@ steps:
     loop: 2
     on_pass: check
 
-  - id: handover
+  - id: create-pr
     description: >-
-      Commit, squash, push and open this task's pull request with git and
-      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
-    run: ./target/release/spoolway stack
+      Push the branch and open this task's pull request with a summary and
+      the screenshots its diff changed. Nothing is merged here; a person lands it.
+    agent: claude
+    prompt: create-pr
+    model: claude-haiku-5-5
     on_pass: done

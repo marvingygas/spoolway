@@ -155,8 +155,16 @@ steps:
     last: true
     run: scripts/e2e-pr.sh
     timeout: 45m
-    on_pass: document
+    on_pass: screenshots
     on_fail: e2e
+
+  - id: screenshots
+    description: File the screenshots e2e captured into docs/screenshots/, one current image per screen.
+    agent: claude
+    prompt: screenshots
+    model: claude-sonnet-5-5
+    effort: medium
+    on_pass: document
 
   - id: document
     description: Bring the domain documents in line with what this task changed.
@@ -164,11 +172,13 @@ steps:
     prompt: archivist
     model: claude-sonnet-5-5
     effort: high
-    on_pass: handover
+    on_pass: create-pr
 
-  - id: handover
+  - id: create-pr
     description: >-
-      Commit, squash, push and open this task's pull request with git and
-      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
-    run: ./target/release/spoolway stack
+      Push the branch and open this task's pull request with a summary and
+      the screenshots its diff changed. Nothing is merged here; a person lands it.
+    agent: claude
+    prompt: create-pr
+    model: claude-haiku-5-5
     on_pass: done
