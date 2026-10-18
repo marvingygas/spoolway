@@ -647,56 +647,103 @@ fn list_window(picker: &ResumePicker, room: usize) -> Window {
     }
 }
 
-/// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
-/// unchanged when `chain` names only the cursor's own task, and a list of it
-/// and every unstarted task that reaches it through `depends_on` once there
-/// is more than one, each dependent annotated with what in the chain it
-/// depends on — see this task's own mockup.
+/// [`BoardMode::ConfirmUnqueue`]'s panel. When `chain` names only the
+/// cursor's own task it is a single sentence about that task: where in `dir`
+/// it goes back to, or, for a routine copy the unqueue deletes, where its
+/// routine stays. A longer chain lists its tasks in two groups, the ones going
+/// back to `dir` and the routine copies being deleted, each dependent
+/// annotated with what in the chain it depends on. A group with no members is
+/// left out, its closing line with it.
+///
+/// A deleted copy is named by its routine, the name the board shows for its
+/// row. A task going to `dir` is named by its id even when it is a copy whose
+/// routine is gone, since that id is the file it lands under.
 pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path) -> Vec<String> {
     let Some(head) = chain.first() else {
         return Vec::new();
     };
+    let shown = |entry: &ChainEntry| match entry.routine_file {
+        Some(_) => entry.name.clone(),
+        None => entry.id.clone(),
+    };
     if chain.len() == 1 {
-        let body = vec![
-            String::new(),
-            "Nothing has run for it yet.".to_string(),
-            String::new(),
-            "The task goes back to:".to_string(),
-            shorten_home(&dir.join(format!("{}.md", head.id))),
-            String::new(),
-            "The queue tab is what sends it again.".to_string(),
-        ];
+        let body = match &head.routine_file {
+            Some(routine_file) => vec![
+                String::new(),
+                "Nothing has run for it yet.".to_string(),
+                String::new(),
+                "This copy is deleted. The".to_string(),
+                "routine stays in:".to_string(),
+                shorten_home(routine_file),
+                String::new(),
+                "The routines tab queues it again.".to_string(),
+            ],
+            None => vec![
+                String::new(),
+                "Nothing has run for it yet.".to_string(),
+                String::new(),
+                "The task goes back to:".to_string(),
+                shorten_home(&dir.join(format!("{}.md", head.id))),
+                String::new(),
+                "The queue tab is what sends it again.".to_string(),
+            ],
+        };
         return crate::screen::ask(
-            &format!("unqueue {}", head.id),
+            &format!("unqueue {}", shown(head)),
             &body,
             &["unqueue it".to_string()],
             0,
         );
     }
 
-    let mut body = vec![
-        String::new(),
-        "Nothing has run for these yet.".to_string(),
-        String::new(),
-        format!("{} tasks go back to:", chain.len()),
-        format!("{}/", shorten_home(dir)),
-        String::new(),
-    ];
-    for entry in chain {
+    // A dependency is named the way its own line in the panel names it, so
+    // the annotation can be matched to a line by eye.
+    let line = |entry: &ChainEntry| {
+        let name = shown(entry);
         if entry.depends_on.is_empty() {
-            body.push(format!("  {}", entry.id));
-        } else {
-            body.push(format!(
-                "  {}{GUTTER}(depends on {})",
-                entry.id,
-                entry.depends_on.join(", ")
-            ));
+            return format!("  {name}");
         }
+        let depends_on: Vec<String> = entry
+            .depends_on
+            .iter()
+            .map(|id| {
+                chain
+                    .iter()
+                    .find(|e| &e.id == id)
+                    .map_or_else(|| id.clone(), shown)
+            })
+            .collect();
+        format!("  {name}{GUTTER}(depends on {})", depends_on.join(", "))
+    };
+    let (deleted, drafted): (Vec<&ChainEntry>, Vec<&ChainEntry>) =
+        chain.iter().partition(|entry| entry.routine_file.is_some());
+
+    let mut body = vec![String::new(), "Nothing has run for these yet.".to_string()];
+    if !drafted.is_empty() {
+        body.push(String::new());
+        body.push(match drafted.len() {
+            1 => "1 task goes back to:".to_string(),
+            n => format!("{n} tasks go back to:"),
+        });
+        body.push(format!("{}/", shorten_home(dir)));
+        body.push(String::new());
+        body.extend(drafted.iter().map(|entry| line(entry)));
+        body.push(String::new());
+        body.push("The queue tab is what sends them again.".to_string());
     }
-    body.push(String::new());
-    body.push("The queue tab is what sends them again.".to_string());
+    if !deleted.is_empty() {
+        body.push(String::new());
+        body.push(match deleted.len() {
+            1 => "1 routine copy is deleted:".to_string(),
+            n => format!("{n} routine copies are deleted:"),
+        });
+        body.push(String::new());
+        body.extend(deleted.iter().map(|entry| line(entry)));
+        body.push(String::new());
+        body.push("The routines tab queues them again.".to_string());
+    }
     crate::screen::ask(
-        &format!("unqueue {}", head.id),
+        &format!("unqueue {}", shown(head)),
         &body,
         &["unqueue them".to_string()],
         0,
@@ -704,7 +751,8 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
 }
 
 /// `path` with a leading run matching the home directory rewritten to `~`,
-/// for the pending path an `unqueue` panel shows.
+/// for the pending and routine paths an `unqueue` panel shows. A relative
+/// path is returned as it is.
 ///
 /// A small copy of `crate::repo::shorten_home`, which is private to that
 /// module and outside what this task touches — duplicated here rather than
@@ -4961,33 +5009,228 @@ mod tests {
         assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
     }
 
+    /// The text inside each row of a boxed panel, borders and padding
+    /// stripped, for comparing a panel with a mockup line by line.
+    fn panel_text(panel: &[String]) -> Vec<String> {
+        panel
+            .iter()
+            .map(|line| {
+                line.trim_matches(|c: char| " │─╭╮╰╯".contains(c))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A routine copy the unqueue deletes, named by its routine in the title.
+    fn routine_copy(id: &str, routine: &str) -> ChainEntry {
+        ChainEntry {
+            id: id.to_string(),
+            name: routine.to_string(),
+            depends_on: Vec::new(),
+            routine_file: Some(std::path::PathBuf::from(format!(
+                ".spoolway/routines/{routine}/{routine}.md"
+            ))),
+        }
+    }
+
+    /// An ordinary task, or a copy whose routine is gone: it goes to pending.
+    fn drafted_entry(id: &str, name: &str, depends_on: &[&str]) -> ChainEntry {
+        ChainEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+            routine_file: None,
+        }
+    }
+
+    /// A routine copy the unqueue deletes says so, and names the routine file
+    /// that stays, in place of the pending path an ordinary task is given.
+    #[test]
+    fn the_unqueue_panel_for_a_routine_copy_names_where_its_routine_stays() {
+        let panel = unqueue_confirm_panel(
+            &[routine_copy("nightly-3", "nightly")],
+            std::path::Path::new("/pending"),
+        );
+        let text = panel_text(&panel);
+        assert_eq!(
+            text[..text.len() - 2],
+            [
+                "unqueue nightly",
+                "",
+                "Nothing has run for it yet.",
+                "",
+                "This copy is deleted. The",
+                "routine stays in:",
+                ".spoolway/routines/nightly/nightly.md",
+                "",
+                "The routines tab queues it again.",
+                "",
+                "> unqueue it",
+                "",
+            ]
+            .map(String::from),
+            "{panel:#?}"
+        );
+        assert!(
+            !panel.iter().any(|line| line.contains("pending")),
+            "{panel:#?}"
+        );
+    }
+
+    /// An ordinary task, and a copy whose routine is gone, keep the panel that
+    /// sends the task back to pending under its own id.
+    #[test]
+    fn the_unqueue_panel_for_a_task_going_to_pending_is_unchanged() {
+        for entry in [
+            drafted_entry("login", "login", &[]),
+            drafted_entry("nightly-3", "nightly", &[]),
+        ] {
+            let id = entry.id.clone();
+            let panel = unqueue_confirm_panel(&[entry], std::path::Path::new("/pending"));
+            let text = panel_text(&panel);
+            assert_eq!(
+                text[..text.len() - 2],
+                [
+                    format!("unqueue {id}").as_str(),
+                    "",
+                    "Nothing has run for it yet.",
+                    "",
+                    "The task goes back to:",
+                    format!("/pending/{id}.md").as_str(),
+                    "",
+                    "The queue tab is what sends it again.",
+                    "",
+                    "> unqueue it",
+                    "",
+                ]
+                .map(String::from),
+                "{panel:#?}"
+            );
+        }
+    }
+
+    /// A chain mixing both kinds lists the tasks going to pending under the
+    /// pending path and the deleted copies under their routine names, each
+    /// group closed by its own line, and a dependency on a deleted copy is
+    /// named by its routine as its line is.
+    #[test]
+    fn the_unqueue_chain_panel_groups_pending_tasks_apart_from_deleted_copies() {
+        let chain = [
+            drafted_entry("login", "login", &[]),
+            ChainEntry {
+                depends_on: vec!["login".to_string()],
+                ..routine_copy("nightly-3", "nightly")
+            },
+            drafted_entry("logout", "logout", &["nightly-3"]),
+        ];
+        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let text = panel_text(&panel);
+        let logout = format!("logout{GUTTER}(depends on nightly)");
+        let nightly = format!("nightly{GUTTER}(depends on login)");
+        assert_eq!(
+            text[..text.len() - 2],
+            [
+                "unqueue login",
+                "",
+                "Nothing has run for these yet.",
+                "",
+                "2 tasks go back to:",
+                "/pending/",
+                "",
+                "login",
+                logout.as_str(),
+                "",
+                "The queue tab is what sends them again.",
+                "",
+                "1 routine copy is deleted:",
+                "",
+                nightly.as_str(),
+                "",
+                "The routines tab queues them again.",
+                "",
+                "> unqueue them",
+                "",
+            ]
+            .map(String::from),
+            "{panel:#?}"
+        );
+    }
+
+    /// A chain of routine copies alone leaves the pending group, its path
+    /// and its closing line out, and is titled by the head's routine.
+    #[test]
+    fn the_unqueue_chain_panel_of_routine_copies_leaves_the_pending_group_out() {
+        let chain = [
+            routine_copy("nightly-3", "nightly"),
+            ChainEntry {
+                depends_on: vec!["nightly-3".to_string()],
+                ..routine_copy("weekly-1", "weekly")
+            },
+        ];
+        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let text = panel_text(&panel);
+        assert_eq!(text[0], "unqueue nightly");
+        assert!(text.contains(&"2 routine copies are deleted:".to_string()));
+        assert!(text.contains(&"The routines tab queues them again.".to_string()));
+        assert!(
+            !text.iter().any(|line| line.contains("pending")),
+            "{panel:#?}"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("queue tab")),
+            "{panel:#?}"
+        );
+    }
+
     /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`
     /// — sized to its widest line,
     /// not a fixed 80 columns, and never wider than that in practice since
-    /// every entry gets its own line.
+    /// every entry gets its own line. The chain mixes ordinary tasks with
+    /// routine copies, each copy shown under its routine's name in the
+    /// deleted group, and the pending path is a long one under the home
+    /// directory, shortened to `~` as the panel shows it.
     #[test]
     fn the_unqueue_chain_panel_stays_within_eighty_columns_at_five_tasks() {
         let chain: Vec<ChainEntry> = (1..=5)
             .map(|n| ChainEntry {
                 id: format!("chain-task-{n}"),
+                name: format!("chain-routine-{n}"),
                 depends_on: if n == 1 {
                     Vec::new()
                 } else {
                     vec![format!("chain-task-{}", n - 1)]
                 },
+                routine_file: (n % 2 == 0).then(|| {
+                    std::path::PathBuf::from(format!(
+                        ".spoolway/routines/chain-routine-{n}/chain-routine-{n}.md"
+                    ))
+                }),
             })
             .collect();
-        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let home = crate::platform::home_dir().unwrap_or_default();
+        let dir = home.join(".spoolway/a-long-project-name-1axtn7/pending");
+        let panel = unqueue_confirm_panel(&chain, &dir);
         for line in &panel {
             assert!(line.chars().count() <= 80, "{line}");
         }
         for entry in &chain {
+            let shown = match entry.routine_file {
+                Some(_) => entry.name.as_str(),
+                None => entry.id.as_str(),
+            };
             assert!(
-                panel.iter().any(|line| line.contains(entry.id.as_str())),
-                "{}",
-                entry.id
+                panel_text(&panel)
+                    .iter()
+                    .any(|line| line.starts_with(shown)),
+                "{shown}: {panel:#?}"
             );
         }
+        assert!(
+            panel
+                .iter()
+                .any(|line| line.contains("The routines tab queues them again.")),
+            "{panel:#?}"
+        );
     }
 
     /// A finished task's line — built by `finished_event` from the archive,

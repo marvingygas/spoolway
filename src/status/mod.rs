@@ -1247,7 +1247,8 @@ impl Board {
     /// no-op on a task the queue no longer has, or one that has started
     /// ([`not_started`] says no). A task some other still-queued task names
     /// in its own `depends_on` is not refused: the panel lists that
-    /// dependent alongside it instead — see [`unqueue_chain`].
+    /// dependent alongside it instead — see [`unqueue_chain`]. Each routine
+    /// copy the answer would delete is marked with its routine file here.
     fn begin_unqueue(&mut self, repo: &Repo, id: String) -> Result<()> {
         let tasks = repo.tasks()?;
         let Some(task) = tasks.iter().find(|t| t.id() == id) else {
@@ -1256,8 +1257,28 @@ impl Board {
         if !not_started(task) {
             return Ok(());
         }
+        let mut chain = unqueue_chain(&tasks, &id);
+        // Which copies the confirm deletes, read through the same
+        // `drafted_in_batch` and `deleted_on_unqueue` the `enter` below
+        // unqueues with, so the panel names exactly what it will do.
+        let ids: Vec<String> = chain.iter().map(|e| e.id.clone()).collect();
+        let drafted = drafted_in_batch(repo, &ids)?;
+        for entry in &mut chain {
+            let Some(task) = tasks.iter().find(|t| t.id() == entry.id) else {
+                continue;
+            };
+            // Shown relative to the checkout the routines are read from, as
+            // `.spoolway/routines/...`; a routine directory outside it (a
+            // workspace clone's) keeps its full path for the panel to
+            // shorten.
+            entry.routine_file = deleted_on_unqueue(repo, task, &drafted).map(|path| {
+                path.strip_prefix(&repo.checkout)
+                    .map(Path::to_path_buf)
+                    .unwrap_or(path)
+            });
+        }
         self.mode = BoardMode::ConfirmUnqueue {
-            chain: unqueue_chain(&tasks, &id),
+            chain,
             dir: repo.pending_dir(),
         };
         Ok(())
@@ -1357,7 +1378,9 @@ enum BoardMode {
     /// unstarted task that reaches it through `depends_on` — see
     /// [`unqueue_chain`] — and `dir`, this run's own [`Repo::pending_dir`],
     /// read once when the panel opened, so its panel can show where the
-    /// tasks are about to land without a second lookup at answer time.
+    /// tasks are about to land without a second lookup at answer time. Each
+    /// entry's `routine_file`, read at the same moment, marks a routine copy
+    /// the answer deletes instead.
     /// `chain` still needs a fresh [`Repo::task`] per id to answer with, the
     /// same as every confirm panel here: a task a moment ago and the
     /// task now are not guaranteed to be the same file.
@@ -1553,7 +1576,16 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
     };
     let entry = |id: &str, depends_on: &[&str]| ChainEntry {
         id: id.to_string(),
+        name: id.to_string(),
         depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+        routine_file: None,
+    };
+    let copy = |id: &str, routine: &str, depends_on: &[&str]| ChainEntry {
+        name: routine.to_string(),
+        routine_file: Some(PathBuf::from(format!(
+            ".spoolway/routines/{routine}/{routine}.md"
+        ))),
+        ..entry(id, depends_on)
     };
     let pending = std::path::Path::new("/pending");
     vec![
@@ -1577,6 +1609,20 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
         (
             "unqueue, with a dependent",
             unqueue_confirm_panel(&[entry("login", &[]), entry("logout", &["login"])], pending),
+        ),
+        (
+            "unqueue, a routine copy",
+            unqueue_confirm_panel(&[copy("nightly-3", "nightly", &[])], pending),
+        ),
+        (
+            "unqueue, a chain with a routine copy",
+            unqueue_confirm_panel(
+                &[
+                    entry("login", &[]),
+                    copy("nightly-3", "nightly", &["login"]),
+                ],
+                pending,
+            ),
         ),
         ("resume picker", resume_picker_panel(&picker, None)),
         (
@@ -2322,13 +2368,22 @@ pub(crate) fn depended_on_by_queued<'a>(
 /// else in its own chain — the chain is exactly what depends on *it*.
 struct ChainEntry {
     id: String,
+    /// [`crate::task::Task::display_name`]: the routine's name for a copy,
+    /// the id otherwise — what the board shows for the row.
+    name: String,
     depends_on: Vec<String>,
+    /// The routine file this copy was made from, when the unqueue deletes it
+    /// rather than writing it to pending — see [`deleted_on_unqueue`].
+    /// Relative to the checkout when the file is inside it. `None` from
+    /// [`unqueue_chain`], which reads no routine files; [`Board::begin_unqueue`]
+    /// fills it in.
+    routine_file: Option<PathBuf>,
 }
 
 /// `id`, then every not-started task that reaches it through `depends_on`,
-/// however many hops away — what `unqueue`'s panel lists and carries back to
-/// pending together (a routine copy that a drafted task depends on included;
-/// see [`drafted_in_batch`]). Breadth first, each new level sorted by id, so the
+/// however many hops away — what `unqueue`'s panel lists and unqueues
+/// together, each to pending or, for a routine copy, deleted (see
+/// [`deleted_on_unqueue`]). Breadth first, each new level sorted by id, so the
 /// panel reads the way a person would explain the chain: the task under the
 /// cursor, then what leans on it, then what leans on that.
 ///
@@ -2374,7 +2429,13 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
             };
             ChainEntry {
                 id: entry_id.clone(),
+                name: tasks
+                    .iter()
+                    .find(|t| t.id() == entry_id)
+                    .map_or(entry_id.as_str(), |t| t.display_name())
+                    .to_string(),
                 depends_on,
+                routine_file: None,
             }
         })
         .collect()
@@ -2480,11 +2541,7 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
     if !not_started(&task) {
         return Ok(Unqueued::Untouched);
     }
-    if let Some(routine_file) = task
-        .routine()
-        .and_then(|routine| crate::commands::routine_file(repo, routine))
-        .filter(|_| !drafted.iter().any(|d| d == id))
-    {
+    if let Some(routine_file) = deleted_on_unqueue(repo, &task, drafted) {
         std::fs::remove_file(&task.path)
             .with_context(|| format!("removing {}", task.path.display()))?;
         // The same teardown `carry_to_pending` ends with: left behind, the
@@ -2506,6 +2563,23 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
             Ok(Unqueued::NewerDraft)
         }
     }
+}
+
+/// The routine file `task` was copied from, when [`unqueue_in`] deletes it
+/// rather than writing it to pending: `task` is a copy of a routine whose
+/// file still exists, and `drafted` (see [`drafted_in_batch`]) does not keep
+/// it. `None` for every task that goes to pending instead.
+///
+/// The one place that rule is read, so the board's `unqueue` panel cannot
+/// promise a deletion the unqueue it confirms would not make.
+fn deleted_on_unqueue(
+    repo: &Repo,
+    task: &crate::task::Task,
+    drafted: &[String],
+) -> Option<PathBuf> {
+    task.routine()
+        .and_then(|routine| crate::commands::routine_file(repo, routine))
+        .filter(|_| !drafted.iter().any(|d| d == task.id()))
 }
 
 /// What [`unqueue_task`] did, for the command that tells a person.
@@ -12901,6 +12975,66 @@ mod tests {
         assert!(repo.pending_dir().join("nightly-1.md").exists());
         assert!(repo.pending_dir().join("after.md").exists());
         assert!(!repo.queue_dir().join("nightly-1.md").exists());
+    }
+
+    /// The panel `unqueue` opens marks a copy as deleted exactly when the
+    /// confirm would delete it, with its routine file relative to the
+    /// checkout: not when the routine is gone, and not when a task carried to
+    /// pending with it depends on it.
+    #[test]
+    fn the_unqueue_panel_marks_a_copy_deleted_only_when_the_confirm_deletes_it() {
+        let opened = |repo: &Repo, id: &str| {
+            let pipelines = Pipelines::builtin();
+            let mut board = Board::for_test();
+            board
+                .frame(
+                    repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap();
+            board.cursor = Some(id.into());
+            pick(&mut board, repo, &pipelines, RowAction::Unqueue);
+            match board.mode {
+                BoardMode::ConfirmUnqueue { chain, .. } => chain
+                    .into_iter()
+                    .map(|e| (e.id, e.name, e.routine_file))
+                    .collect::<Vec<_>>(),
+                _ => panic!("the unqueue panel did not open"),
+            }
+        };
+
+        let (repo, _root_guard) = fixture("unqueue-panel-routine-copy");
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+        assert_eq!(
+            opened(&repo, "nightly-1"),
+            [(
+                "nightly-1".to_string(),
+                "nightly".to_string(),
+                Some(PathBuf::from(".spoolway/routines/nightly/nightly.md")),
+            )]
+        );
+
+        let (repo, _root_guard) = fixture("unqueue-panel-routine-gone");
+        add_routine_copy(&repo, "nightly-1", "nightly", false);
+        assert_eq!(
+            opened(&repo, "nightly-1"),
+            [("nightly-1".to_string(), "nightly".to_string(), None)]
+        );
+
+        let (repo, _root_guard) = fixture("unqueue-panel-routine-kept");
+        add_routine_copy(&repo, "nightly-1", "nightly", true);
+        add_to(&repo, "after", &["nightly-1"], None, Some("nightly"));
+        assert_eq!(
+            opened(&repo, "nightly-1"),
+            [
+                ("nightly-1".to_string(), "nightly".to_string(), None),
+                ("after".to_string(), "after".to_string(), None),
+            ]
+        );
     }
 
     /// Deleting a routine copy also stops and reclaims its hook runs, or the
