@@ -1477,11 +1477,10 @@ impl Task {
 
     /// Read a section's content, if present.
     ///
-    /// `#[cfg(test)]` only: spoolway writes a task's body and never reads it
-    /// back — nothing in `src/` outside a test asks a task file what it
-    /// says any more. Kept for what a test still needs to assert on: that a
-    /// writer put the right words under the right heading.
-    #[cfg(test)]
+    /// spoolway writes a task's body and reads almost none of it back. The
+    /// exception is `queue route`, which shows a stopped task's `## Hook
+    /// error` output; tests also use it to assert that a writer put the right
+    /// words under the right heading.
     pub fn section(&self, heading: &str) -> Option<&str> {
         self.find_section(heading)
             .map(|(start, end)| self.body[start..end].trim())

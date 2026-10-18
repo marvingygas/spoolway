@@ -246,6 +246,15 @@ struct RouteView {
     /// Why `resume_road` refused, when it did: the same error a resume
     /// would stop on.
     resume_error: Option<String>,
+    /// For a task on `hook_failed`, the hook event that failed and the last
+    /// lines that hook wrote, taken from the task's `## Hook error` section.
+    hook: Option<RouteHook>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RouteHook {
+    event: String,
+    output: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -322,7 +331,36 @@ fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<R
         held,
         resumes_to,
         resume_error,
+        hook: hook_view(task),
     })
+}
+
+/// The failed hook of a task on `hook_failed`, with the tail of its output.
+///
+/// The dispatcher appends one `Last output:` block to `## Hook error` for
+/// every failure, so a task that failed twice holds two. Only the newest
+/// block describes the failure the task is stopped on.
+fn hook_view(task: &Task) -> Option<RouteHook> {
+    if task.stage() != crate::pipeline::HOOK_FAILED {
+        return None;
+    }
+    let event = task.front.hook_paused.clone()?;
+    let section = task.section("## Hook error").unwrap_or_default();
+    let lines = section.lines().collect::<Vec<_>>();
+    // The heading the dispatcher writes sits alone on its line, at the left
+    // or two spaces in. A line of the hook's own output carries a six-space
+    // indent, so one that happens to say `Last output:` is never mistaken
+    // for it.
+    let heading = lines
+        .iter()
+        .rposition(|line| line.trim_end() == "Last output:" || line.trim_end() == "  Last output:");
+    let output = lines[heading.map_or(lines.len(), |at| at + 1)..]
+        .iter()
+        .map(|line| line.strip_prefix("      ").unwrap_or(line).trim_end())
+        .skip_while(|line| line.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some(RouteHook { event, output })
 }
 
 /// Where `task` stands, in words, and the step to mark for it.
@@ -448,6 +486,10 @@ fn render_route(route: &RouteView) -> String {
         out.push_str("It is not held, so there is nothing to resume.\n");
         return out;
     }
+    if let Some(hook) = &route.hook {
+        render_hook_ways_out(&mut out, &route.task, hook);
+        return out;
+    }
     match (&route.resumes_to, &route.resume_error) {
         (Some(step), _) => out.push_str(&format!("Resuming on the board sends it to {step}.\n")),
         (None, error) => out.push_str(&format!(
@@ -460,6 +502,34 @@ fn render_route(route: &RouteView) -> String {
         route.task
     ));
     out
+}
+
+/// What `queue route` prints for a task on `hook_failed` in place of the
+/// resume lines: the hook's last output, then the two ways out.
+///
+/// `--stage` is not offered here. The task finished its steps or never started
+/// one, so what is in the way is the hook, and sending it to a step would
+/// redo work that passed.
+fn render_hook_ways_out(out: &mut String, task: &str, hook: &RouteHook) {
+    let event = &hook.event;
+    if !hook.output.is_empty() {
+        out.push_str("The hook's last output:\n");
+        for line in &hook.output {
+            match line.is_empty() {
+                true => out.push('\n'),
+                false => out.push_str(&format!("  {line}\n")),
+            }
+        }
+        out.push('\n');
+    }
+    let onward = match event.as_str() {
+        crate::pipeline::DONE => "skip it and archive the task",
+        _ => "skip it and start the task",
+    };
+    out.push_str(&format!(
+        "To run the {event} hook again: [r] on the board, or in your own shell\n  spoolway resume {task}\n\
+         To {onward}: [k] on the board, or in your own shell\n  spoolway resume {task} --skip-hook\n"
+    ));
 }
 
 /// The longest step id that will ever be part of one of this pipeline's lane
@@ -4235,6 +4305,7 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
             task: id.to_string(),
             stage: None,
             message: None,
+            skip_hook: false,
         };
         // Only a refusal comes back from here: each of these tasks is queued,
         // or has a lane or command run live on its step, or is claimed by the
@@ -23160,6 +23231,7 @@ body\n";
                 task: id.into(),
                 stage: None,
                 message: None,
+                skip_hook: false,
             },
             None,
         )
@@ -23291,6 +23363,41 @@ body\n";
             route_then_resume(&repo, &pipelines, "release"),
             crate::pipeline::DONE
         );
+    }
+
+    /// A task on `hook_failed` is shown the hook's last output and both ways
+    /// out, each with its board key and its shell command. `--stage` is not
+    /// offered.
+    #[test]
+    fn route_names_both_ways_out_of_a_failed_hook() {
+        let (repo, _root_guard) = fixture("route-hook-ways-out");
+        let pipelines = route_pipelines();
+        add(&repo, "release", &[]);
+        let mut task = queued(&repo, "release");
+        task.set_stage(crate::pipeline::DONE, None);
+        task.front.hook_paused = Some(crate::pipeline::DONE.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.append_to_section(
+            "## Hook error",
+            "  Last output:\n\n      old failure\n\n  Last output:\n\n      no pull requests found\n\n      Last output: from the hook itself\n      github.sh: command failed (exit 1)\n\n",
+        );
+        task.set_stage(
+            crate::pipeline::HOOK_FAILED,
+            Some("issue_tracking hook exited 1"),
+        );
+        task.save().unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "release"), &pipelines, 0).unwrap());
+
+        let ways_out = "The hook's last output:\n  no pull requests found\n\n  Last output: from the hook itself\n  github.sh: command failed (exit 1)\n\n\
+             To run the done hook again: [r] on the board, or in your own shell\n  spoolway resume release\n\
+             To skip it and archive the task: [k] on the board, or in your own shell\n  spoolway resume release --skip-hook\n";
+        assert!(text.ends_with(ways_out), "{text}");
+        assert!(
+            !text.contains("old failure"),
+            "only the newest failure: {text}"
+        );
+        assert!(!text.contains("--stage"), "{text}");
     }
 
     /// A task still moving is not held: there is no resume line to give, and

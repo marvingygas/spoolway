@@ -501,6 +501,8 @@ hook exited non-zero or ran past its limit:
 
 The board shows such a task as `● hook failed`, with `[r] rerun hook` in NEXT. No hook event
 fires for the `hook_failed` stage, so a failing hook is never asked to report its own failure.
+`spoolway resume <task> --skip-hook` carries the task on without running the hook again. See
+[Skipping a hook](cli-reference.md#skipping-a-hook).
 
 A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
 again on the next pass. The pass report says so. If three runs in a row are killed this way, the
@@ -551,7 +553,7 @@ log path:
 issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 ```
 
-For a `queued`, `started` or `done` hook, `spoolway resume <task>` clears the row. A failed
+For a `queued`, `started` or `done` hook, `spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears the row. A failed
 `blocked`, `paused` or `open` hook holds nothing, so the row says it clears once the task is done
 and archived. `spoolway issue show` runs produce no row.
 

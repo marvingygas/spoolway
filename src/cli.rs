@@ -1111,6 +1111,12 @@ pub struct ResumeArgs {
     /// Note recorded in the task's status log.
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+
+    /// Carry a task stopped on `hook_failed` past the issue-tracking hook that
+    /// failed, without running it. At `done` the task is archived. At `queued`
+    /// or `started` it goes on to its first step. Later hooks still run.
+    #[arg(long, conflicts_with = "stage")]
+    pub skip_hook: bool,
 }
 
 #[derive(Debug, Args)]

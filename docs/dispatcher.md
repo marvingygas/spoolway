@@ -348,6 +348,8 @@ stateDiagram-v2
   done --> hook_failed: the done hook fails
   hook_failed --> queued: spoolway resume, after a queued or started hook
   hook_failed --> done: spoolway resume, after a done hook
+  hook_failed --> queued: spoolway resume --skip-hook, after a queued or started hook
+  hook_failed --> done: spoolway resume --skip-hook, after a done hook
   done --> [*]
 ```
 
@@ -748,6 +750,8 @@ Nothing inside the pipeline failed, so there is no step to go back to. `spoolway
 `r` on the board, forgets the hook's failed run, so it fires again. A task stopped by its
 `queued` or `started` hook resumes to `queued`. A task stopped by its `done` hook resumes
 straight back to `done`.
+`spoolway resume --skip-hook` moves the task the same way and records the hook event as passed, so
+the hook does not fire for it again. The task's other hook events still fire.
 
 ## A lane that settles without reporting
 
@@ -818,8 +822,8 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. On the headless backend, a step revisited while its old lane is still finishing a turn is refused the same way. The task waits. After ten minutes it routes the task to the step's `on_fail`, or to `blocked` when the step names none. | A launch that starts; arriving at the step again; re-queueing the task. |
 | A step's `loop:` | How many times a task may arrive at the step by a lane's report, a command step's exit, a walk-past or a failed launch; a resume that walks past nothing is not checked. A walk-past and a failed launch count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
-| Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row moves the task to `hook_failed`. | `spoolway resume` on the task. |
-| Hook time limit | An issue hook that runs 10 minutes without exiting is stopped. A `queued`, `started` or `done` hook moves the task to `hook_failed`. | `spoolway resume` on the task. |
+| Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row moves the task to `hook_failed`. | `spoolway resume` or `spoolway resume --skip-hook` on the task. |
+| Hook time limit | An issue hook that runs 10 minutes without exiting is stopped. A `queued`, `started` or `done` hook moves the task to `hook_failed`. | `spoolway resume` or `spoolway resume --skip-hook` on the task. |
 | Reminder loop | Three answered reminders. A silent lane is reminded again and never counted. | Anything the lane writes to its transcript. On a claude lane, a turn the model wrote. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 

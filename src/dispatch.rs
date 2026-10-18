@@ -2403,9 +2403,10 @@ impl<'a> Dispatcher<'a> {
         // `Task::tracking_off`.
         if stage == crate::pipeline::HOOK_FAILED {
             // Nothing here starts, times or reroutes a task on
-            // `hook_failed`; `spoolway resume` is the one way off it. Ahead
-            // of the hook below, which would otherwise fire a
-            // `hook_failed` event at the hook that just failed.
+            // `hook_failed`; `spoolway resume` is the one way off it, with or
+            // without the hook. Ahead of the hook below, which would
+            // otherwise fire a `hook_failed` event at the hook that just
+            // failed.
             return Ok(Routed::NextTask);
         }
         if task.front.trial.is_none() && !task.tracking_off() {
@@ -19850,6 +19851,7 @@ mod tests {
                 task: "demo".into(),
                 stage: None,
                 message: None,
+                skip_hook: false,
             },
             None,
         )
@@ -19919,6 +19921,7 @@ mod tests {
                 task: "demo".into(),
                 stage: None,
                 message: None,
+                skip_hook: false,
             },
             None,
         )
@@ -23919,6 +23922,7 @@ mod tests {
                 task: "parent".into(),
                 stage: Some(crate::pipeline::DONE.into()),
                 message: None,
+                skip_hook: false,
             },
             None,
         )

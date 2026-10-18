@@ -465,7 +465,28 @@ To send it to another step, in your own shell:
   spoolway resume example --stage <step>
 ```
 
-The last lines apply to a task on `paused`, `blocked` or `hook_failed`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
+The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
+
+A task on `hook_failed` has no step to resume at. After the step list it prints the hook's last output, then names the two ways out, each with its board key and its shell command:
+
+```
+impl — hook failed at done: issue_tracking hook exited 1
+
+  implement         Write the code to satisfy the task's acceptance criteria.
+                    pass → review-spec · fail → blocked
+  …
+
+The hook's last output:
+  no pull requests found
+  github.sh: command failed (exit 1)
+
+To run the done hook again: [r] on the board, or in your own shell
+  spoolway resume rel
+To skip it and archive the task: [k] on the board, or in your own shell
+  spoolway resume rel --skip-hook
+```
+
+For a `queued` or `started` hook, the second way reads `To skip it and start the task`. The lines for `--stage` are not printed.
 
 `--json` prints the same facts as one object.
 
@@ -822,7 +843,8 @@ on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, 
 it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events), forgets that
 hook's failed run, so it fires again; a task its `queued` or `started` hook stopped resumes to
-`queued`, and one its `done` hook stopped resumes straight back to `done`. A task paused because its
+`queued`, and one its `done` hook stopped resumes straight back to `done`. With `--skip-hook`, the
+task goes on without that hook running. See [Skipping a hook](#skipping-a-hook). A task paused because its
 [start branch does not exist](tasks.md#a-start-branch-that-does-not-exist) resumes to `queued`
 with `missing_start_branch:` cleared.
 
@@ -853,6 +875,7 @@ While a dispatcher runs, the destination comes from the pipelines it loaded at s
 spoolway resume <task>
 spoolway resume <task> --stage review -m "send it back round"
 spoolway resume <task> --stage done -m "work already on main"
+spoolway resume <task> --skip-hook
 ```
 
 `--stage done` prints `<task>: -> done (skipped: <steps>)` and stops a lane still working on the
@@ -861,9 +884,38 @@ task. See [Closing a stuck task](tasks.md#closing-a-stuck-task).
 | Flag | Default | What it does |
 |---|---|---|
 | `--stage <STEP>` | | Resume at this step instead. `done` closes a `blocked`, `paused` or `hook_failed` task, skipping every step it has left |
+| `--skip-hook` | | Carry a `hook_failed` task past the hook that failed, without running it. Cannot be combined with `--stage`. A lane cannot use it |
 | `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).
+
+#### Skipping a hook
+
+`spoolway resume <task> --skip-hook` carries a task on `hook_failed` past the issue-tracking hook that failed. It is for a hook that cannot pass for this task.
+
+```
+$ spoolway resume rel --skip-hook
+skipped the done hook for rel
+archived rel; ticket https://github.com/acme/app/issues/1025 left as it was
+```
+
+| The failed hook | What happens |
+|---|---|
+| `done` | The task goes back to `done`. The dispatcher's next pass archives it and removes its worktree. The second line reads `archived <task>`, with the task's stored ticket when it has one |
+| `queued` or `started` | The task goes back to `queued` and on to its first step. The second line reads `<task> goes on to <step>` |
+
+Only the failed event is skipped. Later hook events of the task still fire, and the task file does not gain `tracking: off`. The task's `## Status Log` names the skipped event. `-m` adds a note to that line.
+
+A task on any other stage is refused with exit 2. The message names the task's stage. For a `blocked` or `paused` task it also names the command that carries it on:
+
+```
+$ spoolway resume build --skip-hook
+error: build is on `blocked`, not `hook_failed`, so there is no hook to skip.
+To carry it on from the step it stopped on:
+  spoolway resume build
+```
+
+A `queued` task is told `It starts on its own when the dispatcher reaches it.` A task on any other stage is told `It is not stopped, so there is nothing to carry on.`
 
 ### `spoolway restart <task>`
 

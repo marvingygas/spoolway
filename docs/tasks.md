@@ -74,8 +74,8 @@ as JSON.
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
 | `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
-| `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and stopped the task on `hook_failed`. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. A task file on `paused` with this key set is read as `hook_failed`. |
-| `hook_error` | the dispatcher | The reason the hook failed, such as `issue_tracking hook exited 1`. The board's RECENT line and `spoolway queue route` print it. `spoolway resume` clears it. |
+| `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and stopped the task on `hook_failed`. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. `spoolway resume --skip-hook` clears it and records the event as passed. A task file on `paused` with this key set is read as `hook_failed`. |
+| `hook_error` | the dispatcher | The reason the hook failed, such as `issue_tracking hook exited 1`. The board's RECENT line and `spoolway queue route` print it. `spoolway resume`, with or without `--skip-hook`, clears it. |
 | `parked_by_stop` | the dispatcher | Set when the dispatch tab's stop popup's `interrupt them now` answer is what parked this task. The next start resumes it on its own and clears the flag; `spoolway resume` and `r` clear it too. |
 | `skip`, `trial`, `trial_group` | the queue screen's `trial` menu item | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
@@ -387,6 +387,27 @@ and no hook event fires for that stage. `spoolway resume` forgets the hook's fai
 hook fires again. A task stopped by its `queued` or `started` hook resumes back to `queued`. A
 task stopped by its `done` hook resumes straight back to `done` instead, since a plain resume
 only knows pipeline steps and `queued`.
+
+A hook that cannot pass for this task can be skipped. `spoolway resume <task> --skip-hook`
+carries the task past the failed hook without running it:
+
+```
+$ spoolway resume rel --skip-hook
+skipped the done hook for rel
+archived rel; ticket https://github.com/acme/app/issues/1025 left as it was
+```
+
+A task stopped at `done` goes back to `done`, and the dispatcher's next pass archives it and
+removes its worktree. A task stopped at `queued` or `started` goes back to `queued` and on to its
+first step. Only the failed event is skipped. The task's later hook events still fire, and the
+task file does not gain `tracking: off`. The first line of output names the event. The second line
+shows the ticket only when the task has one.
+
+The task's `## Status Log` gets a line naming the skipped event. `-m` adds a note:
+
+```
+→ `done`: skipped done hook by `spoolway resume --skip-hook`, archiving. Note: release has no ticket
+```
 
 ### Closing a stuck task
 

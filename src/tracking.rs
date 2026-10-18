@@ -1013,6 +1013,20 @@ pub fn forget(repo: &Repo, task: &Task, event: &str) {
     let _ = runs(repo).forget(&key);
 }
 
+/// Record this task's `event` hook as having exited cleanly without running it
+/// — what `spoolway resume --skip-hook` calls on a task a failing hook stopped.
+///
+/// [`forget`] alone would let [`fire`] start the hook over. A recorded exit 0
+/// is both what the dispatcher's gate reads as a pass and what keeps
+/// [`fire`] from starting a run, so the skipped event is spent and no other
+/// event of the task is touched.
+pub fn skip(repo: &Repo, task: &Task, event: &str) -> Result<()> {
+    let key = Runs::key(event, task.id());
+    let runs = runs(repo);
+    runs.forget(&key)?;
+    runs.record_exit(&key, 0)
+}
+
 /// Drop every hook run file this task left under `tracking/`, once it has
 /// been archived — the counterpart of [`crate::command_step::Runs`]'
 /// own `reclaim_task` for `commands/`, called from the same place in

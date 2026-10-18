@@ -23,7 +23,7 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `issue_tracking hook exited N`, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `issue_tracking hook exited N`, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; `spoolway resume --skip-hook` on a failed `done` hook archives the task without running the hook a second time; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
 # covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and move the task to `hook_failed` with a problem line the dispatcher prints
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
@@ -703,12 +703,19 @@ has "headed Last output, the shape a failed command step's Blocker uses" \
   echo "base: plan/live"; echo "pipeline: default"
   echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
+{
+  echo "---"; echo "id: hook-skip"; echo "title: hook-skip, done"
+  echo "stage: done"; echo "group: live"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/hook-skip.md"
 
 dispatcher_start
 for _ in $(seq 1 150); do
   [ -f "$TRACKING/hook-blocked · blocked.exit" ] \
     && [ -f "$TRACKING/hook-paused · paused.exit" ] \
     && [ -f "$TRACKING/hook-done · done.exit" ] \
+    && [ -f "$TRACKING/hook-skip · done.exit" ] \
     && break
   sleep 0.2
 done
@@ -742,6 +749,13 @@ if drive hook-done hook_failed 60; then
 else
   bad "a failing done hook lands the task on hook_failed, out of the archive \
 (at \`$(stage_of hook-done)\`)"
+fi
+
+if drive hook-skip hook_failed 60; then
+  ok "a second failing done hook lands its task on hook_failed"
+else
+  bad "a second failing done hook lands its task on hook_failed \
+(at \`$(stage_of hook-skip)\`)"
 fi
 
 # --------------------------------------------------- resume re-runs the hook
@@ -784,6 +798,21 @@ else
 fi
 has "and the fixed hook really ran for the resumed done event" \
   "SPOOLWAY_EVENT=done" "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md.env.done"
+
+# `--skip-hook` carries the other failed `done` task on without the hook. The
+# fixed hook is still configured, so a skip that merely forgot the run would
+# have the next pass fire it and leave its mark; recording the event as passed
+# leaves no mark.
+must "--skip-hook carries a failed done hook's task on" \
+  "$SPOOLWAY" resume hook-skip --skip-hook
+if drive hook-skip gone 60; then
+  ok "skipping a failed done hook archives the task"
+else
+  bad "skipping a failed done hook archives the task \
+(still at \`$(stage_of hook-skip)\`)"
+fi
+works "and the skipped done hook did not run a second time" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/hook-skip.md.env.done"
 
 must "the hook is put back so it stops holding tasks" \
   "$SPOOLWAY" config set issue_tracking.hook ""

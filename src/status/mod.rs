@@ -1006,6 +1006,7 @@ impl Board {
                                 task: picker.id.clone(),
                                 stage: Some(row.step.clone()),
                                 message: None,
+                                skip_hook: false,
                             },
                         )
                     }),
@@ -2303,6 +2304,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
             task: id.to_string(),
             stage: None,
             message: None,
+            skip_hook: false,
         },
     )
 }
