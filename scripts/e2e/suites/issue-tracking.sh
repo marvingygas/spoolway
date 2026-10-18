@@ -1136,6 +1136,31 @@ has "the review label landed on the ticket" "spoolway:review" "$GH_STUB_ISSUES/$
 works "no comment was ever posted on the pull request itself" \
   test ! -e "$GH_STUB_PRS/$DONE_PR_NUM.comment"
 
+# A branch that never got a pull request, such as a release's, has nothing to
+# review: the same shipped `done` branch closes the ticket instead of failing.
+# No pull request is created on `NOPR_BRANCH`, so the stub answers `gh pr
+# view` with the real "no pull requests found" message.
+NOPR_TICKET=$(gh issue create -R acme/app -t "no pull request check" -F "$BODY")
+NOPR_NUM=${NOPR_TICKET##*/}
+NOPR_BRANCH=task/github-no-pr-check
+{
+  echo "---"; echo "id: github-no-pr-check"; echo "title: github-no-pr-check, done"
+  echo "stage: done"; echo "group: github-no-pr"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "ticket: $NOPR_TICKET"; echo "branch: $NOPR_BRANCH"
+  echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/github-no-pr-check.md"
+for _ in $(seq 1 150); do
+  [ -e "$GH_STUB_ISSUES/$NOPR_NUM.closed" ] && break
+  sleep 0.2
+done
+works "a done with no pull request on the branch closes the ticket" \
+  test -e "$GH_STUB_ISSUES/$NOPR_NUM.closed"
+has "and says why on the ticket" \
+  "Done. No pull request on $NOPR_BRANCH." "$GH_STUB_ISSUES/$NOPR_NUM.comment"
+lacks "without handing it to review" "spoolway:review" "$GH_STUB_ISSUES/$NOPR_NUM.labels"
+lacks "and without leaving it in progress" "spoolway:in-progress" "$GH_STUB_ISSUES/$NOPR_NUM.labels"
+
 # ------------------------------------------------------- jira.sh, real, open
 # The shipped script itself, not a hand-written stand-in, run through its
 # real `open` branch — `scripts/e2e/acli-stub.sh`'s own header explains why

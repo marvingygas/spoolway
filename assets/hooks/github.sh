@@ -54,8 +54,13 @@ trap 'hook_trace "$LINENO" "$BASH_COMMAND"' ERR
 # reading it wrong or re-running a side effect a command substitution
 # inside it already had. The line number is real, and the source text is
 # usually enough to find the call in the file next to it.
+#
+# A caller that has already read a command's exit code and now means to stop
+# on it, as `hand_off_for_review` does after sorting one failure from
+# another, passes that code as the third argument. The trace then reads the
+# same as one the trap printed itself.
 hook_trace() {
-  code=$?
+  code=${3:-$?}
   line=$1
   cmd=$2
   if [ "$BASH_SUBSHELL" -gt 0 ]; then
@@ -237,13 +242,35 @@ mark_in_progress() {
 # a comment there — the link runs the other way instead: the ticket names
 # the pull request, so a project's own merge automation can read it off the
 # ticket to tell a group's siblings apart and check whether each one's own
-# pull request has merged. Closing is entirely that automation's job, never
-# this hook's — it only relabels the ticket for review. This repository's own
-# merge workflow, `.github/workflows/spoolway-issues.yml`, is not this file
-# and not spoolway's own binary; it is this project's to keep in step with
-# whatever this comment says.
+# pull request has merged. Closing that ticket is that automation's job, so
+# a ticket with a pull request is only relabelled for review. This
+# repository's own merge workflow, `.github/workflows/spoolway-issues.yml`,
+# is not this file and not spoolway's own binary; it is this project's to
+# keep in step with whatever this comment says.
+#
+# The one time this hook closes a ticket itself is a branch with no pull
+# request, such as a release, whose pull request lives on another branch and
+# is merged before `done`. Nothing is left to review and no merge will ever
+# close the ticket, so it is closed as completed here. Only `gh`'s own "no
+# pull requests found" answer counts. Any other failure, such as `gh` not
+# being logged in, still stops the hook, and so does a lookup that succeeds
+# with no URL: closing a ticket over a lookup that merely failed would
+# discard work that is still waiting for review.
 hand_off_for_review() {
-  pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url)
+  lookup_err=$(mktemp)
+  if pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url 2>"$lookup_err"); then
+    rm -f "$lookup_err"
+  else
+    code=$?
+    if grep -q 'no pull requests found' "$lookup_err"; then
+      rm -f "$lookup_err"
+      close_without_pull_request
+      return 0
+    fi
+    cat "$lookup_err" >&2
+    rm -f "$lookup_err"
+    hook_trace "$LINENO" 'pr=$(gh pr view "$SPOOLWAY_BRANCH" ...)' "$code"
+  fi
   [ -n "$pr" ] || {
     echo "github.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
     exit 1
@@ -255,6 +282,33 @@ hand_off_for_review() {
 
   gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body \
     "Ready for review in $pr"
+}
+
+# The `done` path for a branch with no pull request. The comment goes in
+# before the close so the ticket never sits closed without saying why.
+close_without_pull_request() {
+  gh issue edit "$SPOOLWAY_TICKET" -R "$repo" \
+    --remove-label spoolway:in-progress
+
+  gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body \
+    "Done. No pull request on $SPOOLWAY_BRANCH."
+
+  gh issue close "$SPOOLWAY_TICKET" -R "$repo" --reason completed
+
+  close_group_if_finished
+}
+
+# Closes the group issue once its last task is done and none of the tickets
+# nested under it is still open. A sibling that went to review stays open
+# until its pull request merges, and the merge workflow closes the group
+# then, so this never closes a group ahead of that sibling. The ticket just
+# closed above is already closed, so it does not count as open.
+close_group_if_finished() {
+  [ "$SPOOLWAY_GROUP_LAST" = 1 ] && [ -n "$SPOOLWAY_EPIC" ] || return 0
+  still_open=$(gh api "repos/$repo/issues/${SPOOLWAY_EPIC##*/}/sub_issues" \
+    --paginate --jq '.[] | select(.state == "open") | .number')
+  [ -z "$still_open" ] || return 0
+  gh issue close "$SPOOLWAY_EPIC" -R "$repo" --reason completed
 }
 
 # A `blocked` or `paused` comment carries only what just changed — the log

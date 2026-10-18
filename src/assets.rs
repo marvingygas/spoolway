@@ -144,7 +144,11 @@ pub fn task_template(name: &str) -> Option<&'static str> {
 /// opened this task's own pull request, not when it merges — relabels the
 /// ticket for review and comments "Ready for review in &lt;PR URL&gt;" on
 /// it, never on the pull request itself: nobody wants a comment there.
-/// Closing the ticket is left entirely to the project: a merge workflow can
+/// A branch with no pull request, such as a release's, has nothing to
+/// review, so `done` closes that ticket as completed itself, and the group
+/// issue too when it was the group's last task and no ticket under it is
+/// still open. Closing a ticket that does have a pull request is left
+/// entirely to the project: a merge workflow can
 /// read that very "Ready for review" comment to tell a group's siblings
 /// apart, checking whether the pull request each one names has merged
 /// before closing it — and, once every child of a group has closed, the
@@ -249,17 +253,36 @@ mod tests {
             .1
     }
 
-    /// The GitHub hook hands a ticket to its own pull request at `done`
-    /// rather than closing anything — see the `done` branch of the script.
-    /// A `gh issue close` anywhere in it would silently undo that, so it is
-    /// refused outright rather than left to a live-repo run nobody in CI
-    /// can make.
+    /// The GitHub hook hands a ticket with a pull request to that pull
+    /// request at `done` rather than closing it — see `hand_off_for_review`.
+    /// The only closes allowed are in the two functions that run when the
+    /// branch has no pull request, `close_without_pull_request` and
+    /// `close_group_if_finished`. A `gh issue close` anywhere else would
+    /// silently undo the hand-off, so it is refused outright rather than
+    /// left to a live-repo run nobody in CI can make.
     #[test]
-    fn shipped_github_hook_never_closes_an_issue() {
+    fn shipped_github_hook_closes_issues_only_without_a_pull_request() {
+        const ALLOWED: [&str; 2] = ["close_without_pull_request", "close_group_if_finished"];
         let script = hook_script("github.sh");
-        assert!(
-            !script.contains("issue close"),
-            "github.sh still closes a GitHub issue"
+        let mut function = None;
+        let mut closes = 0;
+        for line in script.lines() {
+            if let Some(name) = line.strip_suffix("() {") {
+                function = Some(name);
+            } else if line == "}" {
+                function = None;
+            }
+            if line.contains("issue close") {
+                closes += 1;
+                assert!(
+                    function.is_some_and(|name| ALLOWED.contains(&name)),
+                    "github.sh closes a GitHub issue outside the no-pull-request path: {line}"
+                );
+            }
+        }
+        assert_eq!(
+            closes, 2,
+            "github.sh no longer closes the ticket and group without a pull request"
         );
     }
 
