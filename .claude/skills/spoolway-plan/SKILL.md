@@ -184,8 +184,8 @@ day it changes; a path stays true. Name the file that already holds the ground n
    Invoke the **spoolway-tasks** skill to do it: the shape it cuts into tasks is the
    page's Decisions and Mockup, or — where no page was written — what step 2 settled. Every
    task gets `plan:` set to the page's own absolute path, whenever a page exists. Where step 1
-   read an issue, its own URL is the `source:` each task gets. With no issue behind it, the
-   page's path stays in `source:` as well. Neither key is set when neither exists.
+   read an issue, a pull request or a Jira item, its URL is the `source:` each task gets. A
+   page's path never goes into `source:`. Neither key is set when neither exists.
    `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
    reads the skeleton, writes the tasks, verifies the chain and proves the set with
    `spoolway task contract` — the whole of the procedure and its guardrails live there now, so

@@ -252,9 +252,10 @@ reading the file whole.
      slug alone, with the `<YYYY-MM-DD>-` of the plan file's own name off it. A split group is
      named `<plan-slug>-<part>` instead, from step 2's own ballot. A group carrying a date pins
      the whole breakdown to the morning it was cut.
-   - `source` — the issue's own URL, from `spoolway issue show`, when this breakdown started
-     at one; the calling page's own absolute path otherwise, where one exists. `source:` is
-     carried for the reader. The `o` menu's `open plan` opens `plan:` in the browser instead.
+   - `source` — the URL of the tracker item this breakdown started at: an issue, a pull
+     request or a Jira item. For an issue, take the URL from `spoolway issue show`. Without
+     one, `source:` is not set. A page's path never goes here. `source:` is carried for the
+     reader. The `o` menu's `open plan` opens `plan:` in the browser instead.
    - `plan` — the calling page's own absolute path, whenever a page exists, with or without an
      issue. An issue read straight into tasks with no page carries no `plan:`.
    - `base` — on every task, a dependent included: its chain's base from step 2, which is
