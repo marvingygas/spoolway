@@ -585,9 +585,21 @@ else bad "and the turn it named is over"; fi
 # the interrupt does rather than on a dispatcher pass, so this polls for a
 # figure rather than reading one `next_frame` after the pause and mistaking
 # a bank that has not landed yet for a dash that never will.
-_row_time_is_set() { [ -n "$(_row_time "$1")" ]; }
+#
+# The figure is read only off a frame whose row already says `● paused`. The
+# stage file turns `paused` before the board has drawn it, and until then the
+# last frame is one where the row still runs and TIME is the live lane's
+# clock — `4s`, say — which the next frame replaces with the banked `0s`.
+_paused_row_time() {
+  local line
+  line=$(_last_frame | _strip_ansi | grep -F "$1" | grep -vF '▌' | head -1)
+  case "$line" in *"● paused"*) ;; *) return 1 ;; esac
+  printf '%s\n' "$line" |
+    grep -Eo '[0-9]+h [0-9]{2}m|[0-9]+m [0-9]{2}s|[0-9]+s' | tail -1
+}
+_row_time_is_set() { [ -n "$(_paused_row_time "$1")" ]; }
 if poll_until 30 _row_time_is_set mid-turn; then
-  PAUSED_TIME=$(_row_time mid-turn)
+  PAUSED_TIME=$(_paused_row_time mid-turn)
   ok "the paused row shows a real TIME ($PAUSED_TIME)"
 else
   PAUSED_TIME=""
