@@ -573,7 +573,7 @@ add_command_step default bench \
 # from `bench` to `done` cost a real interval per transition and so could be
 # sampled on the way. It cannot any more: the dispatcher wakes on a change
 # rather than waiting out the interval it announces, and this suite's own
-# dispatch log shows `bench` starting and the task reaching `handover` inside
+# dispatch log shows `bench` starting and the task reaching `create-pr` inside
 # a single pass — the whole window closed between two 0.2s reads, and the
 # pid was read as empty.
 #
@@ -773,7 +773,7 @@ else
 fi
 # Cleaned up the same way `bench` is, rather than left running into whatever
 # this suite does next — so `hold` is let go first, and the task still has
-# to walk review, document and handover to reach `done` after that.
+# to walk review, document and create-pr to reach `done` after that.
 touch "$NO_SETSID_RELEASE"
 if [ -n "$NOSETSID_PID" ] && poll_while 300 kill -0 "$NOSETSID_PID"; then
   ok "and cleanup stops it once the task is done, same as any other background run"

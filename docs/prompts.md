@@ -44,7 +44,7 @@ report a step whose prompt file is missing. The advice depends on the prompt's n
 
 | The prompt | The advice |
 |---|---|
-| One of the five that `spoolway init` ships | Run `spoolway init`. |
+| One of the six that `spoolway init` ships | Run `spoolway init`. |
 | Any other, such as one named by `unattended.blocked_prompt` | `init` does not ship it, so write it yourself at a path the message names. |
 
 ## A prompt is prose, and nothing else
@@ -168,7 +168,7 @@ It prints seven sections:
 
 ## The sample workflow's cast
 
-Five prompts ship. None of them is named in the binary.
+Six prompts ship. None of them is named in the binary.
 
 | Prompt | Role |
 |---|---|
@@ -176,6 +176,7 @@ Five prompts ship. None of them is named in the binary.
 | `reviewer` | Reviews one task's diff and gives a verdict. Fixes nothing. A mitigation under the task's `## Risks` that the change does not carry out is a finding. |
 | `reproducer` | Writes a failing repro for a bug and runs it. The bugfix pipeline runs it before and after the fix. |
 | `archivist` | Updates the domain documents for its own task's diff. |
+| `create-pr` | Pushes the task's branch and opens its pull request with a plain-English summary of the diff. Squashes, rebases, force-pushes and merges nothing. |
 | `unblocker` | Staffs `blocked` in an unattended run. Clears the obstacle or pauses the task for a person. See [Staffing `blocked`](pipelines.md#staffing-blocked). |
 
 ## Writing your own

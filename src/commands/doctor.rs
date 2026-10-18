@@ -1845,12 +1845,12 @@ fn branch_and_forge_checks(
         findings.push(Finding::Note("no git remote".into()));
     }
 
-    // `spoolway stack` shells out to `gh` for everything past the push — the
-    // pull request and the stack registration both go through it — and a
-    // missing or unauthenticated `gh` fails there with no earlier symptom.
-    // But a project whose pipeline never reaches a forge — no step calls
-    // `spoolway stack`, and issue tracking does not name the `github` hook —
-    // has nothing to lose from that, so this is a hard problem only when
+    // `spoolway stack` and the shipped `create-pr` prompt both shell out to
+    // `gh` for the pull request, and a missing or unauthenticated `gh` fails
+    // there with no earlier symptom. But a project whose pipeline never
+    // reaches a forge — no step calls `spoolway stack` or runs the
+    // `create-pr` prompt, and issue tracking does not name the `github` hook
+    // — has nothing to lose from that, so this is a hard problem only when
     // something here would actually run `gh`.
     if reaches_forge(pipelines, tracking) {
         findings.push(Finding::Check(
@@ -2781,16 +2781,23 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
 }
 
 /// Whether anything here would actually shell out to `gh`: a step whose
-/// `run:` calls `spoolway stack`, or issue tracking naming the `github` hook.
-/// Those are the only two callers `gh` has anywhere in this project — see
-/// `commands::stack::gh_program` and `assets/hooks/github.sh` — so a project
-/// with neither will never notice whether `gh` works at all.
+/// `run:` calls `spoolway stack`, an agent step on the shipped `create-pr`
+/// prompt, which opens its pull request with `gh`, or issue tracking naming
+/// the `github` hook. A project with none of these will never notice whether
+/// `gh` works at all. A project's own prompt that happens to use `gh` is not
+/// visible from here, which is why a missing `gh` is still reported as a note
+/// when none of the three applies.
 fn reaches_forge(pipelines: &Pipelines, tracking: &crate::config::IssueTrackingConfig) -> bool {
     tracking.hook.trim() == crate::cli::Tracker::Github.hook_name()
         || crate::commands::dispatch::stack_step(pipelines).is_some()
+        || pipelines
+            .pipelines
+            .values()
+            .flat_map(|pipeline| &pipeline.steps)
+            .any(|step| step.kind() == StepKind::Agent && step.prompt_name() == "create-pr")
 }
 
-/// Whether `gh` can actually do what `spoolway stack` needs of it: found on
+/// Whether `gh` can actually do what opening a pull request needs of it: found on
 /// PATH, and holding a working login.
 ///
 /// Two different failures rather than one, because they are fixed two
@@ -2799,7 +2806,7 @@ fn reaches_forge(pipelines: &Pipelines, tracking: &crate::config::IssueTrackingC
 /// know which one to reach for.
 fn gh_status() -> Result<Option<String>> {
     let Some(path) = which("gh") else {
-        bail!("`gh` is not on PATH — `spoolway stack` cannot open a pull request without it");
+        bail!("`gh` is not on PATH — a pull request cannot be opened without it");
     };
     let output = std::process::Command::new("gh")
         .args(["auth", "status"])
@@ -3434,7 +3441,7 @@ mod tests {
         assert!(!failure.contains("some step running on"), "{failure}");
     }
 
-    /// A command step names no model on purpose, so the shipped `handover`
+    /// A command step names no model on purpose, so the test fixture's `handover`
     /// (a `run:` step in `default`) must never turn up in a `has a model`
     /// failure — this is what moved here once the check started reading
     /// each pipeline's own steps directly instead of a step id shared
@@ -3455,7 +3462,7 @@ mod tests {
             .collect();
         assert!(
             command_steps.contains(&"handover"),
-            "the shipped set should still have a command `handover`: {command_steps:?}"
+            "the fixture set should still have a command `handover`: {command_steps:?}"
         );
 
         let config = Config::default();
@@ -5190,7 +5197,15 @@ mod tests {
         assert!(reaches_forge(&pipelines, &tracking("")));
     }
 
-    /// Issue tracking naming the `github` hook is the other caller, even with
+    /// An agent step on the shipped `create-pr` prompt opens its pull request
+    /// with `gh`, so the shipped pipelines reach the forge on their own.
+    #[test]
+    fn reaches_forge_is_true_with_the_shipped_create_pr_step() {
+        let shipped = Pipelines::shipped(&Config::default()).unwrap();
+        assert!(reaches_forge(&shipped, &tracking("")));
+    }
+
+    /// Issue tracking naming the `github` hook is a caller too, even with
     /// no step reaching for `gh` itself.
     #[test]
     fn reaches_forge_is_true_with_the_github_hook() {

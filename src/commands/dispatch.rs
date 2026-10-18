@@ -1881,11 +1881,14 @@ mod tests {
         repo.git(&["config", "user.email", ""]).unwrap();
     }
 
-    /// `stack_step` finds the shipped `handover` step, by name, in both
-    /// built-in pipelines.
+    /// `stack_step` finds a step running `spoolway stack` by name, and finds
+    /// none in the pipelines that ship, which open their pull request with the
+    /// `create-pr` agent step.
     #[test]
-    fn stack_step_finds_the_shipped_handover_step() {
+    fn stack_step_finds_a_handover_step_but_not_in_the_shipped_pipelines() {
         assert_eq!(stack_step(&Pipelines::builtin()), Some("handover"));
+        let shipped = Pipelines::shipped(&crate::config::Config::default()).unwrap();
+        assert_eq!(stack_step(&shipped), None);
     }
 
     /// A pipeline with no `spoolway stack` step and `auto_commit` off never
@@ -1904,7 +1907,7 @@ mod tests {
         );
     }
 
-    /// A blank `user.email`, with the shipped `handover` step reaching
+    /// A blank `user.email`, with a `handover` step reaching
     /// `spoolway stack`, is refused — naming the missing key and the reason
     /// in the short form `doctor`'s own row reads (`{err:#}` on the check
     /// itself, never wrapped through [`refuse`]), and a command that sets

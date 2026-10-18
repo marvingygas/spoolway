@@ -62,13 +62,9 @@ new_repo() {
 </script>
 # CLI
 SEED
-  # The shipped pipelines' own `handover` used to run `./target/release/spoolway
-  # stack` — a path good only inside this repository's own worktree — so a
-  # suite driving a real dispatch pass to `handover` needed a binary planted
-  # there to find. That is fixed now: the shipped `handover` runs
-  # `spoolway stack`, resolved through PATH the same way `run.sh` already
-  # puts $SPOOLWAY on PATH for every suite. Nothing plants a binary at a
-  # repo-local path any more.
+  # Nothing plants a binary at a repo-local path: a command step running
+  # `spoolway stack` finds `spoolway` through PATH, where `run.sh` already
+  # puts $SPOOLWAY for every suite.
   must "the seed commit" git add -A
   must "the seed commit" git commit -qm "seed"
 }
@@ -94,8 +90,8 @@ project_home_after_init() {
 # A local forge: a bare repo on disk as `origin`, plus the `gh` test double.
 # No repo created and deleted around every run, no token, no network.
 #
-# Every suite that drives a task to `done` needs one now. `spoolway stack`
-# pushes the branch and opens a stacked pull request against its dependency's
+# Every suite that drives a task to `done` needs one now. The `create-pr`
+# step's stand-in pushes the branch and opens a stacked pull request against its dependency's
 # — there is no route that lands a change without a remote any more, which is
 # the trade `merge: git` used to buy and no longer exists to.
 #
@@ -164,7 +160,7 @@ kind = "pi"
 PROFILE
   for file in .spoolway/pipelines/*.yml; do
     [ -f "$file" ] || continue
-    sed -i '/^[[:space:]]*agent: claude[[:space:]]*$/{N;/prompt: \(implementer\|reproducer\|archivist\)[[:space:]]*$/s/agent: claude/agent: pi/;P;D;}' "$file"
+    sed -i '/^[[:space:]]*agent: claude[[:space:]]*$/{N;/prompt: \(implementer\|reproducer\|archivist\|create-pr\)[[:space:]]*$/s/agent: claude/agent: pi/;P;D;}' "$file"
   done
   agent_models
   # `SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS=1` is the one opt-out: `flow.sh` sets
@@ -174,11 +170,9 @@ PROFILE
   # unset and gets `own_prompts`, same as always — the stand-in agents below
   # decide what to do from `$SPOOLWAY_STEP` alone, never from a prompt's
   # wording, so which prompt set is installed changes nothing else here. The
-  # one exception is the handover role in `agents/pi`, which does match a
-  # prompt's own opening line (`^You own git\.`) — but no shipped prompt
-  # opens with that line, and the shipped `handover` step is `run: spoolway
-  # stack`, never an agent step, so that match never fires on either prompt
-  # set this function chooses between.
+  # one exception is the `create-pr` role in `agents/pi`, which does match a
+  # prompt's own opening line: `stacker`'s `You own git.` under `own_prompts`,
+  # and the shipped prompt's `# Create PR` under this opt-out.
   [ -n "${SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS:-}" ] || own_prompts
   # `spoolway dispatch` refuses `backend = headless` outright unless this is
   # set — the backend draws nowhere a person can see, so only this harness
@@ -244,6 +238,7 @@ implementer builder
 reviewer    judge
 archivist   closer
 reproducer  repro
+create-pr   stacker
 MAP
   done
   must "the unblocker's prompt" "$SPOOLWAY" config set unattended.blocked_prompt clearer
@@ -259,9 +254,37 @@ MAP
   # The one prompt whose first line is load-bearing: the stand-in `pi` decides
   # it is standing in for the hand-off role by reading the composed prompt's
   # opening line, because a step id has been `pr`, then `land`, then `merge`,
-  # now `handover`, and a stand-in keyed on the name fell through every time.
-  # Keep this line and the match in agent-mock.sh together.
-  suite_prompt stacker "You own git. Rebase this task onto the branch below it, push, and open its pull request against that same branch."
+  # then `handover`, now `create-pr`, and a stand-in keyed on the name fell
+  # through every time. Keep this line and the match in `agents/pi` together.
+  suite_prompt stacker "You own git. Push this task's branch and open its pull request against the branch it started from."
+}
+
+# stack_handover
+#
+# Give every pipeline the tail a project written before the shipped pipelines
+# opened their pull request with the `create-pr` agent step: a `handover`
+# command step running `spoolway stack`. That command still ships, and the
+# suites about what it does to a branch, a stack and a forge reach it through
+# a pipeline, as a project that kept the old step does. Every other suite
+# walks the shipped tail.
+#
+# `create-pr` is the last step of each shipped pipeline, so the rewrite keeps
+# everything above it and replaces the rest of the file.
+stack_handover() {
+  local file
+  for file in .spoolway/pipelines/*.yml; do
+    [ -f "$file" ] || continue
+    sed -i 's/^    on_pass: create-pr$/    on_pass: handover/' "$file"
+    sed -i '/^  - id: create-pr$/,$d' "$file"
+    cat >> "$file" <<'TAIL'
+  - id: handover
+    description: Open this task's pull request with `spoolway stack`.
+    run: spoolway stack
+    headless: true
+    on_pass: done
+TAIL
+  done
+  must "the stack handover leaves valid pipelines" "$SPOOLWAY" pipeline check
 }
 
 # suite_prompt <name> <first line>

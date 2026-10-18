@@ -293,7 +293,7 @@ forget lostlock
 # bought "a minute of slack" between the report landing and the pass that
 # would read it. It does not. `--interval` bounds an *idle* pass only; with
 # work pending the passes chain, so `orphan` walked implement -> review ->
-# document -> handover -> blocked inside one second and `review` was never
+# document -> create-pr -> done inside one second and `review` was never
 # observable at all. The scenario could not work as written, and it failed on
 # an idle machine, serial, as reliably as it failed in a concurrent tier.
 #
@@ -321,9 +321,9 @@ if [ -n "$ORPHAN_PID" ]; then
     STAGE_ORPHANED=$(stage_of orphan)
     dispatcher_start
     # Read off the Status Log, not off `stage:`. There is nothing to wait for
-    # once the pass has read the report: `document` routes on to `handover`,
-    # which is `spoolway stack` against a suite with no forge, so the task is
-    # already sitting on `blocked` by the time a poll looks. What the claim is
+    # once the pass has read the report: `document` routes on to `create-pr`,
+    # which the stand-in passes without a forge, so the task is already
+    # sitting on `done` by the time a poll looks. What the claim is
     # about is the hop itself — the pass read the report and routed the task
     # on from the step it was orphaned on — and the task's own log is where
     # that is written down whatever it does afterwards.

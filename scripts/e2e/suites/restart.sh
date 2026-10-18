@@ -464,9 +464,8 @@ rm -f .spoolway/pipelines/kc.yml
 
 # --------------------------------------------- refused before the lock: git identity
 # A start that would actually try to run something and cannot — no git
-# identity, and the shipped `handover` step reaches `spoolway stack`, which
-# builds its squash commit with `commit-tree` whether or not
-# `dispatch.auto_commit` is on — is refused outright, exit 1, and is not to
+# identity, and `dispatch.auto_commit` commits on its own, as would a step
+# running `spoolway stack` — is refused outright, exit 1, and is not to
 # be confused with the ordinary "nothing queued" ending above, exit 3. `git
 # init` gave this checkout a local identity; unset it rather than reach for
 # `--global`, since `new_repo` already pointed `$HOME` at a scratch

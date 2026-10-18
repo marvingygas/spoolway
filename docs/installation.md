@@ -141,7 +141,7 @@ flowchart LR
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
 | `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |

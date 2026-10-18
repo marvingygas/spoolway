@@ -62,6 +62,9 @@ install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
 configure_project plan/live
+# This suite is about what `spoolway stack` does, so its pipelines end the way a
+# project's that kept the old `handover` step do.
+stack_handover
 publish plan/live
 
 # ------------------------------------------------------- a step the stack runs once

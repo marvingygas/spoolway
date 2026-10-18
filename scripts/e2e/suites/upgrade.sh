@@ -277,7 +277,15 @@ stage() {
 # release.
 assert_init_reused_everything() {
   local version=$1 out="$WORK/$1/init.out"
-  lacks "the $version fixture's second init wrote nothing" "  wrote" "$out"
+  # The one file a fixture lacks is the `create-pr` prompt, which no release
+  # before the shipped pipelines ended at that step ever scaffolded. `init`
+  # writes it into an older project and nothing else.
+  local others
+  others=$(grep "^  wrote" "$out" | grep -vF ".spoolway/prompts/create-pr/PROMPT.md" || true)
+  has "the $version fixture's second init wrote the create-pr prompt it lacks" \
+    "  wrote    .spoolway/prompts/create-pr/PROMPT.md" "$out"
+  if [ -z "$others" ]; then ok "and wrote nothing else"
+  else bad "and wrote nothing else (also wrote: $others)"; fi
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
   has "and installed the skills the fixture never carried" \

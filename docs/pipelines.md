@@ -16,8 +16,8 @@ A UTF-8 byte order mark at the top of a pipeline file is ignored.
 
 ```
 .spoolway/pipelines/
-  default.yml        # implement, review, document
-  bugfix.yml         # reproduce, fix, review, reproduce again, document
+  default.yml        # implement, review, document, create-pr
+  bugfix.yml         # reproduce, fix, review, reproduce again, document, create-pr
   hotfix.yml         # yours
 ```
 
@@ -602,8 +602,9 @@ flowchart LR
   Q([queued]) --> I[implement]
   I -->|pass| R[review]
   R -->|pass| D[document]
+  D -->|pass| C[create-pr]
   R -->|fail| I
-  I & D -->|fail| B([blocked])
+  I & D & C -->|fail| B([blocked])
 ```
 
 | Step | Runs |
@@ -611,6 +612,7 @@ flowchart LR
 | `implement` | the `implementer` prompt, session kept. Arrivals here are bounded at two, from any route. |
 | `review` | the `reviewer` prompt, session kept. A fail goes back to `implement`. |
 | `document` | the `archivist` prompt, on this task's diff |
+| `create-pr` | the `create-pr` prompt: pushes the branch and opens its pull request, then the task is `done`. A fail goes to `blocked`. |
 | `blocked` | the unblocker, in an unattended run |
 
 Every agent step ships with a blank `model` and `effort`. `spoolway init` rewrites `agent:

@@ -117,12 +117,14 @@ steps:
     prompt: archivist
     model: ""
     effort: ""
-    on_pass: handover
+    on_pass: create-pr
 
-  - id: handover
+  - id: create-pr
     description: >-
-      Commit, squash, push and open this fix's pull request with git and
-      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
-    run: spoolway stack
-    headless: true
+      Push this task's branch and open its pull request, with a short
+      plain-English summary of the diff. Nothing is merged here.
+    agent: claude
+    prompt: create-pr
+    model: ""
+    effort: ""
     on_pass: done
