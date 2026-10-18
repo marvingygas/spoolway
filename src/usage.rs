@@ -4136,12 +4136,13 @@ fn span_in_raw(
 /// here — [`crate::eval::normalize_skill`] is where a typed command's
 /// leading slash is dropped so both read as the same skill.
 ///
-/// A plain substring scan for the `<command-name>` marker rather than a parse
-/// of the surrounding JSON: the marker is written as literal text inside a
-/// `content` string, and `serde_json` does not escape `<`/`>`, so the raw
-/// bytes of the file already hold the marker exactly as this reads it. The
-/// Skill tool call has no such text form — it is a structured `tool_use`
-/// block — so that half is read one line of JSON at a time instead.
+/// The `<command-name>` marker is literal text inside a user message's
+/// `content`, so each line is parsed and only a `"type":"user"` line's own
+/// text is searched: its `content` string, or the `text` blocks of its
+/// `content` list. A `tool_result` block, or an assistant message, can quote
+/// source code that holds the same tag, and none of that is a skill the
+/// session ran. The Skill tool call is a structured `tool_use` block, read
+/// from the same per-line parse.
 ///
 /// `crate::eval::load` now reads a session's markers through
 /// [`read_sessions`] instead, which shares the walk and the read with the
@@ -4163,23 +4164,28 @@ pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
 /// `read_to_string` of the same transcript.
 fn markers_in_raw(raw: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    const OPEN: &str = "<command-name>";
-    const CLOSE: &str = "</command-name>";
-    let mut rest = raw;
-    while let Some(start) = rest.find(OPEN) {
-        rest = &rest[start + OPEN.len()..];
-        let Some(end) = rest.find(CLOSE) else {
-            break;
-        };
-        out.insert(rest[..end].to_string());
-        rest = &rest[end + CLOSE.len()..];
-    }
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let content = value.pointer("/message/content").and_then(|c| c.as_array());
-        for block in content.into_iter().flatten() {
+        let content = value.pointer("/message/content");
+        if value.get("type").and_then(|t| t.as_str()) == Some("user") {
+            match content {
+                Some(serde_json::Value::String(text)) => command_names_in(text, &mut out),
+                Some(serde_json::Value::Array(blocks)) => {
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                            continue;
+                        }
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            command_names_in(text, &mut out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for block in content.and_then(|c| c.as_array()).into_iter().flatten() {
             if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                 continue;
             }
@@ -4192,6 +4198,21 @@ fn markers_in_raw(raw: &str) -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// Adds every `<command-name>…</command-name>` in `text` to `out`, verbatim.
+fn command_names_in(text: &str, out: &mut BTreeSet<String>) {
+    const OPEN: &str = "<command-name>";
+    const CLOSE: &str = "</command-name>";
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        let Some(end) = rest.find(CLOSE) else {
+            break;
+        };
+        out.insert(rest[..end].to_string());
+        rest = &rest[end + CLOSE.len()..];
+    }
 }
 
 /// What [`read_session`] finds for one session, from one directory walk and
@@ -9173,6 +9194,43 @@ mod tests {
             markers,
             BTreeSet::from(["spoolway-plan".to_string()]),
             "a skill run through the Skill tool must be read the same as a typed slash command"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A `<command-name>` tag counts only when it is in a user line's own
+    /// text, whether that content is a plain string or a list of `text`
+    /// blocks. The same tag inside a `tool_result` block (source code a tool
+    /// returned) or inside an assistant message was only read by the
+    /// session, never run, and must not come back as a skill.
+    #[test]
+    fn skill_markers_counts_only_a_command_name_in_a_user_lines_own_text() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-8888-4000-8000-00000000d011";
+        let tag = |name: &str| format!("<command-name>{name}</command-name>");
+        let lines = format!(
+            "{}\n",
+            [
+                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":tag("/typed-as-string")}}),
+                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:16.000Z","message":{"role":"user","content":[{"type":"text","text":tag("/typed-as-text-block")}]}}),
+                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:17.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":format!("const OPEN: &str = \"{}\";", tag("{marker}"))}]}}),
+                serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:18.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":tag("/perf-{tag}-{j}")}]}]}}),
+                serde_json::json!({"type":"assistant","timestamp":"2026-08-04T06:14:19.000Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":tag("/said-by-assistant")}]}}),
+            ]
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        );
+        let home = claude_home_with("skills-user-text-only", session, &lines);
+        let markers =
+            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
+        assert_eq!(
+            markers,
+            BTreeSet::from([
+                "/typed-as-string".to_string(),
+                "/typed-as-text-block".to_string()
+            ])
         );
         std::fs::remove_dir_all(&home).ok();
     }

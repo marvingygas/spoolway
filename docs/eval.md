@@ -324,7 +324,8 @@ views.
 | `TIME` | That session's own wall time |
 
 A skill counts whether a session typed its command or ran it through the Skill tool; either
-way names the same skill. A subagent's tokens, cost and skills count on the session that ran
+way names the same skill. A typed command counts only when it is in the text of a message the
+user sent. Text that a tool returned or the assistant wrote never counts. A subagent's tokens, cost and skills count on the session that ran
 it, not on a row of its own.
 
 A summary line closes the `by dir` table and is pinned the same way as the lanes table's. In the
