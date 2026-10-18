@@ -36,6 +36,20 @@ mkdir -p "$PRS"
 ISSUES=${GH_STUB_ISSUES:-$PRS/../issues}
 mkdir -p "$ISSUES"
 
+# Create `<dir>/<n>` for the first free number from `<n>` up, and print the
+# number it got. `set -C` makes the create fail when the file already exists,
+# so two creates running at once never both take the same number. The
+# dispatcher opens pull requests in the background while a suite opens its
+# own, and a plain scan-then-write let the later one overwrite the earlier.
+claim() {
+  local dir=$1 n=$2
+  until (set -C; : > "$dir/$n") 2>/dev/null; do
+    [ -e "$dir/$n" ] || { echo "gh-stub: cannot create $dir/$n" >&2; exit 1; }
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
 next_issue() {
   local n=0 f b
   for f in "$ISSUES"/[0-9]*; do
@@ -160,7 +174,7 @@ case "${1:-}" in
           echo "a pull request for branch \"$head\" already exists" >&2
           exit 1
         fi
-        n=$(next_number)
+        n=$(claim "$PRS" "$(next_number)")
         {
           echo "base=$base"
           echo "head=$head"
@@ -220,7 +234,7 @@ case "${1:-}" in
             *) shift ;;
           esac
         done
-        n=$(next_issue)
+        n=$(claim "$ISSUES" "$(next_issue)")
         { echo "repo=$repo"; echo "title=$title"; } > "$ISSUES/$n"
         cp "$bodyfile" "$ISSUES/$n.body"
         # Plain text, one flag's own value per file — not the pre-seeded
