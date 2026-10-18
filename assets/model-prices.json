@@ -1,7 +1,7 @@
 {
   "source": "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
   "license": "MIT",
-  "generated": "2026-10-17",
+  "generated": "2026-10-18",
   "models": {
     "ai21.j2-mid-v1": {
       "context_window": 8191,
@@ -701,7 +701,7 @@
       "cache_write_1h": 8.0
     },
     "anthropic.claude-sonnet-4-20250514-v1:0": {
-      "context_window": 1000000,
+      "context_window": 200000,
       "input": 3.0,
       "output": 15.0,
       "cache_read": 0.3,
@@ -923,7 +923,7 @@
       "cache_write_1h": 8.8
     },
     "apac.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "context_window": 1000000,
+      "context_window": 200000,
       "input": 3.0,
       "output": 15.0,
       "cache_read": 0.3,
@@ -3211,6 +3211,18 @@
       "input": 0.3,
       "output": 1.2,
       "cache_read": 0.007
+    },
+    "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+      "context_window": 1048576,
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.007
+    },
+    "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast": {
+      "context_window": 1048576,
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.014
     },
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-Fast": {
       "context_window": 1048576,
@@ -5850,6 +5862,18 @@
       "output": 2.6,
       "cache_read": 0.1
     },
+    "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash": {
+      "context_window": 1048576,
+      "input": 0.14,
+      "output": 0.42,
+      "cache_read": 0.0042
+    },
+    "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+      "context_window": 1048576,
+      "input": 0.14,
+      "output": 0.42,
+      "cache_read": 0.0042
+    },
     "deepinfra/google/gemini-2.5-flash": {
       "context_window": 1000000,
       "input": 0.3,
@@ -6472,7 +6496,7 @@
       "cache_write_1h": 8.8
     },
     "eu.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "context_window": 1000000,
+      "context_window": 200000,
       "input": 3.0,
       "output": 15.0,
       "cache_read": 0.3,
@@ -6823,6 +6847,12 @@
       "cache_read": 0.044
     },
     "fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash": {
+      "context_window": 1048576,
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006
+    },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017": {
       "context_window": 1048576,
       "input": 0.3,
       "output": 1.2,
@@ -8714,6 +8744,13 @@
       "cache_read": 0.5,
       "cache_write_5m": 6.25
     },
+    "github_copilot/claude-opus-4.8-fast": {
+      "context_window": 200000,
+      "input": 10.0,
+      "output": 50.0,
+      "cache_read": 1.0,
+      "cache_write_5m": 12.5
+    },
     "github_copilot/claude-opus-5": {
       "context_window": 200000,
       "input": 5.0,
@@ -8727,6 +8764,13 @@
       "output": 20.0,
       "cache_read": 0.2,
       "cache_write_5m": 5.0
+    },
+    "github_copilot/claude-sonnet-4.6": {
+      "context_window": 200000,
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.3,
+      "cache_write_5m": 3.75
     },
     "github_copilot/claude-sonnet-5": {
       "context_window": 200000,
@@ -8775,6 +8819,39 @@
         "input": 5.0,
         "output": 22.5,
         "cache_read": 0.5
+      }
+    },
+    "github_copilot/grok-4.5": {
+      "context_window": 500000,
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.5,
+      "above_200k_tokens": {
+        "input": 4.0,
+        "output": 12.0,
+        "cache_read": 1.0
+      }
+    },
+    "github_copilot/grok-4.6": {
+      "context_window": 500000,
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.5,
+      "above_200k_tokens": {
+        "input": 4.0,
+        "output": 12.0,
+        "cache_read": 1.0
+      }
+    },
+    "github_copilot/grok-4.7": {
+      "context_window": 500000,
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.5,
+      "above_200k_tokens": {
+        "input": 4.0,
+        "output": 12.0,
+        "cache_read": 1.0
       }
     },
     "github_copilot/kimi-k3": {
@@ -8888,7 +8965,7 @@
       "cache_write_1h": 8.0
     },
     "global.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "context_window": 1000000,
+      "context_window": 200000,
       "input": 3.0,
       "output": 15.0,
       "cache_read": 0.3,
@@ -9066,7 +9143,7 @@
       "cache_read": 0.5
     },
     "global.xai.grok-4.7": {
-      "context_window": 500000,
+      "context_window": 524288,
       "input": 2.0,
       "output": 6.0,
       "cache_read": 0.5
@@ -12506,6 +12583,21 @@
       "input": 0.07,
       "output": 0.2
     },
+    "openinfer/@oi/GLM-5.3-Flash": {
+      "context_window": 393216,
+      "input": 0.195,
+      "output": 1.56
+    },
+    "openinfer/@oi/Qwen3.5-27B": {
+      "context_window": 32768,
+      "input": 0.195,
+      "output": 1.56
+    },
+    "openinfer/@oi/Qwen3.5-9B": {
+      "context_window": 100000,
+      "input": 5.0,
+      "output": 0.15
+    },
     "ovhcloud/DeepSeek-R1-Distill-Llama-70B": {
       "context_window": 131000,
       "input": 0.67,
@@ -14449,7 +14541,7 @@
       "cache_write_1h": 8.8
     },
     "us.anthropic.claude-sonnet-4-20250514-v1:0": {
-      "context_window": 1000000,
+      "context_window": 200000,
       "input": 3.0,
       "output": 15.0,
       "cache_read": 0.3,
@@ -14702,7 +14794,7 @@
       "cache_read": 0.55
     },
     "us.xai.grok-4.7": {
-      "context_window": 500000,
+      "context_window": 524288,
       "input": 2.2,
       "output": 6.6,
       "cache_read": 0.55

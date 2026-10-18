@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.12.0 to 0.13.0 | The shipped pipelines end at a `create-pr` agent step and `spoolway stack` is deprecated; the shipped tracker hooks close a ticket with no pull request; a failing issue hook stops its task on `hook_failed` instead of `paused`; `eval --per-run` is `--per-task` and its export keys and columns change; unqueuing a routine copy deletes it; `sync` writes every `[dispatch]` key. | Run `spoolway sync` and `spoolway sync --replace` on your tracker hook, replace each `spoolway stack` step with a `create-pr` agent step, and update scripts that read `eval` exports, `--per-run`, held tasks' `state` or unqueued routine drafts. |
 | 0.11.0 to 0.12.0 | A model with no `prompt_cache_ttl` has no age limit; a task keeps its five newest lanes and `keep_finished_lanes` is retired; command steps run without a pane; herdr lanes are named `<step>-<tag>`; step ids are limited to 26 characters; resuming a caught `--fail` goes down `on_fail`; issue and git hooks have fixed time limits; `queue add` refuses misspelt keys, placeholders, ids in use and unreachable `gate_at:`; four commands refuse `--json`; `queue list --json` `stage` names the stopped step; deleting `dispatch.pid` stops the dispatcher; `doctor` fails more settings. | Run `spoolway sync`, set `prompt_cache_ttl`, rename long step ids and quoted `[models]` tables, set `visible_lanes` or `hide_commands` to taste, add `# spoolway-login:` to tracker hooks, update scripts that read lane names, `--json` or `stage`, and clear what `spoolway doctor` fails. |
 | 0.10.0 to 0.11.0 | A background step with `on_fail` is refused when the pipeline loads and its exit never moves the task; `sync`, `init` and `install` refuse a file that matches no copy spoolway has shipped and delete the version marker; the issue question is a checklist of groups and its popups changed; `queue add` calls no `open` hook for a `tracking: off` task; a routine runs one copy at a time and reads by its name on the board, the lane, the workspace and `eval`; `routine:` is refused in a task file; `eval --by task` writes WHEN with the time; `open` reads `~/.spoolway/editor.toml` and falls back to `vim`. | Fix every background step with `on_fail`, run `spoolway sync` and `spoolway sync --replace` for each refused file, commit the deleted marker, update scripts that drive the issue popups, find routine panes by id or read `eval`'s `when`, and rename a `routine:` key of your own. |
 | 0.9.0 to 0.10.0 | Row actions move behind `o` and popups take no letter answers; a job with no `base` never fires; `sync` writes a version marker older binaries refuse to overwrite; long task and step ids are refused; `--json` is refused where a command has no JSON form; `pipeline check` reads the live queue; resuming an archived task fails; silent lanes are reminded instead of escalated; agent launch failures go to `blocked`; a gated command reruns after an unblocker pass; background checks and failed removals hold a task on `done`; `eval` and the ledger carry command steps; `[models]` globs match more names; requeued tasks fire their hooks again; `doctor` fails more settings. | Learn the options menu, add `base` to every job, commit `.spoolway/spoolway-version`, shorten long ids, drop `--json` where refused, update scripts that read `eval`, the ledger or `queue list`, and clear what `spoolway doctor` fails. |
@@ -52,6 +53,58 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.12.0 to 0.13.0
+
+Run `spoolway sync` in each project and commit what it writes. It writes every `[dispatch]` key
+into `config.toml`, defaults included, names each one it adds, and takes the new planning and
+calibrate skills. No value changes. Then read the notes `spoolway doctor` prints, work through the
+list, and restart the dispatcher.
+
+- Replace each step that runs `spoolway stack`. The shipped pipelines now end at a `create-pr`
+  agent step, and `spoolway stack` is deprecated and may be removed in a future release.
+  `spoolway doctor` and `spoolway sync` note ``Still run by: <pipeline> · <step>`` for each one.
+  `sync` changes no pipeline step, so do it by hand. Run `spoolway init`, which adds only the
+  missing `.spoolway/prompts/create-pr/PROMPT.md`, then change each `handover` step and the
+  `on_pass` that leads to it:
+
+  ```yaml
+    - id: create-pr
+      description: >-
+        Push this task's branch and open its pull request, with a short
+        plain-English summary of the diff. Nothing is merged here.
+      agent: claude
+      prompt: create-pr
+      model: ""
+      effort: ""
+      on_pass: done
+  ```
+
+  Give the step a model and effort; a cheap model is enough. Unlike `handover`, it spends an agent
+  turn. `spoolway pipeline check` names a step left without a model.
+- Take the shipped tracker hook. `github.sh` and `jira.sh` now close a task's ticket at `done` when
+  its branch has no pull request, where 0.12.0's failed and stopped the task. `sync` does not
+  rewrite hooks. Run `spoolway sync --replace .spoolway/hooks/github.sh` or
+  `.spoolway/hooks/jira.sh`, then re-apply your own edits from the `.bak` file it saves. In
+  `jira.sh`, set the new `status_done` to your workflow's done status if it is not `Done`.
+- Update scripts that look for tasks held on a failed hook. Such a task now stands on its own
+  `hook_failed` stage, where 0.12.0 paused it, so `spoolway queue list --json` writes
+  `state: "hook_failed"`, and moving there sets off no `paused` hook event. A task 0.12.0 paused on
+  a hook is read as `hook_failed`. `spoolway resume <task>` still reruns the hook, and
+  `spoolway resume <task> --skip-hook` or `[k]` on the board carries the task on without it.
+- Rename `spoolway eval --per-run` to `--per-task` in scripts. The old flag exits 2. In `--csv`,
+  `--json` and `--sort`, `runs` is now `tasks`, every `*_per_run` key is `*_per_task`, and
+  `ctx_peak_avg_tokens` and `ctx_peak_avg_pct` are `ctx_avg_tokens` and `ctx_avg_pct`. The lanes
+  table reads `TASKS`, `X/TASK` and `CTX AVG`, and draws `CTX PEAK` only under `--by task`.
+- Update anything that reads an `eval` export. `--csv` and `--json` now carry only the columns the
+  chosen view draws, starting with `project`. `by`, `lanes`, `unpriced` and the other view's
+  columns are gone, and the closing row is labelled `total` or `average`. Add `--per-task` for the
+  per-task figures. `--sort by` is refused, and the screen's `[e]` file is named
+  `eval-by-<by>-<view>-<stamp>.csv`.
+- Expect an unqueued routine copy to be deleted. 0.12.0 turned it into a pending draft such as
+  `nightly-3.md`; now the copy is gone and its routine stays, ready to queue again. The board's
+  `unqueue`, `spoolway queue unqueue` with or without `--all`, and `--force` on a started copy all
+  do this, and print ``deleted `<id>` `` in place of ``unqueued `<id>` ``.
 
 ## 0.11.0 to 0.12.0
 
