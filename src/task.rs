@@ -363,24 +363,24 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
 
-    /// A reference to where this task came from — an issue URL, a plan page
-    /// path, a bare name. Nothing in spoolway parses it; it is carried for a
-    /// person to follow back, and for nothing else.
+    /// The URL of the tracker item this task came from: an issue, a pull
+    /// request or a Jira item. Nothing in spoolway parses it; it is carried
+    /// for a person to follow back, and for nothing else.
     ///
     /// The issue a planning skill read through `spoolway issue show`,
     /// whenever a task started at one — the issue a person filed stays
     /// theirs, so this is never overwritten with the enhanced version spoolway
-    /// wrote from it. A page argued that shape too, in that case, and its own
-    /// path moves to [`Self::plan`] instead of colliding with this one; with
-    /// no issue behind it, a plan page's path stays here, exactly as before
-    /// `plan:` existed.
+    /// wrote from it. A plan page's path belongs in [`Self::plan`], never
+    /// here. Tasks written before `plan:` existed may still hold a page path
+    /// in this field, and they are accepted and run unchanged: no check
+    /// reads this value, and none should start refusing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
     /// The plan page that argued this task's shape, as an absolute path —
-    /// set only when a page was written *and* [`Self::source`] holds an
-    /// issue instead of it. Nothing in spoolway parses this either; it is
-    /// carried for a person to follow back, same as `source`.
+    /// set whenever a page was written, with or without a tracker item
+    /// behind it. Nothing in spoolway parses this either; it is carried for
+    /// a person to follow back, same as `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 
