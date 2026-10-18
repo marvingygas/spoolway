@@ -49,7 +49,7 @@ work while it shows.
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |
 | `[tab]` | Cycle to the next table |
 | `[f]` | Open the filter panel |
-| `[e]` | Export the rows on screen to a CSV file |
+| `[e]` | Export the table on screen, in the view drawn, to a CSV file |
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
 
@@ -215,13 +215,13 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--per-task` | Print the per-task columns. Without it, the totals columns print. |
 | `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
 
-`--sort` takes a column name the way `--csv`'s header spells it, below. It accepts the totals
-names and the per-task names in both views. A name the printed view does not draw still sorts
+`--sort` takes a column name as the export's header spells it, below. It also takes `lanes` and
+`unpriced`. It accepts the totals names and the per-task names in both views. A name the printed view does not draw still sorts
 the rows and marks no header. An unknown name is refused, naming every column `--by`'s current
 value accepts. It cannot be combined with `--discard`.
 
-`--per-task` changes only the printed table. It is refused beside `--csv`, `--json` and
-`--discard`, because the exports already carry both column sets.
+`--per-task` picks the per-task columns for the printed table, `--csv` and `--json` alike. It
+is refused beside `--discard`, which prints no table.
 
 A trial forks one group into one full copy per pipeline it was ticked under, all under one
 trial id. See [Trials](planning.md#trials).
@@ -368,36 +368,60 @@ the trial's pipelines is a row.
 
 ## Exporting
 
-`[e]` writes the table on screen to `.spoolway/evals/eval-by-<by>-<date>-<time>.csv`, named
-after the current `by`. A second export in the same minute gets a `-2` suffix rather than
-overwriting the first.
+An export is the table on screen. It carries the columns of the view that is drawn, in the
+order they are drawn, with every figure as a raw number a spreadsheet can add up: `195812`
+rather than `195.8k`, and `2244` seconds rather than `37m 24s`. Every row also starts with
+`project`, and under `--by task` the run id follows it as `run`.
+
+`[e]` writes the lanes or directory table on screen to
+`.spoolway/evals/eval-by-<by>-<view>-<date>-<time>.csv`. `<view>` is `totals`, `per-task` or
+`per-session`. The confirmation names the rows, the `by` and the view, such as
+`11 rows, by pipeline · per task`. A second export in the same minute gets a `-2` suffix rather
+than overwriting the first. The file name follows the frame title's view. Under `by session` the
+only view is the session table, and `[t]` names it `per-session`, so the file is
+`eval-by-session-per-session-<date>-<time>.csv`.
+
+`--csv` and `--json` print the totals view, and with `--per-task` the per-task view:
 
 ```
 spoolway eval --by step --pipeline impl --csv
 ```
 ```
-project,by,pipeline,step,pipeline_version,tasks,lanes,pass,blocks,ctx_peak_tokens,ctx_peak_pct,ctx_avg_tokens,ctx_avg_pct,in_tokens,out_tokens,cache_read_tokens,cache_write_tokens,in_per_task,out_per_task,cache_read_per_task,cache_write_per_task,in_usd,out_usd,cache_read_usd,cache_write_usd,in_usd_per_task,out_usd_per_task,cache_read_usd_per_task,cache_write_usd_per_task,cost_usd,cost_per_task,unpriced,time_s,time_per_task_s
-spoolway,step,impl,implement,,48,106,0.98,2,520000,0.52,322000,0.32,17140,4166300,1120540000,21362400,357,86800,23343000,445117,0.05,62.49,336.16,80.11,0.00,1.30,7.00,1.67,451.68,9.41,0,81120,1690
+project,pipeline,step,tasks,pass,blocks,ctx_avg_tokens,ctx_avg_pct,in_tokens,in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,time_s
+spoolway,impl,implement,48,0.98,2,322000,0.32,17140,0.05,4166300,62.49,1120540000,336.16,21362400,80.11,451.68,81120
+```
+```
+spoolway eval --by step --pipeline impl --per-task --csv
+```
+```
+project,pipeline,step,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,cost_per_task,time_per_task_s
+spoolway,impl,implement,48,0.98,0.04,322000,0.32,357,0.00,86800,1.30,23343000,7.00,445117,1.67,451.68,9.41,1690
 ```
 
-The CSV and `--json` rows carry the per-task token figures beside the raw totals, the
-`ctx_avg` pair, and `pipeline_version`. They also carry `in_usd`, `out_usd`, `cache_read_usd`
-and `cache_write_usd`, each with a `_per_task` twin. These are blank in CSV, and `null` in
-`--json`, when every lane on the row that spent tokens is unpriced. The `total` row and the `--json` `total` object
-carry the sums and the per-task figures the screen's `Total` and `Average` lines show:
-`in_tokens`, `out_tokens`, `cache_read_tokens`, `cache_write_tokens`, the four `*_per_task`
-token columns, the four class-cost columns and their `_per_task` twins, `cost_per_task`, `time_s` and `time_per_task_s`. The directory table's export carries the
-`*_per_session` columns instead, including `in_usd_per_session`, `out_usd_per_session`,
-`cache_read_usd_per_session` and `cache_write_usd_per_session`. Under `by session` it carries
-`in_usd`, `out_usd`, `cache_read_usd` and `cache_write_usd` with no twins. The pass and context columns stay blank on the CSV total row, and
-both views export the same row. `--json` prints an object, `{"by", "rows",
-"total"}`, rather than a bare array, so the `Total` line cannot be mistaken for a row. Its own
-`by` column reads `total`. `--csv` and `--json` are not allowed together.
+Each context column is written twice, as a token count and then as a share of the model's
+window. The drawn cell shows the share, or the tokens when no window is set. `ctx_peak_tokens`
+and `ctx_peak_pct` appear only under `--by task`, where `CTX PEAK` is drawn. `pass` and the
+shares are fractions, so `0.98` is 98%.
 
-When no lane matches the filters, `--json` prints the same object with an empty `rows`. `--csv` prints the header and the total row. Both exit 0 with nothing else on stdout. The plain table prints a sentence instead.
+A class cost such as `in_usd` is blank in CSV, and `null` in `--json`, when every lane on the
+row that spent tokens is unpriced. `cost_usd` is blank the same way when every lane on the row
+is unpriced. The directory table's export follows the same rule, with `*_per_session` columns
+in its per-session view. Under `by session` it has one view, with no per-session columns.
 
-`unpriced` counts how many lanes have no price. `cost_usd` is blank in CSV, and `null` in
-`--json`, when every lane on the row is unpriced.
+The last CSV line is the screen's own last line, labelled `total` or `average` in the first
+column. It fills only the cells the screen fills, so the naming columns, `pass` and the context
+columns stay blank, and so does `cost_usd` on an `average` line. `--json` prints an object,
+`{"by", "rows", "total", "commands"}`, rather than a bare array, so the last line cannot be
+mistaken for a row. Each row carries the CSV's columns as keys. `total` carries only the keys
+its line fills, in the same view. `--csv` and `--json` are not allowed together.
+
+An export has no `by`, `lanes` or `unpriced` column, and none of the other view's columns. A
+script that reads `in_per_task` needs `--per-task`, and one that reads `in_tokens` needs the
+totals view.
+
+When no lane matches the filters, `--json` prints the same object with an empty `rows`. `--csv`
+prints the header and the total row. Both exit 0 with nothing else on stdout. The plain table
+prints a sentence instead.
 
 ## The honest limit
 

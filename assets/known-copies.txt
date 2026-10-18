@@ -57,6 +57,7 @@ skill claude/spoolway-calibrate/SKILL.md fa22548c
 skill claude/spoolway-calibrate/SKILL.md 69687d24
 skill claude/spoolway-calibrate/SKILL.md 2b4b0760
 skill claude/spoolway-calibrate/SKILL.md 8fd71e3a
+skill claude/spoolway-calibrate/SKILL.md ec9bfdbb
 skill claude/spoolway-calibrate/assets/report.md 185c9fce
 skill claude/spoolway-config/SKILL.md 29408617
 skill claude/spoolway-config/SKILL.md 8760aad5
@@ -178,6 +179,7 @@ skill codex/spoolway-calibrate/SKILL.md fa22548c
 skill codex/spoolway-calibrate/SKILL.md 69687d24
 skill codex/spoolway-calibrate/SKILL.md 2b4b0760
 skill codex/spoolway-calibrate/SKILL.md 8fd71e3a
+skill codex/spoolway-calibrate/SKILL.md ec9bfdbb
 skill codex/spoolway-config/SKILL.md 31bf4f99
 skill codex/spoolway-config/SKILL.md ab785748
 skill codex/spoolway-config/SKILL.md 96e6ad87
@@ -264,6 +266,7 @@ skill pi/spoolway-calibrate/SKILL.md fa22548c
 skill pi/spoolway-calibrate/SKILL.md 69687d24
 skill pi/spoolway-calibrate/SKILL.md 2b4b0760
 skill pi/spoolway-calibrate/SKILL.md 8fd71e3a
+skill pi/spoolway-calibrate/SKILL.md ec9bfdbb
 skill pi/spoolway-config/SKILL.md 537fb7c0
 skill pi/spoolway-config/SKILL.md 10a33f94
 skill pi/spoolway-config/SKILL.md e4868a36

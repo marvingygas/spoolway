@@ -20,12 +20,13 @@
 //! draws, the figure columns stay put, so two groupings can be read against
 //! each other without relearning where anything is. Those figure columns
 //! come in two views, every row's totals or each total over the row's tasks
-//! — see [`Figures`] — and the exports carry both. A last line closes each table
-//! with only what adds up across its rows, built from the ledger rather than
-//! from the drawn cells: `Total`, the sums, in the totals view, and
-//! `Average`, those sums over its tasks or sessions, in the average view. A
-//! share or a peak summed over rows would be a number nobody could use, so
-//! those cells stay blank. The screen pins that line under its scrolled rows.
+//! — see [`Figures`] — and an export carries the one on screen. A last line
+//! closes each table with only what adds up across its rows, built from the
+//! ledger rather than from the drawn cells: `Total`, the sums, in the totals
+//! view, and `Average`, those sums over its tasks or sessions, in the average
+//! view. A share or a peak summed over rows would be a number nobody could
+//! use, so those cells stay blank. The screen pins that line under its
+//! scrolled rows.
 //!
 //! The honest limit is worth stating where the code is, not only in the help.
 //! Tasks differ in difficulty, so a pipeline that happens to have drawn easy
@@ -57,25 +58,19 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipeline
     run_to(repo, args, json, pipelines, &mut std::io::stdout().lock())
 }
 
-/// `--per-task` beside anything that is not the printed table. Only that
-/// table has two views: `--csv` and `--json` already carry both column sets,
-/// and `--discard` prints no figures at all. Checked here rather than by
-/// clap, so every one of the three is refused with that reason — `--json`
-/// is a global flag clap cannot pair with an `eval` one — and called from
-/// `main` before `--discard` is dispatched, since that never reaches [`run`].
-pub fn refuse_per_task_beside_an_export(args: &EvalArgs, json: bool) -> Result<()> {
-    let beside = match (args.csv, json, args.discard.is_some()) {
-        _ if !args.per_task => return Ok(()),
-        (true, _, _) => "--csv",
-        (_, true, _) => "--json",
-        (_, _, true) => "--discard",
-        _ => return Ok(()),
-    };
-    bail!(
-        "`--per-task` only changes the printed table, not `{beside}`: `--csv` and `--json` \
-         already carry both the totals and the per-task columns. Drop `--per-task` and run it \
-         again"
-    )
+/// `--per-task` beside `--discard`, which prints no figures for it to pick
+/// a view of. Checked here rather than by clap so the refusal can say why,
+/// and called from `main` before `--discard` is dispatched, since that never
+/// reaches [`run`]. Beside `--csv` and `--json` it picks the export's
+/// columns, as it picks the printed table's.
+pub fn refuse_per_task_beside_discard(args: &EvalArgs) -> Result<()> {
+    if args.per_task && args.discard.is_some() {
+        bail!(
+            "`--per-task` picks which figures `spoolway eval` prints, and `--discard` prints \
+             none: it stops a trial's arms. Drop `--per-task` and run it again"
+        );
+    }
+    Ok(())
 }
 
 /// [`run`], printing to `out` — apart so a test can read what it printed.
@@ -89,7 +84,6 @@ fn run_to(
     if json && args.csv {
         bail!("`--csv` and `--json` are two different exports of the same rows — pick one");
     }
-    refuse_per_task_beside_an_export(args, json)?;
     let figures = match args.per_task {
         true => Figures::Average,
         false => Figures::Totals,
@@ -199,7 +193,7 @@ fn run_to(
     let command_total = CommandMetrics::for_matching(&command_refs);
 
     if json {
-        let mut value = lanes_json(args.by, &rows, &total);
+        let mut value = lanes_json(args.by, figures, &rows, &total);
         value["commands"] = commands_json(args.by, &command_rows, &command_total);
         writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
         return Ok(());
@@ -216,11 +210,11 @@ fn run_to(
                  the command steps table"
             );
         }
-        writeln!(out, "{}", lanes_csv_header(args.by))?;
-        for row in &rows {
-            writeln!(out, "{}", lanes_csv_row(args.by, row))?;
+        let (header, lines) = lanes_csv(args.by, figures, &rows, &total);
+        writeln!(out, "{header}")?;
+        for line in &lines {
+            writeln!(out, "{line}")?;
         }
-        writeln!(out, "{}", lanes_csv_total(args.by, &total))?;
         return Ok(());
     }
 
@@ -746,12 +740,6 @@ impl ClassCost {
             false => String::new(),
         })
     }
-
-    /// The four figures for `--json`: `null` where nothing could be priced.
-    fn json(&self, each: impl Fn(f64) -> f64) -> [Option<f64>; 4] {
-        let priced = self.priced();
-        self.figures(each).map(|usd| priced.then_some(usd))
-    }
 }
 
 /// The mean of a set of peaks: in raw tokens over every lane that banked
@@ -937,9 +925,9 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
 /// The figure columns the per-task view draws under every `by`, before
 /// [`lane_figure_columns`] adds `CTX PEAK` under `task`, in the order
 /// [`lane_figures`] draws them — each beside the export column a sort on it
-/// reads. A per-task cell sorts on its per-task figure, not the total beside
-/// it in an export. Each token class is followed by its cost at
-/// today's prices — see [`ClassCost`].
+/// reads. A per-task cell sorts on its per-task figure, not the total it
+/// divides. Each token class is followed by its cost at today's prices — see
+/// [`ClassCost`].
 const LANE_FIGURE_COLUMNS: [(&str, &str); 15] = [
     ("TASKS", "tasks"),
     ("PASS", "pass"),
@@ -1034,8 +1022,8 @@ fn drawn_lane_columns(
 /// table). Both sets do not fit across one terminal, so one shows at a time.
 /// Totals is the default, since what the work cost in all is the first
 /// question a person opening the screen asks; `t` on the screen and
-/// `--per-task` on the command line switch to the other. The exports carry
-/// both sets whichever is drawn. The divided view is named `Average` for
+/// `--per-task` on the command line switch to the other, for the exports
+/// as for the table. The divided view is named `Average` for
 /// what both tables share, since the lanes table names it per task and the
 /// directory table per session — see [`Figures::label`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1112,9 +1100,10 @@ const LANE_PAIRS: [(&str, &str); 11] = [
     ("time_s", "time_per_task_s"),
 ];
 
-/// An export's naming columns under each `by`, between `project,by` and
-/// `pipeline_version`. `--by version` names no `version` here because
-/// `pipeline_version` beside it already is one.
+/// The naming columns [`LaneRow::keys`] holds under each `by`: the run id
+/// under `task`, which the screen has no room for, then the `by`'s own but
+/// for `pipeline_version`, which an export reads off the drawn cell — see
+/// [`lane_export_cell`].
 fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
     match by {
         EvalBy::Group => &["group"],
@@ -1739,13 +1728,12 @@ fn trial_delta_line(baseline: &LaneRow, row: &LaneRow) -> String {
 
 // ------------------------------------------------------------ lanes export
 
-/// The one header a lanes export carries: `project,by`, the `by`'s own
-/// naming columns, `pipeline_version`, then the figures — raw totals first,
-/// and each token class per task beside them, then each class's cost at
-/// today's prices the same way, so a spreadsheet can re-derive the screen's
-/// figures or pick its own.
-fn lanes_csv_header(by: EvalBy) -> String {
-    let mut cols = vec!["project", "by"];
+/// Every column `--sort` takes under `by`: `project`, the `by`'s own naming
+/// columns, `pipeline_version`, then the figures of both views, beside
+/// `lanes` and `unpriced`, which no view draws. A sort outlives `t`, so it
+/// has to name a column whichever view is drawn — see [`Figures::carry`].
+fn lane_sort_keys(by: EvalBy) -> Vec<&'static str> {
+    let mut cols = vec!["project"];
     cols.extend(lane_csv_keys(by));
     cols.extend([
         "pipeline_version",
@@ -1779,190 +1767,294 @@ fn lanes_csv_header(by: EvalBy) -> String {
         "time_s",
         "time_per_task_s",
     ]);
-    cols.join(",")
+    cols
 }
 
-fn opt_u64(v: Option<u64>) -> String {
-    v.map_or(String::new(), |t| t.to_string())
+/// One cell of an export, spelled the two ways it is written: as `--csv`
+/// and `e` write it, and as `--json` does. A figure is the raw number in
+/// both, never the screen's `195.8k` or `37m 24s`, so a spreadsheet can add
+/// a column up. A blank CSV cell is `null` in JSON.
+struct ExportCell {
+    csv: String,
+    json: serde_json::Value,
 }
 
-fn opt_share(v: Option<f64>) -> String {
-    v.map_or(String::new(), |p| format!("{p:.2}"))
+impl ExportCell {
+    fn text(s: &str) -> ExportCell {
+        ExportCell {
+            csv: csv_field(s).into_owned(),
+            json: s.into(),
+        }
+    }
+
+    fn count(n: u64) -> ExportCell {
+        ExportCell {
+            csv: n.to_string(),
+            json: n.into(),
+        }
+    }
+
+    fn count_or_blank(n: Option<u64>) -> ExportCell {
+        n.map_or_else(ExportCell::blank, ExportCell::count)
+    }
+
+    /// A number of seconds, clamped at zero: a time here is a sum of banked
+    /// deltas — see [`Entry::wall_s`] — and no row really ran for less than
+    /// none.
+    fn seconds(s: i64) -> ExportCell {
+        ExportCell::count(s.max(0) as u64)
+    }
+
+    /// A share, a cost or an average of counts: two places in CSV, the
+    /// unrounded figure in JSON.
+    fn decimal(v: Option<f64>) -> ExportCell {
+        ExportCell {
+            csv: v.map_or(String::new(), |v| format!("{v:.2}")),
+            json: v.into(),
+        }
+    }
+
+    /// An average of tokens or seconds: rounded to a whole one in CSV, the
+    /// unrounded figure in JSON.
+    fn whole(v: Option<f64>) -> ExportCell {
+        ExportCell {
+            csv: v.map_or(String::new(), |v| format!("{v:.0}")),
+            json: v.into(),
+        }
+    }
+
+    fn blank() -> ExportCell {
+        ExportCell {
+            csv: String::new(),
+            json: serde_json::Value::Null,
+        }
+    }
+
+    /// A cost cell, blank rather than a false `0.00` when every one of
+    /// `lines` is among `unpriced` — the same "unknown, not free" rule
+    /// [`cost_of`] states for the table and the screen. A floor, where some
+    /// but not all of `lines` are unpriced, is still the number, as the
+    /// drawn cell is.
+    fn cost(cost: f64, lines: usize, unpriced: usize) -> ExportCell {
+        ExportCell::decimal((lines > unpriced).then_some(cost))
+    }
+
+    /// One class cost of `class_cost`, blank where nothing could be priced —
+    /// see [`ClassCost::priced`].
+    fn class(class_cost: &ClassCost, usd: f64) -> ExportCell {
+        ExportCell::decimal(class_cost.priced().then_some(usd))
+    }
 }
 
-fn lanes_csv_row(by: EvalBy, row: &LaneRow) -> String {
+/// `lead`, then the export keys of the columns a table draws, in the order
+/// it draws them — with each context column written as a token count and
+/// then a share, because the drawn cell is a share where the model has a
+/// window set and falls back to tokens where it has none.
+fn export_columns<'k>(
+    mut lead: Vec<&'k str>,
+    drawn: impl IntoIterator<Item = &'k str>,
+) -> Vec<&'k str> {
+    for key in drawn {
+        match key {
+            "ctx_avg_pct" => lead.extend(["ctx_avg_tokens", "ctx_avg_pct"]),
+            "ctx_peak_pct" => lead.extend(["ctx_peak_tokens", "ctx_peak_pct"]),
+            key => lead.push(key),
+        }
+    }
+    lead
+}
+
+/// The columns a lanes export carries under `by` in the view `figures`:
+/// the table as drawn, plus `project` on every row, since an export read
+/// beside another project's has no frame saying whose it is, and under
+/// `by task` the run id the screen has no room for.
+fn lane_export_columns(by: EvalBy, figures: Figures) -> Vec<&'static str> {
+    let mut lead = vec!["project"];
+    if by == EvalBy::Task {
+        lead.push("run");
+    }
+    let drawn = lane_columns(by)
+        .iter()
+        .copied()
+        .chain(lane_figure_columns(by, figures));
+    export_columns(lead, drawn.map(|(_, key)| key))
+}
+
+/// One lanes row's cell under export column `key`.
+fn lane_export_cell(by: EvalBy, row: &LaneRow, key: &str) -> ExportCell {
     let m = &row.metrics;
     let t = &m.tokens;
-    let class_usd = m.class_cost.cells(|usd| usd);
-    let class_usd_per_task = m.class_cost.cells(|usd| m.per_task(usd));
-    let mut cells: Vec<String> = vec![csv_field(&row.project).into_owned(), by.label().to_string()];
-    cells.extend(row.keys.iter().map(|k| csv_field(k).into_owned()));
-    cells.extend([
-        csv_field(m.single_version().unwrap_or_default()).into_owned(),
-        m.runs.to_string(),
-        m.lanes.to_string(),
-        csv_fraction(m.pass_share()),
-        m.blocked.to_string(),
-        opt_u64(m.ctx_peak_tokens),
-        opt_share(m.ctx_peak_pct),
-        opt_u64(m.ctx_avg.tokens.map(|t| t.round() as u64)),
-        opt_share(m.ctx_avg.pct),
-        t.input.to_string(),
-        t.output.to_string(),
-        t.cache_read.to_string(),
-        t.cache_write().to_string(),
-        m.tokens_per_task(t.input).to_string(),
-        m.tokens_per_task(t.output).to_string(),
-        m.tokens_per_task(t.cache_read).to_string(),
-        m.tokens_per_task(t.cache_write()).to_string(),
-    ]);
-    cells.extend(class_usd);
-    cells.extend(class_usd_per_task);
-    cells.extend([
-        csv_cost(m.cost, m.lines, m.unpriced),
-        csv_cost(m.cost_per_task(), m.lines, m.unpriced),
-        m.unpriced.to_string(),
-        m.time_s.max(0).to_string(),
-        (m.time_per_task_s().round() as i64).to_string(),
-    ]);
-    cells.join(",")
+    let c = &m.class_cost;
+    match key {
+        "project" => ExportCell::text(&row.project),
+        "tasks" => ExportCell::count(m.runs as u64),
+        "pass" => ExportCell::decimal(m.pass_share().map(|p| p / 100.0)),
+        "blocks" => ExportCell::count(m.blocked as u64),
+        "blocks_per_task" => ExportCell::decimal(Some(m.blocks_per_task())),
+        "ctx_avg_tokens" => ExportCell::whole(m.ctx_avg.tokens),
+        "ctx_avg_pct" => ExportCell::decimal(m.ctx_avg.pct),
+        "ctx_peak_tokens" => ExportCell::count_or_blank(m.ctx_peak_tokens),
+        "ctx_peak_pct" => ExportCell::decimal(m.ctx_peak_pct),
+        "in_tokens" => ExportCell::count(t.input),
+        "out_tokens" => ExportCell::count(t.output),
+        "cache_read_tokens" => ExportCell::count(t.cache_read),
+        "cache_write_tokens" => ExportCell::count(t.cache_write()),
+        "in_per_task" => ExportCell::count(m.tokens_per_task(t.input)),
+        "out_per_task" => ExportCell::count(m.tokens_per_task(t.output)),
+        "cache_read_per_task" => ExportCell::count(m.tokens_per_task(t.cache_read)),
+        "cache_write_per_task" => ExportCell::count(m.tokens_per_task(t.cache_write())),
+        "in_usd" => ExportCell::class(c, c.input),
+        "out_usd" => ExportCell::class(c, c.output),
+        "cache_read_usd" => ExportCell::class(c, c.cache_read),
+        "cache_write_usd" => ExportCell::class(c, c.cache_write),
+        "in_usd_per_task" => ExportCell::class(c, m.per_task(c.input)),
+        "out_usd_per_task" => ExportCell::class(c, m.per_task(c.output)),
+        "cache_read_usd_per_task" => ExportCell::class(c, m.per_task(c.cache_read)),
+        "cache_write_usd_per_task" => ExportCell::class(c, m.per_task(c.cache_write)),
+        "cost_usd" => ExportCell::cost(m.cost, m.lines, m.unpriced),
+        "cost_per_task" => ExportCell::cost(m.cost_per_task(), m.lines, m.unpriced),
+        "time_s" => ExportCell::seconds(m.time_s),
+        "time_per_task_s" => ExportCell::whole(Some(m.time_per_task_s())),
+        // The naming columns left — `group`, `run`, `task`, `pipeline`,
+        // `when`, `step`, `first` — each read off the row's export keys.
+        // `pipeline_version` has no export key and is read off the drawn
+        // cell instead, found by its place in `lane_columns` rather than a
+        // fixed index, so a column added before `VER` cannot shift it: a
+        // task whose lanes ran under two versions names the one `VER` draws,
+        // its latest lane's.
+        key => match lane_csv_keys(by).iter().position(|name| *name == key) {
+            Some(i) => ExportCell::text(&row.keys[i]),
+            None => lane_columns(by)
+                .iter()
+                .position(|(_, name)| *name == key)
+                .map_or_else(ExportCell::blank, |i| ExportCell::text(&row.cells[i])),
+        },
+    }
 }
 
-/// The `Total` line as an export writes it: `total` where every row names
-/// its `by`, so a filter on that column can never read it as one more row,
-/// and blank in every column that does not add up. It carries what the
-/// screen's `Total` line carries in either view: the sums, and each per-task
-/// column as its sum over the table's distinct tasks.
-fn lanes_csv_total(by: EvalBy, total: &LaneTotal) -> String {
-    let header = lanes_csv_header(by);
-    let names: Vec<&str> = header.split(',').collect();
+/// The closing line's cell under export column `key` in the view `figures`,
+/// `None` where the screen's own `Total` or `Average` line leaves it blank:
+/// every naming column, `PASS` and the context figures, which do not add up
+/// across rows, and `USD` on a line of averages — see [`lanes_table`].
+fn lane_total_cell(total: &LaneTotal, key: &str, figures: Figures) -> Option<ExportCell> {
     let t = &total.tokens;
-    let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.cells(|usd| usd);
-    let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
-        total.class_cost.cells(|usd| total.per_task(usd));
-    names
-        .iter()
-        .map(|name| match *name {
-            "by" => "total".to_string(),
-            "tasks" => total.runs.to_string(),
-            "blocks" => total.blocked.to_string(),
-            "in_tokens" => t.input.to_string(),
-            "out_tokens" => t.output.to_string(),
-            "cache_read_tokens" => t.cache_read.to_string(),
-            "cache_write_tokens" => t.cache_write().to_string(),
-            "in_per_task" => total.tokens_per_task(t.input).to_string(),
-            "out_per_task" => total.tokens_per_task(t.output).to_string(),
-            "cache_read_per_task" => total.tokens_per_task(t.cache_read).to_string(),
-            "cache_write_per_task" => total.tokens_per_task(t.cache_write()).to_string(),
-            "in_usd" => in_usd.clone(),
-            "out_usd" => out_usd.clone(),
-            "cache_read_usd" => cr_usd.clone(),
-            "cache_write_usd" => cw_usd.clone(),
-            "in_usd_per_task" => in_usd_run.clone(),
-            "out_usd_per_task" => out_usd_run.clone(),
-            "cache_read_usd_per_task" => cr_usd_run.clone(),
-            "cache_write_usd_per_task" => cw_usd_run.clone(),
-            "cost_usd" => csv_cost(total.cost, total.lines, total.unpriced),
-            "cost_per_task" => csv_cost(total.per_task(total.cost), total.lines, total.unpriced),
-            "time_s" => total.time_s.max(0).to_string(),
-            "time_per_task_s" => (total.per_task(total.time_s as f64).round() as i64).to_string(),
-            _ => String::new(),
-        })
+    let c = &total.class_cost;
+    let per_task = |n: u64| ExportCell::count(total.tokens_per_task(n));
+    Some(match key {
+        "tasks" => ExportCell::count(total.runs as u64),
+        "blocks" => ExportCell::count(total.blocked as u64),
+        "blocks_per_task" => ExportCell::decimal(Some(total.per_task(total.blocked as f64))),
+        "in_tokens" => ExportCell::count(t.input),
+        "out_tokens" => ExportCell::count(t.output),
+        "cache_read_tokens" => ExportCell::count(t.cache_read),
+        "cache_write_tokens" => ExportCell::count(t.cache_write()),
+        "in_per_task" => per_task(t.input),
+        "out_per_task" => per_task(t.output),
+        "cache_read_per_task" => per_task(t.cache_read),
+        "cache_write_per_task" => per_task(t.cache_write()),
+        "in_usd" => ExportCell::class(c, c.input),
+        "out_usd" => ExportCell::class(c, c.output),
+        "cache_read_usd" => ExportCell::class(c, c.cache_read),
+        "cache_write_usd" => ExportCell::class(c, c.cache_write),
+        "in_usd_per_task" => ExportCell::class(c, total.per_task(c.input)),
+        "out_usd_per_task" => ExportCell::class(c, total.per_task(c.output)),
+        "cache_read_usd_per_task" => ExportCell::class(c, total.per_task(c.cache_read)),
+        "cache_write_usd_per_task" => ExportCell::class(c, total.per_task(c.cache_write)),
+        "cost_usd" if figures == Figures::Average => return None,
+        "cost_usd" => ExportCell::cost(total.cost, total.lines, total.unpriced),
+        "cost_per_task" => {
+            ExportCell::cost(total.per_task(total.cost), total.lines, total.unpriced)
+        }
+        "time_s" => ExportCell::seconds(total.time_s),
+        "time_per_task_s" => ExportCell::whole(Some(total.per_task(total.time_s as f64))),
+        _ => return None,
+    })
+}
+
+/// What an export's closing line reads in its first column: `total` or
+/// `average`, as the screen's own last line is labelled in `figures`' view,
+/// so a filter on that column can never read it as one more row.
+fn export_total_label(figures: Figures) -> &'static str {
+    match figures {
+        Figures::Totals => "total",
+        Figures::Average => "average",
+    }
+}
+
+/// `columns` as one CSV line: `label` in the first column — the closing
+/// line's — and every other cell through `cell`, blank where it is `None`.
+fn csv_total_line<'k>(
+    columns: &[&'k str],
+    label: &str,
+    cell: impl Fn(&'k str) -> Option<ExportCell>,
+) -> String {
+    std::iter::once(label.to_string())
+        .chain(
+            columns[1..]
+                .iter()
+                .map(|key| cell(key).map_or(String::new(), |c| c.csv)),
+        )
         .collect::<Vec<_>>()
         .join(",")
 }
 
-/// `--json`: the rows under `rows` and the `Total` line under `total`, never
-/// in the same list — a consumer iterating the rows cannot meet it.
-fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Value {
+/// The lanes table as `--csv` and `e` write it: its header, then a line per
+/// row in the order given, then the closing line — see
+/// [`lane_export_columns`] for the columns.
+fn lanes_csv(
+    by: EvalBy,
+    figures: Figures,
+    rows: &[LaneRow],
+    total: &LaneTotal,
+) -> (String, Vec<String>) {
+    let columns = lane_export_columns(by, figures);
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|key| lane_export_cell(by, row, key).csv)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+    lines.push(csv_total_line(
+        &columns,
+        export_total_label(figures),
+        |key| lane_total_cell(total, key, figures),
+    ));
+    (columns.join(","), lines)
+}
+
+/// `--json`: the rows under `rows` and the closing line under `total`, never
+/// in the same list — a consumer iterating the rows cannot meet it. A row
+/// carries the CSV's columns as keys; `total` carries only the ones its
+/// line fills in, in the same view.
+fn lanes_json(
+    by: EvalBy,
+    figures: Figures,
+    rows: &[LaneRow],
+    total: &LaneTotal,
+) -> serde_json::Value {
+    let columns = lane_export_columns(by, figures);
     let rows: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
-            let m = &row.metrics;
-            let t = &m.tokens;
-            let priced = m.lines > m.unpriced;
-            let [in_usd, out_usd, cr_usd, cw_usd] = m.class_cost.json(|usd| usd);
-            let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
-                m.class_cost.json(|usd| m.per_task(usd));
-            let mut obj = serde_json::Map::new();
-            obj.insert("project".into(), row.project.clone().into());
-            for (name, value) in lane_csv_keys(by).iter().zip(&row.keys) {
-                obj.insert((*name).into(), value.clone().into());
-            }
-            let figures = serde_json::json!({
-                "pipeline_version": m.single_version(),
-                "tasks": m.runs,
-                "lanes": m.lanes,
-                "pass": m.pass_share().map(|p| p / 100.0),
-                "blocks": m.blocked,
-                "ctx_peak_tokens": m.ctx_peak_tokens,
-                "ctx_peak_pct": m.ctx_peak_pct,
-                "ctx_avg_tokens": m.ctx_avg.tokens,
-                "ctx_avg_pct": m.ctx_avg.pct,
-                "in_tokens": t.input,
-                "out_tokens": t.output,
-                "cache_read_tokens": t.cache_read,
-                "cache_write_tokens": t.cache_write(),
-                "in_per_task": m.tokens_per_task(t.input),
-                "out_per_task": m.tokens_per_task(t.output),
-                "cache_read_per_task": m.tokens_per_task(t.cache_read),
-                "cache_write_per_task": m.tokens_per_task(t.cache_write()),
-                "in_usd": in_usd,
-                "out_usd": out_usd,
-                "cache_read_usd": cr_usd,
-                "cache_write_usd": cw_usd,
-                "in_usd_per_task": in_usd_run,
-                "out_usd_per_task": out_usd_run,
-                "cache_read_usd_per_task": cr_usd_run,
-                "cache_write_usd_per_task": cw_usd_run,
-                "cost_usd": priced.then_some(m.cost),
-                "cost_per_task": priced.then_some(m.cost_per_task()),
-                // How many lines are missing from `cost_usd` — 0 when it is
-                // a real total, and the reason `cost_usd` above is `null`
-                // rather than a number when every line is. A consumer cannot
-                // otherwise tell a partly-priced floor from a complete total:
-                // both are plain numbers.
-                "unpriced": m.unpriced,
-                "time_s": m.time_s,
-                "time_per_task_s": m.time_per_task_s(),
-            });
-            if let serde_json::Value::Object(figures) = figures {
-                obj.extend(figures);
-            }
+            let obj: serde_json::Map<String, serde_json::Value> = columns
+                .iter()
+                .map(|key| (key.to_string(), lane_export_cell(by, row, key).json))
+                .collect();
             serde_json::Value::Object(obj)
         })
         .collect();
-    let total_priced = total.lines > total.unpriced;
-    let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.json(|usd| usd);
-    let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
-        total.class_cost.json(|usd| total.per_task(usd));
+    let total: serde_json::Map<String, serde_json::Value> = columns
+        .iter()
+        .filter_map(|key| lane_total_cell(total, key, figures).map(|c| (key.to_string(), c.json)))
+        .collect();
     serde_json::json!({
         "by": by.label(),
         "rows": rows,
-        "total": {
-            "tasks": total.runs,
-            "blocks": total.blocked,
-            "in_tokens": total.tokens.input,
-            "out_tokens": total.tokens.output,
-            "cache_read_tokens": total.tokens.cache_read,
-            "cache_write_tokens": total.tokens.cache_write(),
-            "in_per_task": total.tokens_per_task(total.tokens.input),
-            "out_per_task": total.tokens_per_task(total.tokens.output),
-            "cache_read_per_task": total.tokens_per_task(total.tokens.cache_read),
-            "cache_write_per_task": total.tokens_per_task(total.tokens.cache_write()),
-            "in_usd": in_usd,
-            "out_usd": out_usd,
-            "cache_read_usd": cr_usd,
-            "cache_write_usd": cw_usd,
-            "in_usd_per_task": in_usd_run,
-            "out_usd_per_task": out_usd_run,
-            "cache_read_usd_per_task": cr_usd_run,
-            "cache_write_usd_per_task": cw_usd_run,
-            "cost_usd": total_priced.then_some(total.cost),
-            "cost_per_task": total_priced.then_some(total.per_task(total.cost)),
-            "time_s": total.time_s,
-            "time_per_task_s": total.per_task(total.time_s as f64),
-        },
+        "total": total,
     })
 }
 
@@ -2195,12 +2287,12 @@ fn parse_sort(by: EvalBy, text: &str) -> Result<Sort> {
         }
         None => (text, true),
     };
-    let header = lanes_csv_header(by);
-    if !header.split(',').any(|name| name == key) {
+    let keys = lane_sort_keys(by);
+    if !keys.contains(&key) {
         bail!(
             "`--sort` has no column `{key}` under `--by {}` — pick one of: {}",
             by.label(),
-            header.split(',').collect::<Vec<_>>().join(", ")
+            keys.join(", ")
         );
     }
     Ok(Sort {
@@ -2409,13 +2501,6 @@ fn percent(value: Option<f64>) -> String {
     value.map_or("—".to_string(), |v| format!("{v:.0}%"))
 }
 
-fn csv_fraction(share: Option<f64>) -> String {
-    match share {
-        Some(pct) => format!("{:.2}", pct / 100.0),
-        None => String::new(),
-    }
-}
-
 /// A cost cell for `spoolway eval`'s own tables and screen: a plain number,
 /// or `—` when nothing behind it could be priced at all. Whether it is a
 /// floor (some, but not all, of `complete` priced) is not marked on the cell
@@ -2425,20 +2510,6 @@ fn cost_of(row_cost: f64, complete: usize, incomplete: usize) -> String {
     match complete - incomplete.min(complete) {
         0 => "—".to_string(),
         _ => crate::fmt::money_plain(Some(row_cost)),
-    }
-}
-
-/// A CSV cost cell, blank rather than a false `0.00` when every one of
-/// `total` is among `unpriced` — the same "unknown, not free" rule
-/// [`cost_of`] states for the table and the screen, spelled the way an empty
-/// cell already spells "nothing to resolve" for `ctx_peak_pct`. A floor
-/// (some but not all of `total` unpriced) still prints the number it did
-/// before; the `unpriced` column beside it is what tells a reader that
-/// number is a floor rather than a total.
-fn csv_cost(cost: f64, total: usize, unpriced: usize) -> String {
-    match total.saturating_sub(unpriced) {
-        0 => String::new(),
-        _ => format!("{cost:.2}"),
     }
 }
 
@@ -2474,6 +2545,9 @@ impl DirBy {
 /// `wall_s` to sum: its own span comes from its transcript's first and last
 /// `timestamp` instead, see [`crate::usage::session_span`].
 struct SessionRow {
+    /// The project whose ledger banked the session, which an export names —
+    /// every one of them where two did, see [`projects_of`].
+    project: String,
     dir: String,
     /// What the `SKILL` column reads — see [`skill_cell`].
     skill: String,
@@ -2493,8 +2567,6 @@ struct SessionRow {
     /// sweep caught it across several passes.
     lines: usize,
     unpriced: usize,
-    ctx_peak_tokens: Option<u64>,
-    ctx_peak_pct: Option<f64>,
 }
 
 /// The `SKILL` cell: a dash where the session ran none, its one skill where
@@ -2547,7 +2619,6 @@ fn list_sessions(
             for line in &lines {
                 tokens.add(&line.tokens);
             }
-            let (ctx_peak_tokens, ctx_peak_pct) = ctx_peak_of(&lines, models);
             let (when, time_s) = match spans.get(&session) {
                 Some((first, last)) => (*first, (*last - *first).num_seconds().max(0)),
                 None => (
@@ -2558,6 +2629,7 @@ fn list_sessions(
                 ),
             };
             SessionRow {
+                project: projects_of(&lines),
                 dir: latest.dir.clone().unwrap_or_default(),
                 skill: skill_cell(skills.get(&session)),
                 model: latest.model.clone(),
@@ -2571,8 +2643,6 @@ fn list_sessions(
                     .iter()
                     .filter(|e| e.cost_usd.is_none() && !e.tokens.is_zero())
                     .count(),
-                ctx_peak_tokens,
-                ctx_peak_pct,
             }
         })
         .collect();
@@ -2581,6 +2651,16 @@ fn list_sessions(
 }
 
 type Spans = HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
+
+/// Every distinct project among `lines`, in name order and joined by ` + `,
+/// for a directory or session row's export to name. Under `--all` two
+/// projects watching overlapping roots bank the same directory, and the same
+/// session, in both ledgers, and the row sums every line, so naming only one
+/// project would credit it with the other's spend. Empty when `lines` is.
+fn projects_of(lines: &[&Entry]) -> String {
+    let names: BTreeSet<&str> = lines.iter().map(|e| e.project.as_str()).collect();
+    names.into_iter().collect::<Vec<_>>().join(" + ")
+}
 
 /// `entries` by session, in first-seen order.
 fn group_by_session<'a>(entries: &[&'a Entry]) -> Vec<(String, Vec<&'a Entry>)> {
@@ -2606,6 +2686,11 @@ fn group_by_session<'a>(entries: &[&'a Entry]) -> Vec<(String, Vec<&'a Entry>)> 
 /// a lanes row divides by `TASKS`, for comparing directories that ran a
 /// different number of sessions — see [`Figures`].
 struct DirRow {
+    /// The projects whose ledgers banked the directory's sessions, which an
+    /// export names — see [`projects_of`]. Empty for a watched root no
+    /// session has run in, which has no line to read it from — see
+    /// [`export_rows`].
+    project: String,
     dir: String,
     sessions: usize,
     tokens: Tokens,
@@ -2614,8 +2699,6 @@ struct DirRow {
     cost: f64,
     lines: usize,
     unpriced: usize,
-    ctx_peak_tokens: Option<u64>,
-    ctx_peak_pct: Option<f64>,
     ctx_avg: CtxAvg,
     time_s: i64,
     /// The latest of its own sessions' `when` — what orders the rows by
@@ -2650,14 +2733,16 @@ impl DirRow {
 /// The `by dir` table's rows added into one, for its `Total` line and its
 /// export's: every figure here adds up across directories, because a
 /// session ran in exactly one of them. `TIME` is the sessions' own time
-/// added up, not the calendar time they spanned. The peaks are left empty —
-/// neither adds up.
+/// added up, not the calendar time they spanned. `CTX AVG` is left empty,
+/// since an average of averages over directories of different sizes is not
+/// the whole table's.
 fn dirs_total(rows: &[DirRow]) -> DirRow {
     let mut tokens = Tokens::default();
     for row in rows {
         tokens.add(&row.tokens);
     }
     DirRow {
+        project: String::new(),
         dir: String::new(),
         sessions: rows.iter().map(|r| r.sessions).sum(),
         tokens,
@@ -2667,8 +2752,6 @@ fn dirs_total(rows: &[DirRow]) -> DirRow {
         cost: rows.iter().map(|r| r.cost).sum(),
         lines: rows.iter().map(|r| r.lines).sum(),
         unpriced: rows.iter().map(|r| r.unpriced).sum(),
-        ctx_peak_tokens: None,
-        ctx_peak_pct: None,
         ctx_avg: CtxAvg::default(),
         time_s: rows.iter().map(|r| r.time_s).sum(),
         latest: None,
@@ -2712,12 +2795,12 @@ fn dir_rows(
             for line in &lines {
                 tokens.add(&line.tokens);
             }
-            let (ctx_peak_tokens, ctx_peak_pct) = ctx_peak_of(&lines, models);
             let groups: Vec<Vec<&Entry>> = group_by_session(&lines)
                 .into_iter()
                 .map(|(_, g)| g)
                 .collect();
             DirRow {
+                project: projects_of(&lines),
                 sessions: sessions.len(),
                 tokens,
                 class_cost: ClassCost::of(lines.iter().copied(), models),
@@ -2727,8 +2810,6 @@ fn dir_rows(
                     .iter()
                     .filter(|e| e.cost_usd.is_none() && !e.tokens.is_zero())
                     .count(),
-                ctx_peak_tokens,
-                ctx_peak_pct,
                 ctx_avg: ctx_avg_of(groups.iter(), models),
                 time_s: sessions.iter().map(|s| s.time_s).sum(),
                 latest: sessions.iter().map(|s| s.when).max(),
@@ -3286,172 +3367,158 @@ fn sessions_table(rows: &[SessionRow], sort: Option<&Sort>) -> Table {
 
 // ------------------------------------------------------ directories export
 
-/// Each token class's cost follows the token columns, then its
-/// `_per_session` twin, in the order the lanes export puts its own.
-const DIRS_CSV_HEADER: &str = "by,dir,sessions,in_tokens,out_tokens,cache_read_tokens,\
-                               cache_write_tokens,in_per_session,out_per_session,\
-                               cache_read_per_session,cache_write_per_session,in_usd,\
-                               out_usd,cache_read_usd,cache_write_usd,in_usd_per_session,\
-                               out_usd_per_session,cache_read_usd_per_session,\
-                               cache_write_usd_per_session,cost_usd,cost_per_session,\
-                               unpriced,ctx_peak_tokens,ctx_peak_pct,ctx_avg_tokens,\
-                               ctx_avg_pct,time_s,time_per_session_s";
+/// The columns a directory export carries under `by` in the view `figures`:
+/// the table as drawn, plus `project` on every row, by the rule
+/// [`lane_export_columns`] states for the lanes table's.
+fn dir_export_columns(by: DirBy, figures: Figures) -> Vec<&'static str> {
+    export_columns(
+        vec!["project"],
+        dir_columns(by, figures).iter().map(|(_, key)| *key),
+    )
+}
 
-/// No `_per_session` twins here: one session per row, so each would repeat
-/// the figure beside it.
-const SESSIONS_CSV_HEADER: &str = "by,when,dir,skill,model,in_tokens,out_tokens,\
-                                   cache_read_tokens,cache_write_tokens,in_usd,out_usd,\
-                                   cache_read_usd,cache_write_usd,cost_usd,unpriced,\
-                                   ctx_peak_tokens,ctx_peak_pct,time_s";
-
-/// A class cost the way the CSV spells it: a blank, not the screen's `—`,
-/// for a watched root no session has run in.
-fn csv_class_cells(row: &DirRow, figures: Figures) -> [String; 4] {
-    match row.sessions {
-        0 => Default::default(),
-        _ => row.class_cells(figures),
+/// One `by dir` row's cell under export column `key`. A per-session figure
+/// and a class cost are blank for a watched root no session has run in,
+/// where its drawn cell is `—`; its sums are the zeros they are.
+fn dir_export_cell(row: &DirRow, key: &str) -> ExportCell {
+    let t = &row.tokens;
+    let c = &row.class_cost;
+    let per = |n: u64| ExportCell::count_or_blank(row.tokens_per_session(n));
+    let class = |usd: f64| ExportCell::decimal((row.sessions > 0 && c.priced()).then_some(usd));
+    let class_per = |usd: f64| ExportCell::decimal(row.per_session(usd).filter(|_| c.priced()));
+    match key {
+        "project" => ExportCell::text(&row.project),
+        "dir" => ExportCell::text(&row.dir),
+        "sessions" => ExportCell::count(row.sessions as u64),
+        "in_tokens" => ExportCell::count(t.input),
+        "out_tokens" => ExportCell::count(t.output),
+        "cache_read_tokens" => ExportCell::count(t.cache_read),
+        "cache_write_tokens" => ExportCell::count(t.cache_write()),
+        "in_per_session" => per(t.input),
+        "out_per_session" => per(t.output),
+        "cache_read_per_session" => per(t.cache_read),
+        "cache_write_per_session" => per(t.cache_write()),
+        "in_usd" => class(c.input),
+        "out_usd" => class(c.output),
+        "cache_read_usd" => class(c.cache_read),
+        "cache_write_usd" => class(c.cache_write),
+        "in_usd_per_session" => class_per(c.input),
+        "out_usd_per_session" => class_per(c.output),
+        "cache_read_usd_per_session" => class_per(c.cache_read),
+        "cache_write_usd_per_session" => class_per(c.cache_write),
+        "cost_usd" => ExportCell::cost(row.cost, row.lines, row.unpriced),
+        "cost_per_session" => row
+            .per_session(row.cost)
+            .map_or_else(ExportCell::blank, |usd| {
+                ExportCell::cost(usd, row.lines, row.unpriced)
+            }),
+        "ctx_avg_tokens" => ExportCell::whole(row.ctx_avg.tokens),
+        "ctx_avg_pct" => ExportCell::decimal(row.ctx_avg.pct),
+        "time_s" => ExportCell::seconds(row.time_s),
+        "time_per_session_s" => ExportCell::whole(row.per_session(row.time_s as f64)),
+        _ => ExportCell::blank(),
     }
 }
 
-fn csv_dir_row(row: &DirRow) -> String {
+/// One `by session` row's cell under export column `key`. `dir` is the
+/// whole path, where the drawn cell is its last part: a path is what a
+/// script can find the directory again by.
+fn session_export_cell(row: &SessionRow, key: &str) -> ExportCell {
     let t = &row.tokens;
-    let per = |n: u64| opt_u64(row.tokens_per_session(n));
-    let [in_usd, out_usd, cr_usd, cw_usd] = csv_class_cells(row, Figures::Totals);
-    let [in_usd_s, out_usd_s, cr_usd_s, cw_usd_s] = csv_class_cells(row, Figures::Average);
-    [
-        "dir".to_string(),
-        csv_field(&row.dir).into_owned(),
-        row.sessions.to_string(),
-        t.input.to_string(),
-        t.output.to_string(),
-        t.cache_read.to_string(),
-        t.cache_write().to_string(),
-        per(t.input),
-        per(t.output),
-        per(t.cache_read),
-        per(t.cache_write()),
-        in_usd,
-        out_usd,
-        cr_usd,
-        cw_usd,
-        in_usd_s,
-        out_usd_s,
-        cr_usd_s,
-        cw_usd_s,
-        csv_cost(row.cost, row.lines, row.unpriced),
-        row.per_session(row.cost)
-            .map_or(String::new(), |c| csv_cost(c, row.lines, row.unpriced)),
-        row.unpriced.to_string(),
-        opt_u64(row.ctx_peak_tokens),
-        opt_share(row.ctx_peak_pct),
-        opt_u64(row.ctx_avg.tokens.map(|t| t.round() as u64)),
-        opt_share(row.ctx_avg.pct),
-        row.time_s.max(0).to_string(),
-        row.per_session(row.time_s as f64)
-            .map_or(String::new(), |t| (t.round() as i64).to_string()),
-    ]
-    .join(",")
+    let c = &row.class_cost;
+    match key {
+        "project" => ExportCell::text(&row.project),
+        "when" => ExportCell::text(&session_when(row.when)),
+        "dir" => ExportCell::text(&row.dir),
+        "skill" => ExportCell::text(&row.skill),
+        "model" => ExportCell::text(&row.model),
+        "in_tokens" => ExportCell::count(t.input),
+        "out_tokens" => ExportCell::count(t.output),
+        "cache_read_tokens" => ExportCell::count(t.cache_read),
+        "cache_write_tokens" => ExportCell::count(t.cache_write()),
+        "in_usd" => ExportCell::class(c, c.input),
+        "out_usd" => ExportCell::class(c, c.output),
+        "cache_read_usd" => ExportCell::class(c, c.cache_read),
+        "cache_write_usd" => ExportCell::class(c, c.cache_write),
+        "cost_usd" => ExportCell::cost(row.cost, row.lines, row.unpriced),
+        "time_s" => ExportCell::seconds(row.time_s),
+        _ => ExportCell::blank(),
+    }
 }
 
-fn csv_session_row(row: &SessionRow) -> String {
-    let t = &row.tokens;
-    let [in_usd, out_usd, cr_usd, cw_usd] = row.class_cost.cells(|usd| usd);
-    [
-        "session".to_string(),
-        csv_field(&session_when(row.when)).into_owned(),
-        csv_field(&row.dir).into_owned(),
-        csv_field(&row.skill).into_owned(),
-        csv_field(&row.model).into_owned(),
-        t.input.to_string(),
-        t.output.to_string(),
-        t.cache_read.to_string(),
-        t.cache_write().to_string(),
-        in_usd,
-        out_usd,
-        cr_usd,
-        cw_usd,
-        csv_cost(row.cost, row.lines, row.unpriced),
-        row.unpriced.to_string(),
-        opt_u64(row.ctx_peak_tokens),
-        opt_share(row.ctx_peak_pct),
-        row.time_s.max(0).to_string(),
-    ]
-    .join(",")
-}
-
-/// A directory export's `Total` line: `total` in the `by` column, as the
-/// lanes export marks its own, and only the figures the screen's `Total`
-/// line carries in either view — under `by dir` the sums and each
-/// per-session column as its sum over the table's sessions; under
-/// `by session` every token class and its cost, USD and time.
-fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String {
-    let header = match by {
-        DirBy::Dir => DIRS_CSV_HEADER,
-        DirBy::Session => SESSIONS_CSV_HEADER,
+/// The directory table as `e` writes it — see [`lanes_csv`] — with how many
+/// of its lines are rows. Under `by dir` the closing line is the screen's
+/// own, from [`dirs_total`]: blank in `dir` and `CTX AVG`, which do not add
+/// up, and in `USD` on a line of averages. Under `by session` it is
+/// `total` in either view, as the screen draws it: one session per row, so
+/// every figure adds up and none is divided.
+fn dirs_csv(
+    by: DirBy,
+    figures: Figures,
+    dirs: &[DirRow],
+    sessions: &[SessionRow],
+) -> (String, Vec<String>, usize) {
+    let columns = dir_export_columns(by, figures);
+    let line = |cell: &dyn Fn(&str) -> ExportCell| {
+        columns
+            .iter()
+            .map(|key| cell(key).csv)
+            .collect::<Vec<_>>()
+            .join(",")
     };
-    let mut tokens = Tokens::default();
-    for row in sessions {
-        tokens.add(&row.tokens);
-    }
-    let dir = dirs_total(dirs);
-    let (cost, lines, unpriced) = match by {
-        DirBy::Dir => (dir.cost, dir.lines, dir.unpriced),
+    let (mut lines, rows): (Vec<String>, usize) = match by {
+        DirBy::Dir => (
+            dirs.iter()
+                .map(|row| line(&|key| dir_export_cell(row, key)))
+                .collect(),
+            dirs.len(),
+        ),
         DirBy::Session => (
-            sessions.iter().map(|r| r.cost).sum::<f64>(),
-            sessions.iter().map(|r| r.lines).sum::<usize>(),
-            sessions.iter().map(|r| r.unpriced).sum::<usize>(),
+            sessions
+                .iter()
+                .map(|row| line(&|key| session_export_cell(row, key)))
+                .collect(),
+            sessions.len(),
         ),
     };
-    let per = |n: u64| opt_u64(dir.tokens_per_session(n));
-    let class = match by {
-        DirBy::Dir => csv_class_cells(&dir, Figures::Totals),
-        DirBy::Session => sessions_class_cost(sessions).cells(|usd| usd),
+    let total = match by {
+        DirBy::Dir => {
+            let total = dirs_total(dirs);
+            csv_total_line(&columns, export_total_label(figures), |key| match key {
+                "dir" | "ctx_avg_tokens" | "ctx_avg_pct" => None,
+                "cost_usd" if figures == Figures::Average => None,
+                key => Some(dir_export_cell(&total, key)),
+            })
+        }
+        DirBy::Session => {
+            let mut tokens = Tokens::default();
+            for row in sessions {
+                tokens.add(&row.tokens);
+            }
+            let c = sessions_class_cost(sessions);
+            let cost: f64 = sessions.iter().map(|r| r.cost).sum();
+            let lines_n: usize = sessions.iter().map(|r| r.lines).sum();
+            let unpriced: usize = sessions.iter().map(|r| r.unpriced).sum();
+            let time: i64 = sessions.iter().map(|r| r.time_s.max(0)).sum();
+            csv_total_line(&columns, "total", |key| {
+                Some(match key {
+                    "in_tokens" => ExportCell::count(tokens.input),
+                    "out_tokens" => ExportCell::count(tokens.output),
+                    "cache_read_tokens" => ExportCell::count(tokens.cache_read),
+                    "cache_write_tokens" => ExportCell::count(tokens.cache_write()),
+                    "in_usd" => ExportCell::class(&c, c.input),
+                    "out_usd" => ExportCell::class(&c, c.output),
+                    "cache_read_usd" => ExportCell::class(&c, c.cache_read),
+                    "cache_write_usd" => ExportCell::class(&c, c.cache_write),
+                    "cost_usd" => ExportCell::cost(cost, lines_n, unpriced),
+                    "time_s" => ExportCell::seconds(time),
+                    _ => return None,
+                })
+            })
+        }
     };
-    let class_per = csv_class_cells(&dir, Figures::Average);
-    let [in_usd, out_usd, cr_usd, cw_usd] = &class;
-    let [in_usd_s, out_usd_s, cr_usd_s, cw_usd_s] = &class_per;
-    header
-        .split(',')
-        .map(|name| match (by, name) {
-            (_, "by") => "total".to_string(),
-            (_, "cost_usd") => csv_cost(cost, lines, unpriced),
-            (_, "in_usd") => in_usd.clone(),
-            (_, "out_usd") => out_usd.clone(),
-            (_, "cache_read_usd") => cr_usd.clone(),
-            (_, "cache_write_usd") => cw_usd.clone(),
-            (DirBy::Dir, "in_usd_per_session") => in_usd_s.clone(),
-            (DirBy::Dir, "out_usd_per_session") => out_usd_s.clone(),
-            (DirBy::Dir, "cache_read_usd_per_session") => cr_usd_s.clone(),
-            (DirBy::Dir, "cache_write_usd_per_session") => cw_usd_s.clone(),
-            (DirBy::Dir, "sessions") => dir.sessions.to_string(),
-            (DirBy::Dir, "in_tokens") => dir.tokens.input.to_string(),
-            (DirBy::Dir, "out_tokens") => dir.tokens.output.to_string(),
-            (DirBy::Dir, "cache_read_tokens") => dir.tokens.cache_read.to_string(),
-            (DirBy::Dir, "cache_write_tokens") => dir.tokens.cache_write().to_string(),
-            (DirBy::Dir, "in_per_session") => per(dir.tokens.input),
-            (DirBy::Dir, "out_per_session") => per(dir.tokens.output),
-            (DirBy::Dir, "cache_read_per_session") => per(dir.tokens.cache_read),
-            (DirBy::Dir, "cache_write_per_session") => per(dir.tokens.cache_write()),
-            (DirBy::Dir, "cost_per_session") => dir
-                .per_session(dir.cost)
-                .map_or(String::new(), |c| csv_cost(c, dir.lines, dir.unpriced)),
-            (DirBy::Dir, "time_s") => dir.time_s.max(0).to_string(),
-            (DirBy::Dir, "time_per_session_s") => dir
-                .per_session(dir.time_s as f64)
-                .map_or(String::new(), |t| (t.round() as i64).to_string()),
-            (DirBy::Session, "in_tokens") => tokens.input.to_string(),
-            (DirBy::Session, "out_tokens") => tokens.output.to_string(),
-            (DirBy::Session, "cache_read_tokens") => tokens.cache_read.to_string(),
-            (DirBy::Session, "cache_write_tokens") => tokens.cache_write().to_string(),
-            (DirBy::Session, "time_s") => sessions
-                .iter()
-                .map(|r| r.time_s.max(0))
-                .sum::<i64>()
-                .to_string(),
-            _ => String::new(),
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+    lines.push(total);
+    (columns.join(","), lines, rows)
 }
 
 // ------------------------------------------------------------------- trials
@@ -4474,41 +4541,41 @@ fn view_lines(
 
 // ------------------------------------------------------------------- export
 
-/// The table on screen, flattened for `.csv`: one header, a line per row in
-/// the order they are on screen, and the `Total` line marked `total` — plus
-/// how many of those lines are rows, for the confirmation to count.
+/// The table on screen, flattened for `.csv` in the view it is drawn in —
+/// see [`lanes_csv`] and [`dirs_csv`]: one header, a line per row in the
+/// order they are on screen, and the closing line — plus how many of those
+/// lines are rows, for the confirmation to count. `own_project` names the
+/// project of a watched root no session has run in, which only this
+/// project's own scope seeds.
 fn export_rows(
     loaded: &Loaded,
     filters: &Filters,
     pipelines: &Pipelines,
     table: TableKind,
+    own_project: &str,
 ) -> (String, Vec<String>, usize) {
     match table {
         TableKind::Lanes => {
             let entries = scoped_entries(loaded, filters);
             let (rows, _) = screen_lane_rows(loaded, filters, pipelines, &entries);
             let total = LaneTotal::of(&entries, &loaded.fallback, &loaded.models);
-            let mut lines: Vec<String> =
-                rows.iter().map(|r| lanes_csv_row(filters.by, r)).collect();
-            lines.push(lanes_csv_total(filters.by, &total));
-            (lanes_csv_header(filters.by), lines, rows.len())
+            let (header, lines) = lanes_csv(filters.by, filters.figures, &rows, &total);
+            (header, lines, rows.len())
         }
         TableKind::Dirs => {
             let entries = scoped_dirs(loaded, filters);
             let (sessions, _) = screen_sessions(loaded, filters, &entries);
-            match filters.dir_by {
+            let dirs = match filters.dir_by {
                 DirBy::Dir => {
-                    let (rows, _) = screen_dir_rows(loaded, filters, &entries);
-                    let mut lines: Vec<String> = rows.iter().map(csv_dir_row).collect();
-                    lines.push(csv_dirs_total(DirBy::Dir, &rows, &sessions));
-                    (DIRS_CSV_HEADER.to_string(), lines, rows.len())
+                    let (mut rows, _) = screen_dir_rows(loaded, filters, &entries);
+                    for row in rows.iter_mut().filter(|row| row.project.is_empty()) {
+                        row.project = own_project.to_string();
+                    }
+                    rows
                 }
-                DirBy::Session => {
-                    let mut lines: Vec<String> = sessions.iter().map(csv_session_row).collect();
-                    lines.push(csv_dirs_total(DirBy::Session, &[], &sessions));
-                    (SESSIONS_CSV_HEADER.to_string(), lines, sessions.len())
-                }
-            }
+                DirBy::Session => Vec::new(),
+            };
+            dirs_csv(filters.dir_by, filters.figures, &dirs, &sessions)
         }
         TableKind::Trials => unreachable!("the trials table has no export: `e` is not read there"),
     }
@@ -4549,8 +4616,9 @@ fn evals_dir(repo: &Repo) -> std::path::PathBuf {
 }
 
 /// Write the table currently on screen to
-/// `.spoolway/evals/eval-by-<by>-<stamp>.csv`, and hand back the path and how
-/// many rows it holds — what the confirmation panel names.
+/// `.spoolway/evals/eval-by-<by>-<view>-<stamp>.csv`, `<view>` the drawn
+/// view's name with a dash for its space, such as `per-task`, and hand back
+/// the path and how many rows it holds — what the confirmation panel names.
 ///
 /// The stamp is to the minute, and a suffix is added rather than a file
 /// overwritten: two `e` presses in the same minute used to leave only the
@@ -4562,12 +4630,17 @@ fn export(
     pipelines: &Pipelines,
     table: TableKind,
 ) -> Result<(std::path::PathBuf, usize)> {
-    let (header, lines, rows) = export_rows(loaded, filters, pipelines, table);
+    let own_project = crate::usage::registry::name_of(&repo.root);
+    let (header, lines, rows) = export_rows(loaded, filters, pipelines, table, &own_project);
     let dir = evals_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
     let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M");
-    let base = format!("eval-by-{}-{stamp}", by_label(filters, table));
+    let base = format!(
+        "eval-by-{}-{}-{stamp}",
+        by_label(filters, table),
+        filters.figures.label(table).replace(' ', "-")
+    );
     let mut path = dir.join(format!("{base}.csv"));
     let mut n = 2;
     while path.exists() {
@@ -5654,9 +5727,9 @@ fn run_screen_with(
                                     state.mode = Mode::Notice {
                                         title: "exported",
                                         body: format!(
-                                            "{}, by {}\n{}",
+                                            "{}, {}\n{}",
                                             plural(rows, "row"),
-                                            by_label(&state.filters, state.table),
+                                            frame_title(&state.filters, state.table),
                                             display_relative(&path, &repo.root),
                                         ),
                                         keys: None,
@@ -6475,22 +6548,16 @@ mod tests {
         assert_eq!(cost_of(m.cost_per_task(), m.lines, m.unpriced), "5.00");
     }
 
-    /// `csv_cost` blanks the cell only when every one of `total` is unpriced —
-    /// a partial floor still prints the number it always did, with the
-    /// `unpriced` column beside it saying how many were left out.
+    /// An exported cost is blank only when every one of its lines is
+    /// unpriced — a partial floor still writes the number, as its drawn cell
+    /// does — and is `null` in JSON where it is blank in CSV.
     #[test]
-    fn csv_cost_is_blank_only_when_everything_is_unpriced() {
-        assert_eq!(
-            csv_cost(9.05, 3, 1),
-            "9.05",
-            "a floor still prints a number"
-        );
-        assert_eq!(
-            csv_cost(0.0, 2, 2),
-            "",
-            "wholly unpriced is blank, not 0.00"
-        );
-        assert_eq!(csv_cost(4.71, 5, 0), "4.71", "a real total prints plainly");
+    fn an_exported_cost_is_blank_only_when_everything_is_unpriced() {
+        let cost = |c, lines, unpriced| ExportCell::cost(c, lines, unpriced).csv;
+        assert_eq!(cost(9.05, 3, 1), "9.05", "a floor still prints a number");
+        assert_eq!(cost(0.0, 2, 2), "", "wholly unpriced is blank, not 0.00");
+        assert_eq!(cost(4.71, 5, 0), "4.71", "a real total prints plainly");
+        assert!(ExportCell::cost(0.0, 2, 2).json.is_null());
     }
 
     #[test]
@@ -6653,7 +6720,7 @@ mod tests {
     fn a_routine_runs_json_row_carries_its_label_and_start_time() {
         let entries = routine_runs();
         let rows = rows_by(&entries, EvalBy::Task);
-        let json = lanes_json(EvalBy::Task, &rows, &total_of(&entries));
+        let json = lanes_json(EvalBy::Task, Figures::Totals, &rows, &total_of(&entries));
         let row = &json["rows"][1];
         assert_eq!(row["run"], "r7");
         assert_eq!(row["task"], "release");
@@ -7197,14 +7264,20 @@ mod tests {
         let mut rows = rows_by_with(&entries, EvalBy::Pipeline, &models);
         let total = total_of_with(&entries, &models);
 
-        let header = lanes_csv_header(EvalBy::Pipeline);
-        let names: Vec<&str> = header.split(',').collect();
-        let at = |line: &str, name: &str| {
-            let i = names.iter().position(|n| *n == name).unwrap();
-            line.split(',').nth(i).unwrap().to_string()
+        // A `_per_task` column is the per-task view's, every other one the
+        // totals view's: each export carries only its own view's columns.
+        let figures_of = |name: &str| match name.ends_with("_per_task") {
+            true => Figures::Average,
+            false => Figures::Totals,
         };
-        let row_of = |name: &str| rows.iter().find(|r| r.keys[0] == name).unwrap();
-        let line = lanes_csv_row(EvalBy::Pipeline, row_of("default"));
+        let at = |row: Option<&str>, name: &str| {
+            let (header, lines) = lanes_csv(EvalBy::Pipeline, figures_of(name), &rows, &total);
+            let line = match row {
+                Some(row) => &lines[rows.iter().position(|r| r.keys[0] == row).unwrap()],
+                None => lines.last().unwrap(),
+            };
+            csv_cell(&header, line, name)
+        };
         let figures = [
             ("in_usd", "3.00"),
             ("out_usd", "15.00"),
@@ -7216,37 +7289,39 @@ mod tests {
             ("cache_write_usd_per_task", "3.75"),
         ];
         for (name, value) in figures {
-            assert_eq!(at(&line, name), value, "{name}: {line}");
+            assert_eq!(at(Some("default"), name), value, "{name}");
         }
-        let line = lanes_csv_row(EvalBy::Pipeline, row_of("local"));
         for (name, _) in figures {
-            assert_eq!(at(&line, name), "", "{name}: {line}");
+            assert_eq!(at(Some("local"), name), "", "{name}");
         }
         // Over the table's two runs.
-        let line = lanes_csv_total(EvalBy::Pipeline, &total);
-        assert_eq!(at(&line, "out_usd"), "15.00", "{line}");
-        assert_eq!(at(&line, "out_usd_per_task"), "7.50", "{line}");
+        assert_eq!(at(None, "out_usd"), "15.00");
+        assert_eq!(at(None, "out_usd_per_task"), "7.50");
 
-        let json = lanes_json(EvalBy::Pipeline, &rows, &total);
-        let json_row = |name: &str| {
+        let json = |figures| lanes_json(EvalBy::Pipeline, figures, &rows, &total);
+        let (totals, average) = (json(Figures::Totals), json(Figures::Average));
+        let json_row = |name: &str, field: &str| {
+            let json = match figures_of(field) {
+                Figures::Totals => &totals,
+                Figures::Average => &average,
+            };
             json["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|r| r["pipeline"] == name)
-                .unwrap()
+                .unwrap()[field]
                 .clone()
         };
-        let priced = json_row("default");
-        assert_eq!(priced["in_usd"], 3.0);
-        assert_eq!(priced["cache_write_usd"], 3.75);
-        assert_eq!(priced["out_usd_per_task"], 15.0);
-        let unpriced = json_row("local");
+        assert_eq!(json_row("default", "in_usd"), 3.0);
+        assert_eq!(json_row("default", "cache_write_usd"), 3.75);
+        assert_eq!(json_row("default", "out_usd_per_task"), 15.0);
         for (name, _) in figures {
-            assert!(unpriced[name].is_null(), "{name}: {unpriced}");
+            let cell = json_row("local", name);
+            assert!(cell.is_null(), "{name}: {cell}");
         }
-        assert_eq!(json["total"]["out_usd"], 15.0);
-        assert_eq!(json["total"]["out_usd_per_task"], 7.5);
+        assert_eq!(totals["total"]["out_usd"], 15.0);
+        assert_eq!(average["total"]["out_usd_per_task"], 7.5);
 
         for (name, _) in figures {
             for descending in [true, false] {
@@ -7425,20 +7500,22 @@ mod tests {
 
     // ------------------------------------------------------------- export
 
-    /// The mockup's own `--csv` header for `--by step`, with the four
-    /// per-task token columns beside the raw totals, and each class's cost
-    /// after them the same way. `qwen` has no price, so those stay blank.
+    /// `name`'s cell on `line` of an export whose header is `header`.
+    fn csv_cell(header: &str, line: &str, name: &str) -> String {
+        let i = header
+            .split(',')
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("no column `{name}` in {header}"));
+        line.split(',').nth(i).unwrap().to_string()
+    }
+
+    /// A lanes export carries the drawn view's columns in drawn order, and
+    /// nothing the screen does not draw: no `by`, `lanes` or `unpriced`, no
+    /// `pipeline_version` under `by step`, and no other view's columns. Its
+    /// closing line is labelled in the first column. Fails while every
+    /// export carried both views' columns whichever was drawn.
     #[test]
-    fn a_lanes_export_carries_totals_beside_per_task_figures_and_marks_its_total() {
-        assert_eq!(
-            lanes_csv_header(EvalBy::Step),
-            "project,by,pipeline,step,pipeline_version,tasks,lanes,pass,blocks,ctx_peak_tokens,\
-             ctx_peak_pct,ctx_avg_tokens,ctx_avg_pct,in_tokens,out_tokens,\
-             cache_read_tokens,cache_write_tokens,in_per_task,out_per_task,cache_read_per_task,\
-             cache_write_per_task,in_usd,out_usd,cache_read_usd,cache_write_usd,in_usd_per_task,\
-             out_usd_per_task,cache_read_usd_per_task,cache_write_usd_per_task,cost_usd,\
-             cost_per_task,unpriced,time_s,time_per_task_s"
-        );
+    fn a_lanes_export_carries_the_drawn_view_and_labels_its_closing_line() {
         let mut entries = vec![
             lane("login", "implement", 1, Some("block")),
             lane("logout", "implement", 1, Some("pass")),
@@ -7446,25 +7523,156 @@ mod tests {
         entries[1].pipeline_version = "1.1".into();
         entries[0].tokens.input = 300;
         let rows = rows_by(&entries, EvalBy::Step);
-        let header_cols = lanes_csv_header(EvalBy::Step).split(',').count();
-        let line = lanes_csv_row(EvalBy::Step, &rows[0]);
-        assert_eq!(line.split(',').count(), header_cols, "{line}");
-        assert!(
-            line.starts_with(
-                "demo,step,default,implement,,2,2,0.50,1,,,,,300,0,0,0,150,0,0,0,,,,,,,,,2.00,1.00,0,120,\
-                 60"
-            ),
-            "two versions on one row name neither: {line}"
+        let total = total_of(&entries);
+
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Totals, &rows, &total);
+        assert_eq!(
+            header,
+            "project,pipeline,step,tasks,pass,blocks,ctx_avg_tokens,ctx_avg_pct,in_tokens,\
+             in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,\
+             cache_write_usd,cost_usd,time_s"
+        );
+        assert_eq!(
+            lines,
+            [
+                "demo,default,implement,2,0.50,1,,,300,,0,,0,,0,,2.00,120",
+                // Every sum; the share and the context average stay blank.
+                "total,,,2,,1,,,300,,0,,0,,0,,2.00,120",
+            ]
         );
 
-        let total = lanes_csv_total(EvalBy::Step, &total_of(&entries));
-        assert_eq!(total.split(',').count(), header_cols, "{total}");
-        // Every sum, and each per-task column over the table's two tasks;
-        // `unpriced` and the shares and peaks stay blank.
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Average, &rows, &total);
         assert_eq!(
-            total,
-            ",total,,,,2,,,1,,,,,300,0,0,0,150,0,0,0,,,,,,,,,2.00,1.00,,120,60"
+            header,
+            "project,pipeline,step,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,\
+             in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
+             cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,\
+             cost_per_task,time_per_task_s"
         );
+        assert_eq!(
+            lines,
+            [
+                "demo,default,implement,2,0.50,0.50,,,150,,0,,0,,0,,2.00,1.00,60",
+                // Each figure over the table's two tasks, and `USD` blank, as
+                // the screen's `Average` line leaves it.
+                "average,,,2,,0.50,,,150,,0,,0,,0,,,1.00,60",
+            ]
+        );
+    }
+
+    /// The decision record's `--by task` panel: `project`, then the run id,
+    /// then the drawn columns in drawn order, each context figure as tokens
+    /// and then a share. Fails while the export put `by` after `project`
+    /// and `pipeline_version` after `when`.
+    #[test]
+    fn a_by_task_export_writes_the_run_id_and_both_context_figures() {
+        let entries = vec![lane("login", "implement", 1, Some("pass"))];
+        let rows = rows_by(&entries, EvalBy::Task);
+        let (header, _) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total_of(&entries));
+        assert_eq!(
+            header,
+            "project,run,task,pipeline,pipeline_version,when,tasks,pass,blocks,ctx_avg_tokens,\
+             ctx_avg_pct,ctx_peak_tokens,ctx_peak_pct,in_tokens,in_usd,out_tokens,out_usd,\
+             cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,\
+             time_s"
+        );
+    }
+
+    /// `pipeline_version` exports the version `VER` and `VERSION` draw,
+    /// under each `by` that draws one: under `by task` the latest lane's,
+    /// which a run re-routed onto a newer version ends on.
+    #[test]
+    fn an_export_writes_the_drawn_pipeline_version() {
+        let mut entries = vec![
+            lane("login", "implement", 1, Some("pass")),
+            lane("login", "review", 1, Some("pass")),
+        ];
+        entries[0].ts = "2026-09-01T09:00:00+00:00".into();
+        entries[1].ts = "2026-09-01T10:00:00+00:00".into();
+        entries[1].pipeline_version = "1.1".into();
+        let total = total_of(&entries);
+        for (by, want) in [
+            (EvalBy::Task, ["1.1"].as_slice()),
+            (EvalBy::Version, &["1.1", "1.0"]),
+        ] {
+            let rows = rows_by(&entries, by);
+            let (header, lines) = lanes_csv(by, Figures::Totals, &rows, &total);
+            let got: Vec<String> = lines[..rows.len()]
+                .iter()
+                .map(|line| csv_cell(&header, line, "pipeline_version"))
+                .collect();
+            assert_eq!(got, want, "under {by:?}");
+        }
+    }
+
+    /// The exported-file mockup's `by pipeline` header in the per-task view.
+    #[test]
+    fn a_per_task_export_by_pipeline_writes_the_mockup_header() {
+        assert_eq!(
+            lane_export_columns(EvalBy::Pipeline, Figures::Average).join(","),
+            "project,pipeline,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,\
+             in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
+             cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,\
+             cost_per_task,time_per_task_s"
+        );
+    }
+
+    /// Every token, cost, share and time cell is written as a number a
+    /// spreadsheet can add up — `195812`, `0.12`, `2244` — never as the
+    /// screen draws it, `195.8k` or `37m 24s`. Fails if a drawn cell leaks
+    /// into the export.
+    #[test]
+    fn every_exported_figure_parses_as_a_number() {
+        let mut a = lane("login", "implement", 1, Some("pass"));
+        a.model = "sized".into();
+        a.tokens = Tokens {
+            input: 195_812,
+            output: 1_250_000,
+            cache_read: 30_382_552,
+            cache_write_5m: 631_217,
+            ..Tokens::default()
+        };
+        a.ctx_peak = Some(12_000);
+        a.wall_s = 2244;
+        let entries = vec![a];
+        let models = priced_models(100_000);
+        let rows = rows_by_with(&entries, EvalBy::Task, &models);
+        let total = total_of_with(&entries, &models);
+        for figures in [Figures::Totals, Figures::Average] {
+            let (header, lines) = lanes_csv(EvalBy::Task, figures, &rows, &total);
+            let names: Vec<&str> = header.split(',').collect();
+            let naming = [
+                "project",
+                "run",
+                "task",
+                "pipeline",
+                "pipeline_version",
+                "when",
+            ];
+            for (name, cell) in names.iter().zip(lines[0].split(',')) {
+                if naming.contains(name) {
+                    continue;
+                }
+                assert!(
+                    cell.parse::<f64>().is_ok(),
+                    "{name} = {cell:?}: {}",
+                    lines[0]
+                );
+            }
+            let cell = |name: &str| csv_cell(&header, &lines[0], name);
+            match figures {
+                Figures::Totals => {
+                    assert_eq!(cell("in_tokens"), "195812");
+                    assert_eq!(cell("time_s"), "2244");
+                }
+                Figures::Average => {
+                    assert_eq!(cell("in_per_task"), "195812");
+                    assert_eq!(cell("time_per_task_s"), "2244");
+                }
+            }
+            assert_eq!(cell("ctx_avg_tokens"), "12000");
+            assert_eq!(cell("ctx_avg_pct"), "0.12");
+        }
     }
 
     /// `--json` keeps the `Total` line out of `rows`, where a consumer
@@ -7476,29 +7684,53 @@ mod tests {
         unpriced.tokens.input = 10;
         let entries = vec![unpriced, lane("logout", "implement", 1, Some("pass"))];
         let rows = rows_by(&entries, EvalBy::Pipeline);
-        let json = lanes_json(EvalBy::Pipeline, &rows, &total_of(&entries));
+        let json = lanes_json(
+            EvalBy::Pipeline,
+            Figures::Totals,
+            &rows,
+            &total_of(&entries),
+        );
         assert_eq!(json["by"], "pipeline");
         assert_eq!(json["rows"].as_array().unwrap().len(), 1);
         let row = &json["rows"][0];
+        assert_eq!(row["project"], "demo");
         assert_eq!(row["pipeline"], "default");
-        assert_eq!(row["pipeline_version"], "1.0");
-        assert_eq!(row["in_per_task"], 5);
-        assert_eq!(row["unpriced"], 1);
+        assert_eq!(row["in_tokens"], 10);
         // A plain number, not `null`: only a *wholly* unpriced row nulls it.
         assert_eq!(row["cost_usd"], 1.0);
-        // The keys the `Total` line always had keep their names and values;
-        // the sums and the average task are added beside them.
+        for gone in ["by", "lanes", "unpriced", "pipeline_version", "in_per_task"] {
+            assert!(row.get(gone).is_none(), "{gone}: {row}");
+        }
+        // The sums the `Total` line draws, and nothing it leaves blank.
         let total = &json["total"];
         assert_eq!(total["tasks"], 2);
         assert_eq!(total["blocks"], 0);
         assert_eq!(total["cost_usd"], 1.0);
         assert_eq!(total["in_tokens"], 10);
-        assert_eq!(total["in_per_task"], 5);
         assert_eq!(total["out_tokens"], 0);
+        assert_eq!(total["time_s"], 120);
+        assert!(total.get("pass").is_none(), "{total}");
+        assert!(total.get("in_per_task").is_none(), "{total}");
+
+        // `--per-task`: the rows and `total` both follow the view.
+        let json = lanes_json(
+            EvalBy::Pipeline,
+            Figures::Average,
+            &rows,
+            &total_of(&entries),
+        );
+        let row = &json["rows"][0];
+        assert_eq!(row["in_per_task"], 5);
+        assert_eq!(row["cost_per_task"], 0.5);
+        assert!(row.get("in_tokens").is_none(), "{row}");
+        let total = &json["total"];
+        assert_eq!(total["tasks"], 2);
+        assert_eq!(total["in_per_task"], 5);
         assert_eq!(total["cache_write_per_task"], 0);
         assert_eq!(total["cost_per_task"], 0.5);
-        assert_eq!(total["time_s"], 120);
         assert_eq!(total["time_per_task_s"], 60.0);
+        assert!(total.get("cost_usd").is_none(), "{total}");
+        assert!(total.get("in_tokens").is_none(), "{total}");
     }
 
     // -------------------------------------------------------- directories
@@ -7724,28 +7956,110 @@ mod tests {
         );
     }
 
-    /// Under `by dir` the export's `Total` line carries what the screen's
-    /// carries in either view: every sum, and each per-session column as its
-    /// sum over the table's two sessions. The peaks stay blank.
+    /// `dirs_csv`'s header and lines for one view of `dirs` and `sessions`.
+    fn dirs_export(
+        by: DirBy,
+        figures: Figures,
+        dirs: &[DirRow],
+        sessions: &[SessionRow],
+    ) -> (String, Vec<String>) {
+        let (header, lines, _) = dirs_csv(by, figures, dirs, sessions);
+        (header, lines)
+    }
+
+    /// A directory export carries the drawn view's columns, `project` first,
+    /// and closes on the line the screen draws: under `by dir` every sum, or
+    /// each figure over the table's two sessions with `USD` blank, and under
+    /// `by session` the sums in either view. Fails while the export carried
+    /// both views and the peaks the table no longer draws.
     #[test]
-    fn a_directory_export_marks_its_total_under_either_by() {
+    fn a_directory_export_carries_the_drawn_view_under_either_by() {
         let a = dir_line("/w/proj", "s1", "2026-09-01T09:00:00+00:00", 0.70);
         let b = dir_line("/w/proj", "s2", "2026-09-01T10:00:00+00:00", 0.18);
         let dirs = dir_rows(&[&a, &b], &[], &no_models(), &HashMap::new());
         let sessions = list_sessions(&[&a, &b], &no_models(), &HashMap::new(), &HashMap::new());
-        let cols = DIRS_CSV_HEADER.split(',').count();
-        assert_eq!(csv_dir_row(&dirs[0]).split(',').count(), cols);
-        let total = csv_dirs_total(DirBy::Dir, &dirs, &sessions);
-        assert_eq!(total.split(',').count(), cols);
+
+        let (header, lines) = dirs_export(DirBy::Dir, Figures::Totals, &dirs, &sessions);
         assert_eq!(
-            total,
-            "total,,2,0,20,0,0,0,10,0,0,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.88,0.44,,,,,,0,0"
+            header,
+            "project,dir,sessions,in_tokens,in_usd,out_tokens,out_usd,cache_read_tokens,\
+             cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,ctx_avg_tokens,\
+             ctx_avg_pct,time_s"
+        );
+        assert_eq!(
+            lines,
+            [
+                "demo,/w/proj,2,0,0.00,20,0.00,0,0.00,0,0.00,0.88,,,0",
+                "total,,2,0,0.00,20,0.00,0,0.00,0,0.00,0.88,,,0",
+            ]
         );
 
-        let cols = SESSIONS_CSV_HEADER.split(',').count();
-        assert_eq!(csv_session_row(&sessions[0]).split(',').count(), cols);
-        let total = csv_dirs_total(DirBy::Session, &[], &sessions);
-        assert_eq!(total, "total,,,,,0,20,0,0,0.00,0.00,0.00,0.00,0.88,,,,0");
+        let (header, lines) = dirs_export(DirBy::Dir, Figures::Average, &dirs, &sessions);
+        assert_eq!(
+            header,
+            "project,dir,sessions,in_per_session,in_usd_per_session,out_per_session,\
+             out_usd_per_session,cache_read_per_session,cache_read_usd_per_session,\
+             cache_write_per_session,cache_write_usd_per_session,cost_usd,cost_per_session,\
+             ctx_avg_tokens,ctx_avg_pct,time_per_session_s"
+        );
+        assert_eq!(
+            lines,
+            [
+                "demo,/w/proj,2,0,0.00,10,0.00,0,0.00,0,0.00,0.88,0.44,,,0",
+                // `USD` blank, as the screen's `Average` line leaves it.
+                "average,,2,0,0.00,10,0.00,0,0.00,0,0.00,,0.44,,,0",
+            ]
+        );
+
+        for figures in [Figures::Totals, Figures::Average] {
+            let (header, lines) = dirs_export(DirBy::Session, figures, &dirs, &sessions);
+            assert_eq!(
+                header,
+                "project,when,dir,skill,model,in_tokens,in_usd,out_tokens,out_usd,\
+                 cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,\
+                 time_s"
+            );
+            // `when` is drawn in local time, so read back rather than spelled.
+            let when = |i: usize| session_when(sessions[i].when);
+            assert_eq!(
+                lines,
+                [
+                    format!(
+                        "demo,{},/w/proj,—,claude-opus-5,0,0.00,10,0.00,0,0.00,0,0.00,0.70,0",
+                        when(0)
+                    ),
+                    format!(
+                        "demo,{},/w/proj,—,claude-opus-5,0,0.00,10,0.00,0,0.00,0,0.00,0.18,0",
+                        when(1)
+                    ),
+                    "total,,,,,0,0.00,20,0.00,0,0.00,0,0.00,0.88,0".to_string(),
+                ]
+            );
+        }
+    }
+
+    /// A directory two projects both banked, as under `--all` when their
+    /// watched roots overlap, exports every project on its row, and so does
+    /// a session both ledgers banked. Fails while each row named only its
+    /// first or latest line's project, crediting it with the other's spend.
+    #[test]
+    fn a_directory_export_names_every_project_that_banked_the_row() {
+        let mut a = dir_line("/w/shared", "s1", "2026-09-01T09:00:00+00:00", 0.70);
+        a.project = "beta".into();
+        let mut b = dir_line("/w/shared", "s1", "2026-09-01T09:05:00+00:00", 0.70);
+        b.project = "alpha".into();
+        let dirs = dir_rows(&[&a, &b], &[], &no_models(), &HashMap::new());
+        let sessions = list_sessions(&[&a, &b], &no_models(), &HashMap::new(), &HashMap::new());
+        assert_eq!((dirs.len(), sessions.len()), (1, 1));
+
+        for by in [DirBy::Dir, DirBy::Session] {
+            let (header, lines) = dirs_export(by, Figures::Totals, &dirs, &sessions);
+            assert_eq!(
+                csv_cell(&header, &lines[0], "project"),
+                "alpha + beta",
+                "under {by:?}"
+            );
+        }
     }
 
     /// Two priced sessions in `/w/priced`, one session in `/w/local` on a
@@ -7855,8 +8169,8 @@ mod tests {
     }
 
     /// The directory export carries each class cost under the lanes
-    /// export's names — with a `_per_session` twin under `by dir`, and none
-    /// under `by session`, whose one view has no per-session column — blank
+    /// export's names — as a `_per_session` figure in `by dir`'s per-session
+    /// view, and never under `by session`, whose one view has none — blank
     /// where nothing could be priced or nothing ran. A sort on any of them
     /// reads that class's own figure, and puts the unpriced row and the root
     /// nothing ran in last whichever way it runs.
@@ -7866,15 +8180,20 @@ mod tests {
         let refs: Vec<&Entry> = entries.iter().collect();
         let mut dirs = dir_rows(&refs, &roots, &models, &HashMap::new());
         let mut sessions = list_sessions(&refs, &models, &HashMap::new(), &HashMap::new());
-        let at = |header: &str, line: &str, name: &str| {
-            let i = header
-                .split(',')
-                .position(|n| n == name)
-                .unwrap_or_else(|| panic!("no {name}: {header}"));
-            line.split(',').nth(i).unwrap().to_string()
+        // A `_per_session` column is the per-session view's, every other one
+        // the totals view's.
+        let figures_of = |name: &str| match name.ends_with("_per_session") {
+            true => Figures::Average,
+            false => Figures::Totals,
         };
-        let dir_of =
-            |rows: &[DirRow], dir: &str| csv_dir_row(rows.iter().find(|r| r.dir == dir).unwrap());
+        let dir_at = |dir: Option<&str>, name: &str| {
+            let (header, lines) = dirs_export(DirBy::Dir, figures_of(name), &dirs, &sessions);
+            let line = match dir {
+                Some(dir) => &lines[dirs.iter().position(|r| r.dir == dir).unwrap()],
+                None => lines.last().unwrap(),
+            };
+            csv_cell(&header, line, name)
+        };
 
         let figures = [
             ("in_usd", "6.00"),
@@ -7886,34 +8205,25 @@ mod tests {
             ("cache_read_usd_per_session", "3.00"),
             ("cache_write_usd_per_session", "3.75"),
         ];
-        let total = csv_dirs_total(DirBy::Dir, &dirs, &sessions);
         for (name, value) in figures {
-            let priced = dir_of(&dirs, "/w/priced");
-            assert_eq!(
-                at(DIRS_CSV_HEADER, &priced, name),
-                value,
-                "{name}: {priced}"
-            );
+            assert_eq!(dir_at(Some("/w/priced"), name), value, "{name}");
             for dir in ["/w/local", "/w/quiet"] {
-                let line = dir_of(&dirs, dir);
-                assert_eq!(at(DIRS_CSV_HEADER, &line, name), "", "{name}: {line}");
+                assert_eq!(dir_at(Some(dir), name), "", "{name} on {dir}");
             }
         }
-        assert_eq!(at(DIRS_CSV_HEADER, &total, "out_usd"), "30.00", "{total}");
+        assert_eq!(dir_at(None, "out_usd"), "30.00");
         // 30.00 over the table's three sessions.
-        assert_eq!(
-            at(DIRS_CSV_HEADER, &total, "out_usd_per_session"),
-            "10.00",
-            "{total}"
-        );
+        assert_eq!(dir_at(None, "out_usd_per_session"), "10.00");
 
-        assert!(!SESSIONS_CSV_HEADER.contains("_per_session"));
-        let line = csv_session_row(sessions.iter().find(|r| r.dir == "/w/priced").unwrap());
-        assert_eq!(at(SESSIONS_CSV_HEADER, &line, "cache_write_usd"), "3.75");
-        let line = csv_session_row(sessions.iter().find(|r| r.dir == "/w/local").unwrap());
-        assert_eq!(at(SESSIONS_CSV_HEADER, &line, "out_usd"), "");
-        let total = csv_dirs_total(DirBy::Session, &[], &sessions);
-        assert_eq!(at(SESSIONS_CSV_HEADER, &total, "in_usd"), "6.00", "{total}");
+        let (header, lines) = dirs_export(DirBy::Session, Figures::Totals, &[], &sessions);
+        assert!(!header.contains("_per_session"), "{header}");
+        let session_at = |dir: &str, name: &str| {
+            let i = sessions.iter().position(|r| r.dir == dir).unwrap();
+            csv_cell(&header, &lines[i], name)
+        };
+        assert_eq!(session_at("/w/priced", "cache_write_usd"), "3.75");
+        assert_eq!(session_at("/w/local", "out_usd"), "");
+        assert_eq!(csv_cell(&header, lines.last().unwrap(), "in_usd"), "6.00");
 
         for (name, value) in figures {
             assert!(
@@ -8086,7 +8396,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.contains(&lanes_csv_header(EvalBy::Pipeline).replace(',', ", ")),
+            err.contains(&lane_sort_keys(EvalBy::Pipeline).join(", ")),
             "{err}"
         );
         let err = parse_sort(EvalBy::Step, "PASS").unwrap_err().to_string();
@@ -8940,7 +9250,7 @@ mod screen_tests {
 
             write_price(9.0);
             assert_eq!(total_of(&first), before, "the table re-read the file");
-            let (_, csv, _) = export_rows(&first, &state.filters, &pipelines, state.table);
+            let (_, csv, _) = export_rows(&first, &state.filters, &pipelines, state.table, "demo");
             assert!(csv.last().unwrap().contains("2.00"), "{csv:?}");
             assert!(!csv.last().unwrap().contains("9.00"), "{csv:?}");
 
@@ -9322,58 +9632,90 @@ mod screen_tests {
         );
     }
 
-    /// `e` exports the table on screen to a file named after its `by`, and
-    /// the confirmation names the rows and the file it wrote.
+    /// `e` exports the table on screen to a file named after its `by` and
+    /// its view, in that view's columns, and the confirmation names the
+    /// rows, the `by` and the view. Fails while the file and the
+    /// confirmation named the `by` alone and the file carried both views.
     #[test]
-    fn e_exports_the_table_to_a_file_named_after_its_by() {
-        let (repo, _root_guard) = fixture_with_one_run("screen-export-key");
-        let text = screen(&repo, "eq");
-        let shown = std::path::PathBuf::from(".spoolway")
-            .join("evals")
-            .join("eval-by-pipeline-");
-        assert!(text.contains(&format!("{TOP_LEFT}─ exported ")), "{text}");
-        assert!(text.contains("1 row, by pipeline"), "{text}");
-        assert!(text.contains(&shown.display().to_string()), "{text}");
+    fn e_exports_the_drawn_view_to_a_file_named_after_its_by_and_view() {
+        for (keys, view, figures) in [
+            ("eq", "totals", Figures::Totals),
+            ("teq", "per task", Figures::Average),
+        ] {
+            let (repo, _root_guard) = fixture_with_one_run("screen-export-key");
+            let text = screen(&repo, keys);
+            let shown = std::path::PathBuf::from(".spoolway")
+                .join("evals")
+                .join(format!("eval-by-pipeline-{}-", view.replace(' ', "-")));
+            assert!(text.contains(&format!("{TOP_LEFT}─ exported ")), "{text}");
+            assert!(
+                text.contains(&format!("1 row, by pipeline · {view}")),
+                "{text}"
+            );
+            assert!(text.contains(&shown.display().to_string()), "{text}");
 
-        let dir = repo.root.join(".spoolway").join("evals");
-        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
-        assert_eq!(files.len(), 1, "exactly one export was written");
-        let body = std::fs::read_to_string(files[0].path()).unwrap();
-        let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines[0], lanes_csv_header(EvalBy::Pipeline));
-        assert!(lines[1].contains(",pipeline,default,1.0,1,1,"), "{body}");
-        assert!(lines[2].starts_with(",total,"), "{body}");
-        assert_eq!(lines.len(), 3, "one header, one row, one total");
+            let dir = repo.root.join(".spoolway").join("evals");
+            let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+            assert_eq!(files.len(), 1, "exactly one export was written");
+            let body = std::fs::read_to_string(files[0].path()).unwrap();
+            let lines: Vec<&str> = body.lines().collect();
+            assert_eq!(
+                lines[0],
+                lane_export_columns(EvalBy::Pipeline, figures).join(",")
+            );
+            assert!(lines[1].contains(",default,1,"), "{body}");
+            let label = export_total_label(figures);
+            assert!(lines[2].starts_with(&format!("{label},")), "{body}");
+            assert_eq!(lines.len(), 3, "one header, one row, one closing line");
+        }
     }
 
+    /// `e` on the directory table writes its own columns in the drawn view,
+    /// naming this project on every row — the project's own watched root
+    /// too, which no ledger line names it on. Fails while that root's row
+    /// was left without a project.
     #[test]
-    fn e_on_the_directory_table_writes_its_own_header() {
+    fn e_on_the_directory_table_writes_its_own_columns() {
         let (repo, _root_guard) = fixture("export-dirs-and-sessions");
         bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
+        let project = crate::usage::registry::name_of(&repo.root);
         let mut filters = no_filters();
         let loaded = load(&repo, &filters).unwrap();
         let pipelines = Pipelines::builtin();
 
         let (path, rows) = export(&repo, &loaded, &filters, &pipelines, TableKind::Dirs).unwrap();
         assert_eq!(rows, 2, "the session's dir and the project's own root");
-        assert!(path.to_string_lossy().contains("eval-by-dir-"));
+        assert!(path.to_string_lossy().contains("eval-by-dir-totals-"));
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.starts_with(DIRS_CSV_HEADER), "{body}");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines[0],
+            dir_export_columns(DirBy::Dir, Figures::Totals).join(",")
+        );
         assert!(
-            body.contains(
-                "dir,spoolway,1,0,10,0,0,0,10,0,0,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.70,0.70,"
-            ),
+            lines[1..3]
+                .iter()
+                .all(|line| line.starts_with(&format!("{project},"))),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "{project},spoolway,1,0,0.00,10,0.00,0,0.00,0,0.00,0.70,"
+            )),
             "{body}"
         );
 
         filters.dir_by = DirBy::Session;
         let (path, rows) = export(&repo, &loaded, &filters, &pipelines, TableKind::Dirs).unwrap();
         assert_eq!(rows, 1);
-        assert!(path.to_string_lossy().contains("eval-by-session-"));
+        assert!(path.to_string_lossy().contains("eval-by-session-totals-"));
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.starts_with(SESSIONS_CSV_HEADER), "{body}");
         assert!(
-            body.contains(",spoolway,—,claude-opus-5,0,10,0,0,0.00,0.00,0.00,0.00,0.70,"),
+            body.starts_with(&dir_export_columns(DirBy::Session, Figures::Totals).join(",")),
+            "{body}"
+        );
+        assert!(
+            body.contains(",spoolway,—,claude-opus-5,0,0.00,10,0.00,0,0.00,0,0.00,0.70,"),
             "{body}"
         );
         assert!(body.contains("\ntotal,"), "{body}");
@@ -10570,18 +10912,19 @@ mod screen_tests {
             key: "pass".into(),
             descending: false,
         });
-        let (_, lines, rows) = export_rows(&loaded, &filters, &pipelines, TableKind::Lanes);
+        let (_, lines, rows) =
+            export_rows(&loaded, &filters, &pipelines, TableKind::Lanes, "spoolway");
         assert_eq!(rows, 3);
-        let named: Vec<&str> = lines.iter().map(|l| l.split(',').nth(2).unwrap()).collect();
+        let named: Vec<&str> = lines.iter().map(|l| l.split(',').nth(1).unwrap()).collect();
         assert_eq!(named, ["beta", "gamma", "alpha", ""], "{lines:?}");
-        assert!(lines[3].starts_with(",total,"), "{lines:?}");
+        assert!(lines[3].starts_with("total,"), "{lines:?}");
 
         filters.dir_by = DirBy::Session;
         filters.dir_sort = Some(Sort {
             key: "cost_usd".into(),
             descending: false,
         });
-        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs);
+        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs, "spoolway");
         assert!(
             lines[0].contains(",0.10,") && lines[1].contains(",0.90,"),
             "{lines:?}"
@@ -10591,7 +10934,7 @@ mod screen_tests {
             key: "cost_usd".into(),
             descending: true,
         });
-        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs);
+        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs, "spoolway");
         assert!(
             lines[0].contains(",0.90,") && lines[1].contains(",0.10,"),
             "{lines:?}"
@@ -10891,25 +11234,29 @@ mod screen_tests {
     }
 
     /// `--sort pass:asc --csv` writes the rows the screen's `PASS` sort
-    /// shows, `Total` last; left off, the direction is descending; a name
-    /// the export does not carry is refused with the ones it does.
+    /// shows, `total` last; left off, the direction is descending; a name no
+    /// column has is refused with every one `--sort` takes.
     #[test]
     fn sort_on_the_command_line_orders_the_csv() {
         let (repo, _root_guard) = fixture_to_sort("cli-sort-csv");
         let pipelines_of = |csv: &str| -> Vec<String> {
             csv.lines()
                 .skip(1)
-                .map(|l| l.split(',').nth(2).unwrap().to_string())
+                .map(|l| l.split(',').nth(1).unwrap().to_string())
                 .collect()
         };
 
         let csv = print(&repo, &["--sort", "pass:asc", "--csv"]).unwrap();
         assert_eq!(
             csv.lines().next(),
-            Some(lanes_csv_header(EvalBy::Pipeline).as_str())
+            Some(
+                lane_export_columns(EvalBy::Pipeline, Figures::Totals)
+                    .join(",")
+                    .as_str()
+            )
         );
         assert_eq!(pipelines_of(&csv), ["beta", "gamma", "alpha", ""], "{csv}");
-        assert!(csv.lines().last().unwrap().starts_with(",total,"), "{csv}");
+        assert!(csv.lines().last().unwrap().starts_with("total,"), "{csv}");
 
         let csv = print(&repo, &["--sort", "cost_usd", "--csv"]).unwrap();
         assert_eq!(pipelines_of(&csv), ["gamma", "beta", "alpha", ""], "{csv}");
@@ -10970,7 +11317,11 @@ mod screen_tests {
         let csv = String::from_utf8(out).unwrap();
         assert_eq!(
             csv.lines().next(),
-            Some(lanes_csv_header(EvalBy::Task).as_str()),
+            Some(
+                lane_export_columns(EvalBy::Task, Figures::Totals)
+                    .join(",")
+                    .as_str()
+            ),
             "{csv}"
         );
         assert!(!csv.contains("No runs recorded"), "{csv}");
@@ -11511,49 +11862,59 @@ mod screen_tests {
         }
     }
 
-    /// `--per-task` changes only the printed table, so beside an export or
-    /// `--discard` it is refused with the reason.
+    /// `--per-task` picks the export's columns beside `--csv` and `--json`,
+    /// as it picks the printed table's. Fails while it was refused there.
     #[test]
-    fn per_task_is_refused_beside_an_export_or_a_discard() {
-        let (repo, _root_guard) = fixture_to_sort("cli-per-task-refused");
-        let err = print(&repo, &["--per-task", "--csv"])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("already carry both"), "{err}");
+    fn per_task_picks_the_per_task_columns_of_an_export() {
+        let (repo, _root_guard) = fixture_to_sort("cli-per-task-export");
+        let csv = print(&repo, &["--per-task", "--csv"]).unwrap();
+        assert_eq!(
+            csv.lines().next(),
+            Some(
+                lane_export_columns(EvalBy::Pipeline, Figures::Average)
+                    .join(",")
+                    .as_str()
+            )
+        );
+        assert!(csv.lines().last().unwrap().starts_with("average,"), "{csv}");
 
         let args = EvalArgs {
             per_task: true,
             ..no_args()
         };
-        let err = run_to(
-            &repo,
-            &args,
-            true,
-            Some(&Pipelines::builtin()),
-            &mut Vec::new(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("already carry both"), "{err}");
+        let mut out = Vec::new();
+        run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(json["rows"][0].get("in_per_task").is_some(), "{json}");
+        assert!(json["rows"][0].get("in_tokens").is_none(), "{json}");
+        assert!(json["total"].get("in_per_task").is_some(), "{json}");
+        assert!(json.get("commands").is_some(), "{json}");
+    }
 
-        // `main` asks the same question before `--discard` is dispatched.
+    /// `main` refuses `--per-task` before `--discard` is dispatched, with
+    /// what `--discard` does and what to do instead.
+    #[test]
+    fn per_task_is_refused_beside_a_discard() {
         let args = EvalArgs {
             per_task: true,
             discard: Some("some-trial".into()),
             ..no_args()
         };
-        let err = refuse_per_task_beside_an_export(&args, false)
+        let err = refuse_per_task_beside_discard(&args)
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("not `--discard`") && err.contains("already carry both"),
-            "{err}"
-        );
+        assert!(err.contains("`--discard` prints none"), "{err}");
+        assert!(!err.contains("carry both"), "{err}");
         assert!(
             err.contains("Drop `--per-task`"),
             "says what to do instead: {err}"
         );
-        assert!(refuse_per_task_beside_an_export(&no_args(), true).is_ok());
+        assert!(refuse_per_task_beside_discard(&no_args()).is_ok());
+        let alone = EvalArgs {
+            discard: Some("some-trial".into()),
+            ..no_args()
+        };
+        assert!(refuse_per_task_beside_discard(&alone).is_ok());
     }
 
     /// `by dir` and `by session` share one sort, so `t` pressed under `by

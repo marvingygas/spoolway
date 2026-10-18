@@ -686,10 +686,9 @@ pub struct EvalArgs {
     pub csv: bool,
 
     /// Print each token, cost and time figure over the row's TASKS — IN/TASK,
-    /// USD/TASK, TIME/TASK and the rest — instead of the row's totals. Only
-    /// the printed table has two views: `--csv` and `--json` already carry
-    /// both column sets, so this is refused beside either, and beside
-    /// `--discard`.
+    /// USD/TASK, TIME/TASK and the rest — instead of the row's totals.
+    /// `--csv` and `--json` follow it, carrying the per-task columns in place
+    /// of the totals. Refused beside `--discard`, which prints no figures.
     #[arg(long)]
     pub per_task: bool,
 
