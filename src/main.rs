@@ -9,6 +9,7 @@ mod agent;
 mod archive_index;
 mod ask;
 mod assets;
+mod browser;
 mod claim;
 mod cli;
 mod command_step;

@@ -740,10 +740,11 @@ impl Board {
     ///
     /// Browsing, `↑`/`↓` move the cursor, and `o` opens the options menu of
     /// the row it sits on — see [`Board::open_options`]. The menu lists only
-    /// what that row can do right now, in a fixed order: `open` its task
-    /// file, `pause` it, `restart` its step from scratch, or
-    /// `unqueue` it back to pending with every still-queued task that
-    /// depends on it. `r` is the one row action left on a key of its own: it
+    /// what that row can do right now, in a fixed order: `open task` opens
+    /// its task file, `open plan` opens the page its `plan:` names, `pause`
+    /// pauses it, `restart` restarts its step from scratch, or `unqueue`
+    /// sends it back to pending with every still-queued task that depends
+    /// on it. `r` is the one row action left on a key of its own: it
     /// opens a picker of the cursor's task's steps if its own resume key is
     /// live — see [`Board::resume_cursor`]. The run as a whole is stopped
     /// from the dispatch tab's own `enter`, not from here. An action opens a
@@ -865,6 +866,11 @@ impl Board {
             Key::Enter => match menu.items.get(menu.cursor) {
                 Some(RowAction::Open) => {
                     if let Some(notice) = open_task(repo, &menu.id) {
+                        self.mode = BoardMode::Outcome(notice);
+                    }
+                }
+                Some(RowAction::OpenPlan) => {
+                    if let Some(notice) = open_plan(repo, &menu.id) {
                         self.mode = BoardMode::Outcome(notice);
                     }
                 }
@@ -1332,7 +1338,7 @@ impl Board {
     }
 }
 
-/// The options menu's `open`: open task `id`'s file in the editor
+/// The options menu's `open task`: open task `id`'s file in the editor
 /// [`crate::editor::open`] picks — a terminal editor in a pane the
 /// multiplexer opens, a window editor in the background — a no-op on a task the queue and the archive no
 /// longer have. `repo.task` reads both, so this reaches a done row's task
@@ -1345,10 +1351,10 @@ impl Board {
 /// A refused open comes back as the popup [`BoardMode::Outcome`] draws —
 /// [`crate::editor::refusal`], the same one the pending screen shows —
 /// rather than as an `Err`: the dispatch loop that calls `on_key` swallows
-/// an `Err`, so a person picking open would see nothing at all. Among the
-/// refusals are a terminal editor on a backend with no pane to open one in
-/// — headless, which refuses the way `Mux::open_command`'s default does —
-/// an `editor.toml` that does not parse, an editor program that is not on
+/// an `Err`, so a person picking open task would see nothing at all. Among
+/// the refusals are a terminal editor on a backend with no pane to open one
+/// in — headless, which refuses the way `Mux::open_command`'s default does
+/// — an `editor.toml` that does not parse, an editor program that is not on
 /// `PATH`, and a path `wslpath` cannot convert. The task file it would have
 /// opened is left exactly as it was.
 fn open_task(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
@@ -1356,6 +1362,28 @@ fn open_task(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
     crate::editor::open(repo, &format!("{id} · edit"), &task.path)
         .err()
         .map(|err| crate::editor::refusal(&err))
+}
+
+/// The options menu's `open plan`: open the page task `id`'s `plan:` names
+/// in the default browser, through [`crate::browser::open_plan`], which
+/// starts it in the background so the pass loop never waits on it.
+///
+/// The task is read again here rather than trusted from when the menu
+/// opened: a task that lost its `plan:` since then gets nothing done, the
+/// same as every other item asks its own check again. A page that is gone,
+/// or a machine with no opener, comes back as the popup
+/// [`BoardMode::Outcome`] draws, for the reason [`open_task`] gives.
+fn open_plan(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
+    let task = repo.task(id).ok()?;
+    crate::browser::open_plan(plan_page(&task)?)
+}
+
+/// Task `task`'s `plan:`, when it is set and not empty: whether the
+/// options menu lists `open plan`, and what [`open_plan`] opens. Whether
+/// the file exists is left to the open, which says so in a popup.
+fn plan_page(task: &crate::task::Task) -> Option<&str> {
+    let plan = task.front.plan.as_deref()?.trim();
+    (!plan.is_empty()).then_some(plan)
 }
 
 /// What an `o` or `r` keypress is waiting to be answered — a menu or panel
@@ -1401,9 +1429,10 @@ enum BoardMode {
     /// would end. Its one answer, `restart`, carries the restart out, and
     /// `esc` leaves the task, its lane and its run exactly as they were.
     ConfirmRestart(RestartConfirm),
-    /// The options menu's `open` was refused — see [`open_task`]. Held until
-    /// `enter` closes it, with no other answer to pick. The pass loop keeps
-    /// running under it, as it does under every panel here.
+    /// The options menu's `open task` or `open plan` was refused — see
+    /// [`open_task`] and [`open_plan`]. Held until `enter` closes it, with no
+    /// other answer to pick. The pass loop keeps running under it, as it
+    /// does under every panel here.
     Outcome(crate::screen::Notice),
 }
 
@@ -1452,17 +1481,19 @@ struct OptionsMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowAction {
     Open,
+    OpenPlan,
     Pause,
     Restart,
     Unqueue,
 }
 
 impl RowAction {
-    /// The item's line in the menu: its verb alone, since the menu's own
-    /// title already names the task.
+    /// The item's line in the menu: its verb, and for the two opens what
+    /// each one opens, since the menu's own title already names the task.
     fn label(self) -> &'static str {
         match self {
-            RowAction::Open => "open",
+            RowAction::Open => "open task",
+            RowAction::OpenPlan => "open plan",
             RowAction::Pause => "pause",
             RowAction::Restart => "restart",
             RowAction::Unqueue => "unqueue",
@@ -1480,18 +1511,20 @@ fn options_panel(menu: &OptionsMenu) -> Vec<String> {
 ///
 /// Each item is asked through the same check its action makes before it
 /// acts, so the menu never offers what would then silently do nothing:
-/// `open` reads the task from the queue or the archive, as [`open_task`]
-/// does; `pause` needs it in the queue and [`pausable`]; `restart` needs
-/// [`restartable_step`] to accept it on [`restart_graph`]'s graph, the one
-/// [`Board::begin_restart`] opens its panel on; `unqueue` needs it in the
-/// queue and [`not_started`]. Resume is never listed: it stays on the
-/// board's `r`.
+/// `open task` reads the task from the queue or the archive, as
+/// [`open_task`] does; `open plan` needs [`plan_page`] to find a `plan:` on
+/// it, as [`open_plan`] does; `pause` needs it in the queue and
+/// [`pausable`]; `restart` needs [`restartable_step`] to accept it on
+/// [`restart_graph`]'s graph, the one [`Board::begin_restart`] opens its
+/// panel on; `unqueue` needs it in the queue and [`not_started`]. Resume is
+/// never listed: it stays on the board's `r`.
 fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAction>> {
     let tasks = repo.tasks()?;
     let queued = tasks.iter().find(|t| t.id() == id);
     let task = repo.task(id).ok();
     let applies = |action| match action {
         RowAction::Open => task.is_some(),
+        RowAction::OpenPlan => task.as_ref().and_then(plan_page).is_some(),
         RowAction::Pause => queued.is_some_and(pausable),
         RowAction::Restart => task.as_ref().is_some_and(|task| {
             restartable_step(task, &restart_graph(repo, pipelines, id).0).is_ok()
@@ -1500,6 +1533,7 @@ fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAc
     };
     Ok([
         RowAction::Open,
+        RowAction::OpenPlan,
         RowAction::Pause,
         RowAction::Restart,
         RowAction::Unqueue,
@@ -1648,7 +1682,12 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
             options_panel(&OptionsMenu {
                 id: "login".to_string(),
                 name: "login".to_string(),
-                items: vec![RowAction::Open, RowAction::Pause, RowAction::Restart],
+                items: vec![
+                    RowAction::Open,
+                    RowAction::OpenPlan,
+                    RowAction::Pause,
+                    RowAction::Restart,
+                ],
                 cursor: 0,
             }),
         ),
@@ -9923,10 +9962,10 @@ mod tests {
 
     /// The cursor walks the archived rows the board draws too, not just the
     /// live queue: with a group holding one live task and one done one, `↓`
-    /// from the live row reaches the done row, and the menu's `open` opens
-    /// its task by way of `repo.task`'s own archive lookup rather than
-    /// refusing because the queue no longer holds the file. `open` is the
-    /// only thing a done row offers.
+    /// from the live row reaches the done row, and the menu's `open task`
+    /// opens its task by way of `repo.task`'s own archive lookup rather than
+    /// refusing because the queue no longer holds the file. `open task` is
+    /// the only thing a done row with no `plan:` offers.
     #[test]
     fn the_cursor_reaches_a_done_row_and_its_menu_opens_its_task() {
         let (mut repo, _root_guard) = fixture("cursor-reaches-done-row");
@@ -10017,6 +10056,128 @@ mod tests {
         }
     }
 
+    /// Task `id`'s `plan:` set to `plan`, or taken off with `None`.
+    fn set_plan(repo: &Repo, id: &str, plan: Option<&str>) {
+        let mut task = repo.task(id).unwrap();
+        task.front.plan = plan.map(str::to_string);
+        task.save().unwrap();
+    }
+
+    /// `open plan` is listed directly under `open task` exactly when the
+    /// task's `plan:` is set and not empty, whether or not the file is
+    /// there: a missing page is the open's to report, not the menu's.
+    #[test]
+    fn the_options_menu_lists_open_plan_only_with_a_plan_key() {
+        let (repo, _root_guard) = fixture("options-open-plan");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "planned", &[], None, Some("planned"));
+        set_plan(&repo, "planned", Some("/nowhere/plan.html"));
+        add_to(&repo, "blank", &[], None, Some("blank"));
+        set_plan(&repo, "blank", Some("  "));
+        add_to(&repo, "bare", &[], None, Some("bare"));
+
+        let mut board = Board::for_test();
+        let listed = [
+            RowAction::Open,
+            RowAction::OpenPlan,
+            RowAction::Pause,
+            RowAction::Unqueue,
+        ];
+        let unlisted = [RowAction::Open, RowAction::Pause, RowAction::Unqueue];
+        for (id, expected) in [
+            ("planned", &listed[..]),
+            ("blank", &unlisted[..]),
+            ("bare", &unlisted[..]),
+        ] {
+            board.cursor = Some(id.to_string());
+            assert_eq!(menu_items(&mut board, &repo, &pipelines), expected, "{id}");
+        }
+        assert_eq!(RowAction::Open.label(), "open task");
+        assert_eq!(RowAction::OpenPlan.label(), "open plan");
+    }
+
+    /// Picking `open plan` on a page that exists hands it to the browser
+    /// opener and closes the menu with no popup.
+    #[test]
+    fn open_plan_opens_the_page_and_closes_the_menu() {
+        let (repo, _root_guard) = fixture("open-plan-opens");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "planned", &[], None, Some("planned"));
+        let page = repo.root.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        set_plan(&repo, "planned", Some(page.to_str().unwrap()));
+
+        let mut board = Board::for_test();
+        board.cursor = Some("planned".to_string());
+        pick(&mut board, &repo, &pipelines, RowAction::OpenPlan);
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert_eq!(crate::browser::opened(), [page]);
+    }
+
+    /// A page that is gone, or an opener that refuses, leaves the `open
+    /// plan` popup up until `enter` closes it.
+    #[test]
+    fn open_plan_refusals_show_a_popup_closed_by_enter() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("open-plan-refused");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "gone", &[], None, Some("gone"));
+        set_plan(&repo, "gone", Some("/nowhere/plan.html"));
+        add_to(&repo, "refused", &[], None, Some("refused"));
+        let page = repo.root.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        set_plan(&repo, "refused", Some(page.to_str().unwrap()));
+        crate::browser::refuse_opens("could not open the plan page: xdg-open is not on PATH.");
+
+        let mut board = Board::for_test();
+        for (id, text) in [
+            ("gone", "o: the plan page is gone.\n/nowhere/plan.html\n"),
+            (
+                "refused",
+                "o: could not open the plan page: xdg-open is not on PATH.",
+            ),
+        ] {
+            board.cursor = Some(id.to_string());
+            pick(&mut board, &repo, &pipelines, RowAction::OpenPlan);
+            let BoardMode::Outcome(notice) = &board.mode else {
+                panic!("{id}: no popup");
+            };
+            assert_eq!(notice.title, "open plan", "{id}");
+            assert!(notice.text.starts_with(text), "{id}: {}", notice.text);
+            board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+            assert!(matches!(board.mode, BoardMode::Outcome(_)), "{id}");
+            board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+            assert!(matches!(board.mode, BoardMode::Browsing), "{id}");
+        }
+        assert!(crate::browser::opened().is_empty());
+    }
+
+    /// A task that lost its `plan:` between `o` and `enter` gets nothing
+    /// done: no open, and no popup.
+    #[test]
+    fn open_plan_reads_the_plan_again_on_enter() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("open-plan-dropped");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "planned", &[], None, Some("planned"));
+        let page = repo.root.join("plan.html");
+        std::fs::write(&page, "<html>").unwrap();
+        set_plan(&repo, "planned", Some(page.to_str().unwrap()));
+
+        let mut board = Board::for_test();
+        board.cursor = Some("planned".to_string());
+        board.on_key(&repo, &pipelines, Key::Char('o')).unwrap();
+        board.on_key(&repo, &pipelines, Key::Down).unwrap();
+        let BoardMode::Options(menu) = &board.mode else {
+            panic!("`o` opened no menu");
+        };
+        assert_eq!(menu.items[menu.cursor], RowAction::OpenPlan);
+        set_plan(&repo, "planned", None);
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert!(crate::browser::opened().is_empty());
+    }
+
     /// `o` lists `restart` on a row standing on a command step, whether its
     /// task is running the command, paused on the step or blocked off it.
     #[test]
@@ -10046,7 +10207,7 @@ mod tests {
     }
 
     /// The menu is a popup titled with the task's id, its items named by
-    /// their verb alone straight under the title, the cursor on the first,
+    /// what they do straight under the title, the cursor on the first,
     /// closed on `[enter] confirm   [esc] close`. `↓` moves the cursor and
     /// holds at the last item; a menu with nothing in it — a row whose task
     /// is in neither the queue nor the archive — says so over `[esc] close`,
@@ -10074,7 +10235,7 @@ mod tests {
             rows(&board),
             [
                 format!("{TOP_LEFT}─ cart-empty-state {}{TOP_RIGHT}", "─".repeat(14)),
-                "│  > open".to_string(),
+                "│  > open task".to_string(),
                 "│    pause".to_string(),
                 "│    restart".to_string(),
                 "│".to_string(),
@@ -10103,6 +10264,56 @@ mod tests {
         );
         board.on_key(&repo, &pipelines, Key::Esc).unwrap();
         assert!(matches!(board.mode, BoardMode::Browsing));
+    }
+
+    /// A running task with a `plan:` draws `open plan` straight under `open
+    /// task`, the cursor moved onto it; a queued task with none draws `open
+    /// task` and no `open plan`.
+    #[test]
+    fn the_options_menu_draws_open_plan_under_open_task() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("options-drawn-plan");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "cart-totals", &[], Some("implement"), Some("cart"));
+        set_plan(&repo, "cart-totals", Some("/plans/2026-10-17-cart.html"));
+        add_to(&repo, "checkout-receipt", &[], None, Some("checkout"));
+
+        let mut board = Board::for_test();
+        let mut drawn = |id: &str, keys: &[Key]| -> Vec<String> {
+            board.cursor = Some(id.to_string());
+            board.on_key(&repo, &pipelines, Key::Char('o')).unwrap();
+            for key in keys {
+                board.on_key(&repo, &pipelines, *key).unwrap();
+            }
+            let rows = board.mode.panel().unwrap();
+            board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+            rows
+        };
+        assert_eq!(
+            drawn("cart-totals", &[Key::Down]),
+            [
+                format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
+                "│    open task                    │".to_string(),
+                "│  > open plan                    │".to_string(),
+                "│    pause                        │".to_string(),
+                "│    restart                      │".to_string(),
+                "│                                 │".to_string(),
+                "│  [enter] confirm   [esc] close  │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
+        assert_eq!(
+            drawn("checkout-receipt", &[]),
+            [
+                format!("{TOP_LEFT}─ checkout-receipt {}{TOP_RIGHT}", "─".repeat(14)),
+                "│  > open task                    │".to_string(),
+                "│    pause                        │".to_string(),
+                "│    unqueue                      │".to_string(),
+                "│                                 │".to_string(),
+                "│  [enter] confirm   [esc] close  │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
     }
 
     /// A paused task offers the resume key only once its own dependencies
@@ -12270,8 +12481,8 @@ mod tests {
     }
 
     /// `o` on a headless run, with a terminal editor named, only opens the
-    /// row's menu: nothing is opened until `open` is picked in it, and the
-    /// task file is left exactly as it was.
+    /// row's menu: nothing is opened until `open task` is picked in it, and
+    /// the task file is left exactly as it was.
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
         let (mut repo, _root_guard) = fixture("open-key-headless");
@@ -12306,7 +12517,7 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    /// Picking `open` with an `editor.toml` naming a program that is not on
+    /// Picking `open task` with an `editor.toml` naming a program that is not on
     /// `PATH` shows the refusal in an `open task` popup, remedy and all,
     /// rather than dropping it. The board keeps drawing under it, every key
     /// but `enter` leaves it open, and `enter` closes it onto the board.

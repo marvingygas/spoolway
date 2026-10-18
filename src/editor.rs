@@ -209,23 +209,15 @@ fn first_word(command: &str) -> String {
     word
 }
 
-/// True under Windows Subsystem for Linux, read from the running kernel.
-fn on_wsl() -> bool {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
-}
-
-/// `wslpath -w`: the `\\wsl.localhost\…` form of a Linux path.
+/// `wslpath -w` for the editor: [`crate::platform::wslpath`], with this
+/// module's remedy when the program is missing, since the fix for that is
+/// in `editor.toml`.
 fn wslpath(path: &Path) -> Result<String> {
-    let output = std::process::Command::new("wslpath")
-        .arg("-w")
-        .arg(path)
-        .output()
-        .with_context(|| format!("could not run `wslpath` — {WSLPATH_REMEDY}"))?;
-    if !output.status.success() {
-        bail!("`wslpath -w` exited with {}", output.status);
+    let on_path = std::env::var_os("PATH").unwrap_or_default();
+    if crate::platform::which("wslpath", &on_path).is_none() {
+        bail!("`wslpath` is not on PATH — {WSLPATH_REMEDY}");
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::platform::wslpath(path)
 }
 
 /// The inputs open and `spoolway doctor` both read, taken from this process.
@@ -235,7 +227,7 @@ pub(crate) fn live_inputs() -> Inputs<'static> {
         visual: std::env::var("VISUAL").ok(),
         editor: std::env::var("EDITOR").ok(),
         path: std::env::var_os("PATH").unwrap_or_default(),
-        wsl: on_wsl(),
+        wsl: crate::platform::on_wsl(),
         home: crate::platform::home_dir(),
         wslpath: &wslpath,
     }

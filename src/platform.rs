@@ -130,6 +130,32 @@ pub fn shell_command(script: &str) -> Command {
     command
 }
 
+/// True under Windows Subsystem for Linux, read from the running kernel.
+///
+/// Shared by every module that hands a path to a Windows program, so a fix
+/// to the detection reaches all of them.
+pub(crate) fn on_wsl() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+}
+
+/// `wslpath -w`: the `\\wsl.localhost\…` form of a Linux path.
+///
+/// The errors say only what `wslpath` did. What a person should do about
+/// them depends on the caller, so each caller adds its own advice.
+pub(crate) fn wslpath(path: &Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let output = Command::new("wslpath")
+        .arg("-w")
+        .arg(path)
+        .output()
+        .context("could not run `wslpath`")?;
+    if !output.status.success() {
+        anyhow::bail!("`wslpath -w` exited with {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Resolve a program name against a `PATH`, the way a shell would.
 pub fn which(program: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     // A path, not a name, is taken as given.

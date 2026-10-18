@@ -162,8 +162,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "plan",
         "The plan page that argued this task's shape, as an absolute path — set \
-         whenever a page was written, with or without an issue behind it. Kept \
-         but never parsed, and never required.",
+         whenever a page was written, with or without an issue behind it. The \
+         `o` menu's `open plan` opens it in the default browser. Kept but \
+         never parsed, and never required.",
     ),
     (
         "depends_on",

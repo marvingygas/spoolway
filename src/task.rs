@@ -374,13 +374,16 @@ pub struct Frontmatter {
     /// here. Tasks written before `plan:` existed may still hold a page path
     /// in this field, and they are accepted and run unchanged: no check
     /// reads this value, and none should start refusing it.
+    /// The `o` menu's `open plan` reads `plan:` and never this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
     /// The plan page that argued this task's shape, as an absolute path —
     /// set whenever a page was written, with or without a tracker item
-    /// behind it. Nothing in spoolway parses this either; it is carried for
-    /// a person to follow back, same as `source`.
+    /// behind it. The `o` menu's `open plan`, on the board and on the queue
+    /// screen's tasks pane, opens it in the default browser. Nothing else in
+    /// spoolway reads it; it is carried for a person to follow back, same as
+    /// `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 
