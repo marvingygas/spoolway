@@ -75,6 +75,7 @@ mod jobs;
 mod lanes;
 mod r#override;
 mod pending;
+mod pending_delete;
 mod pipeline;
 mod queue;
 mod report;

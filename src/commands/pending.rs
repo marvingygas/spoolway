@@ -166,7 +166,7 @@ pub(crate) struct Group {
 /// exists because a task named it — but reads `Queueable` rather than
 /// vacuously `Done` if that ever changes, the same way the bare `bool` this
 /// replaced started its own fold at `true` and was corrected the same way.
-fn group_state(tasks: &[PendingTask]) -> GroupState {
+pub(crate) fn group_state(tasks: &[PendingTask]) -> GroupState {
     if tasks.is_empty() || tasks.iter().any(|t| t.state == TaskState::Pending) {
         GroupState::Queueable
     } else if tasks.iter().all(|t| t.state == TaskState::Done) {

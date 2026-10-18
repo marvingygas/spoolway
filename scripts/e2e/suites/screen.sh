@@ -12,6 +12,9 @@
 # the same project refuses. A refusal on the queue tab is drawn in a popup
 # over the tab, and so is what a clean submission queued, ending on whether a
 # dispatcher will pick it up. `→` from the queue tab reaches the routines tab.
+# Delete off the queue tab's options menu removes a pending group and every
+# pending task, in any group, that depends on one of its tasks, after one
+# popup.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -351,6 +354,42 @@ EDGE=$(LC_ALL=C.UTF-8 awk '/[^[:space:]]/ && (substr($0, 1, 1) != " " || length(
 if [ "$EDGE" = 0 ]; then ok "no row of the full board touches either edge of a 120-column terminal"
 else bad "no row of the full board touches either edge of a 120-column terminal ($EDGE rows do)"; head -40 "$LAST.rows"; fi
 rm -f "$SPOOLWAY_PROJECT_HOME"/queue/full-*.md
+
+# Delete on the queue tab (`o`, down twice, `enter`) takes a pending group
+# and every pending task in any group that depends on one of its tasks.
+# `checkout-total` depends on `cart-totals`, so deleting `cart` takes it too,
+# and `checkout-page` stays. `cart-discounts` is written last, so `cart` is
+# the newest group and the one the cursor opens on.
+PENDING="$SPOOLWAY_PROJECT_HOME/pending"
+pending_doc checkout-page "$BODY" "group: checkout"
+pending_doc checkout-total "$BODY" "group: checkout" "depends_on: [cart-totals]"
+pending_doc cart-discounts "$BODY" "group: cart" "depends_on: [cart-totals]"
+
+# Delete asks, esc keeps every file.
+DELETE="$LIVE/pending-delete.txt"
+on_screen 'o\x1b[B\x1b[B\r\x1b' "$DELETE"
+works "delete then esc keeps the group's tasks" \
+  test -f "$PENDING/cart-totals.md" -a -f "$PENDING/cart-discounts.md"
+works "and the dependent in another group" test -f "$PENDING/checkout-total.md"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete group cart/ { last = $0 } END { print last }' \
+  "$DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "delete opens the delete popup" "─ delete group cart " "$LAST"
+has "counting every pending task it takes" "Delete 3 pending tasks:" "$LAST"
+has "naming the dependent in another group" "checkout-total   (depends on cart-totals)" "$LAST"
+lacks "never a task nothing in the set depends on" "checkout-page" "$LAST"
+has "its one answer under the cursor" "> delete" "$LAST"
+
+# Delete asks, enter removes the files and the group leaves the list.
+on_screen 'o\x1b[B\x1b[B\r\r' "$DELETE"
+works "delete then enter removes the group's tasks" \
+  test ! -e "$PENDING/cart-totals.md" -a ! -e "$PENDING/cart-discounts.md"
+works "and the dependent in another group" test ! -e "$PENDING/checkout-total.md"
+works "a task nothing in the set depends on stays" test -f "$PENDING/checkout-page.md"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DELETE" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the cursor is on the group that is left" "> [ ] checkout" "$LAST"
+lacks "the deleted group has left the list" "cart" "$LAST"
+lacks "with no popup over it" "[enter] confirm" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

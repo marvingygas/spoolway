@@ -179,6 +179,7 @@ task, in this order:
 |---|---|
 | `open` | Open the task in your editor |
 | `gate` | Set or clear a `gate_at` on the task |
+| `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
 Over the groups pane it offers these for the highlighted group, and a group with no tasks says
 `nothing to do here`. To reach them from the tasks pane, press `tab` first.
@@ -187,6 +188,7 @@ Over the groups pane it offers these for the highlighted group, and a group with
 |---|---|
 | `trial` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `save as routine` | Save the group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
+| `delete` | Delete the group's pending tasks, and the pending tasks that depend on them. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
