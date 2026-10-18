@@ -1157,7 +1157,8 @@ first pass after the worktree is gone. Removing a worktree deletes the folder di
 sits under `worktrees/`.
 
 `spoolway queue unqueue --force` prints the first message on standard error and carries the task
-to `pending`. It does not try again.
+to `pending`. It does not try again. A copy of a routine whose worktree cannot be removed stays
+queued, and the command can be run again once the worktree is gone.
 
 ### The archive index
 

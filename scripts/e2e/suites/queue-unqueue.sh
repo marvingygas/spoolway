@@ -222,6 +222,46 @@ else
   bad "and its worktree is gone (\"$GHOST_WORKTREE\" still exists)"
 fi
 
+# ----------------------------------------------- a started copy of a routine
+# The routine is still under `.spoolway/routines/` to queue again, so
+# `--force` tears the copy's checkout down and deletes the copy rather than
+# drafting a duplicate of the routine into pending. Only the routines tab mints
+# a copy, so a queued task is given the `routine:` line it would have carried,
+# once its dispatcher has stopped. A commit is made on its branch first: a
+# branch with nothing beyond what a remote already has is deleted by the
+# teardown, and only one with more is kept.
+echo hang > "$CTL/rt-1"
+mkdir -p .spoolway/routines/rt
+task_doc .spoolway/routines/rt/rt.md rt "$BODY" "group: rt"
+task_doc "$LIVE/rt-1.md" rt-1 "$BODY" "group: rt"
+must "a task that will be a routine's copy" "$SPOOLWAY" queue add --from "$LIVE/rt-1.md"
+if drive_and_hold rt-1 implement 120; then ok "it reaches implement, then the dispatcher stops"
+else bad "it reaches implement, then the dispatcher stops (at \`$(stage_of rt-1)\`)"; fi
+RT_WORKTREE=$(worktree_of rt-1)
+must "its branch holds a commit no remote has" \
+  git -C "$RT_WORKTREE" commit -q --allow-empty -m "work no remote has"
+must "it is stamped as a copy of the routine" \
+  sed -i 's/^group: rt$/group: rt\nroutine: rt/' "$SPOOLWAY_PROJECT_HOME/queue/rt-1.md"
+RT_OUT="$LIVE/unqueue-routine-copy.out"
+if "$SPOOLWAY" queue unqueue rt-1 --force >"$RT_OUT" 2>&1; then
+  ok "\`--force\` unqueues the started copy"
+else
+  bad "\`--force\` unqueues the started copy"
+  sed 's/^/        /' "$RT_OUT"
+fi
+has "it says the copy was deleted" "deleted \`rt-1\`" "$RT_OUT"
+has "naming the routine file" ".spoolway/routines/rt/rt.md" "$RT_OUT"
+has "and names the branch it kept" "kept branch \`task/rt-1\`" "$RT_OUT"
+works "that branch is still there" test -n "$(git branch --list task/rt-1)"
+works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/rt-1.md"
+works "nothing was written to pending" test ! -e "$SPOOLWAY_PROJECT_HOME/pending/rt-1.md"
+works "and the routine file is untouched" test -f .spoolway/routines/rt/rt.md
+if [ -n "$RT_WORKTREE" ] && [ ! -d "$RT_WORKTREE" ]; then
+  ok "and its worktree is gone"
+else
+  bad "and its worktree is gone (\"$RT_WORKTREE\" still exists)"
+fi
+
 # ------------------------------------------ closing a stuck task lets its dependent go on
 # `resume --stage done` is the way out for a task that cannot pass: it moves a
 # paused or blocked task to `done`, and the dispatcher then archives it and

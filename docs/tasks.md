@@ -462,6 +462,13 @@ branch that already exists. Nothing is queued. Rename the branch with `git branc
 it. Then send the task again. See [Where work happens on
 disk](dispatcher.md#where-work-happens-on-disk).
 
+A started copy of a routine is handled differently. `unqueue --force` tears its checkout down, then
+deletes the copy, because the routine is still under `.spoolway/routines/` to queue again. It
+writes nothing to the pending directory and names the routine file. If the copy's branch has
+commits no remote has, the branch is kept and the command prints its name. Nothing sends that
+branch back to a draft, so merge or push it, or run `git branch -D` on it. A copy whose routine
+file is gone is carried to pending as any other task.
+
 Deleting a running task's queue file takes the task off the board and leaves its worktree and
 `task/<id>` branch behind. Nothing removes them, and a command step already running in that
 worktree keeps running. `spoolway doctor` fails the row `no deleted task left a

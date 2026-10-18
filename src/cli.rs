@@ -1172,6 +1172,10 @@ pub enum QueueCommand {
     /// onward, unless `--force` says to interrupt any live lane, record its
     /// uncommitted work and tear the checkout down first — the same care
     /// `Dispatcher::tear_down_checkout` always takes, all or nothing.
+    ///
+    /// A copy of a routine whose file is still under `.spoolway/routines/` is
+    /// deleted instead of carried to pending, with or without `--force`: the
+    /// routine is there to queue again.
     Unqueue(QueueUnqueueArgs),
 }
 

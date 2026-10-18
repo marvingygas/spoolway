@@ -286,7 +286,8 @@ whose `routine:` line is removed shows its id and still runs. `spoolway queue li
 the numbered id.
 
 Unqueuing a copy that has not started deletes it, from the board or with `spoolway queue
-unqueue`. The routine is still in `.spoolway/routines/`, so a draft in the pending directory would
+unqueue`. `spoolway queue unqueue --force` deletes a copy that has started, after it tears the
+checkout down. The routine is still in `.spoolway/routines/`, so a draft in the pending directory would
 only duplicate it. The copy goes to the pending directory instead, with its `routine:` line
 removed, when no routine file has that `id:` any more. It is then the only record of the task.
 It also goes to the pending directory when a task that goes there in the same batch depends on it,
