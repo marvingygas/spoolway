@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/browser.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
 ---
 
 # The dispatcher
