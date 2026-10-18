@@ -391,7 +391,7 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. A `claude` or `codex` profile with no `[models]` row for its glob gets a commented `prompt_cache_ttl` example. A row holding only `prompt_cache_ttl = ""` is dropped. |
+| `config.toml` | The comments and the settings reference. Your values stay. A reference table that matches no shipped copy is refused. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. The `[dispatch]` keys `priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` are added at their defaults when the file lacks them. A `claude` or `codex` profile with no `[models]` row for its glob gets a commented `prompt_cache_ttl` example. A row holding only `prompt_cache_ttl = ""` is dropped. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, when it matches an older shipped copy. A key reference that matches no shipped copy is refused. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that matches an older shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. A skill file that matches no shipped copy is refused. The project's own folder is skipped in home mode; only the user folder is refreshed there. |

@@ -3437,6 +3437,39 @@ mod tests {
         );
     }
 
+    /// `visible_lanes = 5` is written whatever the file held, so a retired
+    /// `keep_finished_lanes` has to be converted and dropped in the same
+    /// rewrite: left beside a default-valued `visible_lanes` it would be read
+    /// as the old choice again, or survive as an unknown key.
+    #[test]
+    fn a_sync_turns_keep_finished_lanes_into_visible_lanes_and_drops_the_old_key() {
+        for (old, written) in [
+            ("true", "visible_lanes = \"all\""),
+            ("false", "visible_lanes = 1"),
+        ] {
+            let (repo, _root_guard) = fixture(&format!("config-keep-finished-{old}"));
+            let path = crate::config::Config::path_in(&repo.root);
+            std::fs::write(
+                &path,
+                format!("[dispatch]\nbackend = \"headless\"\nkeep_finished_lanes = {old}\n"),
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            let after = std::fs::read_to_string(&path).unwrap();
+
+            assert!(after.lines().any(|line| line == written), "{old}: {after}");
+            assert!(
+                !after
+                    .lines()
+                    .any(|line| !line.starts_with('#') && line.contains("keep_finished_lanes")),
+                "{old}: {after}"
+            );
+            assert_eq!(after.matches("\nvisible_lanes = ").count(), 1, "{after}");
+        }
+    }
+
     /// A key this binary does not know — one typo'd inside a table, a whole
     /// misspelt table, and a model row's own — survives a full re-render, each
     /// with the comment written above it, while a retired top-level table is

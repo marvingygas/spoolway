@@ -286,6 +286,23 @@ assert_init_reused_everything() {
     "nothing to install." "$out"
 }
 
+# assert_dispatch_keys_written <version>
+#
+# `sync` writes every `[dispatch]` key with its value, a default included, so
+# a project that predates a key finds it in the file after the sync instead of
+# only in the reference comments. The section is cut out first: a key of the
+# same name under another table would otherwise pass for it.
+assert_dispatch_keys_written() {
+  local version=$1 key section
+  section="$WORK/$version/dispatch-section.toml"
+  awk '/^\[/{in_dispatch = ($0 == "[dispatch]")} in_dispatch' \
+    .spoolway/config.toml >"$section"
+  for key in priority lane_child_ceiling visible_lanes hide_commands lane_layout; do
+    works "the $version project's [dispatch] holds $key after its sync" \
+      grep -q "^$key = " "$section"
+  done
+}
+
 # ---------------------------------------------------------- 0.6.0: the floor
 #
 # The oldest release this binary still upgrades from. Its own `spoolway
@@ -355,6 +372,7 @@ lacks "sync dropped the retired herdr_mode key, and its header row with it" \
 
 has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml
+assert_dispatch_keys_written 0.6.0
 
 # The fixture's project has a `claude` profile and no `[models]` row, so the
 # sync writes the cache-lifetime example as a comment. A row holding a blank
@@ -492,6 +510,7 @@ for fixture_dir in "$FIXTURES"/*/; do
     bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
   lacks "sync refused no file of the $version project as a copy it does not know" \
     "refused " "$WORK/$version/real.out"
+  assert_dispatch_keys_written "$version"
   says "and a second sync of the $version project has nothing left to do" \
     "Nothing updating." \
     "$SPOOLWAY" sync

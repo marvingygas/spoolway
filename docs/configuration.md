@@ -351,6 +351,11 @@ Write and inspect the layer with `spoolway pipeline override`, `prompt override`
 backend = "herdr"
 lane_quiet = "15m"
 auto_commit = true
+priority = "group"
+lane_child_ceiling = "1h"
+visible_lanes = 5
+hide_commands = true
+lane_layout = "panes"
 ```
 
 | Key | Default | What it controls |
@@ -364,9 +369,8 @@ auto_commit = true
 | `hide_commands` | `true` | Whether a command step runs detached with no pane, so it never takes a place in its task's tab. Its output still goes to the same log file. Set to `false` and a command opens a pane that stays open after the command exits. It then counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose command is still running is never closed by the limit. |
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
 
-`priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` are not written
-to a fresh `config.toml` while they hold their default. Add them by hand or with `config set`. `all` is
-written as `visible_lanes = "all"`.
+A fresh `config.toml` holds every one of these keys with its value, and `spoolway sync` adds any that
+an older file lacks. `all` is written as `visible_lanes = "all"`.
 
 `keep_finished_lanes` is retired. See [Retired keys](#retired-keys).
 
