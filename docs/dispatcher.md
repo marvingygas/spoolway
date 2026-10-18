@@ -366,6 +366,14 @@ stateDiagram-v2
 `RECENT` says what each task last did, one sentence per task, newest on top.
 A cause in brackets follows when the route alone does not explain the move.
 
+`RECENT` names a copy of a routine by its routine, such as `release-spoolway` for the task
+`release-spoolway-8`, both while it runs and once it has finished. It keeps one line per routine,
+for the latest move of any of its copies. Any other task keeps one line per task id.
+
+The board's popups name a copy of a routine the same way. The options menu and the `resume`,
+`pause`, `restart` and `unqueue` panels put the routine's name in their title in place of `<task>`.
+A panel's body still names a file by the task's id.
+
 | Line | When |
 |---|---|
 | `started, moved to <step>` | The task left `queued` for its first step. |
@@ -421,8 +429,9 @@ such as `open` or `pause now`, and on the `(next)` step in the resume picker.
 
 ### Options menu
 
-`o` opens a menu titled with the task's id. It lists only what that row can do right now, always
-in this order, and the cursor opens on the first item:
+`o` opens a menu titled with the task's id, or with the routine's name for a copy of a routine. It
+lists only what that row can do right now, always in this order, and the cursor opens on the first
+item:
 
 ```
 ╭─ cart-empty-state ──────────────╮
