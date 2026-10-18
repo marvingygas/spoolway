@@ -351,3 +351,12 @@ skill codex/spoolway-tasks/SKILL.md 38729a5e
 skill codex/spoolway-tasks/SKILL.md 20335dde
 skill pi/spoolway-tasks/SKILL.md bbd0cb8f
 skill pi/spoolway-tasks/SKILL.md 443c6d9f
+skill claude/spoolway-plan/SKILL.md 43f1658a
+skill codex/spoolway-plan/SKILL.md 6ca57924
+skill pi/spoolway-plan/SKILL.md a1ac817a
+skill claude/spoolway-tasks/SKILL.md c4e03413
+skill codex/spoolway-tasks/SKILL.md 78ad8022
+skill pi/spoolway-tasks/SKILL.md 015571d1
+skill claude/spoolway-plan/SKILL.md bd6fa45e
+skill codex/spoolway-plan/SKILL.md 56e423eb
+skill pi/spoolway-plan/SKILL.md b19277cf

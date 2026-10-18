@@ -251,12 +251,10 @@ reading the file whole.
      named `<plan-slug>-<part>` instead, from step 2's own ballot. A group carrying a date pins
      the whole breakdown to the morning it was cut.
    - `source` — the issue's own URL, from `spoolway issue show`, when this breakdown started
-     at one; the calling page's own absolute path otherwise, where one exists. The screen's
-     `o` key opens a `source:` that is a URL; a path is carried for the reader rather than
-     opened.
-   - `plan` — the calling page's own absolute path, when there is both an issue *and* a page
-     — an issue read straight into tasks with no page carries no `plan:` at all, and neither
-     does a page with no issue behind it, since `source:` already carries its path there.
+     at one; the calling page's own absolute path otherwise, where one exists. `source:` is
+     carried for the reader. The `o` menu's `open plan` opens `plan:` in the browser instead.
+   - `plan` — the calling page's own absolute path, whenever a page exists, with or without an
+     issue. An issue read straight into tasks with no page carries no `plan:`.
    - `base` — on every task, a dependent included: its chain's base from step 2, which is
      step 1's `base` unless a note changed it or the person picked the split ballot's
      recommended pull-request option for that chain. A dependency and its dependent must share

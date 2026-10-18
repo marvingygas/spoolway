@@ -78,7 +78,7 @@ asks with a question and a preview per option. Codex and pi print each option as
 section and wait for your letter.
 
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
-URL goes into each task's `source:`.
+URL goes into each task's `source:`. The plan page's path goes into each task's `plan:`.
 
 Both skills are optional. The queue screen reads tasks, so any script or tool that
 writes a task into the pending directory works too.

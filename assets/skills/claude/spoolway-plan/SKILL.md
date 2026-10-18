@@ -165,8 +165,10 @@ day it changes; a path stays true. Name the file that already holds the ground n
    already been cut from the shape being revised. Rewrite the plan block too, the same pass, per
    "The machine copy". A new plan's first copy skips all of this.
 
-6. **Open it, say one line, and ask.** `wslview`, `xdg-open` or `open` — first that exists —
-   then the path and nothing else: `Plan is ready: /abs/path/to/page`.
+6. **Open it, say one line, and ask.** Use `open` on macOS, `wslview` on WSL, and
+   `xdg-open` on other Linux. You are on WSL when `/proc/sys/kernel/osrelease` contains
+   `microsoft`. Do not take the first of them that exists. On Debian and Ubuntu, `open` is
+   `openvt`. Then the path and nothing else: `Plan is ready: /abs/path/to/page`.
 
    **Then put the approval to them, with AskUserQuestion, in the same turn** — never skipped,
    never replaced by an inviting sentence: a session that publishes and stops has handed
@@ -180,11 +182,11 @@ day it changes; a path stays true. Name the file that already holds the ground n
    step 3's answer skipping the page — never assumed from the page simply existing.
 
    Invoke the **spoolway-tasks** skill to do it: the shape it cuts into tasks is the
-   page's Decisions and Mockup, or — where no page was written — what step 2 settled. Where
-   step 1 read an issue, its own URL is the `source:` each task gets and the page's own
-   absolute path moves to `plan:` instead; with no issue behind it, the page's path stays
-   `source:`, exactly as before `plan:` existed, and there is no `plan:`. Neither key is set
-   when neither exists. `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
+   page's Decisions and Mockup, or — where no page was written — what step 2 settled. Every
+   task gets `plan:` set to the page's own absolute path, whenever a page exists. Where step 1
+   read an issue, its own URL is the `source:` each task gets. With no issue behind it, the
+   page's path stays in `source:` as well. Neither key is set when neither exists.
+   `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
    reads the skeleton, writes the tasks, verifies the chain and proves the set with
    `spoolway task contract` — the whole of the procedure and its guardrails live there now, so
    that a second caller cutting a breakdown shares it rather than drifting from it.
