@@ -387,11 +387,76 @@ pub fn parse() -> Cli {
     {
         return cli;
     }
-    let matches = base.clone().get_matches();
+    let mut cmd = base.clone();
+    let matches = match cmd.try_get_matches_from_mut(std::env::args_os()) {
+        Ok(matches) => matches,
+        Err(err) => with_renamed_flag(err, &mut cmd).exit(),
+    };
     match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(err) => err.exit(),
     }
+}
+
+/// Flags that were renamed, as `(command, old, new)`. The old spelling is
+/// gone, not an alias: a script passing it is refused, so it learns the new
+/// name instead of running on a word the help no longer explains.
+const RENAMED_FLAGS: &[(&str, &str, &str)] = &[("eval", "--per-run", "--per-task")];
+
+/// `err` with the tip a renamed flag deserves. clap only suggests a flag
+/// whose spelling is close to the one typed, and `--per-run` is too far from
+/// `--per-task` for it, so the refusal would name no way forward. This adds
+/// the tip and the usage line clap draws when it does find one itself.
+/// Only an error from the command that had the flag gets the tip: `lane` or
+/// the top level never had `--per-run`, so pointing either at `--per-task`
+/// would name a flag it does not take. `cmd` must be the command `err` came
+/// from, so the usage line names the binary the way the rest of the error
+/// does.
+fn with_renamed_flag(mut err: clap::Error, cmd: &mut clap::Command) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    use std::fmt::Write as _;
+
+    if err.kind() != ErrorKind::UnknownArgument || err.get(ContextKind::SuggestedArg).is_some() {
+        return err;
+    }
+    let Some(ContextValue::String(typed)) = err.get(ContextKind::InvalidArg) else {
+        return err;
+    };
+    let Some(&(name, _, new)) = RENAMED_FLAGS.iter().find(|(_, old, _)| old == typed) else {
+        return err;
+    };
+    cmd.build();
+    let Some(bin) = cmd.find_subcommand(name).and_then(|sc| sc.get_bin_name()) else {
+        return err;
+    };
+    // The error carries no field naming the subcommand it came from; the
+    // usage line clap already drew is the one place that does, as
+    // `Usage: <bin name> [OPTIONS]`. The space or end after the name keeps a
+    // command whose name merely starts with this one from matching.
+    let failed_in_named = match err.get(ContextKind::Usage) {
+        Some(ContextValue::StyledStr(drawn)) => drawn
+            .to_string()
+            .strip_prefix("Usage: ")
+            .and_then(|rest| rest.strip_prefix(bin))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')),
+        _ => false,
+    };
+    if !failed_in_named {
+        return err;
+    }
+    let styles = cmd.get_styles();
+    let (title, literal) = (styles.get_usage(), styles.get_literal());
+    let mut usage = clap::builder::StyledStr::new();
+    let _ = write!(
+        usage,
+        "{title}Usage:{title:#} {literal}{bin}{literal:#} {literal}{new}{literal:#}"
+    );
+    err.insert(
+        ContextKind::SuggestedArg,
+        ContextValue::String(new.to_string()),
+    );
+    err.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+    err
 }
 
 /// `argv` as [`Command::Screen`] when it names no command — only the globals
@@ -456,9 +521,10 @@ fn grouped_listing(base: &clap::Command) -> String {
     out
 }
 
-/// What one row of `spoolway eval`'s lanes table stands for. Only the
-/// columns naming a row change with it — the figure columns are the same
-/// under every one, which is what lets two `by`s be read side by side.
+/// What one row of `spoolway eval`'s lanes table stands for. The columns
+/// naming a row change with it, and `Task` alone adds `CTX PEAK` — every
+/// other figure column is the same under every one, which is what lets two
+/// `by`s be read side by side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum EvalBy {
     /// A task's `group:` — every run its tasks made.
@@ -503,12 +569,13 @@ impl EvalBy {
 #[command(
     long_about = "What each pipeline costs to run, grouped one way at a time.\n\n\
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
-        pipeline, step or version instead; only the columns naming a row change with it. A \
-        Total line closes the table with what adds up: distinct RUNS, BLOCKS, and the sums of \
+        pipeline, step or version instead; the columns naming a row change with it, and \
+        --by task alone adds CTX PEAK. A \
+        Total line closes the table with what adds up: distinct TASKS, BLOCKS, and the sums of \
         IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
-        calendar time the lanes took. With --per-run the table ends on an Average line \
-        instead: each sum over the table's distinct RUNS, with USD left blank and USD/RUN \
-        carrying the average. Read RUNS before believing a figure: a row that has only run a couple of times can \
+        calendar time the lanes took. With --per-task the table ends on an Average line \
+        instead: each sum over the table's distinct TASKS, with USD left blank and USD/TASK \
+        carrying the average. Read TASKS before believing a figure: a row that has only run a couple of times can \
         swing a long way on luck alone, and the column is there to say so.",
     after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway eval --by pipeline               every pipeline\n  \
@@ -516,30 +583,31 @@ impl EvalBy {
         spoolway eval --by version                every pipeline version, newest first\n  \
         spoolway eval --by task --since 30d       one row per run of a task\n  \
         spoolway eval --by task --trial <id>      a trial's arms, compared\n\n  \
-        spoolway eval --per-run                   each figure over its RUNS\n  \
+        spoolway eval --per-task                  each figure over its TASKS\n  \
         spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
-        RUNS counts every run that touched the row. PASS is the share of lanes that \n  \
-        reported pass, and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest \n  \
-        context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
-        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R, \n  \
-        CACHE W, USD and TIME are each the row's total. With --per-run, IN/RUN, OUT/RUN, \n  \
-        CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS. \n  \
-        IN USD, OUT USD, CACHE R USD and CACHE W USD price the column before each at \n  \
-        today's price table, so together they can differ from USD, which was banked when \n  \
-        the lane settled. With --per-run each is divided by RUNS like the rest.\n\n  \
+        TASKS counts every task that touched the row. PASS is the share of lanes that \n  \
+        reported pass, and BLOCKS is how many lanes ended blocked. CTX AVG is the mean of \n  \
+        every lane's own peak context reading, each as a share of its model's window. \n  \
+        Under --by task alone, CTX PEAK beside it is the highest share any one of the \n  \
+        task's lanes reached. IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's \n  \
+        total. With --per-task, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, USD/TASK \n  \
+        and TIME/TASK are each that total over TASKS. IN USD, OUT USD, CACHE R USD and \n  \
+        CACHE W USD price the column before each at today's price table, so together \n  \
+        they can differ from USD, which was banked when the lane settled. With \n  \
+        --per-task each is divided by TASKS like the rest.\n\n  \
         Every figure is a floor: an agent does not always write every request it makes \n  \
         to its transcript, and what it leaves out is missing here.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
-        Total carries distinct RUNS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
+        Total carries distinct TASKS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
         their four USD columns, USD and TIME. Its TIME is lane time added up, not the \n  \
-        calendar time the lanes took. With --per-run the line is Average: each sum over \n  \
-        the table's distinct RUNS, with USD blank and USD/RUN carrying the average. \n  \
-        PASS and the CTX PEAK columns stay blank on either."
+        calendar time the lanes took. With --per-task the line is Average: each sum over \n  \
+        the table's distinct TASKS, with USD blank and USD/TASK carrying the average. \n  \
+        PASS, CTX AVG and CTX PEAK stay blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under
-    /// every one.
+    /// every one, but for the `CTX PEAK` that `task` alone draws.
     #[arg(long, value_enum, value_name = "BY", default_value_t = EvalBy::Pipeline)]
     pub by: EvalBy,
 
@@ -617,13 +685,12 @@ pub struct EvalArgs {
     #[arg(long)]
     pub csv: bool,
 
-    /// Print each token, cost and time figure over the row's RUNS — IN/RUN,
-    /// USD/RUN, TIME/RUN and the rest — instead of the row's totals. Only
-    /// the printed table has two views: `--csv` and `--json` already carry
-    /// both column sets, so this is refused beside either, and beside
-    /// `--discard`.
+    /// Print each token, cost and time figure over the row's TASKS — IN/TASK,
+    /// USD/TASK, TIME/TASK and the rest — instead of the row's totals.
+    /// `--csv` and `--json` follow it, carrying the per-task columns in place
+    /// of the totals. Refused beside `--discard`, which prints no figures.
     #[arg(long)]
-    pub per_run: bool,
+    pub per_task: bool,
 
     /// Sort the rows by one column: its name as `--csv` spells it in the
     /// header, then `:asc` or `:desc` — descending when left off. Every
@@ -1867,6 +1934,41 @@ mod tests {
         assert_eq!(args.task.as_deref(), Some("solo-1"));
         assert_eq!(args.trial.as_deref(), Some("t1"));
         assert_eq!(args.pipeline_version.as_deref(), Some("1.1"));
+    }
+
+    /// `--per-run` is gone, and its refusal names `--per-task`, the flag
+    /// that replaced it, although clap finds the two too far apart to
+    /// suggest one for the other by itself. Any other unknown flag, and
+    /// `--per-run` passed to a command that never had it, is left as clap
+    /// words it.
+    #[test]
+    fn per_run_is_refused_naming_per_task() {
+        let refused = |argv: &[&str]| {
+            let mut cmd = command();
+            let err = cmd.try_get_matches_from_mut(argv).unwrap_err();
+            let err = with_renamed_flag(err, &mut cmd);
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            err.to_string()
+        };
+        let text = refused(&["spoolway", "eval", "--per-run"]);
+        assert!(
+            text.contains("tip: a similar argument exists: '--per-task'"),
+            "{text}"
+        );
+        assert!(text.contains("Usage: spoolway eval --per-task"), "{text}");
+
+        let text = refused(&["spoolway", "eval", "--zzzz"]);
+        assert!(!text.contains("tip:"), "{text}");
+        assert!(text.contains("Usage: spoolway eval [OPTIONS]"), "{text}");
+
+        let text = refused(&["spoolway", "lane", "--per-run"]);
+        assert!(!text.contains("--per-task"), "{text}");
+        assert!(text.contains("Usage: spoolway lane"), "{text}");
+
+        let text = refused(&["spoolway", "--per-run"]);
+        assert!(!text.contains("--per-task"), "{text}");
+
+        assert!(eval_args(&["--per-task"]).per_task);
     }
 
     fn try_lane_args(argv: &[&str]) -> Result<LaneArgs, clap::Error> {
