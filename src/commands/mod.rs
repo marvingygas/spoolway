@@ -75,9 +75,6 @@ mod jobs;
 mod lanes;
 mod r#override;
 mod pending;
-// Nothing outside its tests calls this yet: the queue screen's delete menu
-// is built on top of it separately.
-#[cfg_attr(not(test), allow(dead_code))]
 mod pending_delete;
 mod pipeline;
 mod queue;

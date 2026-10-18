@@ -4245,6 +4245,7 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
 
 use super::jobs::WalkStep;
 use super::pending::{Group, GroupState, PendingTask, TaskState};
+use super::pending_delete::{DeleteGroup, DeleteOutcome, DeleteTarget, delete_pending, delete_set};
 use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
@@ -4350,6 +4351,22 @@ enum Mode {
         nav: RoutineNav,
         target: RoutineDelete,
     },
+    /// The options menu's delete popup over the pending screen: `set`, the
+    /// pending files a delete of `target` takes, worked out when delete was
+    /// picked — see [`begin_pending_delete`]. `enter` on its one answer,
+    /// `delete`, removes them through [`delete_pending`], which reads the
+    /// pending directory again and refuses if it no longer gives `set`.
+    /// `esc` keeps them all. Every other key does nothing, so a stray
+    /// keystroke can neither delete nor dismiss it.
+    ///
+    /// The popup holds its own target and list rather than reading the row
+    /// under the cursor, since the queue reader can replace the groups
+    /// while it is open.
+    DeletePending {
+        title: String,
+        target: DeleteTarget,
+        set: Vec<DeleteGroup>,
+    },
     /// The options menu's new job schedule and pipeline popups over the
     /// routines pane `nav` describes, writing a job for the routine
     /// highlighted when new job was picked. The popups, their keys and the save are the jobs tab's own —
@@ -4418,7 +4435,7 @@ impl OptionsMenu {
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open, `g` gate,
 /// `t` trial, `s` save as routine, and the routines tab's `n` new job and
-/// `x` delete.
+/// `x` delete. Delete on the pending screen never had a key of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowOption {
     Open,
@@ -5830,6 +5847,20 @@ fn run_screen_from(
                 // keystroke can neither delete nor dismiss it.
                 _ => {}
             },
+            Mode::DeletePending { target, set, .. } => match key {
+                Key::Enter => {
+                    let outcome = delete_pending(repo, target, set);
+                    state.mode = after_pending_delete(repo, &mut groups, &mut state, outcome);
+                    // `groups` was just read again with the deleted files
+                    // gone; a reading already in flight could still carry
+                    // them back — see `refresh_from_reader`.
+                    known_reading = known_reading.max(reader.started_count());
+                }
+                Key::Esc => state.mode = Mode::Browsing,
+                // Every other key leaves the popup open, so a stray
+                // keystroke can neither delete nor dismiss it.
+                _ => {}
+            },
             Mode::Options(menu) => match key {
                 Key::Esc => state.mode = menu.closed(),
                 Key::Enter => {
@@ -6206,24 +6237,34 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 
 /// `o` on the pending screen: the menu for the row the focused pane
 /// highlights, titled with that row's name. Over the tasks pane a task
-/// offers open and then gate. Over the groups pane a group offers trial and
-/// then save as routine, both only where [`trial_target`] allows them, so a
-/// group with no tasks opens the menu with nothing in it. `None`, and no
-/// menu, when the focused pane highlights no row at all: an empty pending
-/// directory, a filter that matched nothing, or a tasks pane with no tasks.
+/// offers open and then gate, and then delete while the task is still a
+/// pending file. Over the groups pane a group offers trial and then save as
+/// routine, both only where [`trial_target`] allows them, so a group with
+/// no tasks opens the menu with nothing in it, and then delete while the
+/// group holds at least one pending file. Delete is never offered on a
+/// queued or done task: those files live in the queue or the archive, which
+/// this menu does not touch. `None`, and no menu, when the focused pane
+/// highlights no row at all: an empty pending directory, a filter that
+/// matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let (title, row, items) = match state.focus {
         Focus::Tasks => {
             let task = group.tasks.get(state.task_cursor)?;
-            let items = vec![RowOption::Open, RowOption::Gate];
+            let mut items = vec![RowOption::Open, RowOption::Gate];
+            if task.state == TaskState::Pending {
+                items.push(RowOption::Delete);
+            }
             (task.id.clone(), task_key(task), items)
         }
         Focus::Groups => {
-            let items = match trial_target(groups, state) {
+            let mut items = match trial_target(groups, state) {
                 Some(_) => vec![RowOption::Trial, RowOption::SaveRoutine],
                 None => Vec::new(),
             };
+            if group.tasks.iter().any(|t| t.state == TaskState::Pending) {
+                items.push(RowOption::Delete);
+            }
             (group.name.clone(), group_key(group), items)
         }
     };
@@ -6297,9 +6338,10 @@ struct Picked<'a> {
 impl Picked<'_> {
     /// `item` picked off `menu`: exactly what its old key ran, through that
     /// key's own check, so an item whose row no longer allows it does
-    /// nothing. On the pending screen the menu's row must also still be the
-    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
-    /// having done nothing.
+    /// nothing. Delete on the pending screen, which had no key, opens its
+    /// popup through [`begin_pending_delete`]. On the pending screen the
+    /// menu's row must also still be the highlighted one — see
+    /// [`OptionsMenu`]'s `row` — or the menu closes having done nothing.
     fn run(
         &self,
         groups: &[Group],
@@ -6348,9 +6390,10 @@ impl Picked<'_> {
                     name: group.name.clone(),
                 })
             }
-            // The routines tab's items are never put on the pending
+            RowOption::Delete => begin_pending_delete(groups, state).unwrap_or(closed),
+            // The routines tab's new job is never put on the pending
             // screen's menu.
-            RowOption::NewJob | RowOption::Delete => closed,
+            RowOption::NewJob => closed,
         }
     }
 }
@@ -7628,7 +7671,8 @@ pub(super) fn two_pane_frame(
 /// the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::NewJob`] — none
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
+/// [`Mode::NewJob`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
 /// reads only `enter` to close it, which its own popup says, and the line
@@ -7652,7 +7696,9 @@ fn footer(state: &ScreenState) -> String {
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
-        Mode::DeleteRoutine { .. } | Mode::Gate { .. } => hint(&crate::screen::answer_keys()),
+        Mode::DeleteRoutine { .. } | Mode::DeletePending { .. } | Mode::Gate { .. } => {
+            hint(&crate::screen::answer_keys())
+        }
         Mode::NewJob { walk, .. } => walk.footer(),
         Mode::JobSaved { .. } => hint(&confirm()),
         Mode::Trial(trial) => match trial.stage {
@@ -7876,6 +7922,11 @@ fn popup(
         ),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
+        Mode::DeletePending { title, set, .. } => Some(delete_pending_panel(
+            title,
+            set,
+            (checkbox_row_cap(layout), popup_height(layout)),
+        )),
         Mode::NewJob { walk, .. } => Some(walk.panel(pipelines)),
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border — see
@@ -8046,6 +8097,14 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
         tasks: 2,
         jobs: vec![("nightly-audit".to_string(), crate::jobs::Scope::User)],
     };
+    let pending = vec![DeleteGroup {
+        name: "cart".to_string(),
+        tasks: vec![super::pending_delete::DeleteEntry {
+            path: std::path::PathBuf::from("wire.md"),
+            id: "wire".to_string(),
+            depends_on: Vec::new(),
+        }],
+    }];
     vec![
         ("issue tracking", tool_gate_panel(&[unmet])),
         (
@@ -8053,6 +8112,10 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
             gate_steps_panel("wire", &steps, Some("review"), 0),
         ),
         ("delete routine", delete_routine_panel(&routine)),
+        (
+            "delete pending",
+            delete_pending_panel("delete wire", &pending, (80, None)),
+        ),
     ]
 }
 
@@ -9389,6 +9452,198 @@ fn after_routine_delete(
         ),
         (Ok(()), None) => Mode::Routines(nav),
     }
+}
+
+/// Delete picked off the pending screen's menu: [`Mode::DeletePending`] for
+/// the row the focused pane highlights. The set is worked out from every
+/// group the screen read, never [`shown`]'s filtered list: a dependent in a
+/// group the filter or `h` hides still loses its dependency, so it goes
+/// too. `None` when that row has no pending file left to delete.
+fn begin_pending_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let (title, target) = match state.focus {
+        Focus::Tasks => {
+            let task = group.tasks.get(state.task_cursor)?;
+            (
+                format!("delete {}", task.id),
+                DeleteTarget::Task(task.path.clone()),
+            )
+        }
+        Focus::Groups => (
+            format!("delete group {}", group.name),
+            DeleteTarget::Group(group.name.clone()),
+        ),
+    };
+    let set = delete_set(groups, &target);
+    (!set.is_empty()).then_some(Mode::DeletePending { title, target, set })
+}
+
+/// Every row of the delete popup outside its listing: the borders, blank
+/// and key row of [`TRIAL_PANEL_ROWS`], then a blank, its count and a blank
+/// over the listing, and a blank and its one answer under it.
+const DELETE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 5;
+
+/// Delete's popup on the pending screen: how many pending tasks go, then
+/// each group of the set at the body's edge with its tasks two columns in.
+/// A task with dependencies in the set names them after its id, the notes
+/// lined up in one column three spaces past the longest id.
+///
+/// Rows and the title are cut to `width` the way [`issue_question_panel`]
+/// cuts its rows, so a long task id never pushes the popup past the frame
+/// and loses its right border to [`overlay`]. The note column is pulled in
+/// so the longest note still fits, cutting the ids before it instead: the
+/// notes are what say why a task is in the set. It is never pulled in past
+/// half the width, since the ids are what the popup removes, and a note
+/// still too long is cut at its end with the rest of its row. The listing
+/// is held to `height` with a `↓ n more` row — see [`scroll_rows`] — so a
+/// large group never pushes the answer and the key row past the frame's
+/// bottom.
+fn delete_pending_panel(
+    title: &str,
+    set: &[DeleteGroup],
+    (width, height): (usize, Option<usize>),
+) -> Vec<String> {
+    let tasks = || set.iter().flat_map(|group| &group.tasks);
+    let count = tasks().count();
+    let noun = if count == 1 { "task" } else { "tasks" };
+    let mut body = vec![
+        String::new(),
+        clip(format!("Delete {count} pending {noun}:"), width),
+        String::new(),
+    ];
+    let note = |task: &super::pending_delete::DeleteEntry| {
+        format!("(depends on {})", task.depends_on.join(", "))
+    };
+    let longest_id = tasks().map(|task| task.id.chars().count()).max();
+    let longest_note = tasks()
+        .filter(|task| !task.depends_on.is_empty())
+        .map(|task| note(task).chars().count())
+        .max();
+    // Two columns of indent come before the id. The column moves in no
+    // further than half the width or five columns, whichever is more, so a
+    // cut id keeps at least one character and its `…` ahead of the
+    // three-space gap: one long note would otherwise pull it in to a bare
+    // `…` on every row.
+    let natural = longest_id.unwrap_or(0) + 3;
+    let column = natural
+        .min(width.saturating_sub(2 + longest_note.unwrap_or(0)))
+        .max(natural.min((width / 2).max(5)));
+    let mut rows = Vec::new();
+    for group in set {
+        rows.push(clip(group.name.clone(), width));
+        for task in &group.tasks {
+            let row = if task.depends_on.is_empty() {
+                format!("  {}", task.id)
+            } else {
+                let id = clip(task.id.clone(), column - 3);
+                format!("  {}{}", pad_to(&id, column), note(task))
+            };
+            rows.push(clip(row, width));
+        }
+    }
+    body.extend(scroll_rows(&rows, 0, list_room(height, DELETE_CHROME_ROWS)));
+    // `boxed` pads the space between its borders to five columns past the
+    // title and four past a body row, so a title one column under `width`
+    // needs no more room than a body row of `width`.
+    let title = clip(title.to_string(), width.saturating_sub(1));
+    crate::screen::ask(&title, &body, &["delete".to_string()], 0)
+}
+
+/// The text of the notice a delete opens when the pending directory no
+/// longer gives the list its popup showed.
+const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
+                               Nothing was deleted.\n\
+                               Pick delete again to see the current list.";
+
+/// The pending screen after `enter` on delete's popup, whatever the delete
+/// answered: `groups` read again so the removed files drop out, the
+/// selection cut to groups that can still be queued, gates dropped for
+/// tasks no longer listed, and the cursors pulled back inside what is left.
+/// Answers the popup to open: none after a delete that removed everything,
+/// a notice when it removed nothing or stopped part way.
+///
+/// A re-read that fails is named in that notice, or in a notice of its own
+/// after a delete that removed everything, the same as
+/// [`after_routine_delete`] does: the list on screen may then be missing
+/// other changes on disk until the queue reader reads again.
+fn after_pending_delete(
+    repo: &Repo,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    answer: DeleteOutcome,
+) -> Mode {
+    let (fresh, reread_err) = match super::pending::list_groups_and_skipped(repo) {
+        Ok((fresh, _)) => (fresh, None),
+        Err(err) => (without_removed(groups), Some(format!("{err:#}"))),
+    };
+    adopt_groups(fresh, groups, state);
+    // A deleted group left selected would be queued by the next `enter`.
+    state
+        .selected
+        .retain(|key| groups.iter().any(|g| group_key(g) == *key && selectable(g)));
+    // A gate is held by path, so one left behind would land on a new file
+    // written later under the same name.
+    state.gates.retain(|key, _| {
+        groups
+            .iter()
+            .flat_map(|group| &group.tasks)
+            .any(|task| task_key(task) == *key)
+    });
+    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    match answer {
+        DeleteOutcome::Removed => match reread_err {
+            Some(err) => outcome("tasks deleted", reread(&err)),
+            None => Mode::Browsing,
+        },
+        DeleteOutcome::Changed => match reread_err {
+            Some(err) => outcome(
+                "not deleted",
+                format!("{PENDING_CHANGED}\n\n{}", reread(&err)),
+            ),
+            None => outcome("not deleted", PENDING_CHANGED),
+        },
+        DeleteOutcome::Failed {
+            error,
+            kind,
+            removed,
+            left,
+        } => {
+            let remedy = match kind {
+                Some(std::io::ErrorKind::PermissionDenied) => {
+                    "Fix the file's permissions, then pick delete again."
+                }
+                _ => "Fix the error above, then pick delete again.",
+            };
+            let mut text = partial_delete(&anyhow::Error::msg(error.clone()), &removed, &left);
+            // A delete stopped by this same read failing already opens on
+            // its error; naming it a second time says nothing more.
+            if let Some(err) = reread_err.filter(|err| *err != error) {
+                text.push_str(&format!("\n\n{}", reread(&err)));
+            }
+            outcome("tasks not fully deleted", format!("{text}\n\n{remedy}"))
+        }
+    }
+}
+
+/// `groups` with every pending task whose file is gone taken out, for when
+/// the pending directory will not read after a delete: a deleted task is
+/// then not drawn as if it were still there, and the queue reader reads
+/// again on its next poll.
+///
+/// A group left with no task at all drops out. One that still holds queued
+/// or done tasks stays, as a read would list it, its state folded again
+/// from what it has left, so a group with no pending task left is no
+/// longer selectable.
+fn without_removed(groups: &[Group]) -> Vec<Group> {
+    let mut kept = groups.to_vec();
+    for group in &mut kept {
+        group
+            .tasks
+            .retain(|t| t.state != TaskState::Pending || t.path.exists());
+        group.state = super::pending::group_state(&group.tasks);
+    }
+    kept.retain(|group| !group.tasks.is_empty());
+    kept
 }
 
 /// Every task in the ticked routines — each one's nested subfolders
@@ -13352,10 +13607,11 @@ mod tests {
     }
 
     /// `o` lists what the focused row can do, titled with its name: over
-    /// the tasks pane a task offers open then gate, over the groups pane a
-    /// group offers trial then save as routine. A group with no tasks has
-    /// neither and opens the menu with nothing in it, and a pane with no
-    /// row under its cursor opens no menu at all.
+    /// the tasks pane a pending task offers open, gate then delete, over
+    /// the groups pane a group with a pending task offers trial, save as
+    /// routine then delete. A group with no tasks has none of them and opens
+    /// the menu with nothing in it, and a pane with no row under its cursor
+    /// opens no menu at all.
     #[test]
     fn the_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("screen-options-lists");
@@ -13365,11 +13621,17 @@ mod tests {
 
         let menu = pending_options(&groups, &state).unwrap();
         assert_eq!(menu.title, "a");
-        assert_eq!(menu.items, [RowOption::Trial, RowOption::SaveRoutine]);
+        assert_eq!(
+            menu.items,
+            [RowOption::Trial, RowOption::SaveRoutine, RowOption::Delete]
+        );
         state.focus = Focus::Tasks;
         let menu = pending_options(&groups, &state).unwrap();
         assert_eq!(menu.title, "wire");
-        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+        assert_eq!(
+            menu.items,
+            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+        );
 
         // `list_groups` never hands back an empty group, so one is made by
         // hand: the case `trial_target` refuses.
@@ -13468,6 +13730,706 @@ mod tests {
         state.task_cursor = 1 - state.task_cursor;
         let mode = picked.run(&groups, &[], &state, &menu, RowOption::Gate);
         assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+    }
+
+    /// Two groups where deleting `cart-totals` reaches into the other one:
+    /// `cart-discounts` and `checkout-total` both depend on it.
+    /// `checkout` is written first, so `cart` lists first either way the
+    /// groups sort: newest first, or by name on a tie.
+    fn seed_cart_and_checkout(repo: &Repo) {
+        for (id, extra) in [
+            ("checkout-page", "group: checkout\n"),
+            (
+                "checkout-total",
+                "group: checkout\ndepends_on: [cart-totals]\n",
+            ),
+            ("cart-empty-state", "group: cart\n"),
+            ("cart-totals", "group: cart\n"),
+            ("cart-discounts", "group: cart\ndepends_on: [cart-totals]\n"),
+        ] {
+            write_pending(repo, id, &task_text(id, extra, BODY));
+        }
+    }
+
+    /// One task of a [`hand_set`]: its id and the ids it depends on.
+    type HandTask<'a> = (&'a str, &'a [&'a str]);
+
+    /// A delete set built by hand, `(group, [(id, depends_on)])`, with
+    /// each task's file in `dir`.
+    fn hand_set(dir: &std::path::Path, groups: &[(&str, &[HandTask])]) -> Vec<DeleteGroup> {
+        groups
+            .iter()
+            .map(|(name, tasks)| DeleteGroup {
+                name: name.to_string(),
+                tasks: tasks
+                    .iter()
+                    .map(|(id, deps)| super::super::pending_delete::DeleteEntry {
+                        path: dir.join(format!("{id}.md")),
+                        id: id.to_string(),
+                        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Delete comes last on a menu exactly when its row has a pending file:
+    /// after save as routine on a group with one, after gate on a pending
+    /// task. A queued task, and a group whose tasks are all queued or done,
+    /// are not offered it.
+    #[test]
+    fn delete_is_offered_last_exactly_on_rows_with_a_pending_file() {
+        let (repo, _root_guard) = fixture("screen-delete-offered");
+        write_pending_two(
+            &repo,
+            "left",
+            &task_text("left", "group: a\n", BODY),
+            "right",
+            &task_text("right", "group: a\n", BODY),
+        );
+        let mut groups = listed(&repo);
+        let state = ScreenState::new();
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(
+            menu.items,
+            [RowOption::Trial, RowOption::SaveRoutine, RowOption::Delete]
+        );
+        let state = on_pending_task(&groups, "left");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(
+            menu.items,
+            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+        );
+
+        // Set by hand: what `list_groups` gives a task the queue or the
+        // archive already holds.
+        let at = state.task_cursor;
+        groups[0].tasks[at].state = TaskState::Queued;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+        let other = 1 - at;
+        groups[0].tasks[other].state = TaskState::Done;
+        let menu = pending_options(&groups, &ScreenState::new()).unwrap();
+        assert_eq!(menu.items, [RowOption::Trial, RowOption::SaveRoutine]);
+    }
+
+    /// The menu draws delete last, and picking it on a group opens the
+    /// popup titled with the group, over the popup's own key line.
+    #[test]
+    fn picking_delete_on_a_group_opens_its_popup() {
+        let (repo, _root_guard) = fixture("screen-delete-group-popup");
+        seed_cart_and_checkout(&repo);
+
+        let menu = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B")).to_string();
+        assert!(menu.contains("│    save as routine  "), "{menu}");
+        assert!(menu.contains("│  > delete  "), "{menu}");
+
+        let last = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B\r")).to_string();
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ delete group cart ")),
+            "{last}"
+        );
+        assert!(last.contains("Delete 4 pending tasks:"), "{last}");
+        assert!(last.contains("(depends on cart-totals)"), "{last}");
+        assert_eq!(
+            last.matches("[enter] confirm   [esc] close").count(),
+            2,
+            "in the popup and on the line under the frame: {last}"
+        );
+    }
+
+    /// Picking delete on a task works out its set from every group, and
+    /// the popup is titled with the task.
+    #[test]
+    fn picking_delete_on_a_task_opens_the_popup_for_it_and_its_dependents() {
+        let (repo, _root_guard) = fixture("screen-delete-task-popup");
+        seed_cart_and_checkout(&repo);
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &repo.routines_dir(),
+        };
+        let mut state = on_pending_task(&groups, "cart-totals");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        state.mode = picked.run(&groups, &[], &state, &menu, RowOption::Delete);
+        let Mode::DeletePending { title, set, .. } = &state.mode else {
+            panic!("{:?}", state.mode);
+        };
+        assert_eq!(title, "delete cart-totals");
+        let ids: Vec<&str> = set
+            .iter()
+            .flat_map(|group| &group.tasks)
+            .map(|task| task.id.as_str())
+            .collect();
+        assert_eq!(ids, ["cart-totals", "cart-discounts", "checkout-total"]);
+        let panel = popup(&groups, &pipelines, &state, layout("")).unwrap();
+        assert!(panel[0].contains("─ delete cart-totals "), "{panel:#?}");
+    }
+
+    /// The popup's lines, row for row, for a group, a lone task and a task
+    /// with dependents in two groups: the count, each group at the body's
+    /// edge, its tasks two columns in, and the notes lined up three spaces
+    /// past the longest id.
+    #[test]
+    fn the_delete_popup_lists_each_group_and_its_tasks_with_their_notes() {
+        let dir = std::path::Path::new("/p");
+        let group = hand_set(
+            dir,
+            &[
+                (
+                    "cart",
+                    &[
+                        ("cart-empty-state", &[]),
+                        ("cart-totals", &[]),
+                        ("cart-discounts", &["cart-totals"]),
+                    ],
+                ),
+                ("checkout", &[("checkout-total", &["cart-totals"])]),
+            ],
+        );
+        assert_eq!(
+            delete_pending_panel("delete group cart", &group, (200, None)),
+            [
+                "╭─ delete group cart ─────────────────────────────╮",
+                "│                                                 │",
+                "│  Delete 4 pending tasks:                        │",
+                "│                                                 │",
+                "│  cart                                           │",
+                "│    cart-empty-state                             │",
+                "│    cart-totals                                  │",
+                "│    cart-discounts     (depends on cart-totals)  │",
+                "│  checkout                                       │",
+                "│    checkout-total     (depends on cart-totals)  │",
+                "│                                                 │",
+                "│  > delete                                       │",
+                "│                                                 │",
+                "│  [enter] confirm   [esc] close                  │",
+                "╰─────────────────────────────────────────────────╯",
+            ]
+        );
+
+        let lone = hand_set(dir, &[("cart", &[("cart-empty-state", &[])])]);
+        assert_eq!(
+            delete_pending_panel("delete cart-empty-state", &lone, (200, None)),
+            [
+                "╭─ delete cart-empty-state ───────╮",
+                "│                                 │",
+                "│  Delete 1 pending task:         │",
+                "│                                 │",
+                "│  cart                           │",
+                "│    cart-empty-state             │",
+                "│                                 │",
+                "│  > delete                       │",
+                "│                                 │",
+                "│  [enter] confirm   [esc] close  │",
+                "╰─────────────────────────────────╯",
+            ]
+        );
+
+        let chain = hand_set(
+            dir,
+            &[
+                (
+                    "cart",
+                    &[("cart-totals", &[]), ("cart-discounts", &["cart-totals"])],
+                ),
+                ("checkout", &[("checkout-total", &["cart-totals"])]),
+            ],
+        );
+        assert_eq!(
+            delete_pending_panel("delete cart-totals", &chain, (200, None)),
+            [
+                "╭─ delete cart-totals ──────────────────────────╮",
+                "│                                               │",
+                "│  Delete 3 pending tasks:                      │",
+                "│                                               │",
+                "│  cart                                         │",
+                "│    cart-totals                                │",
+                "│    cart-discounts   (depends on cart-totals)  │",
+                "│  checkout                                     │",
+                "│    checkout-total   (depends on cart-totals)  │",
+                "│                                               │",
+                "│  > delete                                     │",
+                "│                                               │",
+                "│  [enter] confirm   [esc] close                │",
+                "╰───────────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// A task id longer than the frame is cut, in the rows and the title,
+    /// so the popup keeps its right border inside the cap `overlay` would
+    /// otherwise cut it at. The note column moves in rather than out, so
+    /// every note is still drawn whole: the long id is cut before its note,
+    /// and a short id keeps its note in the same column.
+    #[test]
+    fn a_long_task_id_is_cut_to_the_frames_width() {
+        let long = "a-task-id-far-too-long-to-fit-in-any-reasonable-popup-width-at-all";
+        let set = hand_set(
+            std::path::Path::new("/p"),
+            &[(
+                "cart",
+                &[("base", &[]), (long, &["base"]), ("short", &["base"])],
+            )],
+        );
+        let width = 40;
+        let panel = delete_pending_panel(&format!("delete {long}"), &set, (width, None));
+        for row in &panel {
+            // `boxed` adds six columns around a body row of `width`.
+            assert!(row.chars().count() <= width + 6, "{row:?}");
+        }
+        let row = |start: &str| {
+            panel
+                .iter()
+                .find(|row| row.starts_with(start))
+                .unwrap_or_else(|| panic!("{start:?}: {panel:#?}"))
+                .clone()
+        };
+        let cut = row("│    a-task-id-far");
+        assert!(cut.contains("…   (depends on base)"), "{cut}");
+        let short = row("│    short ");
+        assert!(short.contains("(depends on base)"), "{short}");
+        // Counted in characters: the `…` is three bytes.
+        let column = |row: &str| row.split("(depends").next().unwrap().chars().count();
+        assert_eq!(column(&cut), column(&short), "one column: {panel:#?}");
+        assert!(panel[0].contains('…'), "the title is cut: {}", panel[0]);
+    }
+
+    /// A note longer than the frame does not pull the note column in past
+    /// half the width: every id is still drawn whole, and the long note is
+    /// cut at its end with its row.
+    #[test]
+    fn a_note_longer_than_the_frame_keeps_every_id() {
+        let set = hand_set(
+            std::path::Path::new("/p"),
+            &[(
+                "cart",
+                &[
+                    ("cart-totals-sum", &[]),
+                    ("cart-discounts1", &[]),
+                    ("cart-shipping-x", &[]),
+                    (
+                        "cart-summary",
+                        &["cart-totals-sum", "cart-discounts1", "cart-shipping-x"],
+                    ),
+                    ("cart-badge", &["cart-totals-sum"]),
+                ],
+            )],
+        );
+        let width = 58;
+        let panel = delete_pending_panel("delete group cart", &set, (width, None));
+        for row in &panel {
+            // `boxed` adds six columns around a body row of `width`.
+            assert!(row.chars().count() <= width + 6, "{row:?}");
+        }
+        let row = |start: &str| {
+            panel
+                .iter()
+                .find(|row| row.starts_with(start))
+                .unwrap_or_else(|| panic!("{start:?}: {panel:#?}"))
+                .clone()
+        };
+        let summary = row("│    cart-summary ");
+        assert!(
+            summary.contains("(depends on cart-totals-sum, "),
+            "{summary}"
+        );
+        assert!(summary.contains("…"), "{summary}");
+        let badge = row("│    cart-badge ");
+        assert!(badge.contains("(depends on cart-totals-sum)"), "{badge}");
+        // Counted in characters: the `…` is three bytes.
+        let column = |row: &str| row.split("(depends").next().unwrap().chars().count();
+        assert_eq!(column(&summary), column(&badge), "one column: {panel:#?}");
+    }
+
+    /// A set with more rows than the frame has room for is held to the
+    /// popup's height: the listing ends on a `↓ n more` row, and the answer,
+    /// the key row and the bottom border are still drawn.
+    #[test]
+    fn a_set_taller_than_the_frame_is_held_to_its_height() {
+        let ids: Vec<String> = (0..25).map(|i| format!("task-{i}")).collect();
+        let tasks: Vec<HandTask> = ids.iter().map(|id| (id.as_str(), &[][..])).collect();
+        let set = hand_set(std::path::Path::new("/p"), &[("big", &tasks)]);
+
+        let panel = delete_pending_panel("delete group big", &set, (80, Some(20)));
+
+        assert_eq!(panel.len(), 20, "{panel:#?}");
+        assert!(panel[0].starts_with(TOP_LEFT), "{panel:#?}");
+        assert!(panel[19].starts_with(BOTTOM_LEFT), "{panel:#?}");
+        assert!(
+            panel[18].contains("[enter] confirm   [esc] close"),
+            "{panel:#?}"
+        );
+        assert!(panel[16].contains("> delete"), "{panel:#?}");
+        // 11 rows of listing: the group, nine tasks and the marker.
+        assert!(panel[14].contains("↓ 16 more"), "{panel:#?}");
+        assert!(panel[2].contains("Delete 25 pending tasks:"), "{panel:#?}");
+    }
+
+    /// `esc` closes the popup with every file still there, and any other
+    /// key but `enter` leaves it open.
+    #[test]
+    fn delete_then_esc_keeps_every_pending_file() {
+        let (repo, _root_guard) = fixture("screen-delete-esc");
+        seed_cart_and_checkout(&repo);
+        let files = || {
+            let mut names: Vec<String> = std::fs::read_dir(repo.pending_dir())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = files();
+
+        let held = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B\ryq jx")).to_string();
+        assert!(held.contains("─ delete group cart "), "{held}");
+        assert_eq!(files(), before);
+
+        let last = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B\r\x1b")).to_string();
+        assert!(!last.contains("delete group cart"), "{last}");
+        assert!(last.contains("> [ ] cart"), "{last}");
+        assert_eq!(files(), before);
+    }
+
+    /// `enter` removes the listed files and opens no popup: the group
+    /// leaves the list, and the cursor sits on the one that is left.
+    #[test]
+    fn delete_then_enter_removes_the_files_and_the_group_leaves_the_list() {
+        let (repo, _root_guard) = fixture("screen-delete-enter");
+        seed_cart_and_checkout(&repo);
+
+        let last = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B\r\r")).to_string();
+
+        let dir = repo.pending_dir();
+        for gone in [
+            "cart-empty-state",
+            "cart-totals",
+            "cart-discounts",
+            "checkout-total",
+        ] {
+            assert!(!dir.join(format!("{gone}.md")).exists(), "{gone}");
+        }
+        assert!(dir.join("checkout-page.md").exists());
+        assert!(last.contains("> [ ] checkout"), "{last}");
+        assert!(!last.contains("cart"), "{last}");
+        assert!(!last.contains("[enter] confirm"), "no popup: {last}");
+    }
+
+    /// A deleted group leaves the selection, so the next `enter` cannot
+    /// try to queue it; a group that is still listed stays selected, and
+    /// the cursors are pulled back inside what is left.
+    #[test]
+    fn a_deleted_group_leaves_the_selection() {
+        let (repo, _root_guard) = fixture("screen-delete-selected");
+        seed_cart_and_checkout(&repo);
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        state.selected = ["cart", "checkout"].map(str::to_string).into();
+        // On `cart`'s third task, a row `checkout` does not have.
+        state.task_cursor = 2;
+        let Some(Mode::DeletePending { target, set, .. }) = begin_pending_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+
+        let answer = delete_pending(&repo, &target, &set);
+        let mode = after_pending_delete(&repo, &mut groups, &mut state, answer);
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["checkout"]);
+        assert_eq!(
+            state.selected,
+            ["checkout".to_string()].into(),
+            "only the deleted group left it"
+        );
+        assert_eq!((state.group_cursor, state.task_cursor), (0, 0));
+    }
+
+    /// A gate held on a deleted task is dropped with it, so a file written
+    /// later under the same name does not open already gated. A gate on a
+    /// task the delete left alone stays.
+    #[test]
+    fn a_deleted_tasks_gate_is_dropped() {
+        let (repo, _root_guard) = fixture("screen-delete-gates");
+        seed_cart_and_checkout(&repo);
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        let dir = repo.pending_dir();
+        let key = |id: &str| dir.join(format!("{id}.md")).display().to_string();
+        state.gates.insert(key("cart-totals"), "review".to_string());
+        state
+            .gates
+            .insert(key("checkout-page"), "review".to_string());
+        let Some(Mode::DeletePending { target, set, .. }) = begin_pending_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+
+        let answer = delete_pending(&repo, &target, &set);
+        after_pending_delete(&repo, &mut groups, &mut state, answer);
+
+        let kept: Vec<&String> = state.gates.keys().collect();
+        assert_eq!(kept, [&key("checkout-page")]);
+    }
+
+    /// A pending directory that will not read after a delete keeps the old
+    /// list minus the files gone from disk, and says so: in a notice of its
+    /// own after a full delete, and after the "changed" text otherwise.
+    #[test]
+    fn a_list_that_will_not_read_after_a_delete_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-delete-reread");
+        seed_cart_and_checkout(&repo);
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        state.selected = ["cart", "checkout"].map(str::to_string).into();
+        let Some(Mode::DeletePending { target, set, .. }) = begin_pending_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+        let answer = delete_pending(&repo, &target, &set);
+        assert_eq!(answer, DeleteOutcome::Removed);
+        // Write and search but no read: the listing fails, while a file's
+        // own `exists` still answers.
+        let dir = repo.pending_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o300);
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        let removed = after_pending_delete(&repo, &mut groups, &mut state, answer);
+        let changed = after_pending_delete(
+            &repo,
+            &mut groups.clone(),
+            &mut state,
+            DeleteOutcome::Changed,
+        );
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["checkout"]);
+        let ids: Vec<&str> = groups[0].tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["checkout-page"]);
+        assert_eq!(state.selected, ["checkout".to_string()].into());
+        let Mode::Outcome { notice, .. } = removed else {
+            panic!("{removed:?}");
+        };
+        assert_eq!(notice.title, "tasks deleted");
+        assert!(
+            notice
+                .text
+                .starts_with("The pending task list would not read again: "),
+            "{}",
+            notice.text
+        );
+        let Mode::Outcome { notice, .. } = changed else {
+            panic!("{changed:?}");
+        };
+        assert!(
+            notice.text.starts_with(&format!(
+                "{PENDING_CHANGED}\n\nThe pending task list would not read again: "
+            )),
+            "{}",
+            notice.text
+        );
+    }
+
+    /// The fallback list drops a group only once it has no task at all. A
+    /// group whose pending task is gone but which still holds a queued one
+    /// stays, as a read would list it, and folds to queued, so it can no
+    /// longer be selected.
+    #[test]
+    fn the_fallback_list_keeps_a_group_that_still_holds_queued_tasks() {
+        let (repo, _root_guard) = fixture("screen-delete-fallback");
+        write_pending_two(
+            &repo,
+            "left",
+            &task_text("left", "group: a\n", BODY),
+            "right",
+            &task_text("right", "group: a\n", BODY),
+        );
+        write_pending(&repo, "solo", &task_text("solo", "group: b\n", BODY));
+        let mut groups = listed(&repo);
+        let a = groups.iter().position(|g| g.name == "a").unwrap();
+        let queued = groups[a].tasks.iter().position(|t| t.id == "left").unwrap();
+        // Set by hand: what a read gives a task the queue already holds.
+        groups[a].tasks[queued].state = TaskState::Queued;
+        std::fs::remove_file(repo.pending_dir().join("right.md")).unwrap();
+        std::fs::remove_file(repo.pending_dir().join("solo.md")).unwrap();
+
+        let kept = without_removed(&groups);
+
+        let names: Vec<&str> = kept.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["a"], "b has no task left");
+        let ids: Vec<&str> = kept[0].tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["left"]);
+        assert_eq!(kept[0].state, GroupState::Queued);
+        assert!(!selectable(&kept[0]));
+    }
+
+    /// A pending directory that changed after the popup opened answers the
+    /// "not deleted" notice, word for word, with nothing removed.
+    #[test]
+    fn a_list_changed_since_the_popup_opened_deletes_nothing() {
+        let (repo, _root_guard) = fixture("screen-delete-changed");
+        seed_cart_and_checkout(&repo);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "cart-totals");
+        let Some(Mode::DeletePending { target, set, .. }) = begin_pending_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+        write_pending(
+            &repo,
+            "cart-coupons",
+            &task_text(
+                "cart-coupons",
+                "group: cart\ndepends_on: [cart-totals]\n",
+                BODY,
+            ),
+        );
+
+        let answer = delete_pending(&repo, &target, &set);
+        let mode = after_pending_delete(&repo, &mut groups, &mut state, answer);
+
+        assert!(repo.pending_dir().join("cart-totals.md").exists());
+        let Mode::Outcome { notice, .. } = mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(
+            notice.panel(crate::screen::NOTICE_WRAP),
+            [
+                "╭─ not deleted ───────────────────────────────────╮",
+                "│                                                 │",
+                "│  Pending tasks changed after the popup opened.  │",
+                "│  Nothing was deleted.                           │",
+                "│  Pick delete again to see the current list.     │",
+                "│                                                 │",
+                "│  [enter] confirm                                │",
+                "╰─────────────────────────────────────────────────╯",
+            ]
+        );
+        assert!(
+            groups
+                .iter()
+                .flat_map(|g| &g.tasks)
+                .any(|t| t.id == "cart-coupons"),
+            "the groups were read again"
+        );
+    }
+
+    /// A removal that stopped part way answers the "tasks not fully
+    /// deleted" notice, word for word: the error, what was removed and
+    /// what was left, then the remedy for a permission error.
+    #[test]
+    fn a_failed_delete_names_what_was_removed_and_what_was_left() {
+        let (repo, _root_guard) = fixture("screen-delete-failed-text");
+        let mut groups = Vec::new();
+        let mut state = ScreenState::new();
+        let answer = DeleteOutcome::Failed {
+            error: "cart-totals.md: Permission denied (os error 13)".to_string(),
+            kind: Some(std::io::ErrorKind::PermissionDenied),
+            removed: ["checkout-total.md", "cart-discounts.md"]
+                .map(str::to_string)
+                .into(),
+            left: vec!["cart-totals.md".to_string()],
+        };
+
+        let Mode::Outcome { notice, .. } =
+            after_pending_delete(&repo, &mut groups, &mut state, answer)
+        else {
+            panic!("no notice");
+        };
+        assert_eq!(
+            notice.panel(crate::screen::NOTICE_WRAP),
+            [
+                "╭─ tasks not fully deleted ─────────────────────────────╮",
+                "│                                                       │",
+                "│  cart-totals.md: Permission denied (os error 13)      │",
+                "│                                                       │",
+                "│  removed:                                             │",
+                "│    checkout-total.md                                  │",
+                "│    cart-discounts.md                                  │",
+                "│                                                       │",
+                "│  left:                                                │",
+                "│    cart-totals.md                                     │",
+                "│                                                       │",
+                "│  Fix the file's permissions, then pick delete again.  │",
+                "│                                                       │",
+                "│  [enter] confirm                                      │",
+                "╰───────────────────────────────────────────────────────╯",
+            ]
+        );
+
+        // Any other error, a refusal before anything was removed among
+        // them, ends on the one general remedy and no other.
+        let answer = DeleteOutcome::Failed {
+            error: "/q/cart-totals.md is not in the pending directory, so nothing was removed"
+                .to_string(),
+            kind: None,
+            removed: Vec::new(),
+            left: vec!["cart-totals.md".to_string()],
+        };
+        let Mode::Outcome { notice, .. } =
+            after_pending_delete(&repo, &mut groups, &mut state, answer)
+        else {
+            panic!("no notice");
+        };
+        assert_eq!(
+            notice.text,
+            "/q/cart-totals.md is not in the pending directory, so nothing was removed\n\n\
+             removed:\n  nothing\n\n\
+             left:\n  cart-totals.md\n\n\
+             Fix the error above, then pick delete again."
+        );
+    }
+
+    /// A real permission error on the pending directory stops the delete
+    /// with every file left, and the notice ends on the permissions remedy.
+    #[test]
+    fn a_pending_directory_that_takes_no_write_fails_on_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-delete-failed-perms");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        let Some(Mode::DeletePending { target, set, .. }) = begin_pending_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+        let dir = repo.pending_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o500); // read + execute, no write
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        let answer = delete_pending(&repo, &target, &set);
+        let mode = after_pending_delete(&repo, &mut groups, &mut state, answer);
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        assert!(dir.join("wire.md").exists());
+        let Mode::Outcome { notice, .. } = mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "tasks not fully deleted");
+        assert!(
+            notice
+                .text
+                .ends_with("\n\nFix the file's permissions, then pick delete again."),
+            "{}",
+            notice.text
+        );
+        assert_eq!(state.selected.len(), 0);
+        assert_eq!(groups.len(), 1, "the group is still listed");
     }
 
     /// On the routines tab, `o` over the list offers new job then delete,

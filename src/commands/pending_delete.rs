@@ -49,7 +49,13 @@ pub(crate) enum DeleteOutcome {
     Removed,
     Changed,
     Failed {
+        /// What went wrong, and nothing about what to do next: the popup
+        /// that shows it ends on the remedy, chosen by `kind`.
         error: String,
+        /// The kind of the error removing a file gave, so the popup can
+        /// name the remedy for it. `None` when no file removal failed: the
+        /// re-read of the directory, or a path refused before removing.
+        kind: Option<std::io::ErrorKind>,
         removed: Vec<String>,
         left: Vec<String>,
     },
@@ -199,10 +205,10 @@ fn remove_in_order(
     if let Some(bad) = order.iter().find(|t| t.path.parent() != Some(pending_dir)) {
         return DeleteOutcome::Failed {
             error: format!(
-                "{} is not in the pending directory, so nothing was removed — \
-                 pick delete again from the queue tab, and report it if it persists",
+                "{} is not in the pending directory, so nothing was removed",
                 bad.path.display()
             ),
+            kind: None,
             removed: Vec::new(),
             left: names,
         };
@@ -214,6 +220,7 @@ fn remove_in_order(
             Err(err) => {
                 return DeleteOutcome::Failed {
                     error: format!("{}: {err}", names[done]),
+                    kind: Some(err.kind()),
                     removed: names[..done].to_vec(),
                     left: names[done..].to_vec(),
                 };
@@ -239,10 +246,8 @@ pub(crate) fn delete_pending(
         Ok(read) => read,
         Err(err) => {
             return DeleteOutcome::Failed {
-                error: format!(
-                    "{err:#}\n\nnothing was removed — fix what the error above names, \
-                     then pick delete again from the queue tab"
-                ),
+                error: format!("{err:#}"),
+                kind: None,
                 removed: Vec::new(),
                 left: removal_order(shown)
                     .iter()
@@ -549,10 +554,12 @@ mod tests {
     }
 
     /// A pending directory that cannot be read is not "changed": nothing was
-    /// removed, and the error says what to fix, since `spoolway doctor`
-    /// never looks at the pending directory.
+    /// removed, and the error is the read's own, naming the directory. It
+    /// carries no remedy of its own, since the popup showing it adds one,
+    /// and never `spoolway doctor`, which does not look at the pending
+    /// directory.
     #[test]
-    fn an_unreadable_pending_directory_removes_nothing_and_says_what_to_do() {
+    fn an_unreadable_pending_directory_removes_nothing_and_names_the_error() {
         let (repo, _guard) = crate::commands::testutil::fixture("pdel-unreadable");
         let a = write(&repo, "a", "solo", &[]);
         let target = DeleteTarget::Task(a);
@@ -568,13 +575,15 @@ mod tests {
             error,
             removed,
             left,
+            ..
         } = outcome
         else {
             panic!("{outcome:?}");
         };
         assert!(removed.is_empty());
         assert_eq!(left, strs(&["a.md"]));
-        assert!(error.contains("pick delete again"), "{error}");
+        assert!(error.contains(&dir.display().to_string()), "{error}");
+        assert!(!error.contains("pick delete again"), "{error}");
         assert!(!error.contains("doctor"), "{error}");
     }
 
@@ -662,6 +671,7 @@ mod tests {
 
         let DeleteOutcome::Failed {
             error,
+            kind,
             removed,
             left,
         } = outcome
@@ -669,6 +679,7 @@ mod tests {
             panic!("{outcome:?}");
         };
         assert!(error.starts_with("mid.md: "), "{error}");
+        assert_eq!(kind, Some(std::io::ErrorKind::PermissionDenied));
         assert_eq!(removed, strs(&["leaf.md"]));
         assert_eq!(left, strs(&["mid.md", "root.md"]));
         // Stopped at the failure: `root.md` was never attempted.
@@ -690,6 +701,7 @@ mod tests {
             error,
             removed,
             left,
+            ..
         } = outcome
         else {
             panic!("{outcome:?}");
@@ -697,9 +709,9 @@ mod tests {
         assert!(removed.is_empty());
         assert_eq!(left, strs(&["leaf.md", "mid.md", "root.md"]));
         assert!(!called.get(), "a refused set must remove nothing");
-        assert!(
-            error.contains("pick delete again"),
-            "a refusal says what to do: {error}"
+        assert_eq!(
+            error, "/q/mid.md is not in the pending directory, so nothing was removed",
+            "the popup showing it adds the remedy"
         );
     }
 }

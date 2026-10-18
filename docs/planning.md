@@ -179,11 +179,53 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
 | `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |
+| `delete` | A group with a pending task, or a pending task. | Delete pending files. See [Deleting pending tasks](#deleting-pending-tasks). |
 
 A group with no tasks opens the menu with `nothing to do here` over `[esc] close`. `enter`
 runs the item under the cursor, and `esc` closes the menu having done nothing. If a fresh read
 of the pending directory moves another row under the cursor while the menu is open, `enter`
 closes the menu and does nothing.
+
+### Deleting pending tasks
+
+`delete` is the last item of the menu. A group lists it when the group has a pending task. A task
+lists it when the task itself is pending. It removes pending files only. Queued and archived
+tasks stay where they are.
+
+The delete takes the picked tasks and every pending task that depends on one of them, even in
+another group. One popup lists them all, titled `delete group <name>` for a group and
+`delete <task-id>` for a task. A task that depends on another task in the list has
+`(depends on <ids>)` after its id.
+
+```
+╭─ delete group cart ─────────────────────────────╮
+│                                                 │
+│  Delete 4 pending tasks:                        │
+│                                                 │
+│  cart                                           │
+│    cart-empty-state                             │
+│    cart-totals                                  │
+│    cart-discounts     (depends on cart-totals)  │
+│  checkout                                       │
+│    checkout-total     (depends on cart-totals)  │
+│                                                 │
+│  > delete                                       │
+│                                                 │
+│  [enter] confirm   [esc] close                  │
+╰─────────────────────────────────────────────────╯
+```
+
+`enter` deletes the listed files and closes the popup. The groups are read again, and a deleted
+group leaves the selection. `esc` closes the popup and deletes nothing. Any other key leaves the
+popup open. A long list scrolls under a `↓ n more` row.
+
+Some outcomes open a notice instead of closing the popup:
+
+| Title | When | What it says |
+|---|---|---|
+| `not deleted` | The pending tasks changed after the popup opened. | `Nothing was deleted.` and `Pick delete again to see the current list.` |
+| `tasks not fully deleted` | A file could not be removed. | The error, the `removed:` and `left:` lists, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` |
+| `tasks deleted` | The delete finished, but the pending directory would not read again. | The read error. |
 
 ### Trials
 
