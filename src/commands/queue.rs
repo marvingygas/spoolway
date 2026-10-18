@@ -23593,7 +23593,11 @@ group_description: audit
                 "probe.sh",
                 format!("#!/bin/sh\necho ran >> '{}'\n{body}\n", ran.display()),
             );
-            let command = login.replace("PROBE", &probe.display().to_string());
+            // Run through `sh` rather than exec'd: the probe is rewritten
+            // and run at once, and an exec of a file just written fails with
+            // "Text file busy" whenever another test thread forks while the
+            // write's descriptor is still open.
+            let command = login.replace("PROBE", &format!("sh {}", probe.display()));
             let requires = if requires.is_empty() {
                 String::new()
             } else {
