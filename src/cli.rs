@@ -1210,9 +1210,9 @@ pub struct QueuePauseArgs {
     pub task: String,
 
     /// Stop a running command step and pause anyway, throwing away its work
-    /// in progress — the same trade the board's own `k` makes on its confirm
-    /// panel. Without it, a task running one is refused rather than killed
-    /// on a script's say-so.
+    /// in progress — the same trade the board's pause panel makes on its
+    /// `pause now` answer. Without it, a task running one is refused rather
+    /// than killed on a script's say-so.
     #[arg(long)]
     pub force: bool,
 }

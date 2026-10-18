@@ -10265,6 +10265,7 @@ mod tests {
             paused_by: None,
             hook_paused: None,
             hook_error: None,
+            hook_skipped: None,
             missing_start_branch: None,
             launched_at: None,
             steps: Default::default(),

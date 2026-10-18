@@ -2280,7 +2280,73 @@ fn resume_checked(
 /// archives it and removes its worktree. At `queued` or `started` the task goes
 /// back to `queued`, and the next pass moves it on to its first step: the hook
 /// event it skipped is spent, so that hook no longer holds it there.
-fn skip_hook(repo: &Repo, pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Result<()> {
+///
+/// Prints what it did; the board's `k` calls [`skip_hook_quietly`] instead,
+/// since a line printed under the board lands on top of its frame.
+fn skip_hook(repo: &Repo, pipelines: &Pipelines, task: Task, args: &ResumeArgs) -> Result<()> {
+    let skipped = skip_hook_quietly(repo, pipelines, task, args.message.as_deref())?;
+    let (id, event) = (&skipped.id, &skipped.event);
+    println!("skipped the {event} hook for {id}");
+    match &skipped.then {
+        SkipThen::Archive { ticket: None } => println!("archived {id}"),
+        SkipThen::Archive {
+            ticket: Some(ticket),
+        } => println!("archived {id}; ticket {ticket} left as it was"),
+        SkipThen::Start { entry } => println!("{id} goes on to {entry}"),
+    }
+    Ok(())
+}
+
+/// What [`skip_hook_quietly`] did, for its caller to say.
+pub(crate) struct HookSkipped {
+    pub(crate) id: String,
+    /// The hook event skipped: `queued`, `started` or `done`.
+    pub(crate) event: String,
+    pub(crate) then: SkipThen,
+}
+
+/// Where a skip sends its task — see [`skip_then`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SkipThen {
+    /// A `done` hook was skipped: the dispatcher's next pass archives the
+    /// task. `ticket` is its `ticket:` as stored, `None` when it has none.
+    Archive { ticket: Option<String> },
+    /// A `queued` or `started` hook was skipped: the task starts on `entry`.
+    Start { entry: String },
+}
+
+/// Where skipping the hook that stopped `task` on `event` sends it, read the
+/// way [`skip_hook_quietly`] reads it, so the board's confirm panel names the
+/// same step the skip goes on to.
+pub(crate) fn skip_then(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    task: &Task,
+    event: &str,
+) -> Result<SkipThen> {
+    if event == crate::pipeline::DONE {
+        let ticket = task.extra_str("ticket");
+        return Ok(SkipThen::Archive {
+            ticket: (!ticket.is_empty()).then(|| ticket.to_string()),
+        });
+    }
+    let pipeline = pipelines.for_task(task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, pipelines, task)?;
+    let entry =
+        crate::dispatch::land_past_hidden(pipeline, task, pipeline.entry().to_string(), dependents)
+            .destination;
+    Ok(SkipThen::Start { entry })
+}
+
+/// [`skip_hook`] without a word printed: the skip itself, shared by
+/// `spoolway resume --skip-hook` and the board's `k`. `message` is the note
+/// `-m` appends to the status log line.
+pub(crate) fn skip_hook_quietly(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    mut task: Task,
+    message: Option<&str>,
+) -> Result<HookSkipped> {
     let id = task.front.id.clone();
     let stage = task.stage().to_string();
     if stage != crate::pipeline::HOOK_FAILED {
@@ -2306,26 +2372,17 @@ fn skip_hook(repo: &Repo, pipelines: &Pipelines, mut task: Task, args: &ResumeAr
              is none to skip. Run `spoolway resume {id}` to start it again from its step."
         );
     };
-    let pipeline = pipelines.for_task(&task)?;
-    let dependents = crate::dispatch::queue_dependents(repo, pipelines, &task)?;
-    let entry = crate::dispatch::land_past_hidden(
-        pipeline,
-        &task,
-        pipeline.entry().to_string(),
-        dependents,
-    )
-    .destination;
-    let at_done = event == crate::pipeline::DONE;
-    let note = args
-        .message
-        .as_deref()
+    let then = skip_then(repo, pipelines, &task, &event)?;
+    let note = message
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(|m| format!(". Note: {m}"))
         .unwrap_or_default();
-    let line = match at_done {
-        true => format!("skipped {event} hook by `spoolway resume --skip-hook`, archiving{note}"),
-        false => format!(
+    let line = match &then {
+        SkipThen::Archive { .. } => {
+            format!("skipped {event} hook by `spoolway resume --skip-hook`, archiving{note}")
+        }
+        SkipThen::Start { entry } => format!(
             "skipped {event} hook by `spoolway resume --skip-hook`, moves on to {entry}{note}"
         ),
     };
@@ -2354,10 +2411,13 @@ fn skip_hook(repo: &Repo, pipelines: &Pipelines, mut task: Task, args: &ResumeAr
     task.front.hook_paused = None;
     task.front.parked_by_stop = false;
     task.mark_blocker_cleared();
-    match at_done {
-        true => task.set_stage(crate::pipeline::DONE, Some(&line)),
-        false => task.set_stage_unbanked(crate::pipeline::QUEUED, &line),
+    match then {
+        SkipThen::Archive { .. } => task.set_stage(crate::pipeline::DONE, Some(&line)),
+        SkipThen::Start { .. } => task.set_stage_unbanked(crate::pipeline::QUEUED, &line),
     }
+    // Written after the move, which clears any earlier mark. The board's
+    // RECENT line reads it to say `skipped <event> hook`; nothing routes on it.
+    task.front.hook_skipped = Some(event.clone());
     if !crate::dispatch::persist_task(repo, &mut task, &mut seen)? {
         // A change landed between the check above and this write. The task
         // is not on the stage the record was made for, so take it back:
@@ -2366,13 +2426,7 @@ fn skip_hook(repo: &Repo, pipelines: &Pipelines, mut task: Task, args: &ResumeAr
         crate::tracking::forget(repo, &task, &event);
         return Err(stale());
     }
-    println!("skipped the {event} hook for {id}");
-    match (at_done, task.extra_str("ticket")) {
-        (true, "") => println!("archived {id}"),
-        (true, ticket) => println!("archived {id}; ticket {ticket} left as it was"),
-        (false, _) => println!("{id} goes on to {entry}"),
-    }
-    Ok(())
+    Ok(HookSkipped { id, event, then })
 }
 
 /// Close a stopped task as `done` by hand, skipping the steps it has left:

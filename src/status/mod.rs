@@ -42,8 +42,8 @@ use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
     clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, jobs_ledger,
     pane_height, pane_width, pause_answers, pause_confirm_panel, restart_confirm_panel,
-    resume_picker_panel, spool_frame, table_laid_out, table_window, ticker, tint_available,
-    unqueue_confirm_panel,
+    resume_picker_panel, skip_hook_confirm_panel, spool_frame, table_laid_out, table_window,
+    ticker, tint_available, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -384,7 +384,7 @@ pub struct Board {
     /// pressed. `None` again only once the board has nothing left to show at
     /// all.
     cursor: Option<String>,
-    /// What an `o` or `r` keypress is waiting on, if anything — see
+    /// What an `o`, `r` or `k` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves, which never open a panel at all.
     mode: BoardMode,
@@ -748,14 +748,17 @@ impl Board {
     /// what that row can do right now, in a fixed order: `open` its task
     /// file, `pause` it, `restart` its step from scratch, or
     /// `unqueue` it back to pending with every still-queued task that
-    /// depends on it. `r` is the one row action left on a key of its own: it
-    /// opens a picker of the cursor's task's steps if its own resume key is
-    /// live — see [`Board::resume_cursor`]. The run as a whole is stopped
-    /// from the dispatch tab's own `enter`, not from here. An action opens a
-    /// confirm panel first wherever what it is about to do is not free to
-    /// undo — `unqueue` and `restart` open one unconditionally, since
-    /// writing a task back to pending and throwing a conversation or a
-    /// command's run away are exactly that — see [`BoardMode`]. With a menu
+    /// depends on it. Two row actions keep a key of their own. `r` opens a
+    /// picker of the cursor's task's steps if its own resume key is live —
+    /// see [`Board::resume_cursor`]. `k`, on a `hook_failed` row alone,
+    /// opens a panel to skip the hook that stopped it — see
+    /// [`Board::begin_skip_hook`]. The run as a whole is stopped from the
+    /// dispatch tab's own `enter`, not from here. An action opens a confirm
+    /// panel first wherever what it is about to do is not free to undo —
+    /// `unqueue`, `restart` and `k` open one unconditionally, since writing a
+    /// task back to pending, throwing a conversation or a command's run away
+    /// and archiving a task past its hook are exactly that — see
+    /// [`BoardMode`]. With a menu
     /// or panel already open every other key is read by it instead. Each one
     /// lists its answers: `↑` and `↓` move its own cursor rather than the
     /// board's, `enter` runs the answer under it, and `esc` closes it with
@@ -794,6 +797,9 @@ impl Board {
             BoardMode::ConfirmRestart(confirm) => {
                 self.on_key_restart_confirm(repo, pipelines, confirm, key)?
             }
+            BoardMode::ConfirmSkipHook(confirm) => {
+                self.on_key_skip_hook_confirm(repo, pipelines, confirm, key)?
+            }
             // `enter` closes it, and nothing else does, the same as the
             // pending screen's: a key meant for the board under it cannot
             // slip past a refusal not yet read.
@@ -821,6 +827,7 @@ impl Board {
             Key::Down => self.cursor = shift_cursor(&self.drawn, self.cursor.as_deref(), 1),
             Key::Char('o') => self.open_options(repo, pipelines)?,
             Key::Char('r') => self.resume_cursor(repo, pipelines)?,
+            Key::Char('k') => self.begin_skip_hook(repo, pipelines)?,
             _ => {}
         }
         Ok(())
@@ -1250,6 +1257,107 @@ impl Board {
         Ok(())
     }
 
+    /// `k`: open [`BoardMode::ConfirmSkipHook`] on the cursor's row, naming
+    /// the hook it would skip and where the task goes without it. A no-op
+    /// on any row but a `hook_failed` one that records which hook failed,
+    /// so `k` means nothing anywhere else on the board.
+    ///
+    /// Where the task goes is read on the running dispatcher's copy of the
+    /// pipelines, the one the skip itself routes on, so the step the panel
+    /// names is the step the task starts on. When that copy refuses the
+    /// task, the panel still opens, with the refusal printed in it and the
+    /// step read on the board's own copy in its place. When neither copy
+    /// can place the task, `k` shows the refusal in a popup instead.
+    fn begin_skip_hook(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+        let Some(id) = self.cursor.clone() else {
+            return Ok(());
+        };
+        let Ok(task) = repo.task(&id) else {
+            return Ok(());
+        };
+        if task.stage() != crate::pipeline::HOOK_FAILED {
+            return Ok(());
+        }
+        let Some(event) = task.front.hook_paused.clone() else {
+            return Ok(());
+        };
+        let routed = routed_for(repo, pipelines, &id)
+            .and_then(|routed| crate::commands::skip_then(repo, &routed, &task, &event));
+        let (then, error) = match routed {
+            Ok(then) => (then, None),
+            Err(err) => match crate::commands::skip_then(repo, pipelines, &task, &event) {
+                Ok(then) => (then, Some(format!("{err:#}"))),
+                // Neither copy can say where it goes, so there is no panel
+                // to draw. The dispatch loop drops an `Err` out of `on_key`
+                // without a word; the refusal is shown instead.
+                Err(_) => {
+                    self.mode = BoardMode::Outcome(crate::screen::Notice::new(
+                        "skip hook",
+                        format!("k: {err:#}"),
+                    ));
+                    return Ok(());
+                }
+            },
+        };
+        self.mode = BoardMode::ConfirmSkipHook(SkipHookConfirm {
+            id,
+            event,
+            then,
+            error,
+        });
+        Ok(())
+    }
+
+    fn on_key_skip_hook_confirm(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        mut confirm: SkipHookConfirm,
+        key: crate::screen::Key,
+    ) -> Result<()> {
+        use crate::screen::Key;
+        match key {
+            // The panel wrote nothing, so the task is left wherever it now
+            // is: on `hook_failed`, held for its hook, unless a shell moved
+            // it since.
+            Key::Esc => return Ok(()),
+            // Its one answer: skip and archive, or skip and start.
+            Key::Enter => {
+                let skipped = routed_for(repo, pipelines, &confirm.id).and_then(|routed| {
+                    let task = repo.task(&confirm.id)?;
+                    // The panel can sit open while the task moves: a rerun
+                    // from a shell, or a skip there. A task no longer held by
+                    // the hook the panel named is refused rather than moved
+                    // on unseen; `skip_hook_quietly` refuses one that left
+                    // `hook_failed` on its own, but not one stopped again by
+                    // another hook since.
+                    let held_by = (task.stage() == crate::pipeline::HOOK_FAILED)
+                        .then_some(task.front.hook_paused.as_deref())
+                        .flatten();
+                    if held_by != Some(confirm.event.as_str()) {
+                        anyhow::bail!(
+                            "task `{}` is no longer held by its `{}` hook — press esc; its \
+                             row says what holds it now.",
+                            confirm.id,
+                            confirm.event
+                        );
+                    }
+                    crate::commands::skip_hook_quietly(repo, &routed, task, None)
+                });
+                // The dispatch loop drops an `Err` out of `on_key` without a
+                // word, so a refused skip would close the panel and look like
+                // it happened. It stays open with the refusal in it.
+                match skipped {
+                    Ok(_) => return Ok(()),
+                    Err(err) => confirm.error = Some(format!("{err:#}")),
+                }
+            }
+            _ => {}
+        }
+        self.mode = BoardMode::ConfirmSkipHook(confirm);
+        Ok(())
+    }
+
     /// The options menu's `unqueue`: open [`BoardMode::ConfirmUnqueue`] for
     /// task `id` and everything that reaches it through `depends_on` — a
     /// no-op on a task the queue no longer has, or one that has started
@@ -1335,7 +1443,7 @@ fn open_task(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
         .map(|err| crate::editor::refusal(&err))
 }
 
-/// What an `o` or `r` keypress is waiting to be answered — a menu or panel
+/// What an `o`, `r` or `k` keypress is waiting to be answered — a menu or panel
 /// drawn over the table, and the one thing standing between an accidental
 /// press and the run it would otherwise change. Every panel here
 /// lists its answers and is answered the same way: the arrows move its
@@ -1376,6 +1484,11 @@ enum BoardMode {
     /// would end. Its one answer, `restart`, carries the restart out, and
     /// `esc` leaves the task, its lane and its run exactly as they were.
     ConfirmRestart(RestartConfirm),
+    /// `k` on a `hook_failed` row: the hook it would skip and where the task
+    /// goes without it — see [`SkipHookConfirm`]. Its one answer skips the
+    /// hook the way `spoolway resume --skip-hook` does, and `esc` leaves the
+    /// task held.
+    ConfirmSkipHook(SkipHookConfirm),
     /// The options menu's `open` was refused — see [`open_task`]. Held until
     /// `enter` closes it, with no other answer to pick. The pass loop keeps
     /// running under it, as it does under every panel here.
@@ -1397,6 +1510,7 @@ impl BoardMode {
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
             BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
             BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
+            BoardMode::ConfirmSkipHook(confirm) => Some(skip_hook_confirm_panel(confirm)),
             // Wrapped no wider than the board has room for, so a narrow
             // terminal still sees the popup's right border: a notice line
             // spends 6 columns around its text, a border and two spaces of
@@ -1587,6 +1701,28 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
         ),
         ("resume picker", resume_picker_panel(&picker, None)),
         (
+            "skip hook, done",
+            skip_hook_confirm_panel(&SkipHookConfirm {
+                id: "login".to_string(),
+                event: crate::pipeline::DONE.to_string(),
+                then: crate::commands::SkipThen::Archive {
+                    ticket: Some("#1025".to_string()),
+                },
+                error: None,
+            }),
+        ),
+        (
+            "skip hook, queued",
+            skip_hook_confirm_panel(&SkipHookConfirm {
+                id: "login".to_string(),
+                event: crate::pipeline::QUEUED.to_string(),
+                then: crate::commands::SkipThen::Start {
+                    entry: "implement".to_string(),
+                },
+                error: None,
+            }),
+        ),
+        (
             "options",
             options_panel(&OptionsMenu {
                 id: "login".to_string(),
@@ -1635,6 +1771,20 @@ struct RestartConfirm {
     /// What the restart ends on that step, which decides the panel's form.
     ends: RestartEnds,
     /// The last refusal `restart` met, printed in the panel until `esc`.
+    error: Option<String>,
+}
+
+/// [`BoardMode::ConfirmSkipHook`]'s state, read once when `k` opens it.
+struct SkipHookConfirm {
+    /// The task whose hook would be skipped.
+    id: String,
+    /// The hook event that failed, from `hook_paused:`.
+    event: String,
+    /// Where the skip sends the task: archived, or started on a step.
+    then: crate::commands::SkipThen,
+    /// The refusal the dispatcher's copy of the pipelines gave when `k`
+    /// opened the panel, or the last one `enter` met; printed in the panel
+    /// until `esc`.
     error: Option<String>,
 }
 
@@ -2491,12 +2641,14 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         if task.front.run.is_some() || task.front.base_commit.is_some() {
             map.remove("starts_from");
         }
-        // The dispatcher's records of why it paused this task. They describe
-        // the run being left behind, and a copy that kept `hook_paused` would
-        // be sent straight to `done` by its first `resume`.
+        // The dispatcher's records of why it paused this task, and the mark a
+        // skipped hook leaves. They describe the run being left behind, and a
+        // copy that kept `hook_paused` would be sent straight to `done` by its
+        // first `resume`.
         map.remove("hook_paused");
         map.remove("hook_error");
         map.remove("missing_start_branch");
+        map.remove("hook_skipped");
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
@@ -4260,10 +4412,13 @@ fn build_rows(
             // Always resumable: rerunning a hook races no lane, since a
             // `queued` or `started` hook fires before any lane starts and a
             // `done` hook after every lane has finished. `r` skips the
-            // picker here, as `resume_cursor` says.
-            None if task.stage() == crate::pipeline::HOOK_FAILED => {
-                (State::HookFailed, "[r] rerun hook".to_string(), true)
-            }
+            // picker here, as `resume_cursor` says. `k` skips the hook
+            // instead, and is offered on no other row.
+            None if task.stage() == crate::pipeline::HOOK_FAILED => (
+                State::HookFailed,
+                "[r] rerun hook  [k] skip hook".to_string(),
+                true,
+            ),
             None if task.stage() == crate::pipeline::DONE => {
                 // The `done` hook runs before the task archives, so a hung
                 // one holds the row here; name it the way `queued` does.
@@ -5270,6 +5425,19 @@ fn classify(was: &str, stage: &str, task: &crate::task::Task, queue: &QueueView)
             passed,
             event,
             reason: task.front.hook_error.clone(),
+        };
+    }
+    // A skip clears `hook_paused`, so its own mark is all that says a hook
+    // was skipped. Read on the move out of `hook_failed` the skip made, and
+    // on the move off `queued` onto a step that follows a skip at `queued`
+    // or `started`: both moves can land between two readings, and then the
+    // board sees only the second.
+    if (was == HOOK_FAILED || was == QUEUED)
+        && let Some(event) = task.front.hook_skipped.clone()
+    {
+        return Move::HookSkipped {
+            event,
+            to: (stage != DONE).then(|| stage.to_string()),
         };
     }
     let to = stage.to_string();
@@ -7762,10 +7930,11 @@ mod tests {
     }
 
     /// A task a failed hook stopped reads `hook failed` in STATE, offers
-    /// `[r] rerun hook` in NEXT, and keeps the stage the hook stopped it on
-    /// in STEP: `done` for its `done` hook, `queued` for its `queued` hook.
+    /// `[r] rerun hook  [k] skip hook` in NEXT, and keeps the stage the hook
+    /// stopped it on in STEP: `done` for its `done` hook, `queued` for its
+    /// `queued` hook. A queued task beside them is offered no `[k]`.
     #[test]
-    fn a_hook_failed_row_reads_hook_failed_and_offers_a_rerun() {
+    fn a_hook_failed_row_reads_hook_failed_and_offers_a_rerun_and_a_skip() {
         use crate::pipeline::{DONE, HOOK_FAILED, QUEUED};
         let (repo, _root_guard) = fixture("hook-failed-row");
         let pipelines = Pipelines::builtin();
@@ -7783,6 +7952,7 @@ mod tests {
         };
         fail("release", DONE);
         fail("retry-flag", QUEUED);
+        add_to(&repo, "plain", &[], None, Some("plain"));
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
@@ -7793,9 +7963,10 @@ mod tests {
             assert_eq!(row(id).stage, step, "{id}");
             assert!(matches!(row(id).state, State::HookFailed), "{id}");
             assert_eq!(row(id).state.word(), "● hook failed", "{id}");
-            assert_eq!(row(id).next, "[r] rerun hook", "{id}");
+            assert_eq!(row(id).next, "[r] rerun hook  [k] skip hook", "{id}");
             assert!(row(id).resumable, "{id}");
         }
+        assert!(!row("plain").next.contains("[k]"), "{}", row("plain").next);
     }
 
     /// A `blocked` an unblocker lane staffs is the step at work, so a running
@@ -10696,6 +10867,314 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+    }
+
+    /// Task `id` held on `hook_failed` by its `event` hook, with `ticket:`
+    /// set when one is given — the shape the dispatcher's own hook stop
+    /// leaves behind.
+    fn hook_failed_task(repo: &Repo, id: &str, event: &str, ticket: Option<&str>) {
+        use crate::pipeline::{DONE, HOOK_FAILED};
+        add_to(repo, id, &[], None, Some(id));
+        let mut task = repo.task(id).unwrap();
+        if event == DONE {
+            task.set_stage("handover", None);
+            task.set_stage(DONE, None);
+        }
+        if let Some(ticket) = ticket {
+            task.set_extra_str("ticket", ticket);
+        }
+        task.front.hook_paused = Some(event.into());
+        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.set_stage(HOOK_FAILED, Some("issue_tracking hook exited 1"));
+        task.save().unwrap();
+    }
+
+    /// `k` on a row held by its `done` hook opens the skip panel and writes
+    /// nothing: the panel names the archive, the worktree and the ticket as
+    /// `ticket:` stores it, and answers `skip and archive` on enter.
+    #[test]
+    fn k_on_a_done_hook_opens_the_skip_panel_naming_the_archive() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-done");
+        let pipelines = Pipelines::builtin();
+        let ticket = "https://github.com/acme/app/issues/1025";
+        hook_failed_task(&repo, "release", crate::pipeline::DONE, Some(ticket));
+        let before = std::fs::read_to_string(&repo.task("release").unwrap().path).unwrap();
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        assert!(matches!(board.mode, BoardMode::ConfirmSkipHook(_)));
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ skip the done hook? ─")),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("release is archived and its worktree removed."),
+            "{frame}"
+        );
+        assert!(
+            frame.contains(&format!("Ticket {ticket} stays as it is.")),
+            "{frame}"
+        );
+        assert!(frame.contains("> skip and archive"), "{frame}");
+        assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
+        let after = std::fs::read_to_string(&repo.task("release").unwrap().path).unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// `k` on a row held by its `queued` hook names the step the task starts
+    /// on, and a task with no `ticket:` gets no ticket line.
+    #[test]
+    fn k_on_a_queued_hook_names_the_step_it_starts_on() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-queued");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ skip the queued hook? ─")),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("retry-flag starts on implement, without its queued hook."),
+            "{frame}"
+        );
+        assert!(frame.contains("> skip and start implement"), "{frame}");
+        assert!(!frame.contains("Ticket"), "{frame}");
+    }
+
+    /// `k` means nothing on a row no hook holds: a queued task's opens no
+    /// panel and writes nothing.
+    #[test]
+    fn k_does_nothing_on_a_row_no_hook_holds() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-other-row");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "plain", &[], None, Some("plain"));
+        let before = std::fs::read_to_string(&repo.task("plain").unwrap().path).unwrap();
+
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let after = std::fs::read_to_string(&repo.task("plain").unwrap().path).unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// `esc` closes the skip panel with the task still on `hook_failed`, its
+    /// file untouched, and a stray key leaves the panel open.
+    #[test]
+    fn esc_on_the_skip_panel_leaves_the_task_held() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-esc");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "release", crate::pipeline::DONE, None);
+        let before = std::fs::read_to_string(&repo.task("release").unwrap().path).unwrap();
+
+        let board = board_after(
+            &repo,
+            &pipelines,
+            &[Key::Down, Key::Char('k'), Key::Char('y')],
+        );
+        assert!(matches!(board.mode, BoardMode::ConfirmSkipHook(_)), "y");
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k'), Key::Esc]);
+        assert!(matches!(board.mode, BoardMode::Browsing));
+
+        let task = repo.task("release").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+    }
+
+    /// `enter` on a `done` hook's skip panel skips it the way `spoolway
+    /// resume --skip-hook` does — the task on `done`, the event recorded as
+    /// passed, `hook_skipped:` naming it — and RECENT reads `skipped done
+    /// hook, archived`.
+    #[test]
+    fn enter_on_the_skip_panel_skips_a_done_hook_and_says_so_in_recent() {
+        use crate::pipeline::DONE;
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-enter-done");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "release", DONE, None);
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k'), Key::Enter]);
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("release").unwrap();
+        assert_eq!(task.stage(), DONE);
+        assert!(task.front.hook_paused.is_none());
+        assert_eq!(task.front.hook_skipped.as_deref(), Some(DONE));
+        assert_eq!(crate::tracking::exit_code(&repo, &task, DONE), Some(0));
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("skipped done hook, archived"), "{frame}");
+    }
+
+    /// `enter` on a `queued` hook's skip panel puts the task back on
+    /// `queued`, and once the dispatcher moves it onto its first step RECENT
+    /// reads `skipped queued hook, moved to implement` rather than an
+    /// ordinary start.
+    #[test]
+    fn enter_on_the_skip_panel_skips_a_queued_hook_and_says_so_in_recent() {
+        use crate::pipeline::QUEUED;
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-enter-queued");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "retry-flag", QUEUED, None);
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k'), Key::Enter]);
+
+        let task = repo.task("retry-flag").unwrap();
+        assert_eq!(task.stage(), QUEUED);
+        assert_eq!(task.front.hook_skipped.as_deref(), Some(QUEUED));
+        assert_eq!(crate::tracking::exit_code(&repo, &task, QUEUED), Some(0));
+        watching_frame(&mut board, &repo, &pipelines);
+
+        let mut task = repo.task("retry-flag").unwrap();
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(
+            frame.contains("skipped queued hook, moved to implement"),
+            "{frame}"
+        );
+        assert!(!frame.contains("started, moved to"), "{frame}");
+    }
+
+    /// A task no longer held by the hook the panel named — rerun from a
+    /// shell while the panel was open — is not moved by `enter`: the panel
+    /// stays open with the refusal in it, and nothing is recorded.
+    #[test]
+    fn a_task_rerun_since_the_skip_panel_opened_is_not_skipped() {
+        use crate::pipeline::DONE;
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-stale");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "release", DONE, None);
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        let mut task = repo.task("release").unwrap();
+        task.front.hook_paused = None;
+        task.front.hook_error = None;
+        task.set_stage(DONE, Some("hook run forgotten by `spoolway resume`"));
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        let BoardMode::ConfirmSkipHook(confirm) = &board.mode else {
+            panic!("the panel closed on a refused skip");
+        };
+        let error = confirm.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("no longer held by its `done` hook"),
+            "{error}"
+        );
+        let task = repo.task("release").unwrap();
+        assert!(task.front.hook_skipped.is_none());
+        assert_eq!(crate::tracking::exit_code(&repo, &task, DONE), None);
+    }
+
+    /// A task stopped again by another hook while the panel was open — the
+    /// panel named its `queued` hook, and a shell's skip let it start, only
+    /// for its `started` hook to fail — is still on `hook_failed`, so only
+    /// the board's own check of the event refuses it: `enter` leaves the
+    /// panel open with the refusal, and skips neither hook.
+    #[test]
+    fn a_task_held_by_another_hook_since_the_skip_panel_opened_is_not_skipped() {
+        use crate::pipeline::{QUEUED, STARTED};
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-other-event");
+        let pipelines = Pipelines::builtin();
+        hook_failed_task(&repo, "retry-flag", QUEUED, None);
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        let mut task = repo.task("retry-flag").unwrap();
+        task.front.hook_paused = Some(STARTED.into());
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        let BoardMode::ConfirmSkipHook(confirm) = &board.mode else {
+            panic!("the panel closed on a refused skip");
+        };
+        let error = confirm.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("no longer held by its `queued` hook"),
+            "{error}"
+        );
+        let task = repo.task("retry-flag").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::HOOK_FAILED);
+        assert_eq!(task.front.hook_paused.as_deref(), Some(STARTED));
+        assert!(task.front.hook_skipped.is_none());
+        assert_eq!(crate::tracking::exit_code(&repo, &task, QUEUED), None);
+        assert_eq!(crate::tracking::exit_code(&repo, &task, STARTED), None);
+    }
+
+    /// When the running dispatcher's copy refuses the task — its pipeline
+    /// was renamed since the run started — `k` still opens the skip panel,
+    /// with that refusal printed in it and the step read on the board's own
+    /// pipelines.
+    #[test]
+    fn a_skip_the_running_dispatchers_copy_refuses_says_so_in_its_panel() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-routed-refused");
+        let pipelines = Pipelines::builtin();
+        let mut loaded = pipelines.clone();
+        let default = loaded.pipelines.remove("default").unwrap();
+        loaded.pipelines.insert("renamed".into(), default);
+        hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
+
+        let refused = "is not one the running dispatcher";
+        let BoardMode::ConfirmSkipHook(confirm) = &board.mode else {
+            panic!("k opened no panel");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(refused)),
+            "{:?}",
+            confirm.error
+        );
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains(refused), "{frame}");
+        assert!(frame.contains("> skip and start implement"), "{frame}");
+    }
+
+    /// When neither the running dispatcher's copy nor the board's own
+    /// pipelines can place the task, there is no step for a panel to name:
+    /// `k` shows the dispatcher's refusal in a `skip hook` popup instead,
+    /// and writes nothing.
+    #[test]
+    fn a_skip_no_copy_of_the_pipelines_can_place_shows_the_refusal() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("skip-hook-panel-both-refused");
+        let mut renamed = Pipelines::builtin();
+        let default = renamed.pipelines.remove("default").unwrap();
+        renamed.pipelines.insert("renamed".into(), default);
+        hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
+        let before = std::fs::read_to_string(&repo.task("retry-flag").unwrap().path).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &renamed).unwrap();
+
+        let board = board_after(&repo, &renamed, &[Key::Down, Key::Char('k')]);
+
+        let BoardMode::Outcome(notice) = &board.mode else {
+            panic!("k showed no popup");
+        };
+        assert_eq!(notice.title, "skip hook");
+        assert!(notice.text.starts_with("k: "), "{}", notice.text);
+        assert!(
+            notice.text.contains("is not one the running dispatcher"),
+            "{}",
+            notice.text
+        );
+        let after = std::fs::read_to_string(&repo.task("retry-flag").unwrap().path).unwrap();
+        assert_eq!(before, after);
     }
 
     /// A start resumes only what a stop parked. A task a person paused with

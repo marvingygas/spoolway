@@ -323,7 +323,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -361,7 +361,7 @@ stateDiagram-v2
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
-| `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook`. |
+| `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook  [k] skip hook`. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
@@ -380,6 +380,8 @@ A cause in brackets follows when the route alone does not explain the move.
 | `failed <step>, moved to <step>` | The step failed, or a command step exited non-zero. The move may go past steps the task walks past. |
 | `skipped <step>, moved to <step>` | The task passed over the step without running it, or the step sent no report. |
 | `resumed, moved to <step>` | The task left `paused` or `hook_failed`. |
+| `skipped <event> hook, archived` | A person skipped the failed `done` hook, from the board's `k` or with `spoolway resume --skip-hook`. |
+| `skipped <event> hook, moved to <step>` | A person skipped the failed `queued` or `started` hook. The step is `queued` until the dispatcher starts the task, then the step it starts on. |
 | `unblocked, moved to <step>` | The task left `blocked`. |
 | `unblocked by its lane, moved to <step>` | The `blocked` lane reported a pass. |
 | `left <step>, moved to <step>` | The task file does not say how the task left the step. |
@@ -419,6 +421,7 @@ cursor sits on a row it can resume.
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the options menu of the row under the cursor. See [Options menu](#options-menu). |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started resumes at once with no picker. A `hook_failed` row also resumes at once and runs its hook again. See [Resume picker](#resume-picker). |
+| `k` | Open the skip panel for a `hook_failed` row. Does nothing on any other row. See [Skip panel](#skip-panel). |
 | `ctrl-c` | Stop the run. |
 
 Every menu and panel these keys open lists its answers under its text, with `>` on the
@@ -633,6 +636,33 @@ The command form is drawn for a command step, which has no lane and no session. 
 | `esc` | Close the panel and change nothing. |
 
 The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
+
+### Skip panel
+
+`k` on a `hook_failed` row opens a panel titled `skip the <event> hook?`, where `<event>` is the hook that failed. The panel says where the task goes without that hook. It has one answer.
+
+For a failed `done` hook the panel names the archive and the worktree removal. A line about the ticket follows when the task has a `ticket:`. The answer is `skip and archive`.
+
+```
+╭─ skip the done hook? ────────────────────────╮
+│  release-spoolway is archived and its        │
+│  worktree removed.                           │
+│  Ticket #1025 stays as it is.                │
+│                                              │
+│  > skip and archive                          │
+│                                              │
+│  [enter] confirm   [esc] close               │
+╰──────────────────────────────────────────────╯
+```
+
+For a failed `queued` or `started` hook the panel names the step the task starts on, and the answer reads `skip and start <step>`.
+
+| Key | What it does |
+|---|---|
+| `enter` on the answer | The same as `spoolway resume <task> --skip-hook`. The board prints nothing over itself. RECENT reads `skipped <event> hook, archived` or `skipped <event> hook, moved to <step>`. |
+| `esc` | Close the panel and change nothing. The task stays on `hook_failed`. |
+
+When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the answer. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
 
 ### Footer
 

@@ -271,6 +271,11 @@ pub(crate) enum Move {
         event: Option<String>,
         reason: Option<String>,
     },
+    /// The hook `event` that held the task on `hook_failed` was skipped, by
+    /// `spoolway resume --skip-hook` or the board's `k`. `to` is where it
+    /// moved — `queued` first, then the step it starts on — or `None` for a
+    /// `done` hook's skip, which archives it.
+    HookSkipped { event: String, to: Option<String> },
     /// The task was on `paused` or `hook_failed`.
     Resumed { to: String },
     /// The task was on `blocked`. `by_lane` when the report that moved it
@@ -656,6 +661,50 @@ fn list_window(picker: &ResumePicker, room: usize) -> Window {
         shown,
         marked: true,
     }
+}
+
+/// [`BoardMode::ConfirmSkipHook`]'s panel: what skipping the failed hook
+/// does, titled with the hook's event as a question.
+///
+/// A `done` hook's form says the task is archived and its worktree removed,
+/// and that its ticket is left as it is. The ticket is named as `ticket:`
+/// stores it, since spoolway never reads its state or labels from the
+/// tracker; a task with no ticket gets no ticket line. A `queued` or
+/// `started` hook's form names the step the task starts on instead. A
+/// refusal, from opening the panel or from its answer, is printed under the
+/// body, above the one answer.
+pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> {
+    use crate::commands::SkipThen;
+    let id = &confirm.id;
+    let (mut body, answer) = match &confirm.then {
+        SkipThen::Archive { ticket } => {
+            let mut body = vec![format!("{id} is archived and its worktree removed.")];
+            if let Some(ticket) = ticket {
+                body.push(format!("Ticket {ticket} stays as it is."));
+            }
+            (body, "skip and archive".to_string())
+        }
+        SkipThen::Start { entry } => (
+            vec![format!(
+                "{id} starts on {entry}, without its {} hook.",
+                confirm.event
+            )],
+            format!("skip and start {entry}"),
+        ),
+    };
+    if let Some(err) = &confirm.error {
+        body.push(String::new());
+        body.extend(
+            err.lines()
+                .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
+        );
+    }
+    crate::screen::ask(
+        &format!("skip the {} hook?", confirm.event),
+        &body,
+        &[answer],
+        0,
+    )
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
@@ -1257,11 +1306,13 @@ pub(super) fn table_laid_out(
     };
 
     if let Some(pane) = style.clip_to {
-        // Whether the row fits, given NEXT gets at least one character once
-        // shown — `clip` guarantees that much even at `room == 1`, so a
-        // `show_next` this test passed under never overflows once the real
-        // room (which is usually far more than one character) is handed to
-        // it below.
+        // Whether the row fits, given NEXT gets at least the width of its
+        // own header once shown. `clip` would draw a cell in one character,
+        // but the header row spells `NEXT` out whole, so a pane with room
+        // for one character more than the rest would push that row past
+        // the pane's edge. A `show_next` this test passed under never
+        // overflows once the real room (usually far more) is handed to it
+        // below.
         let fits = |id_w: usize,
                     show_loop: bool,
                     show_pipeline: bool,
@@ -1295,7 +1346,7 @@ pub(super) fn table_laid_out(
                 w += GUTTER.len() + time_w;
             }
             if show_next {
-                w += GUTTER.len() + 1;
+                w += GUTTER.len() + "NEXT".len();
             }
             w <= pane
         };
@@ -2449,6 +2500,11 @@ pub(crate) fn sentence(change: &Move) -> String {
                 .unwrap_or_default();
             (format!("{passed}{hook}{why}"), None)
         }
+        Move::HookSkipped { event, to: None } => (format!("skipped {event} hook, archived"), None),
+        Move::HookSkipped {
+            event,
+            to: Some(to),
+        } => (format!("skipped {event} hook, moved to {to}"), None),
         Move::Resumed { to } => (format!("resumed, moved to {to}"), None),
         Move::Unblocked { to, by_lane: false } => (format!("unblocked, moved to {to}"), None),
         Move::Unblocked { to, by_lane: true } => {
@@ -3539,6 +3595,38 @@ mod tests {
                 "row {n} is {} columns: {line}",
                 line.chars().count()
             );
+        }
+    }
+
+    /// A `hook_failed` row's NEXT, `[r] rerun hook  [k] skip hook`, is the
+    /// widest NEXT a held row draws, and it follows the same rules as any
+    /// other: on a wide pane it reads whole, and on a narrower one the
+    /// columns shed before any row grows past the pane, so a row never
+    /// wraps.
+    #[test]
+    fn a_hook_failed_row_never_wraps_a_narrow_pane() {
+        let rows = vec![Row {
+            group: Some("gh-1024-release-spoolway".into()),
+            stage: "done".into(),
+            state: State::HookFailed,
+            next: "[r] rerun hook  [k] skip hook".into(),
+            ..row("release-spoolway")
+        }];
+        let totals = BTreeMap::new();
+
+        let wide = strip(&table(&rows, Style::board(120), &totals, None));
+        assert!(wide.contains("[r] rerun hook  [k] skip hook"), "{wide}");
+
+        for width in 40..120 {
+            let drawn = strip(&table(&rows, Style::board(width), &totals, None));
+            for line in drawn.lines() {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width} columns, a row of {}: {line}",
+                    line.chars().count()
+                );
+            }
+            assert!(drawn.contains("● hook failed"), "{width}: {drawn}");
         }
     }
 
@@ -5158,6 +5246,14 @@ mod tests {
                     passed: passed.clone(),
                     event: Some(event.to_string()),
                     reason: Some("<reason>".to_string()),
+                }));
+            }
+        }
+        for event in ["<event>", "queued", "started", "done"] {
+            for to in [None, Some("<step>".to_string())] {
+                written.insert(sentence(&Move::HookSkipped {
+                    event: event.to_string(),
+                    to,
                 }));
             }
         }

@@ -1331,6 +1331,9 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // block and `resume` straight to `done`, past every step it never ran.
     front.hook_paused = None;
     front.hook_error = None;
+    // A board-only mark of a skip in some earlier run; on a fresh task it
+    // would word the first start in RECENT as a skip.
+    front.hook_skipped = None;
     front.missing_start_branch = None;
     front.resume = None;
     front.restart = None;
@@ -22755,9 +22758,10 @@ body\n";
         assert!(repo.queue_dir().join("login.md").exists());
     }
 
-    /// A hook-paused task carried back to pending loses `hook_paused:` and
-    /// `missing_start_branch:`, and its hook run files, so queuing it again
-    /// fires the hooks over instead of reading the old exit codes.
+    /// A hook-paused task carried back to pending loses `hook_paused:`,
+    /// `missing_start_branch:` and a skipped hook's `hook_skipped:`, and its
+    /// hook run files, so queuing it again fires the hooks over instead of
+    /// reading the old exit codes.
     #[test]
     fn queue_unqueue_forgets_hook_state_of_the_old_run() {
         let (repo, _root_guard) = fixture("queue-unqueue-hook-state");
@@ -22765,6 +22769,7 @@ body\n";
         let mut task = queued(&repo, "login");
         task.front.hook_paused = Some("done".to_string());
         task.front.missing_start_branch = Some("gone".to_string());
+        task.front.hook_skipped = Some("queued".to_string());
         task.save().unwrap();
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         let exit = repo.tracking_dir().join("login · queued.exit");
@@ -22777,6 +22782,7 @@ body\n";
         let text = std::fs::read_to_string(repo.pending_dir().join("login.md")).unwrap();
         assert!(!text.contains("hook_paused"), "{text}");
         assert!(!text.contains("missing_start_branch"), "{text}");
+        assert!(!text.contains("hook_skipped"), "{text}");
         assert!(!exit.exists(), "the old run's exit code must be gone");
         assert!(other.exists(), "another task's run must be left alone");
     }

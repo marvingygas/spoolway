@@ -499,10 +499,10 @@ hook exited non-zero or ran past its limit:
 `t5`'s `done` hook failed: issue_tracking hook exited 3. Fix the hook, then resume the task to run it again.
 ```
 
-The board shows such a task as `● hook failed`, with `[r] rerun hook` in NEXT. No hook event
+The board shows such a task as `● hook failed`, with `[r] rerun hook  [k] skip hook` in NEXT. No hook event
 fires for the `hook_failed` stage, so a failing hook is never asked to report its own failure.
-`spoolway resume <task> --skip-hook` carries the task on without running the hook again. See
-[Skipping a hook](cli-reference.md#skipping-a-hook).
+`spoolway resume <task> --skip-hook`, or `k` on the board, carries the task on without running the hook again. See
+[Skipping a hook](cli-reference.md#skipping-a-hook) and the board's [Skip panel](dispatcher.md#skip-panel).
 
 A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
 again on the next pass. The pass report says so. If three runs in a row are killed this way, the

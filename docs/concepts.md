@@ -179,7 +179,7 @@ Every pipeline gets a `blocked` step from `[unattended]` unless it declares its 
 | `done` | Finished. The worktree is removed, the branch deleted once pushed, the file archived. |
 | `paused` | Held for a person after a gate. `r` on the board sends it on, or to a step you pick instead. |
 | `blocked` | Needs help. `spoolway resume` continues it. An [unattended run](pipelines.md#unattended-runs) starts the unblocker lane instead. |
-| `hook_failed` | An [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) failed on `queued`, `started` or `done`. `spoolway resume`, or `r` on the board, runs the hook again. `spoolway resume --skip-hook` carries the task on without the hook. |
+| `hook_failed` | An [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) failed on `queued`, `started` or `done`. `spoolway resume`, or `r` on the board, runs the hook again. `spoolway resume --skip-hook`, or `k` on the board, carries the task on without the hook. |
 
 A step names where the task goes next with `on_pass` and `on_fail`. Prompts report an outcome
 and never a destination.

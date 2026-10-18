@@ -80,6 +80,7 @@ const IGNORED_KEYS: &[&str] = &[
     "paused_by",
     "hook_paused",
     "hook_error",
+    "hook_skipped",
     "missing_start_branch",
     "launched_at",
     "steps",

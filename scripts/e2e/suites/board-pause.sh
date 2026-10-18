@@ -1258,5 +1258,74 @@ draws_since_waited "a newer executable on PATH asks for a restart" \
 draws_since "with the running build still the version it names" \
   "· v$RUNNING_VERSION" "$NEW_MARK"
 
+# ------------------------------ `k` skips a failed hook, behind its panel
+# A task held on `hook_failed` by its `done` hook offers `[k] skip hook`, and
+# `k` opens a panel rather than skipping: `esc` there leaves the task held,
+# and only `enter` skips the hook, through the same code `spoolway resume
+# --skip-hook` runs. The hook is a real `[issue_tracking]` script that fails
+# on `done` alone, so the stop is the dispatcher's own, as in
+# `issue-tracking.sh`. The task is written straight onto `done`, the one
+# stage that fires that event without a pipeline to walk first. Its group
+# sorts first, as `0-blocked` and `0-chain` do, so its row is in the window
+# the board draws above everything the sections before this left queued.
+#
+# RECENT is not checked here: those tasks fill the pane, and the board draws
+# no RECENT under a table that does. The line a skip writes there is
+# unit-tested in `src/status/mod.rs`.
+#
+# The config changes under a stopped board, so the dispatcher the next one
+# starts reads it.
+board_stop
+mkdir -p .spoolway/hooks
+# Logs each `done` run by task file, so the skip is proven to start no
+# second run of the hook it skipped.
+DONE_RUNS="$LIVE/done-hook-runs"
+cat > .spoolway/hooks/fail-done.sh <<EOF
+#!/bin/sh
+[ "\$SPOOLWAY_EVENT" = done ] || exit 0
+basename "\$SPOOLWAY_TASK_FILE" >> "$DONE_RUNS"
+exit 1
+EOF
+chmod +x .spoolway/hooks/fail-done.sh
+must "the hook fails on done" "$SPOOLWAY" config set issue_tracking.hook fail-done.sh
+must "with a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/skip-held.md" skip-held "$BODY" \
+  "stage: done" "group: 0-hook"
+board_start
+
+stage_reaches "a failing done hook holds its task" skip-held hook_failed 30
+draws_now "its row offers a rerun and a skip" "[r] rerun hook  [k] skip hook"
+SKIP_PANEL="╭─ skip the done hook? ─"
+if cursor_to skip-held; then
+  press k
+  draws_now "\`k\` opens the skip panel" "$SKIP_PANEL" 10
+  draws_now "naming the archive" "skip-held is archived and its worktree removed." 10
+  press $'\x1b'
+  stops_drawing "\`esc\` closes it" "$SKIP_PANEL"
+else
+  bad "the cursor reaches the held row"
+fi
+if [ "$(stage_of skip-held)" = hook_failed ]; then
+  ok "and leaves the task held on hook_failed"
+else
+  bad "and leaves the task held on hook_failed (at \`$(stage_of skip-held)\`)"
+fi
+
+if cursor_to skip-held; then
+  press k
+  if shows "> skip and archive" 10; then press $'\r'; fi
+fi
+_skip_archived() { [ -f "$SPOOLWAY_PROJECT_HOME/archive/skip-held.md" ]; }
+if poll_until 30 _skip_archived; then ok "\`k\` then \`enter\` skips the hook and archives the task"
+else
+  bad "\`k\` then \`enter\` skips the hook and archives the task (at \`$(stage_of skip-held)\`)"
+  _frame_now | sed 's/^/        /'
+fi
+if [ "$(grep -cx skip-held.md "$DONE_RUNS" 2>/dev/null)" = 1 ]; then
+  ok "the skipped hook ran once, for the failure, and never again"
+else
+  bad "the skipped hook ran once, for the failure, and never again ($(grep -cx skip-held.md "$DONE_RUNS" 2>/dev/null) runs)"
+fi
+
 board_stop
 finish

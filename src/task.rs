@@ -608,6 +608,21 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_error: Option<String>,
 
+    /// `"queued"`, `"started"` or `"done"` — the hook event `spoolway resume
+    /// --skip-hook` (or the board's `k`) last carried this task past. Read by
+    /// the board alone, so its RECENT line can say `skipped <event> hook`:
+    /// the skip clears [`Frontmatter::hook_paused`], and nothing else left
+    /// in the file tells a skip from any other way off `hook_failed`.
+    ///
+    /// It has to outlive one more move than the skip itself. A skip at
+    /// `queued` or `started` puts the task back on `queued`, and the board
+    /// may first see it on the step the dispatcher moves it to next, so the
+    /// mark is still there on that move from `queued` onto a step — see
+    /// [`Task::set_stage`], which clears it on every other move.
+    /// [`Task::set_stage_unbanked`] clears it too. Nothing routes on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_skipped: Option<String>,
+
     /// The start branch that was missing when the dispatcher paused this task
     /// instead of cutting its worktree — the pause's own reason, which
     /// `queue show` prints with the rest of the front matter.
@@ -1168,6 +1183,12 @@ impl Task {
         if from == crate::pipeline::BLOCKED {
             self.front.escalated = false;
         }
+        // A skipped hook's mark is read on the move from `queued` onto a
+        // step that follows the skip, and is stale on any other: a later
+        // stop of the same task would otherwise read on the board as a skip.
+        if from != crate::pipeline::QUEUED || crate::pipeline::RESERVED.contains(&stage) {
+            self.front.hook_skipped = None;
+        }
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.launched_at = None;
@@ -1213,6 +1234,10 @@ impl Task {
     /// Clearing a run is not counting an arrival: `rounds` stays as it was.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
+        // Every move this makes — a park, a put-back, a skip back onto
+        // `queued` — is a move away from the one a skip marked; a skip writes
+        // its own mark after this.
+        self.front.hook_skipped = None;
         self.front.attempts = 0;
         self.front.launched_at = None;
         self.front.launch_failures.remove(stage);
@@ -2224,6 +2249,32 @@ mod tests {
         let raw = "---\nid: demo\nstage: paused\nparked_from: review\n---\n## Goal\nDo a thing.\n";
         let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
+    }
+
+    /// A skipped hook's `hook_skipped:` mark lives through exactly one more
+    /// move: the dispatcher's from `queued` onto a step, which the board reads
+    /// it on. Any other move clears it — the step's own pass, a move from
+    /// `queued` onto a stage that is not a step, a park — so a later stop
+    /// never reads as a skip.
+    #[test]
+    fn a_skip_mark_outlives_only_the_move_off_queued_onto_a_step() {
+        use crate::pipeline::{BLOCKED, QUEUED};
+        let raw = "---\nid: demo\nstage: queued\nhook_skipped: queued\n---\n## Goal\nx\n";
+        let marked = || Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+
+        let mut task = marked();
+        task.set_stage("implement", None);
+        assert_eq!(task.front.hook_skipped.as_deref(), Some(QUEUED));
+        task.set_stage("review", None);
+        assert_eq!(task.front.hook_skipped, None);
+
+        let mut task = marked();
+        task.set_stage(BLOCKED, None);
+        assert_eq!(task.front.hook_skipped, None);
+
+        let mut task = marked();
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "parked");
+        assert_eq!(task.front.hook_skipped, None);
     }
 
     /// A task file already on disk carrying `rounds:` but no `arrivals:` of

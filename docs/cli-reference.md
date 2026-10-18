@@ -893,6 +893,8 @@ See [Gates](pipelines.md#gates).
 
 `spoolway resume <task> --skip-hook` carries a task on `hook_failed` past the issue-tracking hook that failed. It is for a hook that cannot pass for this task.
 
+The board's `k` on a `hook_failed` row runs the same skip behind a confirm panel. See [Skip panel](dispatcher.md#skip-panel).
+
 ```
 $ spoolway resume rel --skip-hook
 skipped the done hook for rel
