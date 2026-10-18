@@ -194,6 +194,10 @@ bindings that no longer exist — `git show main:<file>` and `git show origin/<b
 side by side is how you find out which name survived. Never keep a hunk that mentions a
 binding `grep` cannot find a definition for; it will compile only if you were lucky.
 
+**Screenshots.** When two pull requests replace the same image under `docs/screenshots/`, the
+two binaries cannot be merged. Keep the image from the branch merged last, since it was captured
+against the newer code.
+
 **Doc comments.** Both sides usually rewrote the same paragraph for different reasons. Keep
 both facts. Prefer `main`'s wording where it describes structure that still exists, and the
 branch's wording where it describes what the branch changed.

@@ -230,6 +230,9 @@ fi
 if [ -d "$RMA_WT" ] && [ ! -e "$RMA_WT/.git" ]; then
   printf 'gitdir: %s\n' "$LIVE/proj/.git/worktrees/$(basename "$RMA_WT")" > "$RMA_WT/.git"
 fi
+# `rmb` blocks at `create-pr`, which is what keeps `task/rma`, the branch it is
+# cut from, in place for the checks below.
+echo bail > "$CTL/rmb.create-pr"
 if settle rma gone 120 && settle rmb blocked 120; then
   ok "the restart finishes both tasks"
 else bad "the restart finishes both tasks"; fi
@@ -417,8 +420,8 @@ forget zz-free
 must "unattended, so \`blocked\` is staffed" "$SPOOLWAY" config set unattended.enabled true
 must "by an agent that honours the ctl files" "$SPOOLWAY" config set unattended.blocked_agent pi
 # The unblocker waits out its linger, then leaves a change and passes: the
-# task is cut onto `blocked` without ever having run `implement`, and without a
-# change `handover` refuses it and sends it straight back.
+# task is cut onto `blocked` without ever having run `implement`, so its branch
+# would otherwise hold nothing for `create-pr` to open a pull request for.
 echo "linger:20" > "$CTL/stuck.blocked"
 echo "work" > "$CTL/stuck"
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/stuck.md" stuck "$BODY" \

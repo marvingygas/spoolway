@@ -201,7 +201,6 @@ whole prompt, or any key `spoolway config contract` lists:
   `run:` line, a script it calls or a prompt names no `SPOOLWAY_TASK`,
   `SPOOLWAY_TASK_FILE`, `SPOOLWAY_REPO`, `SPOOLWAY_STEP`, `SPOOLWAY_WORKTREE`
   or `SPOOLWAY_SCRATCH`, and no `spoolway report`. Any other `SPOOLWAY_`
-  name or subcommand is legal. `spoolway stack` on a handover step is the one
-  `run:` exception, and an issue hook is outside the rule.
+  name or subcommand is legal. An issue hook is outside the rule.
 - Never hand the person a spoolway command. Run it yourself once they say
   yes.

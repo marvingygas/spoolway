@@ -2,7 +2,7 @@
 # A task's whole life, live.
 #
 # `dispatch.backend = headless` runs lanes as real detached processes, so this
-# is the pipeline actually running: queued -> implement -> review -> handover
+# is the pipeline actually running: queued -> implement -> review -> create-pr
 # -> done, with a lane per step, a real worktree, a real pull request, and
 # the archive at the end.
 #
@@ -38,9 +38,8 @@ new_repo "$LIVE/proj"
 # product ships, not on a harness-owned substitute. Safe to do here and
 # nowhere else needs it: the stand-in agents below decide what to do from
 # `$SPOOLWAY_STEP` alone, never from a prompt's wording — except the
-# handover role in `agents/pi`, which matches a prompt's own opening line,
-# and no shipped prompt opens with that line (`handover` here runs `spoolway
-# stack`, not an agent), so that exception never reaches this pipeline.
+# `create-pr` role in `agents/pi`, which matches a prompt's own opening line:
+# here that is the shipped prompt's `# Create PR`.
 export SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS=1
 configure_project plan/live
 publish plan/live
@@ -65,10 +64,7 @@ must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/land.md"
 if drive land gone; then ok "a task runs queued -> ... -> done and is archived"
 else bad "a task runs queued -> ... -> done and is archived (stuck at \`$(stage_of land)\`)"; fi
 
-has "its journey is in the status log" "→ \`handover\`" $SPOOLWAY_PROJECT_HOME/archive/land.md
-# The handover log is reclaimed with the task, so the archived file is the only
-# place left that names the pull request.
-has "the archived task names its pull request" "- pull req    #" $SPOOLWAY_PROJECT_HOME/archive/land.md
+has "its journey is in the status log" "→ \`create-pr\`" $SPOOLWAY_PROJECT_HOME/archive/land.md
 if handed_over land; then ok "the change is handed over as a pushed branch and a pull request"
 else bad "the change is handed over as a pushed branch and a pull request"; ls "$FORGE/prs" | sed 's/^/        /'; fi
 # With no dependency, a task stacks on the plan branch it was cut from.
@@ -79,7 +75,7 @@ if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-land" ]; then bad "the task's wor
 else ok "the task's worktree is gone after cleanup"; fi
 if git rev-parse --verify -q task/land >/dev/null; then bad "the task's branch is gone after cleanup"
 else ok "the task's branch is gone after cleanup"; fi
-# The command-step run file (`handover`'s `spoolway stack`) leaves with the
+# A command-step run file leaves with the
 # task: nothing routes on a run of an archived task, and a stray `.log` per
 # task per step would otherwise pile up for the life of the project.
 CMD_LEFT=$(ls "$SPOOLWAY_PROJECT_HOME/commands/" 2>/dev/null | grep -c '^land · ' || true)
@@ -494,12 +490,7 @@ must "staging the slot change" git add .spoolway/config.toml
 git diff --cached --quiet .spoolway/config.toml \
   || must "committing the slot change" git commit -qm "e2e: back to two slots, again"
 
-# `chain-b` is a dependent task, so — exactly as `top` does in `stacking.sh`,
-# and for the same reason — its own `handover` always blocks against this
-# suite's bare-repo forge, on the one call that needs a real github.com
-# remote. `blocked` is as far as this suite drives it; landing a stack all
-# the way is `stacking.sh`'s scenario, not this one's.
-if drive chain-a gone 180 && drive chain-b blocked 180 \
+if drive chain-a gone 180 && drive chain-b gone 180 \
   && drive gate-untouched-a gone 180 && drive gate-untouched-b gone 180; then
   ok "the chain runs to its real end and both never-run groups land"
 else

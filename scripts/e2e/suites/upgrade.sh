@@ -277,7 +277,15 @@ stage() {
 # release.
 assert_init_reused_everything() {
   local version=$1 out="$WORK/$1/init.out"
-  lacks "the $version fixture's second init wrote nothing" "  wrote" "$out"
+  # The one file a fixture lacks is the `create-pr` prompt, which no release
+  # before the shipped pipelines ended at that step ever scaffolded. `init`
+  # writes it into an older project and nothing else.
+  local others
+  others=$(grep "^  wrote" "$out" | grep -vF ".spoolway/prompts/create-pr/PROMPT.md" || true)
+  has "the $version fixture's second init wrote the create-pr prompt it lacks" \
+    "  wrote    .spoolway/prompts/create-pr/PROMPT.md" "$out"
+  if [ -z "$others" ]; then ok "and wrote nothing else"
+  else bad "and wrote nothing else (also wrote: $others)"; fi
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
   has "and installed the skills the fixture never carried" \
@@ -371,6 +379,16 @@ works "and the real run changed on disk exactly the files it reported" \
 
 lacks "sync refused no file of the 0.6.0 project as a copy it does not know" \
   "refused " "$WORK/0.6.0/real.out"
+
+# Both of 0.6.0's pipelines end in `spoolway stack`, so sync names the step to
+# change, in a dry run and a real one alike, and the note adds no file to the
+# lists compared above.
+has "the 0.6.0 dry run names the deprecated spoolway stack" \
+  "\`spoolway stack\` is deprecated" "$WORK/0.6.0/dry.out"
+has "and the real run names it too" \
+  "\`spoolway stack\` is deprecated" "$WORK/0.6.0/real.out"
+has "naming the step that still runs it, pipeline first" \
+  "Still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
 
@@ -517,6 +535,8 @@ for fixture_dir in "$FIXTURES"/*/; do
   has "the $version sync names dispatch.lane_layout among the settings it added" \
     "dispatch.lane_layout" "$WORK/$version/real.out"
   assert_dispatch_keys_written "$version"
+  has "sync names the deprecated spoolway stack in the $version project" \
+    "\`spoolway stack\` is deprecated" "$WORK/$version/real.out"
   says "and a second sync of the $version project has nothing left to do" \
     "Nothing updating." \
     "$SPOOLWAY" sync

@@ -220,11 +220,13 @@ steps:
     agent: pi
     prompt: archivist
     model: Ornith-1.5-35B-A3B
-    on_pass: handover
+    on_pass: create-pr
 
-  - id: handover
-    description: Create a stacked pull request without an LLM call.
-    run: spoolway stack
+  - id: create-pr
+    description: Push the branch and open its pull request.
+    agent: claude
+    prompt: create-pr
+    model: claude-opus-5
     on_pass: done
 ```
 

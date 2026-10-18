@@ -1171,12 +1171,11 @@ has "and the stdin content lands on disk" "read from stdin" \
 #
 # What `enter` did is read off the gate's own record, not off `stage:`
 # alone. Once resumed, `gate-edit` runs on through `review` and `document` to
-# `handover`, which fails here for want of a forge, and the unattended
-# unblocker sends it back there until the run gives up and parks it on
-# `paused` again — several passes, but no person in the loop, so the whole
-# round trip can be over before anything looks. Watching for "not `paused`"
-# then waited its full bound on a task that had already left and come back,
-# and failed. The Status Log line the gate's release writes stays put
+# `create-pr`, which the stand-in passes without a forge, and on to `done` —
+# several passes, but no person in the loop, so the whole round trip can be
+# over before anything looks. Watching for "not `paused`" then waited its
+# full bound on a task that had already left for good, and failed.
+# The Status Log line the gate's release writes stays put
 # whatever the task does next, and names the step the preselected row did.
 SAW_PICKER=""
 cursor_to late && press r

@@ -78,9 +78,8 @@ case "$mode" in
   hang | vanish) sleep 300 ;; # never finishes on its own
   # A turn that leaves a change behind and passes. A task cut straight onto
   # `blocked` has never run `implement`, so its branch holds nothing, and the
-  # `handover` it is sent to refuses to open a pull request for an empty diff.
-  # Sent back to `blocked` each time, such a task never leaves the queue, which
-  # says nothing about the report that cleared it.
+  # `create-pr` it is sent to would open a pull request for an empty diff.
+  # The change keeps such a task shaped like one that ran.
   work) echo "work for $SPOOLWAY_TASK at $SPOOLWAY_STEP" >> "work-$SPOOLWAY_TASK.txt"
         "$SPOOLWAY" report --pass -m "did $SPOOLWAY_STEP, leaving a change" ;;
   bail) "$SPOOLWAY" report --block -m "needs a credential no lane can mint" ;;
@@ -151,19 +150,16 @@ case "$mode" in
         fi
         ;;
       *)
-        # The handover role, standing in for a pipeline that still gives it to
-        # a prompt — matched on the prompt this lane runs, which arrives in
-        # argv as the profile's `{prompt_file}`.
+        # The `create-pr` role: the shipped pipelines' last step, and any
+        # project pipeline whose last step gives the same job to a prompt.
+        # Matched on the prompt this lane runs, which arrives in argv as the
+        # profile's `{prompt_file}`.
         #
         # Not on the step id, because that id has been `pr`, then `land`, then
-        # `merge`, now `handover` — and each time, a stand-in keyed on the name
-        # quietly fell through, reported a pass and handed nothing over. It keyed
-        # on `$SPOOLWAY_CREDENTIALS` until that went with the pipeline's last
-        # statement about what a lane may reach. The role is what does not drift:
-        # handing a change over is this prompt's, whatever its step is called.
-        # No shipped pipeline names one for it any more — `handover` runs
-        # `spoolway stack` instead — so this branch now stands in only for a
-        # project's own pipeline that still wants a model to do the job.
+        # `merge`, then `handover`, now `create-pr` — and each time, a stand-in
+        # keyed on the name quietly fell through, reported a pass and handed
+        # nothing over. The role is what does not drift: handing a change over
+        # is this prompt's, whatever its step is called.
         #
         # Which is why this reads the prompt file's *contents* rather than its
         # path. The path used to end in the prompt's own directory and matching
@@ -183,62 +179,22 @@ case "$mode" in
             case "$arg" in --append-system-prompt | --append-system-prompt-file) next=yes ;; esac
           done
         fi
-        if ! { [ -n "$prompt" ] && [ -f "$prompt" ] && grep -q "^You own git\." "$prompt"; }; then
+        if ! { [ -n "$prompt" ] && [ -f "$prompt" ] && grep -qE "^(You own git\.|# Create PR)" "$prompt"; }; then
           "$SPOOLWAY" report --pass -m "ok"
           exit 0
         fi
 
-        # What it stands in for is one job in three parts: rebase onto the
-        # branch this task sits on, push, and open the pull request against that
-        # same branch. The rebase is the load-bearing one — spoolway cuts every
-        # worktree from its `base:`, not from its dependency, so without it a
-        # pull request from this branch to its dependency's reads the
-        # dependency's changes as deletions.
+        # What it stands in for is the shipped prompt's job: push the branch as
+        # it is and open the pull request against the branch the task file
+        # names in `starts_from:`, or `base:` where it has none. Never a
+        # rebase and never a force-push, as the prompt says — a base that moved
+        # under the branch is a non-event, and `conflicts.sh` holds that.
         branch="task/$SPOOLWAY_TASK"
         git rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
           || branch=$(git rev-parse --abbrev-ref HEAD)
 
-        # What this task stacks on: its dependency's branch, or its base where it
-        # has none. Read out of the task file, which is where `spoolway stack`
-        # reads it too — nothing in spoolway knows what a stack is.
-        onto=""
-        dep=$(sed -n "/^depends_on:/,/^[a-z_]*:/p" "$SPOOLWAY_TASK_FILE" 2>/dev/null \
-              | sed -n "s/^ *- *//p" | tail -1)
-        [ -n "$dep" ] && onto="task/$dep"
-        taskbase=$(sed -n "s/^base: //p" "$SPOOLWAY_TASK_FILE" 2>/dev/null | head -1)
-
-        # Resolve that name to a commit, preferring the forge.
-        #
-        # The dependency's *local* branch does not exist here: spoolway deletes
-        # it when that task reached `done`, and this worktree was cut before then
-        # either way. So asking the local ref first is precisely how a stacked
-        # task falls back to its `base:` and ships flat — which is the bug this
-        # loop is shaped to avoid, and the one the `stacking` suite is watching
-        # for.
-        tip=""
-        for candidate in "$onto" "$taskbase"; do
-          [ -n "$candidate" ] || continue
-          if git fetch -q origin "$candidate" >/dev/null 2>&1 \
-             && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
-            onto=$candidate
-            tip=$(git rev-parse FETCH_HEAD)
-            break
-          fi
-          if git rev-parse --verify -q "refs/heads/$candidate" >/dev/null 2>&1; then
-            onto=$candidate
-            tip=$(git rev-parse "refs/heads/$candidate")
-            break
-          fi
-        done
-        [ -n "$tip" ] || onto=""
-
-        rebased=""
-        if [ -n "$tip" ] && ! git merge-base --is-ancestor "$tip" HEAD 2>/dev/null; then
-          # Resolving in the branch's favour, which is a stand-in's stand-in for
-          # reading two changes and meaning both.
-          git rebase -X theirs "$tip" >/dev/null 2>&1 \
-            && rebased=", rebased onto \`$onto\`"
-        fi
+        onto=$(sed -n "s/^starts_from: //p" "$SPOOLWAY_TASK_FILE" 2>/dev/null | head -1)
+        [ -n "$onto" ] || onto=$(sed -n "s/^base: //p" "$SPOOLWAY_TASK_FILE" 2>/dev/null | head -1)
 
         [ "$mode" = noland ] && {
           "$SPOOLWAY" report --pass -m "left it unpushed on purpose"
@@ -246,28 +202,22 @@ case "$mode" in
         }
 
         if [ -z "$E2E_FORGE" ]; then
-          # No forge in this suite. The rebase is still the part worth doing —
-          # it is what makes the branch a stack — and there is nowhere to push.
-          "$SPOOLWAY" report --pass -m "rebased; no forge to open a pull request on$rebased"
+          "$SPOOLWAY" report --pass -m "no forge to open a pull request on"
           exit 0
         fi
 
-        # A rebase rewrites the branch, so a plain push is refused once it has
-        # been published. The lease is what makes the remote refuse if anything
-        # arrived meanwhile, which is the correct outcome rather than a failure.
-        git push -q --force-with-lease -u origin "$branch" 2>/dev/null \
-          || git push -q -u origin "$branch" 2>/dev/null
+        git push -q -u origin "$branch" 2>/dev/null
 
-        # Against what it rebased onto, not against the mainline. A branch may
-        # already have a pull request, and that one is this task's — the double
-        # reports "already exists" rather than opening a second.
+        # A branch may already have a pull request, and that one is this
+        # task's — the double reports "already exists" rather than opening a
+        # second.
         "$E2E_FORGE/bin/gh" pr create --head "$branch" --base "${onto:-main}" \
           --title "$SPOOLWAY_TASK" --body "queued by the e2e suite" >/dev/null 2>&1
 
-        # This ends every task's handover, whatever step reaches it last in its
-        # plan: a rebase, a push and an open pull request, and nothing else. No
+        # This ends every task's `create-pr`, whatever step reaches it last in
+        # its plan: a push and an open pull request, and nothing else. No
         # merge, no plan pull request, no `plan list` — landing is a person's.
-        "$SPOOLWAY" report --pass -m "pull request open against \`${onto:-main}\`$rebased"
+        "$SPOOLWAY" report --pass -m "pull request open against \`${onto:-main}\`"
         ;;
     esac
     ;;

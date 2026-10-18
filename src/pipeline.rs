@@ -50,8 +50,8 @@ pub const PIPELINE_FILE: &str = "pipeline.yml";
 ///
 /// Both pipelines here are unconditional: every step runs for every task, so
 /// reading the file tells you the whole flow. `document` is per-task and scoped
-/// to that task's own diff, and `handover` — the last step of both — ends at a
-/// green pull request. Nothing is merged: a plan's stack is landed bottom-up
+/// to that task's own diff, and `create-pr` — the last step of both — ends at an
+/// open pull request. Nothing is merged: a plan's stack is landed bottom-up
 /// into the mainline by a person.
 pub const BUILTIN_PIPELINES: &[(&str, &str)] = &[
     ("default", include_str!("../assets/pipelines/default.yml")),
@@ -2472,6 +2472,13 @@ impl Pipelines {
     /// The built-in definitions, already parsed — a test fixture standing in
     /// for a project's own `.spoolway/pipelines/`, which production always
     /// loads from disk with no fallback of its own.
+    ///
+    /// Not the shipped pipelines exactly: the shipped tail is the `create-pr`
+    /// agent step, and this fixture swaps it for the command step `handover`
+    /// running `spoolway stack`. Command steps, their runs and the
+    /// `spoolway stack` checks are all still supported and tested through
+    /// this fixture, and no shipped pipeline has a command step to test them
+    /// on. [`Pipelines::shipped`] is the one that is exactly what ships.
     #[cfg(test)]
     pub fn builtin() -> Pipelines {
         let mut pipelines = Pipelines::assemble(
@@ -2501,6 +2508,25 @@ impl Pipelines {
                     step.effort = None;
                 }
             }
+            let tail: Step = serde_norway::from_str(
+                "id: handover\n\
+                 description: Open this task's pull request with `spoolway stack`.\n\
+                 run: spoolway stack\n\
+                 headless: true\n\
+                 on_pass: done\n",
+            )
+            .expect("the fixture's command step must parse");
+            let at = pipeline
+                .steps
+                .iter()
+                .position(|step| step.id == "create-pr")
+                .expect("the shipped tail is `create-pr`");
+            pipeline.steps[at] = tail;
+            pipeline
+                .steps
+                .iter_mut()
+                .filter(|step| step.on_pass.as_deref() == Some("create-pr"))
+                .for_each(|step| step.on_pass = Some("handover".into()));
         }
         pipelines
     }
@@ -3054,23 +3080,27 @@ mod tests {
     }
 
     /// Both shipped pipelines end the same way, and end unconditionally: every
-    /// task documents its own diff, then hands it over. `handover` is the
-    /// last step either one runs — there is no `checks` step waiting behind
-    /// it any more, since `gh pr checks --watch --fail-fast`'s exit code
-    /// cannot tell a red build from GitHub not having registered a check yet,
-    /// and that is not a thing spoolway tries to route on. A red build after
-    /// handover is a person's to pick up. `land` is not a step any more, and
+    /// task documents its own diff, then opens its pull request. `create-pr` is
+    /// the last step either one runs — there is no `checks` step waiting behind
+    /// it, since `gh pr checks --watch --fail-fast`'s exit code cannot tell a
+    /// red build from GitHub not having registered a check yet, and that is not
+    /// a thing spoolway tries to route on. A red build after the pull request
+    /// opens is a person's to pick up. `land` is not a step any more, and
     /// nothing in a pipeline decides whether a step runs.
     ///
-    /// `handover` is a command step — `run: spoolway stack`, no model and no
-    /// rebase — and its failure routes straight to `blocked`: `spoolway
-    /// stack` calls `gh pr view` first, so re-running `handover` from
-    /// `blocked` is safe and there is no second, LLM-run escalation step to
-    /// fall back to any more.
+    /// `create-pr` is an agent step on the shipped `create-pr` prompt, with the
+    /// model and effort left blank like every other shipped step. No shipped
+    /// pipeline runs `spoolway stack`. Its failure routes straight to
+    /// `blocked`: the prompt updates a pull request that is already open, so
+    /// re-running the step from `blocked` is safe.
     #[test]
-    fn both_pipelines_end_at_document_then_handover() {
+    fn both_pipelines_end_at_document_then_create_pr() {
         for name in ["default", "bugfix"] {
-            let pipeline = Pipelines::builtin().get(name).unwrap().clone();
+            let pipeline = Pipelines::shipped(&crate::config::Config::default())
+                .unwrap()
+                .get(name)
+                .unwrap()
+                .clone();
             assert!(
                 pipeline.step("land").is_none(),
                 "pipeline `{name}` still has a `land` step"
@@ -3079,26 +3109,42 @@ mod tests {
                 pipeline.step("checks").is_none(),
                 "pipeline `{name}` still has a `checks` step"
             );
+            assert!(
+                pipeline.step("handover").is_none(),
+                "pipeline `{name}` still has a `handover` step"
+            );
+            assert!(
+                pipeline.steps.iter().all(|step| !step
+                    .run
+                    .as_deref()
+                    .is_some_and(|r| r.contains("spoolway stack"))),
+                "pipeline `{name}` still runs `spoolway stack`"
+            );
             let document = pipeline.step("document").expect("`document`");
             assert_eq!(
                 document.on_pass.as_deref(),
-                Some("handover"),
+                Some("create-pr"),
                 "pipeline `{name}`"
             );
-            let handover = pipeline.step("handover").expect("`handover`");
+            let create_pr = pipeline.step("create-pr").expect("`create-pr`");
             assert!(
-                handover.agent.is_none() && handover.run.is_some(),
-                "pipeline `{name}`: `handover` should be a command step running `spoolway stack`"
+                create_pr.agent.is_some() && create_pr.run.is_none(),
+                "pipeline `{name}`: `create-pr` should be an agent step"
             );
-            assert_eq!(handover.on_pass.as_deref(), Some(DONE), "pipeline `{name}`");
+            assert_eq!(create_pr.prompt_name(), "create-pr", "pipeline `{name}`");
+            assert_eq!(
+                create_pr.on_pass.as_deref(),
+                Some(DONE),
+                "pipeline `{name}`"
+            );
             // `on_fail` is absent, not `blocked`: that key is redundant with
             // no `on_fail` at all — see `Pipeline::redundant_on_fail_warnings`
             // — so the routing this test cares about is read from
             // `destination`, the one place it is actually decided.
             assert_eq!(
-                handover.destination(Outcome::Fail),
+                create_pr.destination(Outcome::Fail),
                 Some(BLOCKED),
-                "pipeline `{name}`: a failed `spoolway stack` is a person's call, not \
+                "pipeline `{name}`: a failed `create-pr` is a person's call, not \
                  another agent step"
             );
         }

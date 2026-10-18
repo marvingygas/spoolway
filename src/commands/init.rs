@@ -2124,7 +2124,7 @@ mod tests {
             home,
         };
 
-        let pipelines = Pipelines::builtin();
+        let pipelines = Pipelines::shipped(&Config::default()).unwrap();
 
         // Every step a shipped pipeline runs has prose on disk after `init`.
         for pipeline in pipelines.pipelines.values() {
@@ -2151,6 +2151,37 @@ mod tests {
             crate::assets::PROMPTS.len(),
             "listed {:?}",
             listed.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A project made before `create-pr` shipped has every other prompt, and
+    /// a repeat `init` gives it that one alone: the prompts it has edited stay
+    /// as they are.
+    #[test]
+    fn a_repeat_init_adds_only_the_create_pr_prompt_an_older_project_lacks() {
+        let root = crate::scratch::root("commands-create-pr-prompt");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        run_init(&root, &confirmed()).expect("init");
+
+        let prompts = root.join(".spoolway").join("prompts");
+        let created = prompts.join("create-pr").join(assets::PROMPT_FILE);
+        assert!(created.is_file(), "init writes {}", created.display());
+        std::fs::remove_dir_all(prompts.join("create-pr")).unwrap();
+        let edited = prompts.join("implementer").join(assets::PROMPT_FILE);
+        std::fs::write(&edited, "# Mine\n").unwrap();
+
+        run_init(&root, &confirmed()).expect("repeat init");
+
+        assert_eq!(
+            std::fs::read_to_string(&created).unwrap(),
+            assets::prompt("create-pr").unwrap().body
+        );
+        assert_eq!(
+            std::fs::read_to_string(&edited).unwrap(),
+            "# Mine\n",
+            "a prompt the project edited is never rewritten"
         );
     }
 

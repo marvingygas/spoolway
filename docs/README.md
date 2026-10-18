@@ -67,6 +67,6 @@ use.
 
 ## What ships is a sample
 
-Two pipelines and five prompts come with `spoolway init`, so a new project runs on its first
+Two pipelines and six prompts come with `spoolway init`, so a new project runs on its first
 pass. They are a template. Edit them, cut steps, or replace them with the workflow your team
 already follows: [Converting a workflow you already run](pipelines.md#converting-a-workflow-you-already-run).

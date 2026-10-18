@@ -6,9 +6,9 @@
 # worktrees — and finds it by the checkout's own path in the workspace's
 # `project.toml`, with no id stamped into `.git`. Which files that resolves to
 # is unit-tested in src/repo.rs. What a unit test cannot reach is the rest of
-# the run: a detached lane in a linked worktree, and the `spoolway report` and
-# `spoolway stack` it runs from there, each finding the one workspace from a
-# checkout that is neither the clone nor carries a `.spoolway/` of its own.
+# the run: a detached lane in a linked worktree, and the `spoolway report` it
+# runs from there, finding the one workspace from a checkout that is neither
+# the clone nor carries a `.spoolway/` of its own.
 #
 # `init --setup home` writes a workspace itself now, and the last section runs
 # it for real: in a fresh git repository, and again from a second clone that
@@ -90,12 +90,12 @@ has "it is queued in the clone's dispatcher folder" "id: homed" "$WS/dispatchers
 if drive homed gone; then ok "a home-mode task runs queued -> ... -> done and is archived"
 else bad "a home-mode task runs queued -> ... -> done and is archived (stuck at \`$(stage_of homed)\`)"; fi
 
-has "the archive is in the clone's dispatcher folder" "→ \`handover\`" \
+has "the archive is in the clone's dispatcher folder" "→ \`create-pr\`" \
   "$WS/dispatchers/proj/archive/homed.md"
 has "its worktree was cut under the dispatcher folder" \
   "worktree_path: $WS/dispatchers/proj/worktrees/" "$WS/dispatchers/proj/archive/homed.md"
-if handed_over homed; then ok "the lane's own spoolway stack handed the change over from its worktree"
-else bad "the lane's own spoolway stack handed the change over from its worktree"; ls "$FORGE/prs" | sed 's/^/        /'; fi
+if handed_over homed; then ok "the lane's own create-pr handed the change over from its worktree"
+else bad "the lane's own create-pr handed the change over from its worktree"; ls "$FORGE/prs" | sed 's/^/        /'; fi
 
 # ---------------------------------------------- nothing written back
 # Home mode's promise to the clone: nothing in `.git`, nothing in the tree.

@@ -56,15 +56,17 @@ pending_doc beta "$BODY" "group: audits" "pipeline:" \
 # the first row: `space` ticks it, `j` moves onto `default` and `space`
 # ticks that too. `enter` then advances to the skips screen, one page per
 # ticked pipeline, `bugfix`'s first. The cursor opens on its first step: one
-# `j` reaches its second, `fix`, and `space` ticks it. `→` turns to
-# `default`'s page, where the cursor starts on its first step again; two `j`s
-# reach its third, `document`, and `space` ticks that too. Both runs are
+# `j` reaches its second, `fix`, and `space` ticks it; four more reach its
+# last, `create-pr`, which is ticked too, since a trial arm that ran it would
+# open a real pull request. `→` turns to `default`'s page, where the cursor
+# starts on its first step again; two `j`s reach its third, `document`, which
+# is ticked, and one more reaches its last, `create-pr`. Both runs are
 # counted off each pipeline's own steps, so they have to be recounted
 # whenever either built-in pipeline gains or loses a step near the top.
 # `enter` mints and writes all four arms and goes back to browsing; the
 # trailing `n` is noise the screen ignores, and the pipe running dry ends it
 # the same way `esc` would.
-on_screen 'o\r j \rj \033[Cjj \rn' /dev/null
+on_screen 'o\r j \rj jjjj \033[Cjj j \rn' /dev/null
 
 # Two copies of the two-task chain, ids numbered in pipeline order: the
 # `bugfix` copy is `alpha-1`, `beta-1`, the `default` copy `alpha-2`,
@@ -85,8 +87,8 @@ for arm in alpha-1 beta-1; do
     "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
   has "$arm sits in the bugfix copy's own group" "group: audits-bugfix" \
     "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
-  works "$arm carries bugfix's ticked skip, and none of default's" \
-    bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- fix"' \
+  works "$arm carries bugfix's ticked skips, and none of default's" \
+    bash -c 'grep -A2 "^skip:" "$1" | tail -2 | sort | paste -sd, | grep -qxF -- "- create-pr,- fix"' \
     _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
 done
 for arm in alpha-2 beta-2; do
@@ -94,8 +96,8 @@ for arm in alpha-2 beta-2; do
     "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
   has "$arm sits in the default copy's own group" "group: audits-default" \
     "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
-  works "$arm carries default's ticked skip, and none of bugfix's" \
-    bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- document"' \
+  works "$arm carries default's ticked skips, and none of bugfix's" \
+    bash -c 'grep -A2 "^skip:" "$1" | tail -2 | sort | paste -sd, | grep -qxF -- "- create-pr,- document"' \
     _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
 done
 for arm in $ARMS; do

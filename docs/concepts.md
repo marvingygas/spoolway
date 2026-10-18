@@ -235,10 +235,8 @@ deploy or a release.
 
 ## Branches and pull requests
 
-A dependent task's worktree is cut from its dependency's branch. The optional `spoolway stack`
-command can turn that chain into one stack of GitHub pull requests without calling a model or
-spending tokens. spoolway never merges branches. Where or whether you call the command is up
-to you. See [`spoolway stack`](pipelines.md#spoolway-stack).
+A dependent task's worktree is cut from its dependency's branch. The shipped pipelines end at a
+`create-pr` agent step that opens each task's pull request. spoolway never merges branches.
 
 ## The design rule underneath all of it
 

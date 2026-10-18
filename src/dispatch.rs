@@ -28439,7 +28439,7 @@ mod tests {
         let (repo, _root_guard) = fixture("prompt-command-fail");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
-        // `handover` is the shipped pipeline's command step (`spoolway
+        // `handover` is the test fixture's command step (`spoolway
         // stack`), and its `on_fail` goes straight to `blocked`.
         let step = pipeline.step("blocked").unwrap();
 

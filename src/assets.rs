@@ -83,6 +83,14 @@ pub const PROMPTS: &[Prompt] = &[
             ),
         ],
     },
+    // The last step of both shipped pipelines. It reads no `SPOOLWAY_`
+    // variable: the lane is told its task file, and the branch, title and
+    // ticket it needs are keys in that file.
+    Prompt {
+        name: "create-pr",
+        body: include_str!("../assets/prompts/create-pr/PROMPT.md"),
+        assets: &[],
+    },
     // A sample, not a mechanism: the binary knows the step id `blocked`, not
     // this prompt's name — nothing in `src/` outside this file spells
     // `unblocker`. Staffed only in an unattended run, on a pipeline that

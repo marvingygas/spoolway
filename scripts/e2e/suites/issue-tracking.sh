@@ -163,31 +163,6 @@ silent_about "and doctor stops complaining once the mode is fixed" \
 must "hook is restored to the bare name again" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
-# `handover` is `spoolway stack`, and the second task of a group is the second
-# pull request of a stack — one `gh api` call that needs a remote reading as
-# `github.com` and a `gh` that tracks stack membership. This suite's forge is
-# a bare repo on disk and its `gh` double tracks no stacks at all, so without
-# the three lines below `tracked-b` blocks at `handover` and never reaches
-# `done`, taking the `SPOOLWAY_GROUP_LAST` assertions with it. Both facts are
-# deliberate elsewhere — `suites/stacking.sh` asserts that exact refusal as
-# its own subject — so this is scoped to this block and undone after it.
-ORIGIN="$FORGE/origin.git"
-TRACKED_URL="https://github.com/e2e/spoolway-tracked.git"
-must "origin addressed as github, so the second of the pair can stack" \
-  git -C "$LIVE/proj" remote set-url origin "$TRACKED_URL"
-must "and redirected straight back to the same bare forge" \
-  git -C "$LIVE/proj" config "url.$ORIGIN.insteadOf" "$TRACKED_URL"
-export SPOOLWAY_GH="$HERE/../gh-stub.sh"
-export GH_STUB_PRS="$LIVE/tracked-prs"
-export GH_STUB_URL="file://$ORIGIN"
-# `handover` (`spoolway stack`) reads $SPOOLWAY_GH for its own `gh` calls —
-# the only ones this pipeline makes any more, `checks` having gone with it —
-# so there is no bare `gh` left to resolve off PATH, and no second double to
-# put ahead of `new_forge`'s own.
-# The dispatcher inherited its environment when it started, before any of
-# that existed — restarted, so the `handover` it runs sees all three.
-dispatcher_restart
-
 # A dependent pair rather than two independent tasks: `tracked-b` cannot even
 # start until `tracked-a` has reached `done`, which is what keeps
 # `SPOOLWAY_GROUP_LAST` deterministic below — the two can never reach `done`
@@ -252,15 +227,6 @@ if ! grep -q '^tracked-a ' "$STAGES_B_STARTED" 2>/dev/null \
 else
   bad "tracked-b's started event saw tracked-a at \`$(sed -n 's/^tracked-a //p' "$STAGES_B_STARTED")\` ($STAGES_B_STARTED) — the dependency gate did not hold started back"
 fi
-
-# Undone: everything past here is meant to see the same not-github forge the
-# rest of this suite was written against.
-must "origin is the bare forge again" \
-  git -C "$LIVE/proj" remote set-url origin "$ORIGIN"
-must "and the redirect is dropped with it" \
-  git -C "$LIVE/proj" config --unset "url.$ORIGIN.insteadOf"
-unset SPOOLWAY_GH
-dispatcher_restart
 
 # --------------------------------------------------------------- open hook
 # `queue add` calls a fifth event, `open`, once per document before anything

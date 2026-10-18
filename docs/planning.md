@@ -355,9 +355,8 @@ the pipeline panel saves it. `esc` on either panel cancels and writes nothing. S
 
 ## Closing a plan out
 
-spoolway does not prescribe how a finished task is published. The optional [`spoolway
-stack`](pipelines.md#spoolway-stack) command can open one GitHub pull request per task without
-using a model, but where or whether a pipeline calls it is up to you.
+spoolway does not prescribe how a finished task is published. The shipped pipelines end at a
+`create-pr` agent step that opens the pull request, and your own pipelines can end anywhere.
 
 A step with `last:` runs once for the chain. See
 [`last:`](pipelines.md#last--a-step-the-chain-runs-once).

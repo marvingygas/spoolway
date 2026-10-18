@@ -1699,6 +1699,10 @@ for each replaced key block, each value `sync` set on its own, each group of unk
 it kept, each group of settings it added, and each group of retired settings it dropped. See
 [Unknown keys](configuration.md#unknown-keys).
 
+When a step runs the deprecated stack command, the report ends with a `note` that names
+each `pipeline · step`, above the closing line. See
+[Keeping a project's files current](installation.md#keeping-a-projects-files-current).
+
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
 a project that `sync` would change.
 
@@ -1783,6 +1787,8 @@ prints a note with the fix and is never a failure. See [Editor](dispatcher.md#ed
 ```
   ok    editor — notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths
 ```
+
+A note names each `pipeline · step` that runs the deprecated stack command. See [Checking the setup](installation.md#checking-the-setup).
 
 A note names each file `sync` refuses, on its own line with the reason. A refused file is not
 counted in the `file(s) are behind this spoolway` note. See [Files spoolway
@@ -1884,24 +1890,3 @@ While a dispatcher runs, the route comes from the pipelines it loaded at start. 
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 See [Gates](pipelines.md#gates).
-
-### `spoolway stack [<task>]`
-
-Optionally hand a task's change to GitHub with git and `gh`. The command makes no model call
-and spends no tokens. It does not impose a pipeline step, step name or position; where or
-whether you call it is up to you. See
-[`spoolway stack`](pipelines.md#spoolway-stack).
-
-```mermaid
-flowchart LR
-  A[commit what is uncommitted] --> B[squash to one commit named after title:]
-  B --> H{base branch on origin?}
-  H -->|yes| C[push --force-with-lease]
-  H -->|no, local only| P[publish the base to origin] --> C
-  H -->|no, cannot be published| R[refuse — nothing pushed]
-  C --> D[open or reuse the pull request]
-  D --> E[register the GitHub stack]
-```
-
-The task defaults to `$SPOOLWAY_TASK`. A blank `title:` is refused. It never merges anything.
-It exits 0 on success and non-zero on any git or `gh` failure.

@@ -62,7 +62,7 @@ as JSON.
 | `stage` | the pipeline | The step the task is on. |
 | `routine` | the routines tab, or a job | The `id:` of the routine file this task is a queued copy of. The board and the `queued` popup show it in place of the numbered id. See [Routines](planning.md#routines). |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. A group whose every task in the batch sets `tracking: off` keeps `task/<id>`. |
-| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. Set it yourself before the task starts to cut from another branch. The pull request opens against it. Once that branch is gone, it opens against the branch its own pull request merged into instead. See [`spoolway stack`](pipelines.md#spoolway-stack). A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
+| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. Set it yourself before the task starts to cut from another branch. The pull request opens against it. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
 | `base_commit` | the dispatcher | The commit `starts_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
@@ -543,8 +543,8 @@ On `done` the dispatcher removes the worktree and the branch and moves the task 
 archive directory. The branch is kept while a remote still lacks one of its commits. The usage
 ledger keeps its lines after the task is archived.
 
-A task whose pipeline has a handover step keeps its pull request and predicted conflicts in the
-archived file, under `## Handover`:
+A task with a step that runs the deprecated stack command keeps its pull request and predicted
+conflicts in the archived file, under `## Handover`:
 
 ```
 ## Handover

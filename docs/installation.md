@@ -141,7 +141,7 @@ flowchart LR
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
 | `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
@@ -325,6 +325,11 @@ spoolway doctor
 - each pipeline's `task_template:` names a file that exists
 - the configured issue-tracking hook has Unix line endings and an executable bit
 - the configured backend is one `spoolway dispatch` accepts
+
+When a step runs the deprecated stack command, `doctor` prints one `note` line. It says
+the command is deprecated and names each `pipeline · step` that runs it. It also says to run
+`spoolway init` to add the `create-pr` prompt and replace each such step with an agent step on
+it. It prints nothing when no step does. The shipped pipelines run no such step.
 
 Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section
 reads both.
@@ -512,6 +517,10 @@ as they are.`
 
 `sync` also deletes a leftover per-skill-file stamp, if it finds one. `spoolway doctor` notes a
 project that `sync` would change. Only `spoolway sync` writes the files.
+
+When a step runs the deprecated stack command, `sync` and `sync --dry-run` print the same
+deprecation note as `doctor`. It comes after the file lines, under the word `note`, and above
+the closing line. It writes no file and does not change the exit code.
 
 ### Files spoolway refuses
 
