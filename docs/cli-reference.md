@@ -825,7 +825,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV: the drawn view's columns as raw numbers, plus `project`, and `run` and `complexity` under `--by task` |
-| `--per-task` | | Print each token, cost and time figure divided by the row's tasks. `--csv` and `--json` then carry the per-task columns. Not with `--discard` |
+| `--per-task` | | Print each turn, token, cost and time figure divided by the row's tasks. `--csv` and `--json` then carry the per-task columns. Not with `--discard` |
 | `--sort <column>[:asc\|:desc]` | | Sort the rows by one column, descending when the direction is left off. Not with `--discard` |
 
 `--json` prints `{"by", "rows", "total", "commands"}` rather than a bare array, with an empty `rows` when no lane matches. Each row carries the same columns as `--csv`, and `total` follows the same view. `commands` holds the command steps table. `--csv` prints the lanes table only, and its last line is labelled `total`, or `average` under `--per-task`.

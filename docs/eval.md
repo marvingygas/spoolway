@@ -12,14 +12,14 @@ the ledger described in [Cost accounting](cost.md). There is no second store.
 spoolway eval
 ```
 ```
-PIPELINE  TASKS  PASS  BLOCKS  CTX AVG       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
-impl         28   79%       1      13%    11.6k    0.01    2.95M    37.19  952.76M       190.55   12.15M        66.00    293.86   16h 18m
-impl_ui      11   84%       1      13%     4.7k    0.01    1.34M    20.10  267.48M        53.50    5.74M        40.26    113.87    5h 55m
-Total        39             2             16.3k    0.02    4.29M    57.29    1.22B       244.05   17.89M       106.26    407.73   22h 13m
+PIPELINE  TASKS  PASS  BLOCKS  TURNS  CTX AVG       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+impl         28   79%       1   1640      13%    11.6k    0.01    2.95M    37.19  952.76M       190.55   12.15M        66.00    293.86   16h 18m
+impl_ui      11   84%       1    612      13%     4.7k    0.01    1.34M    20.10  267.48M        53.50    5.74M        40.26    113.87    5h 55m
+Total        39             2   2252            16.3k    0.02    4.29M    57.29    1.22B       244.05   17.89M       106.26    407.73   22h 13m
 ```
 
-The token, cost and time columns show each row's totals. `spoolway eval --per-task` prints each
-of them divided by the row's tasks. See [Totals and per task](#totals-and-per-task).
+The turn, token, cost and time columns show each row's totals. `spoolway eval --per-task` prints
+each of them divided by the row's tasks. See [Totals and per task](#totals-and-per-task).
 
 ## The screen
 
@@ -134,6 +134,7 @@ Rows read newest start first. `--json` and `--csv` carry the same label in `task
 | `TASKS` | Tasks that touched this row |
 | `PASS` | Share of lanes that reported `pass`. Lanes that never reported are left out. |
 | `BLOCKS` | Lanes that reported `--block`, and lanes whose pass or fail left the task on `blocked`. A pass or fail does that when the next step's `loop:` is spent, when a failing step has no `on_fail`, or when a passing step's worktree cannot be committed. A lane counts once, and a pass still counts in `PASS`. Per task, `BLOCKS/TASK` is that count divided by `TASKS`, with two decimals. |
+| `TURNS` | The model's replies in the row's lanes, subagents included. Each reply reads the whole conversation again from the cache, so `CACHE R` grows with `TURNS` times context. Read `TURNS` beside `CTX AVG` to see which of the two drove the cache reads. Per task: `TURNS/TASK`, divided by `TASKS` and rounded to a whole number. |
 | `CTX AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window. A raw token count when no lane's model has a `context_window`. `—` when no lane banked one. |
 | `CTX PEAK` | Drawn under `--by task` only, right after `CTX AVG`. The highest share of its own model's window any of the task's lanes reached. A task can mix models with different windows, so this is not always the largest raw reading. A raw token count when no lane's model has a `context_window`. `—` when no lane banked one. |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per task: `IN/TASK`, `OUT/TASK`, `CACHE R/TASK`, `CACHE W/TASK`, each divided by `TASKS`. |
@@ -154,6 +155,7 @@ computed from the ledger entries on screen.
 |---|---|---|
 | `TASKS` | Distinct tasks in the table | The same |
 | `BLOCKS` | The `BLOCKS` lanes counted above | `BLOCKS/TASK`: that count divided by distinct tasks, with two decimals |
+| `TURNS` | The sum of every row's turns | `TURNS/TASK`: that sum divided by distinct tasks |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | The sum of each | `IN/TASK`, `OUT/TASK`, `CACHE R/TASK`, `CACHE W/TASK`: each sum divided by distinct tasks |
 | `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The sum of each | `IN USD/TASK`, `OUT USD/TASK`, `CACHE R USD/TASK`, `CACHE W USD/TASK`: each sum divided by distinct tasks |
 | `USD` | The sum | Blank |
@@ -216,8 +218,8 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--per-task` | Print the per-task columns. Without it, the totals columns print. |
 | `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
 
-`--sort` takes a column name as the export's header spells it, below. It also takes `lanes` and
-`unpriced`. Under `--by task`, `--sort complexity` orders the runs by their estimate, and runs with no estimate come last. It accepts the totals names and the per-task names in both views. A name the printed view does not draw still sorts
+`--sort` takes a column name as the export's header spells it, below. `--sort turns` orders the
+rows by their turns. It also takes `lanes` and `unpriced`. Under `--by task`, `--sort complexity` orders the runs by their estimate, and runs with no estimate come last. It accepts the totals names and the per-task names in both views. A name the printed view does not draw still sorts
 the rows and marks no header. An unknown name is refused, naming every column `--by`'s current
 value accepts. It cannot be combined with `--discard`.
 
@@ -231,10 +233,10 @@ trial id. See [Trials](planning.md#trials).
 spoolway eval --by task --trial t-8c21e0
 ```
 ```
-TASK                PIPELINE   VER  WHEN             COMPLEXITY  TASKS  PASS  BLOCKS  CTX AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
-cart-totals-1       impl       1.0  2026-09-26 14:05         24      1   83%       0      19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
-cart-totals-2       impl_fast  1.0  2026-09-26 14:07         24      1  100%       0      14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
-Total                                                                2             0                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
+TASK                PIPELINE   VER  WHEN             COMPLEXITY  TASKS  PASS  BLOCKS  TURNS  CTX AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+cart-totals-1       impl       1.0  2026-09-26 14:05         24      1   83%       0     52      19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
+cart-totals-2       impl_fast  1.0  2026-09-26 14:07         24      1  100%       0     41      14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
+Total                                                                2             0     93                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -395,15 +397,15 @@ only view is the session table, and `[t]` names it `per-session`, so the file is
 spoolway eval --by step --pipeline impl --csv
 ```
 ```
-project,pipeline,step,tasks,pass,blocks,ctx_avg_tokens,ctx_avg_pct,in_tokens,in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,time_s
-spoolway,impl,implement,48,0.98,2,322000,0.32,17140,0.05,4166300,62.49,1120540000,336.16,21362400,80.11,451.68,81120
+project,pipeline,step,tasks,pass,blocks,turns,ctx_avg_tokens,ctx_avg_pct,in_tokens,in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,time_s
+spoolway,impl,implement,48,0.98,2,1310,322000,0.32,17140,0.05,4166300,62.49,1120540000,336.16,21362400,80.11,451.68,81120
 ```
 ```
 spoolway eval --by step --pipeline impl --per-task --csv
 ```
 ```
-project,pipeline,step,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,cost_per_task,time_per_task_s
-spoolway,impl,implement,48,0.98,0.04,322000,0.32,357,0.00,86800,1.30,23343000,7.00,445117,1.67,451.68,9.41,1690
+project,pipeline,step,tasks,pass,blocks_per_task,turns_per_task,ctx_avg_tokens,ctx_avg_pct,in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,cost_per_task,time_per_task_s
+spoolway,impl,implement,48,0.98,0.04,27,322000,0.32,357,0.00,86800,1.30,23343000,7.00,445117,1.67,451.68,9.41,1690
 ```
 
 Each context column is written twice, as a token count and then as a share of the model's

@@ -140,22 +140,23 @@ spoolway eval --since 2026-06-01 --until 7d    # a window
 ```
 
 ```
-PIPELINE   TASKS  PASS  BLOCKS  CTX AVG       IN      OUT  CACHE R  CACHE W       USD      TIME
-impl          41   82%       3      32%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
-impl_ui       15   79%       2      31%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
-Total         56             5             38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
+PIPELINE   TASKS  PASS  BLOCKS  TURNS  CTX AVG       IN      OUT  CACHE R  CACHE W       USD      TIME
+impl          41   82%       3   2410      32%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
+impl_ui       15   79%       2    890      31%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
+Total         56             5   3300            38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
 ```
 
 | Column | What it is |
 |---|---|
 | `TASKS` | Tasks that touched this row |
+| `TURNS` | The model's replies in the row's lanes, subagents included |
 | `CTX AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | Drawn under `--by task` only: the highest share of its model's window any of the task's lanes reached |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each priced token class, summed over the row |
 | `USD` | Priced spend. Blank when no lane on the row has a price. See [Pricing](#pricing). |
 | `TIME` | Wall time, summed over the row |
 
-`spoolway eval --per-task` divides each token class and the time by `TASKS`. See
+`spoolway eval --per-task` divides the turns, each token class and the time by `TASKS`. See
 [Comparing pipelines](eval.md) for the full column set, `--by` and the rest of the flags.
 
 ## Pricing
