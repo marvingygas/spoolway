@@ -473,7 +473,7 @@ page exists. Picking it starts the browser in the background, so the board keeps
 nothing waits on the browser. macOS uses `open`, WSL uses `wslview` or else `explorer.exe`, and
 any other Linux uses `xdg-open`. When the page is gone, or the platform's program is not on
 `PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
-The queue screen's tasks pane lists `open plan` the same way. The routines pane does not.
+The queue screen's tasks pane lists `open plan` the same way. A plan row on that screen lists it too, and opens its own page. The routines pane does not.
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.

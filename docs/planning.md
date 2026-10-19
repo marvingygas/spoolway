@@ -207,9 +207,10 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
 | `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |
-| `delete` | A group with a pending task, a pending task, or a plan row. | Delete pending files. See [Deleting pending tasks](#deleting-pending-tasks). On a plan row, delete its one `.html` page after a `delete plan <name>` popup. If a task names the page by then, nothing is deleted. |
+| `delete` | A group with a pending task, a pending task, or a plan row. | Delete pending files. See [Deleting pending tasks](#deleting-pending-tasks). On a plan row, delete the plan page. See [Deleting a plan page](#deleting-a-plan-page). |
 
-A group with no tasks opens the menu with `nothing to do here` over `[esc] close`. `enter`
+A plan row opens the menu with `open plan` and then `delete`. A group with no tasks and no plan
+page opens the menu with `nothing to do here` over `[esc] close`. `enter`
 runs the item under the cursor, and `esc` closes the menu having done nothing. If a fresh read
 of the pending directory moves another row under the cursor while the menu is open, `enter`
 closes the menu and does nothing.
@@ -254,6 +255,35 @@ Some outcomes open a notice instead of closing the popup:
 | `not deleted` | The pending tasks changed after the popup opened. | `Nothing was deleted.` and `Pick delete again to see the current list.` |
 | `tasks not fully deleted` | A file could not be removed. | The error, the `removed:` and `left:` lists, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` |
 | `tasks deleted` | The delete finished, but the pending directory would not read again. | The read error. |
+
+### Deleting a plan page
+
+`delete` on a plan row removes the plan's `.html` page from `plans/`, so a plan nobody will cut
+leaves the list. It removes that one file. A folder under `plans/` stays. The popup is titled
+`delete plan <name>` and names the page:
+
+```
+╭─ delete plan search ─────────────╮
+│                                  │
+│  Delete 1 plan page:             │
+│                                  │
+│    plans/2026-10-21-search.html  │
+│                                  │
+│  > delete                        │
+│                                  │
+│  [enter] confirm   [esc] close   │
+╰──────────────────────────────────╯
+```
+
+`enter` removes the page, and the row is gone after the screen reads the groups again. `esc`
+closes the popup and removes nothing.
+
+Two outcomes open a notice instead:
+
+| Title | When | What it says |
+|---|---|---|
+| `not deleted` | A task names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
+| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` Only `esc` closes it. |
 
 ### Trials
 

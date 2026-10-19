@@ -184,14 +184,15 @@ task, in this order:
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
-Over the groups pane it offers these for the highlighted group, and a group with no tasks says
-`nothing to do here`. To reach them from the tasks pane, press `tab` first.
+Over the groups pane it offers these for the highlighted group. A group with no tasks and no plan
+page says `nothing to do here`. To reach them from the tasks pane, press `tab` first.
 
 | Item | What it does |
 |---|---|
+| `open plan` | On a plan row, open its page in your default browser |
 | `trial` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `save as routine` | Save the group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
-| `delete` | Delete the group's pending tasks, and the pending tasks that depend on them. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
+| `delete` | Delete the group's pending tasks, and the pending tasks that depend on them. See [Deleting pending tasks](planning.md#deleting-pending-tasks). On a plan row, delete the plan page. See [Deleting a plan page](planning.md#deleting-a-plan-page) |
 
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
