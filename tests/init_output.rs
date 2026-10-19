@@ -1155,6 +1155,72 @@ fn pipeline_contract_and_prompt_contract_succeed_with_no_pipelines_defined() {
     );
 }
 
+/// `prompt contract` renders the lane's system prompt, the reminder and the
+/// report contract for the mode `unattended.enabled` sets, and says which
+/// mode that is. Runs the real binary, because the mode is read from
+/// `config.toml` in `main`'s own wiring and a unit test handed a `Repo`
+/// would pass whatever the command did with it.
+#[test]
+fn prompt_contract_renders_the_block_text_for_the_mode_config_toml_sets() {
+    let project = Project::new("prompt-contract-mode");
+    project.init("claude");
+    let config_path = project.as_ref().join(".spoolway/config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let flat = |out: &Output| {
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let args = [
+        "prompt",
+        "contract",
+        "--pipeline",
+        "default",
+        "--step",
+        "implement",
+    ];
+
+    let attended = flat(&project.run(&args));
+    assert!(
+        attended.contains("Rendered for attended runs"),
+        "{attended}"
+    );
+    assert!(attended.contains("goes up to a person"), "{attended}");
+    assert!(
+        !attended.contains("An unblocker lane picks it up next."),
+        "{attended}"
+    );
+
+    // `init` writes the table with `enabled = false`, so flip that line
+    // rather than append a second `[unattended]`, which would not parse.
+    let flipped = config.replacen(
+        "[unattended]\nenabled = false",
+        "[unattended]\nenabled = true",
+        1,
+    );
+    assert_ne!(
+        flipped, config,
+        "init no longer writes `unattended.enabled = false`"
+    );
+    std::fs::write(&config_path, flipped).unwrap();
+    let unattended = flat(&project.run(&args));
+    assert!(
+        unattended.contains("Rendered for unattended runs"),
+        "{unattended}"
+    );
+    // Section 2's system prompt, section 3's reminder and section 6 each
+    // carry the text, so the mode reaches all three.
+    assert_eq!(
+        unattended
+            .matches("An unblocker lane picks it up next.")
+            .count(),
+        3,
+        "{unattended}"
+    );
+    assert!(!unattended.contains("goes up to a person"), "{unattended}");
+}
+
 /// A repeat `init` with no `--provider` and a missing `pipelines/` folder
 /// restores it for the project's own configured provider, not the menu's
 /// first entry (`claude`), and installs only that provider's skills.

@@ -18257,6 +18257,16 @@ mod tests {
                 assert_eq!(reload(&path).stage(), "implement", "{name} round {round}");
                 assert_eq!(mux.did("prompt").len(), 1, "{name} round {round}");
             }
+
+            // The nudge carries the `--block` text of the run that sends it.
+            let nudge = mux.read("demo · implement", 9999).unwrap();
+            let flat = nudge.split_whitespace().collect::<Vec<_>>().join(" ");
+            let (present, absent) = match unattended {
+                true => ("An unblocker lane picks it up next.", "goes up to a person"),
+                false => ("goes up to a person", "An unblocker lane picks it up next."),
+            };
+            assert!(flat.contains(present), "{name}: {nudge}");
+            assert!(!flat.contains(absent), "{name}: {nudge}");
         }
     }
 

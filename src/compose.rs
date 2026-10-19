@@ -133,9 +133,9 @@ pub(crate) fn system_prompt(
 /// step — and the reader has no glossary, so it is defined in the sentence
 /// that introduces it rather than assumed.
 ///
-/// One bullet varies by step — `blocked` alone rewrites the first and adds
-/// two after it: every other lane owns one task's own step, and `blocked`'s
-/// does not. Whatever stops the task from moving on is its to clear, and the
+/// The first bullet varies by step. `blocked` alone rewrites it and adds two
+/// after it: every other lane owns one task's own step, and `blocked`'s does
+/// not. Whatever stops the task from moving on is its to clear, and the
 /// text says so here, in the binary, because `spoolway sync` never rewrites
 /// a prompt a project already has, so nothing a prompt says reaches every
 /// project the way this does. The prompt's own `## Never` list is what still
@@ -1105,7 +1105,8 @@ pub(crate) fn park_prompt(task: &Task, _pipeline: &Pipeline, escalated: bool) ->
 }
 
 /// The eighth typed message: what a lane that has gone quiet is nudged with,
-/// repeating the report contract it was launched with. Its own function
+/// repeating the report contract for the mode of the run sending it, which
+/// can differ from the run that launched the lane. Its own function
 /// rather than inlined at the one call site, so `spoolway prompt contract`
 /// can render it too, against the same wording a real nudge would use.
 pub(crate) fn reminder_prompt(
