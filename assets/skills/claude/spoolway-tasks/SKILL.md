@@ -254,17 +254,20 @@ reading the file whole.
    refused for the same reasons.
 
    Check every `to` part against the pipeline names in step 1's `spoolway task contract`.
-   When a part names a pipeline that is not there, or a task that is not on the ballot,
-   bring the confirm ballot back unchanged. Open it with the notes line, such as `notes: 2 to
-   bugfx`. Then name the problem, as in `No pipeline is named \`bugfx\`. This project has:`,
-   and list every pipeline name. End with `Pick again, with a note naming one of them.`
+   When a `to` part names a pipeline that is not there, bring the confirm ballot back
+   unchanged. Open it with the notes line, such as `notes: 2 to bugfx`. Then say ``No
+   pipeline is named `bugfx`. This project has:`` and list every pipeline name. End with
+   `Pick again, with a note naming one of them.`
+
+   When a part names a task that is not on the ballot, bring the confirm ballot back
+   unchanged, with that problem named.
 
    When every part is accepted, draw the confirm ballot again with the change in place.
    Open it with the notes line, such as `notes: 2 to impl, 3 from #412`. Draw the same rows,
    with each re-routed task's new pipeline and each moved chain's new `base`. Ask it again.
-   An answer with no note stands. When a `to` part moves a group's last task onto a
-   pipeline with no `last-of-chain` step, say so on the redrawn ballot, the way step 4 says
-   its own swap.
+   An answer with no note stands. A `to` part may move a group's last task onto a pipeline
+   with no `last-of-chain` step. Then say so on the redrawn ballot, the way step 4 says its
+   own swap.
 
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
