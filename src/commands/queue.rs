@@ -16900,6 +16900,179 @@ mod tests {
         );
     }
 
+    /// A plan page in `plans/` that no task names, written a moment after
+    /// the last so creation times order the pages. The `plans-since` stamp
+    /// is set to the earliest instant, so the page's time never hides it.
+    fn plan_page(repo: &Repo, file: &str) -> String {
+        std::fs::write(repo.home().join("plans-since"), "1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let path = repo.plans_dir().join(file);
+        std::fs::write(&path, "<html></html>").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// The rows the screen lists, plan rows included.
+    fn rows(repo: &Repo) -> Vec<Group> {
+        super::super::pending::list_rows(repo).unwrap().0
+    }
+
+    /// Plans draw after the queueable groups and before the done ones,
+    /// newest first, with no blank row before them and one before the done
+    /// groups. A plan row has no checkbox and no tail.
+    #[test]
+    fn plan_rows_sit_between_the_queueable_and_done_groups() {
+        let (repo, _root_guard) = fixture("screen-plan-rows");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: cart
+",
+                BODY,
+            ),
+        );
+        already_done(&repo, "cook", "cook");
+        plan_page(&repo, "2026-10-20-onboarding.html");
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+
+        let mut state = ScreenState::new();
+        state.hide_scope = HideScope::PlusDone;
+        let shown = visible(&groups, state.hide_scope);
+        let (lines, _) = groups_pane_lines(&groups, &shown, &state, 30);
+        let lines: Vec<&str> = lines.iter().map(|line| line.trim_end()).collect();
+        assert_eq!(
+            lines,
+            [
+                "> [ ] cart",
+                "      search",
+                "      onboarding",
+                "",
+                "      cook                done",
+            ],
+        );
+    }
+
+    /// Beside a plan row the tasks pane holds one blank line and the skill
+    /// that cuts it, and nothing else.
+    #[test]
+    fn the_tasks_pane_beside_a_plan_row_names_the_skill_that_cuts_it() {
+        let (repo, _root_guard) = fixture("screen-plan-tasks-pane");
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let state = ScreenState::new();
+
+        let (lines, starts, _) = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 52);
+        assert_eq!(lines, ["", "  Use /spoolway-tasks"]);
+        assert!(starts.is_empty(), "a plan row has no task rows: {starts:?}");
+    }
+
+    /// `space` and `enter` on a plan row queue nothing: the group above it
+    /// stays pending and the queue stays empty.
+    #[test]
+    fn space_and_enter_on_a_plan_row_do_nothing() {
+        let (repo, _root_guard) = fixture("screen-plan-space-enter");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: cart
+",
+                BODY,
+            ),
+        );
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+
+        let mut state = ScreenState::new();
+        state.group_cursor = 1;
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+        assert!(state.selected.is_empty(), "{:?}", state.selected);
+
+        // Down onto the plan row, then `space` and `enter`.
+        screen(&repo, groups, "\x1b[B \r");
+        assert!(repo.pending_dir().join("wire.md").exists());
+        let queued: Vec<_> = std::fs::read_dir(repo.queue_dir()).unwrap().collect();
+        assert!(queued.is_empty(), "nothing may be queued: {queued:?}");
+    }
+
+    /// `h` never hides a plan row, and `f` finds one by its name.
+    #[test]
+    fn a_plan_row_survives_h_and_matches_f_by_name() {
+        let (repo, _root_guard) = fixture("screen-plan-h-f");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: cart
+",
+                BODY,
+            ),
+        );
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let mut state = ScreenState::new();
+
+        for scope in [HideScope::Pending, HideScope::PlusDone] {
+            state.hide_scope = scope;
+            assert!(
+                visible(&groups, scope).iter().any(|g| g.name == "search"),
+                "the plan row must be on screen at {scope:?}"
+            );
+        }
+        state.filter = "search".to_string();
+        let names: Vec<&str> = shown(&groups, &state)
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(names, ["search"]);
+    }
+
+    /// Once a task names the highlighted plan, the next reload lists it as
+    /// a queueable group instead, and the cursor stays on it.
+    #[test]
+    fn a_plan_whose_tasks_are_cut_reloads_as_a_queueable_group() {
+        let (repo, _root_guard) = fixture("screen-plan-cut");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: cart
+",
+                BODY,
+            ),
+        );
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let mut groups = rows(&repo);
+        let mut state = ScreenState::new();
+        state.group_cursor = 1;
+        assert_eq!(shown(&groups, &state)[1].state, GroupState::Plan);
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let front = format!("group: search\nplan: {page}\n");
+        write_pending(
+            &repo,
+            "search-index",
+            &task_text("search-index", &front, BODY),
+        );
+        reload(&repo, &mut groups, &mut state);
+
+        let shown = shown(&groups, &state);
+        assert!(
+            shown.iter().all(|g| g.state != GroupState::Plan),
+            "{shown:?}"
+        );
+        let cursor = shown[state.group_cursor];
+        assert_eq!(
+            (cursor.name.as_str(), cursor.state),
+            ("search", GroupState::Queueable)
+        );
+    }
+
     /// A reload can reorder `shown` out from under the cursor — a task
     /// just edited moves to the front of `list_groups`' own newest-first
     /// order — but the group the cursor was on stays highlighted, found
