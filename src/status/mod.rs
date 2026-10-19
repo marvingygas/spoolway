@@ -3431,13 +3431,25 @@ const LARGE_READING: std::time::Duration = std::time::Duration::from_millis(250)
 /// [`LARGE_READING`] or more. A reading that long read a lot, and its
 /// buffers are freed by the time `build` returns. Trimming after every
 /// reading would walk every arena on each keypress for nothing.
-fn timed_reading<T>(build: &mut impl FnMut() -> Option<T>) -> Option<T> {
+fn timed_reading<R>(build: &mut impl FnMut() -> R) -> R {
     let began = std::time::Instant::now();
     let reading = build();
     if began.elapsed() >= LARGE_READING {
         crate::memory::trim();
     }
     reading
+}
+
+/// What one run of a [`Reader`]'s build closure found.
+pub(crate) enum Attempt<T> {
+    /// A new reading, which replaces the standing one.
+    Fresh(T),
+    /// Nothing the reading looks at has changed, so the standing reading,
+    /// its generation and the reader's success state all stay as they are.
+    Unchanged,
+    /// The reading could not be taken. The standing one stays, and
+    /// [`Reader::last_reading`] reports the failure.
+    Failed,
 }
 
 impl<T: Send + Sync + Default + 'static> Reader<T> {
@@ -3451,9 +3463,22 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
     /// own [`Memory`], say) carries over between readings exactly as a
     /// loop's own local would.
     pub(crate) fn start(mut build: impl FnMut() -> Option<T> + Send + 'static) -> Reader<T> {
+        Self::start_watching(move || build().map_or(Attempt::Failed, Attempt::Fresh))
+    }
+
+    /// [`Reader::start`] for a build that can tell "nothing changed" from
+    /// "could not read" — see [`Attempt`]. The very first call must be
+    /// [`Attempt::Fresh`]; anything else leaves the empty default standing
+    /// and counts as a failed reading.
+    pub(crate) fn start_watching(
+        mut build: impl FnMut() -> Attempt<T> + Send + 'static,
+    ) -> Reader<T> {
         // Nothing stands in for an empty one on the very first reading —
         // there is no earlier one to keep instead.
-        let initial = timed_reading(&mut build);
+        let initial = match timed_reading(&mut build) {
+            Attempt::Fresh(initial) => Some(initial),
+            Attempt::Unchanged | Attempt::Failed => None,
+        };
         let last_ok = initial.is_some();
         let snapshot = Arc::new(Mutex::new((Arc::new(initial.unwrap_or_default()), 0)));
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -3491,19 +3516,25 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
                 // A failed reading — the queue directory unreadable for an
                 // instant — leaves the last one standing, the same
                 // tolerance a failed frame always had.
-                let fresh = timed_reading(&mut build);
-                let ok = fresh.is_some();
-                if let Some(fresh) = fresh
-                    && let Ok(mut guard) = thread_snapshot.lock()
-                {
-                    *guard = (Arc::new(fresh), generation);
-                    if let Some(signal) = &thread_signal {
-                        signal.notify();
+                let reading = timed_reading(&mut build);
+                let ok = match reading {
+                    Attempt::Fresh(fresh) => {
+                        if let Ok(mut guard) = thread_snapshot.lock() {
+                            *guard = (Arc::new(fresh), generation);
+                            if let Some(signal) = &thread_signal {
+                                signal.notify();
+                            }
+                        }
+                        Some(true)
                     }
-                }
+                    Attempt::Unchanged => None,
+                    Attempt::Failed => Some(false),
+                };
                 if let Ok(mut state) = state.lock() {
                     state.finished += 1;
-                    state.last_ok = ok;
+                    if let Some(ok) = ok {
+                        state.last_ok = ok;
+                    }
                 }
                 landed.notify_all();
             }
@@ -6281,6 +6312,30 @@ mod tests {
             !board.reading_landed(),
             "a frame drawn from memory takes the landed reading in"
         );
+    }
+
+    /// A reading that finds nothing changed keeps the standing snapshot and
+    /// its generation and leaves the reader reporting success; one that
+    /// fails reports it. Before [`Attempt`], an unchanged reading could only
+    /// be a `None`, which reads as a failure.
+    #[test]
+    fn an_unchanged_reading_is_not_a_failed_one() {
+        let mut calls = 0;
+        let reader = Reader::<Vec<u8>>::start_watching(move || {
+            calls += 1;
+            match calls {
+                1 => Attempt::Fresh(vec![1]),
+                2 => Attempt::Unchanged,
+                _ => Attempt::Failed,
+            }
+        });
+        assert!(reader.wake_and_wait().is_ok(), "unchanged is not a failure");
+        let (snapshot, generation) = reader.latest_with_generation();
+        assert_eq!((*snapshot).clone(), vec![1]);
+        assert_eq!(generation, 0);
+
+        assert!(reader.wake_and_wait().is_err(), "a failed reading is");
+        assert_eq!((*reader.latest()).clone(), vec![1]);
     }
 
     /// The reader signals the screen waiting on its input each time a

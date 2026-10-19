@@ -125,9 +125,7 @@ impl PollableRead for RawStdin {
         let Some(wake) = wake else {
             return self.byte_pending(timeout);
         };
-        let ready = poll_ready(&[libc::STDIN_FILENO, wake.read_fd()], timeout);
-        wake.drain();
-        ready.first().copied().unwrap_or(false)
+        wait_input_or_wake(libc::STDIN_FILENO, wake, timeout)
     }
 
     fn discard_typed(&mut self) {
@@ -139,6 +137,21 @@ impl PollableRead for RawStdin {
             libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
         }
     }
+}
+
+/// Whether `input` has a byte within `timeout`, giving up early, with
+/// `false`, when `wake` is signalled first. The signal is drained either
+/// way, so the next wait starts clean. A free function over the descriptor,
+/// like [`fd_has_byte_within`], so a test can aim it at a pipe.
+#[cfg(unix)]
+fn wait_input_or_wake(
+    input: std::os::unix::io::RawFd,
+    wake: &Wake,
+    timeout: std::time::Duration,
+) -> bool {
+    let ready = poll_ready(&[input, wake.read_fd()], timeout);
+    wake.drain();
+    ready.first().copied().unwrap_or(false)
 }
 
 /// A signal one thread sends another that is waiting in [`poll_ready`]: a
@@ -160,19 +173,29 @@ impl Wake {
     /// `None` when the pipe cannot be made, which leaves the caller on its
     /// plain timeout.
     pub(crate) fn new() -> Option<Self> {
+        // Non-blocking so neither a full pipe stalls `notify` nor an empty
+        // one stalls `drain`; close-on-exec so a lane's child process does
+        // not inherit them. Both are set as the pipe is made where the
+        // system allows, since a process another thread spawns between
+        // `pipe` and a later `fcntl` would inherit both ends.
         let mut fds = [0i32; 2];
-        // SAFETY: `fds` is a well-formed two-element buffer `pipe` fills in.
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: `fds` is a well-formed two-element buffer `pipe2` fills in.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
             return None;
         }
-        for fd in fds {
-            // SAFETY: `fd` was just opened above and is still owned here.
-            // Non-blocking so neither a full pipe stalls `notify` nor an
-            // empty one stalls `drain`; close-on-exec so a lane's child
-            // process does not inherit them.
-            unsafe {
-                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            // SAFETY: `fds` is a well-formed two-element buffer `pipe` fills in.
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return None;
+            }
+            for fd in fds {
+                // SAFETY: `fd` was just opened above and is still owned here.
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
             }
         }
         Some(Self {
@@ -1130,6 +1153,32 @@ mod tests {
         unsafe {
             libc::close(fd);
         }
+    }
+
+    // A signal ends the wait early with no byte, and is drained; a byte
+    // typed first still answers `true`. Before `wait_input_or_wake`, the
+    // dispatch tab's wait could not be cut short by its reader.
+    #[test]
+    fn a_wake_ends_the_wait_early_and_a_byte_still_answers() {
+        let (read_end, write_end) = pipe();
+        let wake = Wake::new().unwrap();
+        let long = std::time::Duration::from_secs(10);
+
+        wake.notify();
+        let began = std::time::Instant::now();
+        assert!(!wait_input_or_wake(read_end, &wake, long));
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            !fd_has_byte_within(wake.read_fd(), std::time::Duration::ZERO),
+            "the signal is drained"
+        );
+
+        // SAFETY: `write_end` is this test's own live pipe fd.
+        unsafe { libc::write(write_end, b"x".as_ptr().cast(), 1) };
+        assert!(wait_input_or_wake(read_end, &wake, long));
+
+        close(read_end);
+        close(write_end);
     }
 
     // Regression for the review finding that pressing Escape alone froze the

@@ -10,6 +10,7 @@ use crate::screen::{
     Key, Notice, PollableRead, confirm, hint, key_hint, keys, overlay, pad_to, panel, plural,
     read_key,
 };
+use crate::status::Attempt;
 
 /// Which dependencies a task on a wait step is still waiting for, or, when
 /// one of them has no task file at all, that it never will finish.
@@ -5713,8 +5714,9 @@ fn run_screen_from(
         QueueSnapshot {
             groups: groups.clone(),
             branch: state.board_branch.clone(),
-            // What the opening message already named is what the seed holds;
-            // `refresh_from_reader` never announces the seed itself.
+            // What the opening message already named is what the seed holds.
+            // `refresh_from_reader` offers this list on every call; it names
+            // none of it because `named.files` already holds the same files.
             unreadable: state
                 .named
                 .iter()
@@ -6306,12 +6308,13 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
     // this ever runs, so the closure hands it straight back the one time it
     // is asked for a value it does not have to build. The `Option` holding
     // it guards that: `take` empties it on that first call, so every call
-    // after it really does read.
+    // after it goes to [`IdleCheck`], which reads only when something it
+    // stamps has moved.
     let mut initial = Some(initial);
     let mut idle = IdleCheck::default();
-    QueueReader::start(move || {
+    QueueReader::start_watching(move || {
         if let Some(seed) = initial.take() {
-            return Some(seed);
+            return Attempt::Fresh(seed);
         }
         idle.read(&repo, &cwd)
     })
@@ -6323,13 +6326,14 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 /// A reading looks at the pending, queue and archive directories, the files
 /// in the first two, and the checkout's `HEAD`. [`crate::watch::Stamp`]
 /// records all of them before each reading, and a tick whose stamp equals the
-/// last settled one returns `None` without starting a process, reading a
-/// file or building a snapshot. The reader keeps the snapshot it already
-/// holds when a reading is `None`, so [`refresh_from_reader`] sees no new
+/// last settled one returns [`Attempt::Unchanged`] without starting a
+/// process, reading a file or building a snapshot. The reader keeps the
+/// snapshot it already holds, so [`refresh_from_reader`] sees no new
 /// generation and copies nothing.
 ///
-/// A reading that fails also returns `None`, and keeps no stamp, so the next
-/// tick tries again rather than treating the failure as the current state.
+/// A reading that fails is [`Attempt::Failed`] and keeps no stamp, so the
+/// next tick tries again rather than treating the failure as the current
+/// state.
 #[derive(Default)]
 struct IdleCheck {
     stamp: Option<crate::watch::Stamp>,
@@ -6337,22 +6341,26 @@ struct IdleCheck {
 }
 
 impl IdleCheck {
-    fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
-        let head: Vec<std::path::PathBuf> = self.branch.head_path(cwd).into_iter().collect();
+    fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Attempt<QueueSnapshot> {
+        let head = self.branch.head_path(cwd);
         let stamp = crate::watch::Stamp::capture(
             &[repo.pending_dir(), repo.queue_dir()],
-            &[repo.archive_dir()],
-            &head,
+            &[repo.archive_dir()]
+                .into_iter()
+                .chain(head)
+                .collect::<Vec<_>>(),
         );
         if let Some(before) = &self.stamp
             && stamp.unchanged_since(before)
         {
-            return None;
+            return Attempt::Unchanged;
         }
         self.stamp = None;
-        let snapshot = build_queue_snapshot(repo, cwd, &mut self.branch)?;
+        let Some(snapshot) = build_queue_snapshot(repo, cwd, &mut self.branch) else {
+            return Attempt::Failed;
+        };
         self.stamp = Some(stamp);
-        Some(snapshot)
+        Attempt::Fresh(snapshot)
     }
 }
 
@@ -13666,10 +13674,10 @@ mod tests {
 
     /// Back-date a file or directory so a stamp counts it as settled.
     fn age(path: &std::path::Path) {
-        std::fs::File::open(path)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
-            .unwrap();
+        crate::scratch::set_mtime(
+            path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
     }
 
     /// With nothing changed, [`IdleCheck::read`] returns no reading, reads no
@@ -13691,12 +13699,18 @@ mod tests {
             age(&head);
         }
 
-        assert!(idle.read(&repo, &repo.root).is_some(), "the first reading");
+        assert!(
+            matches!(idle.read(&repo, &repo.root), Attempt::Fresh(_)),
+            "the first reading"
+        );
         let (runs, reads) = (git_runs(), file_reads());
         assert!(reads > 0);
 
         for _ in 0..3 {
-            assert!(idle.read(&repo, &repo.root).is_none(), "nothing changed");
+            assert!(
+                matches!(idle.read(&repo, &repo.root), Attempt::Unchanged),
+                "nothing changed"
+            );
         }
         assert_eq!(git_runs(), runs, "an idle reading must start no process");
         assert_eq!(file_reads(), reads, "an idle reading must read no file");
@@ -13709,7 +13723,10 @@ mod tests {
         age(&path);
         age(&repo.pending_dir());
         let changed = idle.read(&repo, &repo.root);
-        assert!(changed.is_some(), "an edited file is read again");
+        assert!(
+            matches!(changed, Attempt::Fresh(_)),
+            "an edited file is read again"
+        );
         assert!(file_reads() > reads);
         assert_eq!(git_runs(), runs, "an edit to a task does not move HEAD");
     }

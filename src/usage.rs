@@ -1269,7 +1269,7 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
     // "nothing yet" rather than as a transcript at `path`.
     kind(kind_name)?;
     let meta = std::fs::metadata(path).ok()?;
-    let identity = FileIdentity::of(&meta);
+    let identity = FileIdentity::from_metadata(&meta);
     let key = (kind_name.to_string(), path.to_path_buf());
     let mut state = TAIL_READS
         .lock()
@@ -1404,37 +1404,11 @@ process_memo!(
 /// The reading of each transcript so far, by agent kind and path.
     TAIL_READS, BTreeMap<(String, PathBuf), TailRead>);
 
-/// What a file looked like when it was last read.
-#[derive(Clone, Default, PartialEq, Eq)]
-struct FileIdentity {
-    inode: u64,
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-}
+/// What a file looked like when it was last read — the one identity
+/// [`crate::watch`] also keeps for the screen's idle ticks.
+type FileIdentity = crate::watch::Identity;
 
 impl FileIdentity {
-    /// Whether the file was written within `window` of now. A file with no
-    /// readable modified time is not.
-    fn written_within(&self, window: std::time::Duration) -> bool {
-        self.modified.is_some_and(|at| {
-            std::time::SystemTime::now()
-                .duration_since(at)
-                .is_ok_and(|age| age <= window)
-        })
-    }
-
-    fn of(meta: &std::fs::Metadata) -> Self {
-        #[cfg(unix)]
-        let inode = std::os::unix::fs::MetadataExt::ino(meta);
-        #[cfg(not(unix))]
-        let inode = 0;
-        Self {
-            inode,
-            len: meta.len(),
-            modified: meta.modified().ok(),
-        }
-    }
-
     /// Whether a file now looking like `now` is this one with lines appended,
     /// or not touched at all.
     ///
@@ -1875,7 +1849,10 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
     if self::kind(kind).is_none() {
         return none;
     }
-    let Some(identity) = std::fs::metadata(path).ok().map(|m| FileIdentity::of(&m)) else {
+    let Some(identity) = std::fs::metadata(path)
+        .ok()
+        .map(|m| FileIdentity::from_metadata(&m))
+    else {
         return none;
     };
     let key = (kind.to_string(), path.to_path_buf());
