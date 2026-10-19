@@ -220,19 +220,17 @@ reading the file whole.
    pull request for, names a pull request from a fork (`isCrossRepository` is true — its
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
-   **Confirm a changed split whole, before step 3 writes anything.** The group ballot and the
-   task ballots each draw one level, so a person who picks away from the recommendation has
-   not seen the whole breakdown. When any pick was not the recommended one — a
-   non-recommended option on the group ballot, a non-recommended option on any task ballot,
-   or a split typed into Other — end on one confirm ballot after the last task ballot is
-   answered. When every pick was the recommended one, skip it and go straight to step 3, as
-   before.
+   **Before step 3 writes anything, confirm the whole breakdown when a pick changed.**
+   Ask one confirm ballot after the last task ballot when any pick was not the recommended
+   one. That is a non-recommended option on the group ballot or on any task ballot, or a split
+   typed into Other. When every pick was the recommended one, skip it and go straight to
+   step 3.
 
-   Print it and end the turn there, the same way the task ballot does. Open the question text with `Write this breakdown? You picked <n> tasks for
-   <group>, not the recommended <m>.`, naming each pick that was not recommended. Then draw
+   Print it and end the turn there, the same way the task ballot does. Open it with `Write this breakdown? You picked <n> tasks for
+   <group>, not the recommended <m>.` Name each pick that was not recommended. Then draw
    every group on one line with its `base` or `after` part, and every task under it on one
    row with its size and pipeline. Number the tasks once across the whole breakdown, not per
-   group. Draw no sentences, because they were read on the ballots before it:
+   group. Draw no sentences:
 
    ```
    1  cart-core                    base  main
@@ -243,8 +241,8 @@ reading the file whole.
       3  cart-empty       small    bugfix
    ```
 
-   Print the two answers under the breakdown, each followed by its words, and say that the
-   person answers with one of the two:
+   Print the two answers under the breakdown, each with its description. Then say the
+   person answers with one of them:
 
    ```
    Write them     the tasks are written as drawn
