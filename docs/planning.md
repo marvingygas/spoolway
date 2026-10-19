@@ -127,8 +127,8 @@ runs `spoolway task contract --from` over the directory to check the set.
 <img src="screenshots/queue.png" alt="the queue screen">
 
 Bare `spoolway` opens the screen, on the queue tab. The left pane, titled `groups`, lists one
-row per group in the pending directory. The right pane, titled `tasks`, lists the highlighted
-group's tasks and what each waits on.
+row per group in the pending directory, and one per plan page no task names yet. The right
+pane, titled `tasks`, lists the highlighted group's tasks and what each waits on.
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in

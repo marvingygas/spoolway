@@ -165,6 +165,10 @@ pub(crate) struct Group {
     /// time could be read at all, which sorts the group to the end rather
     /// than refusing the whole listing over one stat failure.
     pub(crate) created: Option<std::time::SystemTime>,
+    /// The plan page a [`GroupState::Plan`] row stands for, and `None` on
+    /// every other row. The queue screen keys a plan row by this path, since
+    /// a group of the same name as the page can be listed beside it.
+    pub(crate) page: Option<PathBuf>,
 }
 
 /// A group's own [`GroupState`], folded from its tasks' individual
@@ -311,7 +315,7 @@ pub(crate) fn list_groups_and_skipped(repo: &Repo) -> Result<(Vec<Group>, Vec<Pa
 /// nanoseconds since the epoch.
 const PLANS_SINCE: &str = "plans-since";
 
-/// One plan page that no task names, as the queue screen will draw it.
+/// One plan page that no task names, as the queue screen draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanPage {
     /// The page's absolute path, which is what a task's `plan:` would hold.
@@ -426,26 +430,49 @@ pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<P
     Ok(out)
 }
 
+/// What the queue screen lists — see [`list_rows`].
+#[derive(Debug, Default)]
+pub(crate) struct Rows {
+    /// Every group, with the plan rows right after the queueable ones.
+    pub(crate) groups: Vec<Group>,
+    /// The pending files no group could be built from, as
+    /// [`list_groups_and_skipped`] passed them over.
+    pub(crate) unreadable: Vec<PathBuf>,
+    /// Why no plan rows could be listed, when `plans/` would not read. The
+    /// groups are listed all the same.
+    pub(crate) plans_error: Option<String>,
+}
+
 /// What the queue screen lists: every group of [`list_groups_and_skipped`],
 /// with a [`GroupState::Plan`] row for each of [`plans_without_tasks`] right
 /// after the queueable groups, and the pending files no group could be built
 /// from.
 ///
 /// A plans folder that cannot be read costs the plan rows alone, not the
-/// screen: the groups are still listed, and the next reload tries again.
-pub(crate) fn list_rows(repo: &Repo) -> Result<(Vec<Group>, Vec<PathBuf>)> {
-    let (mut groups, skipped) = list_groups_and_skipped(repo)?;
-    let plans = plans_without_tasks(repo, &groups).unwrap_or_default();
+/// screen: the groups are still listed, the error comes back in
+/// [`Rows::plans_error`] for the screen to name, and the next reload tries
+/// again.
+pub(crate) fn list_rows(repo: &Repo) -> Result<Rows> {
+    let (mut groups, unreadable) = list_groups_and_skipped(repo)?;
+    let (plans, plans_error) = match plans_without_tasks(repo, &groups) {
+        Ok(plans) => (plans, None),
+        Err(err) => (Vec::new(), Some(format!("{err:#}"))),
+    };
     groups.extend(plans.into_iter().map(|page| Group {
         name: page.name,
         tasks: Vec::new(),
         state: GroupState::Plan,
         created: Some(page.created),
+        page: Some(page.path),
     }));
     // A stable sort on state alone: the groups and the plans each arrive
     // newest first already, and keep that order inside their own state.
     groups.sort_by_key(|group| group.state);
-    Ok((groups, skipped))
+    Ok(Rows {
+        groups,
+        unreadable,
+        plans_error,
+    })
 }
 
 /// Every file [`list_groups_in`] has read the bytes of so far in this
@@ -568,6 +595,7 @@ pub(crate) fn list_groups_in(
             // needs no seed here, unlike the bare `bool` this replaced.
             state: GroupState::Queueable,
             created: None,
+            page: None,
         });
         if newest_first(created, entry.created) == std::cmp::Ordering::Less {
             entry.created = created;
@@ -632,6 +660,7 @@ pub(crate) fn list_groups_in(
             tasks: Vec::new(),
             state: GroupState::Queueable,
             created: None,
+            page: None,
         });
         if newest_first(created, entry.created) == std::cmp::Ordering::Less {
             entry.created = created;
@@ -675,6 +704,7 @@ pub(crate) fn list_groups_in(
             tasks: Vec::new(),
             state: GroupState::Queueable,
             created: None,
+            page: None,
         });
         if newest_first(created, entry.created) == std::cmp::Ordering::Less {
             entry.created = created;
