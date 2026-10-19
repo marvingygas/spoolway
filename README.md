@@ -111,87 +111,47 @@ spoolway init
 
 See **[Home mode](docs/concepts.md#home-mode)**.
 
-### 2. Create queueable tasks
+### 2. Plan
+
+Use `/spoolway-plan` if you want help shaping the work first. It writes the agreed plan as an
+HTML page under `~/.spoolway/<label>-<id>/plans/`. Verify the agent and you have a shared understanding.
+See **[Planning](docs/planning.md)**. This step is optional.
+
+<img src="docs/screenshots/plan.png" alt="a plan page written by /spoolway-plan" width="100%">
+
+### 3. Create queueable tasks
 
 Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown tasks.
 It assigns each task to a suitable pipeline and writes the tasks to
 `~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
-of work. If you want help shaping the work first, you can use `/spoolway-plan`.
+of work. See **[Tasks](docs/tasks.md)**.
 
-### 3. Queue
-
-```
-spoolway
-```
+### 4. Queue
 
 `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
 `enter` to queue it. The tab strip runs dispatch, queue, routines, jobs and eval, and `←` and
 `→` move between them.
 
-### 4. Dispatch
+<img src="docs/screenshots/queue.png" alt="the queue tab" width="100%">
+
+### 5. Dispatch
 
 To start dispatching, spoolway must run in herdr.
 
-```
-herdr
-spoolway
-```
+`←` from the queue tab opens the dispatch tab. Press `enter` there to start dispatching.
 
-`←` from the queue tab opens the dispatch tab. Press `enter` there to start dispatching, or run
-`spoolway dispatch` from a script to print a line per pass instead of drawing the board.
+<img src="docs/screenshots/dispatch.png" alt="the dispatch tab" width="100%">
 
-Every task on the board is in one of a few states:
+See **[The dispatcher](docs/dispatcher.md#states)** for what each state on the board means.
 
-| State | Meaning |
-|---|---|
-| `queued` | Waiting for its dependencies and a free slot. |
-| `waiting` | Held at a `serial:` step while another task's run of it finishes. |
-| `starting` | A slot is claimed and the lane is booting. |
-| `running` | An agent is working the task's current step. |
-| `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
-| `silent` | A lane has not answered the last reminder, shown as `● silent · 31m`. The task stays on its step. A lane that never answers needs the step restarted from the board. |
-| `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
-| `blocked` | A step reported a block and needs help. An unattended run hands it to the unblocker prompt. |
-| `done` | Finished: the worktree removed, the task archived. |
-
-### 5. Calibrate
+### 6. Calibrate
 
 The `/spoolway-calibrate` skill reads your archived tasks, their step-level evaluation results
 and the spend ledger. It compares them with the prompts, pipelines and settings that produced
 them. The comparison explains review failures, blocked sessions and wasted loops. This is the
 feedback loop that enables improvement of your workflows over time.
 
-## A task is what travels the line, and you define it
-
-```markdown
----
-id: sessions
-title: "feat(auth): add session tokens on top of login"
-group: auth
-pipeline: default
-base: main
-depends_on:
-  - login
----
-## Context
-## Intend
-## Non-goals
-## Acceptance criteria
-## References
-```
-
-**The frontmatter is spoolway's, the body is yours.** spoolway never reads the body. The
-agent works from it, and you own the skeleton it is written from.
-
 ## The pipeline is a file
-
-- Mix agents and commands
-- Set model and effort levels per step
-- Reuse previous sessions until the context threshold is met
-- Give the pipeline a `version:` and raise it when you change the pipeline, so eval can compare
-  versions
-- Run a step only on a chain's root task with `first:`, only on a chain's last task with `last:`, or
-  a command step one task at a time with `serial:`
 
 ```yaml
 # .spoolway/pipelines/default.yml
@@ -230,6 +190,8 @@ steps:
     on_pass: done
 ```
 
+See **[Pipelines](docs/pipelines.md)**.
+
 ## Try changes without committing them
 
 In a repo-mode project, the tracked `.spoolway/` is shared with everyone. You can still change
@@ -249,7 +211,12 @@ Tip: the `/spoolway-config` skill activates whenever you want to change somethin
 See **[The overrides layer](docs/configuration.md#the-overrides-layer)** and
 **[Private pipelines](docs/pipelines.md#private-pipelines)**.
 
-## Jobs
+## Routines and jobs
+
+A routine is a saved task or group of tasks that you can queue again. It lives in
+`.spoolway/routines/`.
+On the queue screen, press `o` on a group and pick `save as routine` to save it there, and `r`
+to browse and queue what is saved.
 
 A job runs a routine on a schedule. It has three parts: a cron expression, a pipeline, and a
 routine saved under `.spoolway/routines/`.
@@ -263,12 +230,7 @@ pipeline = "impl_fast"
 routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
 ```
 
-## Routines
-
-A routine is a saved task or group of tasks that you can queue again. It lives in
-`.spoolway/routines/`.
-On the queue screen, press `o` on a group and pick `save as routine` to save it there, and `r`
-to browse and queue what is saved.
+<img src="docs/screenshots/jobs.png" alt="the jobs tab" width="100%">
 
 ## Trials
 
@@ -295,28 +257,31 @@ Event hooks can sync tasks with an issue tracker.
 
 **The two shipped scripts are editable samples.** Choosing a tracker in `spoolway init` copies
 `github.sh` and `jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change
-them, replace them, or leave issue tracking disabled; `spoolway hook contract` describes the
-events and environment available to any custom script.
+them, replace them, or leave issue tracking disabled.
 
 See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
 
 ## Configurable per project
 
-- Unattended mode hands **`blocked`** tasks to a prompt you define, so the pipeline keeps
-  running while nobody is watching.
 
 ```toml
 [dispatch]
+backend = "herdr"            # where lanes run
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
+priority = "group"           # fill a free slot from a group already running first; "any" weighs every ready task
+lane_child_ceiling = "1h"    # how long a lane's running child process excuses it from reminders
+visible_lanes = 5            # a task's most recent lanes kept open, or "all"
+hide_commands = true         # run command steps without a pane
+lane_layout = "panes"        # every step a pane of one tab; "tabs" gives each step its own tab
 
 [unattended]
-enabled = true               # the overnight switch
+enabled = false              # the overnight switch
 max_output_tokens = 0        # output-token ceiling for a run with nobody watching; 0 is none
 max_cost_usd = 0.0           # dollar ceiling for the same run; 0 is none
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
 blocked_model = "claude-opus-5"
-blocked_effort = "medium"
+blocked_effort = ""
 blocked_session = true       # the unblocker carries its own earlier session forward
 blocked_prompt = "unblocker"
 
@@ -327,6 +292,9 @@ retention_days = 30          # how long run records, logs and scratch space are 
 archive_retention_days = 0   # how long finished tasks are kept; 0 keeps every one
 price_max_age_days = 30      # how old the price table may be before `spoolway doctor` says so
 
+[watch]
+dirs = []                    # extra directories whose own agent sessions count as this project's spend
+
 [issue_tracking]
 hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
 project_key = ""             # handed to the hook verbatim, e.g. owner/repo
@@ -334,27 +302,26 @@ key_in_names = true          # prefix branch and worktree names with the tracker
 
 [agents.claude]
 kind = "claude"
-concurrency = 3              # most lanes of this profile at once
+# concurrency = 3            # most lanes of this profile at once; unset is no cap
 session_reuse_ctx = 20       # % of the window before a carried session restarts fresh
 session_blocked_ctx = 40     # % of the window at which a running lane is stopped and blocked; 0 is off
 permission_mode = "auto"
 
 [agents.codex]
 kind = "codex"
-concurrency = 3
 session_reuse_ctx = 20
 session_blocked_ctx = 40
 permission_mode = "never"
 
 [agents.pi]
 kind = "pi"
-session_reuse_ctx = 50
-session_blocked_ctx = 0
+session_reuse_ctx = 20
+session_blocked_ctx = 40
 
-[models."Ornith-1.5-35B-A3B"]  # a local model, served by llama.cpp
+[models."Ornith-1.5-35B-A3B"]  # a local model, served by llama.cpp; [models] is empty by default
 context_window = 100096
-slots = 2                    # parallel lanes the local server can actually hold
-local = true                 # runs on hardware you own
+slots = 0                    # parallel lanes the local server can hold; 0 leaves the profile in charge
+local = false                # true when it runs on hardware you own
 ```
 
 See **[Configuration](docs/configuration.md)**.
@@ -373,6 +340,8 @@ spoolway eval
 compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
 `tab` cycles to the directory table and the trials table, `t` switches between totals and per-task
 figures, `f` filters, and `e` exports CSV.
+
+<img src="docs/screenshots/eval.png" alt="the eval tab" width="100%">
 
 ## Documentation
 
