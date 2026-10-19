@@ -4984,11 +4984,12 @@ impl<'a> PopupHook<'a> {
 
     /// The popup while the hook is still answering.
     fn panel(&self) -> Vec<String> {
-        let filled = if self.total == 0 {
-            0
-        } else {
-            (self.finished * PROGRESS_BAR_CELLS / self.total).min(PROGRESS_BAR_CELLS)
-        };
+        // `total` is zero only when the hook is never called, and then no
+        // panel is drawn; the guard keeps the division total anyway.
+        let filled = (self.finished * PROGRESS_BAR_CELLS)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(PROGRESS_BAR_CELLS);
         crate::screen::boxed(
             "issue tracking",
             &issue_body([format!(
