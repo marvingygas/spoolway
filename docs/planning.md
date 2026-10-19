@@ -77,6 +77,13 @@ Each option draws its groups numbered, in dependency order:
 asks with a question and a preview per option. Codex and pi print each option as a lettered
 section and wait for your letter.
 
+Picking an option that is not the recommended one, on the group ballot or on any task ballot,
+ends on one more ballot. So does typing your own split into Other. This confirm ballot draws
+the whole breakdown: each group on one line, and each task under it with its size and
+pipeline. Tasks are numbered once across the breakdown. `Write them` writes the tasks as drawn.
+`Pick again` goes back to the group ballot. When you take every recommendation, the tasks are
+written straight away.
+
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`. The plan page's absolute path goes into each task's
 `plan:` whenever a page exists, with or without an issue.

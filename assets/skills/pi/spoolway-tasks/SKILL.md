@@ -220,6 +220,33 @@ reading the file whole.
    pull request for, names a pull request from a fork (`isCrossRepository` is true — its
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
+   **Confirm a changed split whole, before step 3 writes anything.** The group ballot and the
+   task ballots each draw one level, so a person who picks away from the recommendation has
+   not seen the whole breakdown. When any pick was not the recommended one — a
+   non-recommended option on the group ballot, a non-recommended option on any task ballot,
+   or a split typed into Other — end on one confirm ballot after the last task ballot is
+   answered. When every pick was the recommended one, skip it and go straight to step 3, as
+   before.
+
+   Print it and end the turn there, the same way the task ballot does. Open the question text with `Write this breakdown? You picked <n> tasks for
+   <group>, not the recommended <m>.`, naming each pick that was not recommended. Then draw
+   every group on one line with its `base` or `after` part, and every task under it on one
+   row with its size and pipeline. Number the tasks once across the whole breakdown, not per
+   group. Draw no sentences, because they were read on the ballots before it:
+
+   ```
+   1  cart-core                    base  main
+      1  cart-totals      medium   impl
+      2  cart-discounts   small    impl_tdd
+   2  cart-empty                   base  main
+      3  cart-empty       small    bugfix
+   ```
+
+   Give it two answers: `Write them`, which writes the tasks as drawn, and `Pick again`, which
+   goes back to the group ballot. Say that the person answers with one of the two.
+   `Write them` goes on to step 3. `Pick again` asks the group ballot again, and every ballot
+   after it.
+
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
    step 1's contract already printed for this task's own pipeline — same headings, same order
