@@ -249,6 +249,26 @@ reading the file whole.
    `Write them` goes on to step 3. `Pick again` asks the group ballot again, and every ballot
    after it.
 
+   **A note on the confirm ballot re-routes a task or moves a chain's base.** The person may
+   add a note to the option they pick. A note holds parts, comma-separated, such as
+   `2 to impl, 3 from #412`. A part is `<task> to <pipeline>` or `<task> from <branch or
+   #pr>`. `<task>` is a task's number or id from this ballot. A `to` part sets that task's
+   pipeline. A `from` part is checked and resolved the way the task ballot's note is, and is
+   refused for the same reasons.
+
+   Check every `to` part against the pipeline names in step 1's `spoolway task contract`.
+   When a part names a pipeline that is not there, or a task that is not on the ballot,
+   bring the confirm ballot back unchanged. Open it with the notes line, such as `notes: 2 to
+   bugfx`. Then name the problem, as in `No pipeline is named \`bugfx\`. This project has:`,
+   and list every pipeline name. End with `Pick again, with a note naming one of them.`
+
+   When every part is accepted, draw the confirm ballot again with the change in place.
+   Open it with the notes line, such as `notes: 2 to impl, 3 from #412`. Draw the same rows,
+   with each re-routed task's new pipeline and each moved chain's new `base`. Print it again and end the turn.
+   An answer with no note stands. When a `to` part moves a group's last task onto a
+   pipeline with no `last-of-chain` step, say so on the redrawn ballot, the way step 4 says
+   its own swap.
+
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
    step 1's contract already printed for this task's own pipeline — same headings, same order
