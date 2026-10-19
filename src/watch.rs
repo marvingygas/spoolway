@@ -192,11 +192,11 @@ impl BranchWatch {
         let identity = self.head_path(dir).and_then(|head| Identity::of(&head));
         // Judged now, before `run`: how long git takes must not age a
         // modified time that was still inside the settle window when taken.
-        let now = self.now();
-        let settled = identity.as_ref().is_some_and(|id| id.settled_at(now));
-        if let (Some(now), Some(seen)) = (&identity, &self.seen)
+        let at = self.now();
+        let settled = identity.as_ref().is_some_and(|id| id.settled_at(at));
+        if let (Some(current), Some(seen)) = (&identity, &self.seen)
             && seen.settled
-            && seen.identity == *now
+            && seen.identity == *current
         {
             return Some(seen.branch.clone());
         }
@@ -294,8 +294,9 @@ mod tests {
 
     /// Whether `HEAD` was settled is judged when its identity was taken, not
     /// after git has finished: time passing during a slow `run` must not make
-    /// a young `HEAD` look old. The clock jumps past the settle window inside
-    /// `run` while `HEAD` itself stays untouched, so the second read sees the
+    /// a young `HEAD` look old. `HEAD` is dated an hour ahead, so it is
+    /// unsettled when first taken however slowly the test runs. The clock
+    /// jumps two hours inside `run` while `HEAD` itself stays untouched, so the second read sees the
     /// same identity and only the settled flag decides whether git runs
     /// again. Judged after `run`, it was recorded as settled and git did not.
     #[test]
@@ -303,10 +304,11 @@ mod tests {
         let dir = scratch("watch-slow-git");
         let head = dir.join("HEAD");
         std::fs::write(&head, "ref: refs/heads/one\n").unwrap();
+        unsettle(&head);
         let mut watch = BranchWatch::with_head(head);
         watch.clock = Some(skewed_now);
         watch.read(&dir, || {
-            SKEW_SECS.store(10, std::sync::atomic::Ordering::SeqCst);
+            SKEW_SECS.store(7200, std::sync::atomic::Ordering::SeqCst);
             Ok("one".to_string())
         });
         let runs = Cell::new(0);
