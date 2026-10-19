@@ -9,8 +9,11 @@
 //! - "is this a repeat failure"     -> a round counter in the task file
 //! - "is it blocked or hung"        -> whether its step declares a human gate
 //!
-//! A pass is safe to interrupt at any point: it derives all its state fresh
-//! from task files and the multiplexer, and never remembers anything.
+//! A pass is safe to interrupt at any point: it derives its decisions fresh
+//! from task files and the multiplexer. The one thing it carries from pass to
+//! pass is a [`PassMemory`] of what the multiplexer last said, which only
+//! saves it asking again; a dispatcher that starts without one asks everything
+//! once, so losing it costs one full sweep.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -657,9 +660,11 @@ pub struct PassMemory {
     /// What each tab was called at the last full look, updated by each
     /// rename since.
     tab_labels: HashMap<String, String>,
-    /// A clock for a test to move; see [`PassMemory::backdate`].
+    /// The time a test says it is, standing in for the clock so that a test
+    /// can place a pass a minute after another without waiting for it; see
+    /// [`PassMemory::at`].
     #[cfg(test)]
-    skew: Duration,
+    now: Option<Instant>,
 }
 
 impl PassMemory {
@@ -668,31 +673,35 @@ impl PassMemory {
         let Some(seen) = &self.lanes else {
             return true;
         };
-        let age = self.swept_at.map(|at| at.elapsed());
-        #[cfg(test)]
-        let age = age.map(|age| age + self.skew);
+        let age = self
+            .swept_at
+            .map(|at| self.now().saturating_duration_since(at));
         seen != lanes || age.is_none_or(|age| age >= FULL_SWEEP_EVERY)
     }
 
     /// Record a full look that succeeded.
     fn swept(&mut self, lanes: BTreeSet<(String, String)>, tabs: &[crate::mux::SweepTab]) {
         self.lanes = Some(lanes);
-        self.swept_at = Some(Instant::now());
-        #[cfg(test)]
-        {
-            self.skew = Duration::ZERO;
-        }
+        self.swept_at = Some(self.now());
         self.tab_labels = tabs
             .iter()
             .filter_map(|tab| Some((tab.tab_id.clone(), tab.label.clone()?)))
             .collect();
     }
 
-    /// Make the last full look `by` older than it is, so a test need not wait
-    /// out [`FULL_SWEEP_EVERY`].
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.now {
+            return now;
+        }
+        Instant::now()
+    }
+
+    /// Say what time it is, for the passes that follow.
     #[cfg(test)]
-    pub(crate) fn backdate(&mut self, by: Duration) {
-        self.skew += by;
+    pub(crate) fn at(mut self, now: Instant) -> Self {
+        self.now = Some(now);
+        self
     }
 }
 
@@ -1383,9 +1392,11 @@ impl<'a> Dispatcher<'a> {
         self.usage_banked.as_mut().expect("just set")
     }
 
-    /// Writes `lanes.json` now, logging rather than failing: a lane record
+    /// Saves the lane records, logging rather than failing: a lane record
     /// that did not reach disk is a problem for the next pass to correct, not
-    /// a reason to stop this one. `when` names the moment in the problem log.
+    /// a reason to stop this one. The file is written only when it differs
+    /// from the records — see [`save_lane_records`]. `when` names the moment
+    /// in the problem log.
     fn save_lanes(&self, when: &str) {
         if let Err(err) = save_lane_records(self.repo, &self.lanes) {
             crate::problem_log::append(
@@ -1432,12 +1443,13 @@ impl<'a> Dispatcher<'a> {
     /// {}`.
     pub fn pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
         let outcome = self.run_pass(tick);
-        // `lanes.json` is written whatever came of the pass — error paths
-        // included. A `?` partway through `run_pass` used to return before
-        // its final save, discarding every lane record built earlier in the
-        // same pass: the next pass re-adopted those lanes with a stale or
-        // blank session, and their spend was never banked. See review
-        // finding 8.
+        // The records are saved whatever came of the pass — error paths
+        // included; the write itself is skipped when the file already holds
+        // them, so a pass that changed nothing writes nothing. A `?` partway
+        // through `run_pass` used to return before its final save,
+        // discarding every lane record built earlier in the same pass: the
+        // next pass re-adopted those lanes with a stale or blank session, and
+        // their spend was never banked. See review finding 8.
         self.save_lanes("after this pass");
         outcome
     }
@@ -9248,6 +9260,9 @@ mod tests {
         /// `tabs_for_sweep`, kept apart from `calls` because other tests
         /// compare that log whole.
         asked: Mutex<Vec<&'static str>>,
+        /// Make `list_lanes` fail, as a multiplexer that has gone away does:
+        /// the pass errors out before it does anything else.
+        list_fails: bool,
     }
 
     impl FakeMux {
@@ -9289,6 +9304,7 @@ mod tests {
                 pane_tabs: Mutex::new(HashMap::new()),
                 tabs_opened: Mutex::new(0),
                 asked: Mutex::new(Vec::new()),
+                list_fails: false,
             }
         }
         /// Place `pane` in `tab`, which holds `panes` panes, for
@@ -9522,6 +9538,9 @@ mod tests {
         }
         fn list_lanes(&self) -> Result<Vec<Lane>> {
             self.asked.lock().unwrap().push("list_lanes");
+            if self.list_fails {
+                anyhow::bail!("the fake multiplexer is gone");
+            }
             Ok(self.lanes.clone())
         }
         /// Answers `Some(true)` for a lane a test has marked with
@@ -14572,8 +14591,8 @@ mod tests {
     }
 
     /// A pass that finds this project's lanes as the last full look left them
-    /// asks the multiplexer for the lane list and nothing else, and names no
-    /// tab that already carries its name.
+    /// asks the multiplexer for the lane list and nothing else, starts no
+    /// process, and names no tab that already carries its name.
     ///
     /// Fails before `PassMemory`: every pass listed the tabs again and
     /// renamed the lane's tab again.
@@ -14586,9 +14605,15 @@ mod tests {
         assert_eq!(mux.did("rename_tab"), ["rename_tab w1:t1 implement"]);
         mux.clear_calls();
 
+        let started = crate::repo::runs_under(&repo.root);
         let (_, memory) = pass_remembering(&repo, &mux, memory);
         let (_, _memory) = pass_remembering(&repo, &mux, memory);
         assert_eq!(mux.take_asked(), ["list_lanes", "list_lanes"]);
+        assert_eq!(
+            crate::repo::runs_under(&repo.root),
+            started,
+            "an idle pass started a process"
+        );
         assert!(
             mux.did("rename_tab").is_empty(),
             "a tab already named was named again: {:?}",
@@ -14604,7 +14629,10 @@ mod tests {
     #[test]
     fn a_lane_starting_or_ending_brings_the_full_look_forward_and_so_does_a_minute() {
         let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-lane-change");
-        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default());
+        // Every pass here happens at a time this test names, so a slow run
+        // cannot move one across the minute.
+        let start = Instant::now();
+        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default().at(start));
         mux.take_asked();
 
         // The lane has gone: the lane list alone shows it, and that pass
@@ -14617,19 +14645,18 @@ mod tests {
         let (_, memory) = pass_remembering(&repo, &mux, memory);
         assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
 
-        let (_, mut memory) = pass_remembering(&repo, &mux, memory);
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
         assert_eq!(mux.take_asked(), ["list_lanes"]);
 
-        memory.backdate(FULL_SWEEP_EVERY - Duration::from_secs(1));
-        let (_, mut memory) = pass_remembering(&repo, &mux, memory);
+        let a_second_short = start + FULL_SWEEP_EVERY - Duration::from_secs(1);
+        let (_, memory) = pass_remembering(&repo, &mux, memory.at(a_second_short));
         assert_eq!(
             mux.take_asked(),
             ["list_lanes"],
             "a second short of a minute"
         );
 
-        memory.backdate(Duration::from_secs(1));
-        let (_, _memory) = pass_remembering(&repo, &mux, memory);
+        let (_, _memory) = pass_remembering(&repo, &mux, memory.at(start + FULL_SWEEP_EVERY));
         assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
     }
 
@@ -14657,8 +14684,7 @@ mod tests {
         }
     }
 
-    /// `lanes.json` is written when its records change and not otherwise,
-    /// including for a pass that fails after building them.
+    /// `lanes.json` is written when its records change and not otherwise.
     ///
     /// Fails before the comparison: the file was rewritten, and so given a
     /// new modified time, by every pass.
@@ -14691,6 +14717,47 @@ mod tests {
         save_lane_records(&repo, &records).unwrap();
         assert_ne!(modified(), long_ago, "changed records were not written");
         assert_eq!(load_lane_records(&repo).len(), 9);
+    }
+
+    /// A pass that errors out still saves the records it changed, and one
+    /// that changed nothing leaves the file alone.
+    ///
+    /// Fails if the save on the error path is skipped along with the
+    /// unchanged one: the record added before the failure never reaches disk.
+    #[test]
+    fn a_failed_pass_still_saves_the_records_it_changed() {
+        let (repo, _root_guard) = fixture("lanes-json-failed-pass");
+        let mut mux = FakeMux::new(vec![]);
+        mux.list_fails = true;
+        let pipelines = Pipelines::builtin();
+
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        dispatcher
+            .lanes
+            .insert("demo · implement".into(), LaneRecord::adopted(1));
+        assert!(dispatcher.pass(&mut || {}).is_err());
+        assert!(load_lane_records(&repo).contains_key("demo · implement"));
+
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(lanes_path(&repo))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        assert!(
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(lanes_path(&repo))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            long_ago,
+            "a failed pass that changed nothing rewrote the file"
+        );
     }
 
     /// The first step takes the workspace's own first tab and names it, and

@@ -9,7 +9,8 @@
 # step runs again in its own tab, so no tab is added. A third task runs past
 # the close of its first tab and then fails its last step back to the one
 # before: both keep working in tabs of their own, in the workspace they began
-# in. A task with a limit of 1 keeps one tab, and its workspace survives every
+# in. A fourth task loses its lane's agent from herdr's list and is found out.
+# A task with a limit of 1 keeps one tab, and its workspace survives every
 # swap, including the ones after its first tab is gone.
 #
 # Against the double rather than a real server — its header says why there is
@@ -320,6 +321,38 @@ else bad "the fourth step runs again in the same workspace"; fi
 must "the fourth step passes" report_as rework fourth
 if drive rework gone 60; then ok "the reworked task is done and archived"
 else bad "the reworked task is done and archived"; fi
+
+# ------------------------------------------------------ a lane that dies
+# The dispatcher asks herdr for the agent list on every pass, and for the
+# workspace, pane and tab lists only when a lane starts or ends or a minute has
+# gone by. A lane whose agent disappears from the list is therefore found on the
+# next pass, which looks at everything, and the task is blocked.
+must "a limit of 5 for the dying task" "$SPOOLWAY" config set dispatch.visible_lanes 5
+task_doc "$LIVE/dies.md" dies "$BODY" "group: dies" "pipeline: fourstep"
+must "a task queued to lose its lane" "$SPOOLWAY" queue add --from "$LIVE/dies.md"
+if drive dies first 60 && poll_until 60 lane_listed "dies · first"; then
+  ok "the dying task's lane starts"
+else bad "the dying task's lane starts"; fi
+poll_until 30 tabs_are dies "first" || true
+
+# The agent rows of the task's workspace, one pane id a line.
+agent_panes_of() { # task
+  local ws; ws=$(workspace_of "$1")
+  awk -F'\t' -v ws="$ws" 'NR == FNR {if ($3 == ws) mine[$1] = 1; next} $2 in mine {print $2}' \
+    "$HSTATE/panes" "$HSTATE/agents"
+}
+DYING_PANE=$(agent_panes_of dies | head -n 1)
+# What a lane that exited looks like to herdr: the pane stands, the agent does not.
+awk -F'\t' -v p="$DYING_PANE" '$2 != p' "$HSTATE/agents" > "$HSTATE/agents.tmp" \
+  && mv "$HSTATE/agents.tmp" "$HSTATE/agents"
+is_blocked() { [ "$(stage_of dies)" = blocked ]; }
+if [ -n "$DYING_PANE" ] && poll_until 60 is_blocked; then
+  ok "a lane whose agent vanished is found on a later pass, and its task blocked"
+else
+  bad "a lane whose agent vanished is found on a later pass, and its task blocked (was $DYING_PANE, stage $(stage_of dies))"
+  sed 's/^/        /' "$HSTATE/agents"
+fi
+forget dies
 
 # ------------------------------------------------------ with a limit of 1
 # One tab at a time. The new tab opens before the old one closes, so the

@@ -1647,13 +1647,24 @@ mod tests {
         watch.reload(&mut repo, &mut reported, &mut record_reported);
         assert!(!repo.config.dispatch.hide_commands, "an edit was not read");
 
-        // A record that cannot be written is tried again on every pass.
+        // A record that cannot be written is tried again on every pass,
+        // even while every file the watch stats stays exactly as it was.
         backdate(&config);
-        watch.reload(&mut repo, &mut reported, &mut record_reported);
         std::fs::remove_file(&record).unwrap();
         std::fs::create_dir(&record).unwrap();
         watch.reload(&mut repo, &mut reported, &mut record_reported);
         assert!(record_reported.is_some(), "the unwritable record is said");
+        std::fs::File::open(&record)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        let before = crate::repo::runs_under(&repo.root);
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(
+            crate::repo::runs_under(&repo.root) > before,
+            "the unwritable record was not tried again"
+        );
         std::fs::remove_dir(&record).unwrap();
         watch.reload(&mut repo, &mut reported, &mut record_reported);
         assert!(record_reported.is_none(), "the next pass tried again");
