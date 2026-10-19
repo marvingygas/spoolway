@@ -3004,12 +3004,19 @@ pub struct LedgerTotals {
     last_by_step: HashMap<(String, String), LastLane>,
     command_runs: HashSet<String>,
     trials: HashMap<String, HashSet<String>>,
-    /// Lane output tokens and cost banked at or after the `since` that
-    /// [`LedgerTotals::read_since`] was given, and nothing from any other
-    /// constructor. An unattended run's ceilings are sums over this window,
-    /// which moves with every run, so it cannot be a total kept per task.
-    since_output: u64,
-    since_cost: f64,
+}
+
+/// What the lanes of one run have spent: output tokens and cost in dollars,
+/// summed over the lines stamped at or after the run's start.
+///
+/// The unattended ceilings are sums over this window. It moves with every
+/// run, so it cannot be a total kept per task, and it is not part of
+/// [`LedgerTotals`]: only [`LedgerTotals::read_since`] can answer it, and a
+/// caller that built its totals any other way has no window to ask.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunWindow {
+    pub output: u64,
+    pub cost_usd: f64,
 }
 
 impl LedgerTotals {
@@ -3098,34 +3105,24 @@ impl LedgerTotals {
         }
     }
 
-    /// [`LedgerTotals::read_at`], also summing the lane output tokens and cost
-    /// of every line stamped at or after `since` — all of them when it is
-    /// `None`. Lines with no task are a person's own sessions, not the run's,
-    /// and are left out of those two sums.
-    pub fn read_since(path: &Path, since: Option<&str>) -> Result<Self> {
+    /// [`LedgerTotals::read_at`], also summing the [`RunWindow`] of every line
+    /// stamped at or after `since` — all of them when it is `None`. Lines with
+    /// no task are a person's own sessions, not the run's, and are left out of
+    /// the window.
+    pub fn read_since(path: &Path, since: Option<&str>) -> Result<(Self, RunWindow)> {
         let mut totals = Self::default();
-        let mut output = 0;
-        let mut cost = 0.0;
+        let mut window = RunWindow::default();
         match stream_entries(path, 0, |entry| {
             if !entry.task.is_empty() && since.is_none_or(|since| entry.ts.as_str() >= since) {
-                output += entry.tokens.output;
-                cost += entry.cost_usd.unwrap_or(0.0);
+                window.output += entry.tokens.output;
+                window.cost_usd += entry.cost_usd.unwrap_or(0.0);
             }
             totals.fold(&entry);
         }) {
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+            Ok(_) => Ok((totals, window)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
         }
-        totals.since_output = output;
-        totals.since_cost = cost;
-        Ok(totals)
-    }
-
-    /// The window sums [`LedgerTotals::read_since`] took: output tokens, then
-    /// cost in dollars.
-    pub fn since(&self) -> (u64, f64) {
-        (self.since_output, self.since_cost)
     }
 
     /// Output tokens banked for `task` at `step`, every round of it summed, or
@@ -3670,13 +3667,12 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    // Streamed, so a project's whole history is never held to find one flag.
-    // The rule is [`LedgerTotals::lane_owns_subagents`]'s, asked of one session.
-    let mut hand_line = false;
-    let _ = stream_entries(&ledger_path(repo), 0, |entry| {
-        hand_line |= entry.hand && entry.session == session;
-    });
-    let harvest = harvest(kind, session, &repo.config.models, !hand_line)?;
+    // The same rule the dispatcher and the board ask, so a change to it
+    // reaches this path too.
+    let own_subagents = LedgerTotals::read_at(&ledger_path(repo))
+        .unwrap_or_default()
+        .lane_owns_subagents(session);
+    let harvest = harvest(kind, session, &repo.config.models, own_subagents)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -6982,8 +6978,8 @@ mod tests {
         }
     }
 
-    /// Whether two totals give the same answer to every question the board
-    /// and the dispatcher ask about `tasks`, and counted the same lines.
+    /// Asserts that two totals give the same answer to every question the
+    /// board and the dispatcher ask about `tasks`, and counted the same lines.
     fn same_answers(a: &LedgerTotals, b: &LedgerTotals, tasks: &[&str]) {
         assert_eq!(a.lines, b.lines, "a line was counted twice or missed");
         for task in tasks {
@@ -7093,10 +7089,13 @@ mod tests {
         append(&repo, &spend_entry("old", "implement", 4, 1.0, 1)).unwrap();
         assert_eq!(totals(&repo).spent_at("old", "implement"), Some(8));
 
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Shortened in place, so the inode is the cached one and only the
+        // length says the offset no longer means anything.
         let path = ledger_path(&repo);
-        std::fs::remove_file(&path).unwrap();
-        append(&repo, &spend_entry("new", "implement", 1, 1.0, 1)).unwrap();
+        let mut line = serde_json::to_string(&spend_entry("new", "implement", 1, 1.0, 1)).unwrap();
+        line.push('\n');
+        assert!(line.len() < std::fs::metadata(&path).unwrap().len() as usize);
+        std::fs::write(&path, line).unwrap();
 
         let after = totals(&repo);
         assert_eq!(after.spent_at("old", "implement"), None);
@@ -7174,7 +7173,7 @@ mod tests {
             append(&repo, line).unwrap();
         }
         let start = at(0);
-        let streamed = LedgerTotals::read_since(&ledger_path(&repo), Some(&start)).unwrap();
+        let (_, streamed) = LedgerTotals::read_since(&ledger_path(&repo), Some(&start)).unwrap();
 
         let all = read(&repo).unwrap();
         let in_window = |entry: &&Entry| !entry.task.is_empty() && entry.ts >= start;
@@ -7184,11 +7183,18 @@ mod tests {
             .filter(in_window)
             .filter_map(|e| e.cost_usd)
             .sum();
-        assert_eq!(streamed.since(), (output, cost));
-        assert_eq!(streamed.since(), (12, 0.75));
+        assert_eq!((streamed.output, streamed.cost_usd), (output, cost));
+        assert_eq!((streamed.output, streamed.cost_usd), (12, 0.75));
 
-        let everything = LedgerTotals::read_since(&ledger_path(&repo), None).unwrap();
-        assert_eq!(everything.since().0, 112);
+        let (totals, everything) = LedgerTotals::read_since(&ledger_path(&repo), None).unwrap();
+        assert_eq!(everything.output, 112);
+        // The totals streamed beside the window are the same ones `read_at`
+        // builds.
+        same_answers(
+            &totals,
+            &LedgerTotals::from_entries(&all),
+            &["in", "before"],
+        );
     }
 
     /// What a session has banked, as the dispatcher diffs a transcript against

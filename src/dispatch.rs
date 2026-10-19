@@ -652,7 +652,7 @@ pub struct Dispatcher<'a> {
     /// tears nothing down never builds it. Populating it in
     /// [`Dispatcher::new`] unconditionally was the bug: every pass paid to
     /// parse the whole ledger whether or not it had anything to bank.
-    usage_banked: Option<HashMap<String, BankedTotals>>,
+    usage_banked: Option<HashMap<String, crate::usage::SessionBanked>>,
     /// The ledger's totals, streamed once on first use and shared for the rest
     /// of the pass — see [`Dispatcher::ledger`]; no line of it is kept. The ceiling checks,
     /// `carried_session`, `readopted` and `lane_session` all used to parse
@@ -661,6 +661,10 @@ pub struct Dispatcher<'a> {
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
     ledger: Option<std::sync::Arc<crate::usage::LedgerTotals>>,
+    /// What this run's lanes had spent when `ledger` was streamed, for the
+    /// unattended ceilings. Meaningful once [`Dispatcher::ledger`] has run,
+    /// which every ceiling check does first.
+    run_window: crate::usage::RunWindow,
     /// The lines this pass appended to the ledger after `ledger` was loaded.
     /// The unattended ceilings add them to the snapshot's sum, so the lane a
     /// pass has just banked counts toward the brake it may have crossed; every
@@ -805,21 +809,6 @@ fn bank_command_run(
         project: String::new(),
     };
     crate::usage::bank_command_run(repo, &entry)
-}
-
-/// What one session has banked to the usage ledger so far — the running
-/// total [`Dispatcher::record_usage`] diffs a transcript's own cumulative
-/// reading against, so a resumed session is never counted twice.
-#[derive(Debug, Clone, Default)]
-struct BankedTotals {
-    tokens: crate::usage::Tokens,
-    /// The part of `tokens` already banked as over a price threshold.
-    tier_tokens: crate::usage::Tokens,
-    turns: u32,
-    cost_usd: f64,
-    /// The part of the session's reported total already banked — see
-    /// [`crate::usage::Entry::reported_usd`].
-    reported_usd: f64,
 }
 
 /// A task that wants a lane started for it, and the step to start.
@@ -1240,6 +1229,7 @@ impl<'a> Dispatcher<'a> {
             unattended: repo.unattended(),
             usage_banked: None,
             ledger: None,
+            run_window: Default::default(),
             banked_this_pass: Vec::new(),
             file_seen: HashMap::new(),
             pending_command_forget: None,
@@ -1278,33 +1268,31 @@ impl<'a> Dispatcher<'a> {
     /// thereafter. Deferred to first use — most passes tear nothing down and never read it
     /// — see [`Dispatcher::ledger`](Self::ledger)'s field doc.
     pub(crate) fn ledger(&mut self) -> std::sync::Arc<crate::usage::LedgerTotals> {
-        let repo = self.repo;
-        self.ledger
-            .get_or_insert_with(|| {
-                // Streamed into totals, so the pass holds what the ledger
-                // adds up to and not a copy of its lines. The run's start is
-                // read here, with the totals, so the ceilings sum the same
-                // lines the totals counted.
-                let start = crate::status::run_start(repo);
-                std::sync::Arc::new(
-                    crate::usage::LedgerTotals::read_since(
-                        &crate::usage::ledger_path(repo),
-                        start.as_deref(),
-                    )
-                    .unwrap_or_default(),
-                )
-            })
-            .clone()
+        if self.ledger.is_none() {
+            // Streamed into totals, so the pass holds what the ledger adds up
+            // to and not a copy of its lines. The run's start is read here,
+            // with the totals, so the ceilings sum the same lines the totals
+            // counted.
+            let start = crate::status::run_start(self.repo);
+            let (totals, window) = crate::usage::LedgerTotals::read_since(
+                &crate::usage::ledger_path(self.repo),
+                start.as_deref(),
+            )
+            .unwrap_or_default();
+            self.ledger = Some(std::sync::Arc::new(totals));
+            self.run_window = window;
+        }
+        self.ledger.clone().expect("just set")
     }
 
     /// This pass's own running total per session, folded out of
     /// [`Dispatcher::ledger`] on first use and kept for the rest of the pass.
     /// Updated in place as this pass banks more, so a second lane banked
     /// against the same carried session sees the first one's totals.
-    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+    fn usage_banked(&mut self) -> &mut HashMap<String, crate::usage::SessionBanked> {
         if self.usage_banked.is_none() {
             let ledger = self.ledger();
-            self.usage_banked = Some(banked_totals(&ledger));
+            self.usage_banked = Some(ledger.sessions().clone());
         }
         self.usage_banked.as_mut().expect("just set")
     }
@@ -6466,18 +6454,20 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: u64 = self.ledger().since().0
-            + self
-                .banked_this_pass
-                .iter()
-                .filter(|entry| {
-                    start
-                        .as_ref()
-                        .is_none_or(|start| entry.ts.as_str() >= start.as_str())
-                })
-                .filter(|entry| !entry.task.is_empty())
-                .map(|entry| entry.tokens.output)
-                .sum::<u64>();
+        let spent: u64 = {
+            self.ledger();
+            self.run_window.output
+        } + self
+            .banked_this_pass
+            .iter()
+            .filter(|entry| {
+                start
+                    .as_ref()
+                    .is_none_or(|start| entry.ts.as_str() >= start.as_str())
+            })
+            .filter(|entry| !entry.task.is_empty())
+            .map(|entry| entry.tokens.output)
+            .sum::<u64>();
         if spent < ceiling {
             return None;
         }
@@ -6512,18 +6502,20 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: f64 = self.ledger().since().1
-            + self
-                .banked_this_pass
-                .iter()
-                .filter(|entry| {
-                    start
-                        .as_ref()
-                        .is_none_or(|start| entry.ts.as_str() >= start.as_str())
-                })
-                .filter(|entry| !entry.task.is_empty())
-                .filter_map(|entry| entry.cost_usd)
-                .sum::<f64>();
+        let spent: f64 = {
+            self.ledger();
+            self.run_window.cost_usd
+        } + self
+            .banked_this_pass
+            .iter()
+            .filter(|entry| {
+                start
+                    .as_ref()
+                    .is_none_or(|start| entry.ts.as_str() >= start.as_str())
+            })
+            .filter(|entry| !entry.task.is_empty())
+            .filter_map(|entry| entry.cost_usd)
+            .sum::<f64>();
         if spent < ceiling {
             return None;
         }
@@ -8957,27 +8949,6 @@ pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
 pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>) -> Result<()> {
     let rendered = serde_json::to_string_pretty(lanes)?;
     crate::task::write_atomic(&lanes_path(repo), &rendered)
-}
-
-/// The usage ledger folded into a running total per session — what
-/// [`Dispatcher::record_usage`] used to recompute from scratch, by re-reading
-/// the whole file, for every lane a pass banked. Reads nothing itself now: the
-/// pass's one [`Dispatcher::ledger`] snapshot is folded here.
-fn banked_totals(ledger: &crate::usage::LedgerTotals) -> HashMap<String, BankedTotals> {
-    ledger
-        .sessions()
-        .iter()
-        .map(|(session, banked)| {
-            let totals = BankedTotals {
-                tokens: banked.tokens,
-                tier_tokens: banked.tier_tokens,
-                turns: banked.turns,
-                cost_usd: banked.cost_usd,
-                reported_usd: banked.reported_usd,
-            };
-            (session.clone(), totals)
-        })
-        .collect()
 }
 
 pub(crate) fn now_secs() -> i64 {
