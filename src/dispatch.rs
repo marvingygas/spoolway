@@ -6957,6 +6957,13 @@ fn spare_pane_to_take(mux: &dyn Mux, task: &Task, fresh: Option<&str>) -> Option
     }
 }
 
+/// Whether `checkout` is the project's main checkout, compared resolved on
+/// both sides.
+fn is_main_checkout(repo: &Repo, checkout: &Path) -> bool {
+    crate::platform::resolve_through_existing(checkout)
+        == crate::platform::resolve_through_existing(&repo.root)
+}
+
 /// Fails the start when `checkout` is the project's main checkout.
 ///
 /// A lane there edits the person's own files, and cleanup commits all of them
@@ -6965,9 +6972,7 @@ fn spare_pane_to_take(mux: &dyn Mux, task: &Task, fresh: Option<&str>) -> Option
 /// The failure is an ordinary failed start, so it is retried and then
 /// blocked, with this message in the Status Log.
 fn refuse_main_checkout(repo: &Repo, task: &Task, checkout: &Path) -> Result<()> {
-    if crate::platform::resolve_through_existing(checkout)
-        != crate::platform::resolve_through_existing(&repo.root)
-    {
+    if !is_main_checkout(repo, checkout) {
         return Ok(());
     }
     let branch = task
@@ -7054,8 +7059,34 @@ fn ensure_workspace(
     // borrowed. A task an earlier release let borrow the main checkout is
     // still mid-pipeline when spoolway is upgraded, and its recorded path
     // would otherwise skip the borrow below and get a pane there anyway.
-    if let Some(recorded) = task.front.worktree_path.clone() {
-        refuse_main_checkout(repo, task, &recorded)?;
+    //
+    // The refusal lasts only while the main checkout still has the task's
+    // branch out. Once a person has switched it away, as the message asks,
+    // the record is stale: it is dropped the way a vanished folder's is, so
+    // the start below borrows or cuts a checkout like any first start. Refusing
+    // on the path alone would block the task again on every resume.
+    if let Some(recorded) = task.front.worktree_path.clone()
+        && is_main_checkout(repo, &recorded)
+    {
+        let branch = task
+            .front
+            .branch
+            .clone()
+            .unwrap_or_else(|| crate::task::default_branch(task.id()));
+        match repo.worktree_for(&branch)? {
+            Some(out) if is_main_checkout(repo, &out) => {
+                refuse_main_checkout(repo, task, &out)?;
+            }
+            _ => {
+                task.front.worktree_path = None;
+                task.front.workspace_id = None;
+                task.front.pane_id = None;
+                task.front.tab_id = None;
+                task.front.spare_pane = None;
+                task.front.borrowed = false;
+                persist_task(repo, task, file_seen)?;
+            }
+        }
     }
 
     // The directory can survive a restart of the multiplexer fronting it even
@@ -22076,6 +22107,7 @@ mod tests {
     #[test]
     fn a_task_already_recorded_in_the_main_checkout_is_refused() {
         let (repo, _root_guard) = fixture("recorded-in-main");
+        crate::repo::run(&repo.root, "git", &["branch", "-m", "work", "task/demo"]).unwrap();
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
@@ -22101,8 +22133,26 @@ mod tests {
             "{}",
             task.body
         );
-    }
 
+        // The person does what the message says: the main checkout goes back
+        // to another branch, and the task is resumed. The recorded placement
+        // is dropped, so the lane starts in a checkout of its own.
+        crate::repo::run(&repo.root, "git", &["branch", "-m", "task/demo", "work"]).unwrap();
+        let mut task = reload(&path);
+        task.front.blocked_from = None;
+        task.set_stage_unbanked("implement", "put back from the board");
+        task.save().unwrap();
+        with_home(&home, || run_pass(&repo, &mux));
+
+        assert_eq!(mux.did("start"), ["start demo · implement"]);
+        let task = reload(&path);
+        assert_eq!(task.stage(), "implement");
+        assert_ne!(
+            task.front.worktree_path.as_deref().map(|p| p.comparable()),
+            Some(repo.root.comparable()),
+            "the lane no longer sits in the main checkout"
+        );
+    }
     /// The main checkout is recognised through a link to it, since git lists
     /// the real path and `repo.root` may be spelled another way.
     #[cfg(unix)]
