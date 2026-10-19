@@ -350,7 +350,10 @@ rm -rf .spoolway/prompts/reproducer .spoolway/templates/tasks/bugfix.md
 "$SPOOLWAY" pipeline check >/dev/null
 
 # --- routines and the project job --------------------------------------------
-R=.spoolway/routines
+# Written and checked in a staging folder first. Once a file sits under
+# .spoolway/routines/ its id is a routine name, and `task contract` refuses a
+# task named for a routine.
+R=$(mktemp -d)
 mkdir -p $R/nightly $R/weekly-deps $R/release-notes
 cat > $R/nightly/audit-deps.md <<'EOF'
 ---
@@ -487,6 +490,9 @@ pipeline = "impl_fast"
 routine  = "nightly"
 EOF
 for d in $R/*/; do "$SPOOLWAY" task contract --from "$d" >/dev/null; done
+mkdir -p .spoolway/routines
+mv "$R"/* .spoolway/routines/
+rmdir "$R"
 
 git add -A && git commit -qm "chore: shop skeleton, spoolway pipelines, routines and the nightly job"
 
