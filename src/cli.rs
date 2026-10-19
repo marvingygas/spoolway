@@ -1452,6 +1452,10 @@ pub enum GroupCommand {
     /// finished has no line here. `group:` on a queued task is read verbatim,
     /// never path-parsed — a bare word and a path are different groups even
     /// when they share a file stem.
+    ///
+    /// Plan pages that no task names yet are listed too, after the groups,
+    /// newest first. Their line reads `<name>  0 open — plan <path>`, so a
+    /// script that counts groups can tell a plan from a group by `0 open — plan`.
     List,
 }
 

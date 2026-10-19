@@ -1,4 +1,5 @@
-//! `spoolway group list`: what the queue's own `group:` key answers.
+//! `spoolway group list`: what the queue's own `group:` key answers, and the
+//! plan pages no task names yet.
 
 use super::*;
 
@@ -16,6 +17,12 @@ use super::*;
 /// is how a finished group reads. `group:` is read verbatim — never
 /// path-parsed — so two tasks group together only when they name exactly the
 /// same string.
+///
+/// After the group lines come the plan pages no pending, queued or archived
+/// task names, newest first, each as `<name>  0 open — plan <path>`. The
+/// fixed `0 open — plan` lets a script that counts groups tell a plan line
+/// from a group line. The pages are the ones the queue screen lists, under
+/// the same `plans-since` rule.
 pub fn group_list(repo: &Repo) -> Result<()> {
     let tasks = repo.tasks()?;
     let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -30,7 +37,12 @@ pub fn group_list(repo: &Repo) -> Result<()> {
             .push(task.id().to_string());
     }
 
-    if groups.is_empty() {
+    // The queue alone is not enough here: a plan a pending task names is
+    // not waiting to be cut, and only the pending-aware listing knows that.
+    let (listed, _) = super::pending::list_groups_and_skipped(repo)?;
+    let plans = super::pending::plans_without_tasks(repo, &listed)?;
+
+    if groups.is_empty() && plans.is_empty() {
         println!("No queued tasks belong to a group.");
         return Ok(());
     }
@@ -38,6 +50,9 @@ pub fn group_list(repo: &Repo) -> Result<()> {
     for (group, mut open) in groups {
         open.sort();
         println!("{group:<28}  {} open — {}", open.len(), open.join(", "));
+    }
+    for page in plans {
+        println!("{:<28}  0 open — plan {}", page.name, page.path.display());
     }
     Ok(())
 }

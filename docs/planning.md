@@ -182,6 +182,15 @@ One more command:
 spoolway group list         # every group with open tasks, and which tasks are open
 ```
 
+After the groups it prints one line for each plan page that no task names yet, newest first:
+
+```
+payments                      2 open — payments-refunds, payments-webhooks
+search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/plans/2026-10-21-search.html
+```
+
+A plan line always reads `0 open — plan <path>`, so a script that counts groups can tell it apart.
+
 ### Options menu
 
 `o` opens a menu for the row the focused pane highlights, titled with that row's name. With
