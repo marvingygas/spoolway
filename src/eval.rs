@@ -5240,6 +5240,16 @@ fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
     rx
 }
 
+/// Hands freed memory back to the system when dropped — see the use in
+/// [`run_screen_with`] for why its place among the locals matters.
+struct TrimOnDrop;
+
+impl Drop for TrimOnDrop {
+    fn drop(&mut self) {
+        crate::memory::trim();
+    }
+}
+
 /// The hint under an error notice.
 const NOTICE_KEYS: &str = "[any key] continue";
 
@@ -5377,7 +5387,13 @@ impl ScreenState {
         };
         match result {
             Ok(fresh) => {
-                *loaded = Some(fresh);
+                let replaced = loaded.replace(fresh).is_some();
+                // The table this one replaces was freed just now, after the
+                // load thread's own trim. Trim again or its memory stays
+                // resident.
+                if replaced {
+                    crate::memory::trim();
+                }
                 self.filters = filters;
                 if reset_cursor {
                     self.cursor = 0;
@@ -5486,6 +5502,10 @@ fn run_screen_with(
     use crate::screen::shell::Leave;
 
     let mut state = ScreenState::new(args);
+    // Declared before `loaded` on purpose: locals drop in reverse order, so
+    // `loaded` is freed first and this trims after it, on every way out of
+    // the function. Leaving the tab is when the table's memory should go back.
+    let _trim_on_leave = TrimOnDrop;
     let mut loaded: Option<Loaded> = None;
     // The reason the visit's first load failed, once it has. Hosted, the tab
     // still has a strip and three neighbours to reach, so the reason is held
