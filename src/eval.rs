@@ -5225,12 +5225,12 @@ fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
     // cannot start a thread: that reason reaches the person as a failed
     // load instead of tearing the whole shell down.
     if let Err(err) = std::thread::Builder::new().spawn(move || {
-        // A send into a dropped receiver is the screen having moved on — a
-        // newer load, or the person leaving the tab — and nothing to report.
         let result = load(&repo, &filters);
         // The load's transcript buffers are freed by now. Without this, glibc
         // keeps them resident for the rest of the session.
         crate::memory::trim();
+        // A send into a dropped receiver is the screen having moved on — a
+        // newer load, or the person leaving the tab — and nothing to report.
         let _ = tx.send(result);
     }) {
         let _ = failed.send(Err(
@@ -5501,11 +5501,12 @@ fn run_screen_with(
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
-    let mut state = ScreenState::new(args);
-    // Declared before `loaded` on purpose: locals drop in reverse order, so
-    // `loaded` is freed first and this trims after it, on every way out of
-    // the function. Leaving the tab is when the table's memory should go back.
+    // The first local, on purpose: locals drop in reverse order, so `loaded`
+    // and `state` (whose `built` cache holds every rendered row) are both
+    // freed before this trims, on every way out of the function. Leaving the
+    // tab is when the table's memory should go back.
     let _trim_on_leave = TrimOnDrop;
+    let mut state = ScreenState::new(args);
     let mut loaded: Option<Loaded> = None;
     // The reason the visit's first load failed, once it has. Hosted, the tab
     // still has a strip and three neighbours to reach, so the reason is held

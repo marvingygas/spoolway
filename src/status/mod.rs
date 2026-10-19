@@ -3417,6 +3417,19 @@ struct Readings {
 /// How long a reading must run before [`Reader`] hands freed memory back.
 const LARGE_READING: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// One reading from `build`, followed by a trim when it ran for
+/// [`LARGE_READING`] or more. A reading that long read a lot, and its
+/// buffers are freed by the time `build` returns. Trimming after every
+/// reading would walk every arena on each keypress for nothing.
+fn timed_reading<T>(build: &mut impl FnMut() -> Option<T>) -> Option<T> {
+    let began = std::time::Instant::now();
+    let reading = build();
+    if began.elapsed() >= LARGE_READING {
+        crate::memory::trim();
+    }
+    reading
+}
+
 impl<T: Send + Sync + Default + 'static> Reader<T> {
     /// Reads once, here, on the caller's own thread — so the very first
     /// hosted frame is never drawn from an empty reading, the same
@@ -3430,7 +3443,7 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
     pub(crate) fn start(mut build: impl FnMut() -> Option<T> + Send + 'static) -> Reader<T> {
         // Nothing stands in for an empty one on the very first reading —
         // there is no earlier one to keep instead.
-        let initial = build();
+        let initial = timed_reading(&mut build);
         let last_ok = initial.is_some();
         let snapshot = Arc::new(Mutex::new((Arc::new(initial.unwrap_or_default()), 0)));
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -3466,14 +3479,7 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
                 // A failed reading — the queue directory unreadable for an
                 // instant — leaves the last one standing, the same
                 // tolerance a failed frame always had.
-                let began = std::time::Instant::now();
-                let fresh = build();
-                // A reading that took this long read a lot, and its buffers
-                // are freed by now. Trimming after every reading would walk
-                // every arena on each keypress for nothing.
-                if began.elapsed() >= LARGE_READING {
-                    crate::memory::trim();
-                }
+                let fresh = timed_reading(&mut build);
                 let ok = fresh.is_some();
                 if let Some(fresh) = fresh
                     && let Ok(mut guard) = thread_snapshot.lock()

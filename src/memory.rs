@@ -25,8 +25,9 @@ const ARENA_MAX: libc::c_int = 4;
 /// thread starts: an arena that already exists is not taken back.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn cap_arenas() {
-    // SAFETY: `mallopt` only sets an allocator parameter. It is sound before
-    // any thread exists, which is the only place this is called from. A
+    // SAFETY: `mallopt` only sets an allocator parameter, and glibc takes
+    // its arena lock to do it, so it is safe from any thread. Running before
+    // any thread starts is what gives it effect, not what makes it safe. A
     // refusal (return 0) leaves glibc's default, so it is ignored.
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, ARENA_MAX);
