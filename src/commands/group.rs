@@ -25,9 +25,11 @@ use super::*;
 /// ones the queue screen lists, under the same `plans-since` rule.
 ///
 /// The plan side can fail without the queue being at fault, for instance when
-/// `plans/` is not a folder. The group lines still print then, and a notice on
-/// stderr says the plan lines are missing, the way the queue screen keeps its
-/// groups when its plan list fails.
+/// `plans/` is not a folder, or when `pending/` or the archive index, which
+/// the exclusion reads too, cannot be read. The group lines still print then,
+/// and a notice on stderr says the plan lines are missing and names the path
+/// that failed, the way the queue screen keeps its groups when its plan list
+/// fails.
 pub fn group_list(repo: &Repo) -> Result<()> {
     let tasks = repo.tasks()?;
     let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -49,8 +51,8 @@ pub fn group_list(repo: &Repo) -> Result<()> {
         .unwrap_or_else(|err| {
             eprintln!(
                 "Plans with no tasks are not listed, because they could not be read: {err:#}. \
-                 Check that {} is a folder you can read, then run `spoolway group list` again.",
-                repo.plans_dir().display()
+                 Check that the path named above is one you can read, then run \
+                 `spoolway group list` again."
             );
             Vec::new()
         });
