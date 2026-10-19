@@ -17048,9 +17048,22 @@ mod tests {
         plan_page(&repo, "2026-10-21-search.html");
         let groups = rows(&repo);
 
-        // Select cart, move onto the plan row, `space` there, then `enter`.
-        // Were `space` to act on the plan row as on a group, it would take
-        // cart's tick off instead, and `enter` would queue nothing.
+        // Select cart, move onto the plan row and press `space` there: the
+        // selection still holds cart alone, with no tick on the plan.
+        let mut state = ScreenState::new();
+        for key in [Key::Char(' '), Key::Down, Key::Char(' ')] {
+            handle_browse_key(&groups, &mut state, key);
+        }
+        assert_eq!(
+            shown(&groups, &state)[state.group_cursor].state,
+            GroupState::Plan
+        );
+        let cart = std::collections::BTreeSet::from(["cart".to_string()]);
+        assert_eq!(state.selected, cart);
+
+        // The same keys and then `enter`, through the whole screen. Without
+        // a plan row, Down stays on cart and the second `space` takes its
+        // tick off, so `enter` would queue nothing.
         screen(&repo, groups, " \x1b[B \r");
         assert!(
             repo.queue_dir().join("wire.md").exists(),
