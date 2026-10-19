@@ -7185,13 +7185,16 @@ fn ensure_workspace(
     // Every lane runs in a worktree. The only question is whose, and git
     // answers it rather than a setting: a branch cannot be checked out twice, so
     // a task whose branch somebody already has out is *borrowing* that checkout
-    // and a task whose branch is nowhere gets one cut for it.
+    // and a task whose branch is nowhere gets one cut for it. The one checkout
+    // never borrowed is the main one: `refuse_main_checkout` fails the start
+    // for it.
     //
     // No knob says so, and none ever did: it is a fact about git rather than a
     // mode. What used to depend on it was the plan closeout, which ran in the
     // main checkout on purpose; that is gone — the last task of a plan documents
     // on its own branch like any other work — and what is left is the ordinary
-    // case of a person having a task's branch out while spoolway reaches it.
+    // case of a person having a task's branch out in a checkout of their own
+    // while spoolway reaches it.
     let branch = task
         .front
         .branch
@@ -22174,21 +22177,37 @@ mod tests {
         std::fs::remove_file(&link).ok();
     }
 
-    /// A task with no checkout on record fails its start rather than running
-    /// in the main checkout.
+    /// A task with a live workspace and no checkout on record fails its start
+    /// rather than running in the main checkout: no pane is split and nothing
+    /// starts, and after the usual retries it is blocked with the reason in
+    /// its Status Log.
     #[test]
     fn a_task_with_no_worktree_on_record_fails_its_start() {
         let (repo, _root_guard) = fixture("no-recorded-worktree");
-        let task = reload(&add_task(&repo, "demo", "implement"));
-        assert!(task.front.worktree_path.is_none());
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        assert!(reload(&path).front.worktree_path.is_none());
+        let mux = FakeMux::new(vec![]);
+        let home = crate::scratch::root("no-recorded-worktree-home");
 
-        let err = recorded_worktree(&task).unwrap_err();
+        for _ in 0..3 {
+            with_home(&home, || run_pass(&repo, &mux));
+        }
 
+        assert!(mux.did("split_pane").is_empty(), "{:?}", mux.calls());
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked");
         assert!(
-            format!("{err:#}").contains("never falls back to the main checkout"),
-            "{err:#}"
+            task.body.contains("never falls back to the main checkout"),
+            "{}",
+            task.body
         );
     }
+
     #[test]
     fn a_task_waits_for_its_dependencies_to_finish() {
         let (repo, _root_guard) = fixture("deps");
