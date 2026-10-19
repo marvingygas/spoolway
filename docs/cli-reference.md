@@ -153,8 +153,10 @@ With no subcommand, prints its usage and exits, the same as `spoolway queue --he
 
 Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
 that still has a task to queue or has every task archived. A group with every task already
-queued never appears. The left pane is titled `groups`. The right pane is titled `tasks` and
-lists the highlighted group's tasks. Each task shows its `Pipeline:`, `Depends on:`,
+queued never appears. Below the groups that can be queued, the pane also lists one row per plan
+page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
+is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
+Beside a plan row it says `Use /spoolway-tasks`. Each task shows its `Pipeline:`, `Depends on:`,
 `Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
 dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
 board's branch.
