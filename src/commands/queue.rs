@@ -6636,9 +6636,9 @@ impl Picked<'_> {
     /// key's own check, so an item whose row no longer allows it does
     /// nothing. Delete on the pending screen, which had no key, opens its
     /// popup through [`begin_pending_delete`], or [`begin_plan_delete`] on a
-    /// plan row. On the pending screen the
-    /// menu's row must also still be the highlighted one — see
-    /// [`OptionsMenu`]'s `row` — or the menu closes having done nothing.
+    /// plan row. On the pending screen the menu's row must also still be the
+    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
+    /// having done nothing.
     fn run(
         &self,
         groups: &[Group],
@@ -8046,7 +8046,8 @@ pub(super) fn two_pane_frame(
 /// [`Mode::DeletePlan`], [`Mode::NewJob`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
-/// reads only `enter` to close it, which its own popup says, and the line
+/// reads only `enter` to close it, or only `esc` for
+/// [`Mode::PlanNotDeleted`], which its own popup says, and the line
 /// under the frame stays the one the screen will read again once it is
 /// closed — all but [`Mode::JobSaved`], which the routines tab's mockup
 /// draws over its own `[enter] confirm` line. [`Mode::Options`] keeps the
@@ -10059,7 +10060,7 @@ fn begin_plan_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
 }
 
 /// Delete's popup over a plan row: the one page it removes, two columns in
-/// under its count, the same layout [`delete_pending_panel`] gives a task.
+/// under its count, as [`delete_pending_panel`] indents a task.
 fn delete_plan_panel(title: &str, page: &Path) -> Vec<String> {
     let body = [
         String::new(),

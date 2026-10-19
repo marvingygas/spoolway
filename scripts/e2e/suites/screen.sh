@@ -15,7 +15,8 @@
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
-# pane beside it says `Use /spoolway-tasks`.
+# pane beside it says `Use /spoolway-tasks`. Delete off that row's options
+# menu removes its page after one popup.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -406,6 +407,20 @@ has "the queueable group keeps its checkbox" "[ ] checkout" "$LAST"
 has "the plan row is drawn under it, by name, with no checkbox" "│ >     search " "$LAST"
 has "the tasks pane beside it says how to cut it" "│   Use /spoolway-tasks " "$LAST"
 lacks "with no task drawn for it" "Pipeline:" "$LAST"
+
+# The plan row's menu opens on open plan; delete, its second item, asks
+# once, and `enter` removes the page, so the row leaves the list.
+PLAN_DELETE="$LIVE/plan-delete.txt"
+on_screen '\x1b[Bo\x1b[B\r\r' "$PLAN_DELETE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete plan search/ { last = $0 } END { print last }' \
+  "$PLAN_DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "delete on a plan row opens its popup" "─ delete plan search " "$LAST"
+has "naming its one page" "plans/2026-10-21-search.html" "$LAST"
+works "delete then enter removes the plan page" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/plans/2026-10-21-search.html"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$PLAN_DELETE" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+lacks "the plan row has left the list" "search" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
