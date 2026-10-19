@@ -5398,7 +5398,7 @@ impl ScreenState {
 }
 
 /// Whether `group` is one this screen lists at all, under any [`HideScope`]
-/// or filter: queueable or done, never [`GroupState::Queued`]. The "nothing
+/// or filter: queueable, a plan or done, never [`GroupState::Queued`]. The "nothing
 /// to queue — N hidden" count is taken over these alone, so it never counts
 /// a group no key here can bring back.
 fn reachable(group: &Group) -> bool {
@@ -5412,7 +5412,11 @@ fn visible(groups: &[Group], scope: HideScope) -> Vec<&Group> {
     groups
         .iter()
         .filter(|group| match scope {
-            HideScope::Pending => group.state == GroupState::Queueable,
+            // A plan row is never hidden: `h` hides what is finished, and
+            // a plan's tasks are not even cut yet.
+            HideScope::Pending => {
+                matches!(group.state, GroupState::Queueable | GroupState::Plan)
+            }
             HideScope::PlusDone => reachable(group),
         })
         .collect()
@@ -5579,7 +5583,7 @@ pub(crate) fn queue_tab(
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
-    let (groups, skipped) = super::pending::list_groups_and_skipped(repo)?;
+    let (groups, skipped) = super::pending::list_rows(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
     let dir = repo.pending_dir();
@@ -6259,10 +6263,10 @@ fn adopt_groups(fresh: Vec<Group>, groups: &mut Vec<Group>, state: &mut ScreenSt
 /// never waits on this itself — but kept, test-only, as the plain
 /// synchronous read it always was: its own test below is what checks the
 /// cursor-preserving swap in [`adopt_groups`] directly, against a real
-/// `list_groups` read, without a reader thread's timing in the way.
+/// `list_rows` read, without a reader thread's timing in the way.
 #[cfg(test)]
 fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
-    let Ok(fresh) = super::pending::list_groups(repo) else {
+    let Ok((fresh, _)) = super::pending::list_rows(repo) else {
         return;
     };
     adopt_groups(fresh, groups, state);
@@ -6284,7 +6288,7 @@ struct QueueSnapshot {
 
 /// The read [`run_screen_from`]'s loop used to run on the key thread itself
 /// — `crate::repo::branch_at` for `state.board_branch`, every key, and
-/// `super::pending::list_groups_and_skipped` once a second while idle — kept
+/// `super::pending::list_rows` once a second while idle — kept
 /// off that thread by a thread of its own: [`crate::status`]'s own generic
 /// `Reader<T>`, the same `board-reader-thread` decision the dispatch tab's
 /// board already reuses for its own `Snapshot`, rather than a second copy
@@ -6316,7 +6320,7 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
     })
 }
 
-/// [`super::pending::list_groups_and_skipped`] and
+/// [`super::pending::list_rows`] and
 /// [`crate::repo::branch_at`], together
 /// — what [`QueueReader`] reads on its own thread once its seed has been
 /// handed back once. `None` when the pending directory itself cannot be
@@ -6324,7 +6328,7 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 /// fail the whole reading, the same tolerance the inline `branch_at` call
 /// this replaces always gave.
 fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
-    let (groups, unreadable) = super::pending::list_groups_and_skipped(repo).ok()?;
+    let (groups, unreadable) = super::pending::list_rows(repo).ok()?;
     let branch = crate::repo::branch_at(cwd).ok();
     Some(QueueSnapshot {
         groups,
@@ -7342,7 +7346,7 @@ fn wrapped(prefix: &str, body: &str, width: usize) -> Vec<String> {
 /// telling that lie.
 fn group_tail(group: &Group) -> String {
     match group.state {
-        GroupState::Queueable => String::new(),
+        GroupState::Queueable | GroupState::Plan => String::new(),
         GroupState::Queued => " queued".to_string(),
         GroupState::Done => " done".to_string(),
     }
@@ -7350,23 +7354,32 @@ fn group_tail(group: &Group) -> String {
 
 /// The indices in `shown` where [`groups_pane_lines`] draws a blank
 /// separator row — one for every point [`Group::state`] actually changes
-/// between one row and the next. [`reachable`] keeps queued groups off the
-/// screen, so a list holding both queueable and done groups draws one.
+/// between one row and the next, except from a queueable group to a plan.
+/// [`reachable`] keeps queued groups off the screen, so a list holding done
+/// groups beside queueable groups or plans draws one.
 ///
-/// `shown` is already in `list_groups`' own order — queueable groups, then
-/// queued ones, then done ones — so a single left-to-right scan is enough:
+/// `shown` is already in `list_rows`' own order — queueable groups, then
+/// plans, then queued groups, then done ones — so a single left-to-right
+/// scan is enough:
 /// a boundary sits wherever a row's state differs from the row right before
 /// it. [`group_line_index`] uses these same boundaries to keep a
 /// line-addressed pane (see [`window`]) in step with `group_cursor`, which
 /// still addresses groups, never a separator between them.
 fn group_boundaries(shown: &[&Group]) -> Vec<usize> {
+    // Plan rows sit straight under the queueable groups with no blank row
+    // between, so the two count as one state here.
+    let section = |state: GroupState| match state {
+        GroupState::Plan => GroupState::Queueable,
+        other => other,
+    };
     let mut boundaries = Vec::new();
     let mut previous: Option<GroupState> = None;
     for (i, group) in shown.iter().enumerate() {
-        if previous.is_some_and(|state| state != group.state) {
+        let state = section(group.state);
+        if previous.is_some_and(|prev| prev != state) {
             boundaries.push(i);
         }
-        previous = Some(group.state);
+        previous = Some(state);
     }
     boundaries
 }
@@ -7403,8 +7416,9 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 ///
 /// The checkbox is here and nowhere else, because a group is what gets
 /// submitted. A group not still [`GroupState::Queueable`] has no box at all
-/// — at least one of its tasks is no longer waiting in `pending/`. A done
-/// group is what `h` hides on; a queued one never shows at all.
+/// — at least one of its tasks is no longer waiting in `pending/`, or, for a
+/// plan, it has no tasks yet. A done group is what `h` hides on; a queued
+/// one never shows at all.
 ///
 /// No task count: the pane beside this one is the group's tasks, so a number
 /// here says the same thing twice and costs the names the room to be read.
@@ -7502,6 +7516,10 @@ fn groups_pane_lines(
     (lines, starts)
 }
 
+/// What the tasks pane says beside a plan row: the skill that cuts a plan
+/// page into tasks.
+const PLAN_HINT: &str = "Use /spoolway-tasks";
+
 /// The characters a tasks-pane row spends before its own name even starts:
 /// the cursor marker and the space after it — half of [`ROW_PREFIX_COLUMNS`],
 /// since this pane draws no checkbox.
@@ -7547,7 +7565,8 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 /// one-sentence description — plus the task's own header row above them.
 ///
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
-/// pane to the left, and this is what that group holds.
+/// pane to the left, and this is what that group holds. Beside a plan row,
+/// which holds no tasks, the pane says only [`PLAN_HINT`].
 ///
 /// Comes back with the line each task's header row sits on — see [`Items`]
 /// — and the line range the highlighted task occupies as well — its header
@@ -7562,6 +7581,14 @@ pub(crate) fn tasks_pane_lines(
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return (Vec::new(), Vec::new(), (0, 0));
     };
+    // A plan has no tasks to list yet, only the way to cut some.
+    if group.state == GroupState::Plan {
+        return (
+            vec![String::new(), format!("  {PLAN_HINT}")],
+            Vec::new(),
+            (0, 0),
+        );
+    }
     let tasks = &group.tasks;
 
     let mut lines = Vec::new();
@@ -9785,7 +9812,7 @@ fn after_pending_delete(
     state: &mut ScreenState,
     answer: DeleteOutcome,
 ) -> Mode {
-    let (fresh, reread_err) = match super::pending::list_groups_and_skipped(repo) {
+    let (fresh, reread_err) = match super::pending::list_rows(repo) {
         Ok((fresh, _)) => (fresh, None),
         Err(err) => (without_removed(groups), Some(format!("{err:#}"))),
     };

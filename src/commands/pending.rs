@@ -104,7 +104,7 @@ impl PendingTask {
 /// A group's own stage, folded from every task it holds — see
 /// [`group_state`]. `Ord`ered in the order [`list_groups_and_skipped`] sorts by:
 /// something still queueable first, then everything queued, then everything
-/// done.
+/// done. [`list_rows`] slots its plan rows in by the same order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum GroupState {
     /// At least one task's own id reads [`TaskState::Pending`] — the group
@@ -117,6 +117,11 @@ pub(crate) enum GroupState {
     /// *not* this case: that task's own state reads `Queued` or `Done`, not
     /// `Pending`, so it does not keep the group `Queueable` on its own.
     Queueable,
+    /// Not a group at all: a plan page no task names yet, listed by
+    /// [`list_rows`] with no tasks of its own. [`group_state`] never folds
+    /// to this. It sorts after the queueable groups, since it has nothing to
+    /// queue, and before the done ones, since cutting it is still to come.
+    Plan,
     /// No task is still pending, but not every one has finished either — the
     /// ordinary shape a group takes the moment it is submitted, and the shape
     /// a chain keeps for as long as any of its tasks is still mid-run: half
@@ -133,6 +138,9 @@ pub(crate) enum GroupState {
 /// A group is what a person selects and submits, whole. Its tasks are a
 /// chain — cut together, ordered by `depends_on` — and half a chain in the
 /// queue is a task waiting on a dependency nobody queued.
+///
+/// A plan page no task names is drawn as a row too, and is held as a group
+/// with no tasks in [`GroupState::Plan`] — see [`list_rows`].
 ///
 /// `Clone`: the queue tab's reader thread (`commands::queue`'s own
 /// `QueueReader`) hands a freshly read `Vec<Group>` back across threads
@@ -364,8 +372,9 @@ fn plans_since(repo: &Repo, any_page: bool) -> u128 {
     since
 }
 
-/// Every plan page that no pending, queued or archived task names in `plan:`
-/// and that was created after the `plans-since` stamp, newest first.
+/// Every plan page that no pending, queued or archived task in `groups`
+/// names in `plan:` and that was created after the `plans-since` stamp,
+/// newest first.
 ///
 /// Only the folder's file names and creation times are read, never a page.
 /// Only `.html` files directly inside `plans/` count. A page whose creation
@@ -373,14 +382,12 @@ fn plans_since(repo: &Repo, any_page: bool) -> u128 {
 /// stamp. Pages with the same time sort by name, so the list does not
 /// reshuffle between two reloads.
 ///
-/// The pages tasks name come from the listing the queue screen already
-/// reloads every second, [`list_groups_and_skipped`], so its caches apply:
-/// the pending and queue files are parsed again only when their bytes change,
+/// `groups` is what [`list_groups_and_skipped`] gave the caller, which the
+/// queue screen already reloads every second, so its caches apply: the
+/// pending and queue files are parsed again only when their bytes change,
 /// and the archive comes from its index. A task with no `group:` is not in
 /// that listing, so a page only it names still counts as having no task.
-// Nothing outside the tests calls this until the queue screen draws plan rows.
-#[cfg_attr(not(test), expect(dead_code, reason = "nothing draws plan rows yet"))]
-pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
+pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<PlanPage>> {
     let plans = repo.plans_dir();
     let mut pages: Vec<PathBuf> = std::fs::read_dir(&plans)
         .with_context(|| format!("reading {}", plans.display()))?
@@ -394,11 +401,10 @@ pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
         return Ok(Vec::new());
     }
 
-    let named: std::collections::HashSet<String> = list_groups_and_skipped(repo)?
-        .0
-        .into_iter()
-        .flat_map(|group| group.tasks)
-        .filter_map(|task| task.plan)
+    let named: std::collections::HashSet<&str> = groups
+        .iter()
+        .flat_map(|group| &group.tasks)
+        .filter_map(|task| task.plan.as_deref())
         .collect();
 
     let mut out: Vec<PlanPage> = pages
@@ -418,6 +424,28 @@ pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
         newest_first(Some(a.created), Some(b.created)).then_with(|| a.name.cmp(&b.name))
     });
     Ok(out)
+}
+
+/// What the queue screen lists: every group of [`list_groups_and_skipped`],
+/// with a [`GroupState::Plan`] row for each of [`plans_without_tasks`] right
+/// after the queueable groups, and the pending files no group could be built
+/// from.
+///
+/// A plans folder that cannot be read costs the plan rows alone, not the
+/// screen: the groups are still listed, and the next reload tries again.
+pub(crate) fn list_rows(repo: &Repo) -> Result<(Vec<Group>, Vec<PathBuf>)> {
+    let (mut groups, skipped) = list_groups_and_skipped(repo)?;
+    let plans = plans_without_tasks(repo, &groups).unwrap_or_default();
+    groups.extend(plans.into_iter().map(|page| Group {
+        name: page.name,
+        tasks: Vec::new(),
+        state: GroupState::Plan,
+        created: Some(page.created),
+    }));
+    // A stable sort on state alone: the groups and the plans each arrive
+    // newest first already, and keep that order inside their own state.
+    groups.sort_by_key(|group| group.state);
+    Ok((groups, skipped))
 }
 
 /// Every file [`list_groups_in`] has read the bytes of so far in this
@@ -1862,7 +1890,7 @@ mod tests {
     }
 
     fn names(repo: &Repo) -> Vec<String> {
-        plans_without_tasks(repo)
+        plans_without_tasks(repo, &list_groups(repo).unwrap())
             .unwrap()
             .into_iter()
             .map(|page| page.name)
