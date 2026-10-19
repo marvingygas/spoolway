@@ -532,11 +532,24 @@ for fixture_dir in "$FIXTURES"/*/; do
     bash -c '"$1" sync >"$2" 2>&1' _ "$SPOOLWAY" "$WORK/$version/real.out"
   lacks "sync refused no file of the $version project as a copy it does not know" \
     "refused " "$WORK/$version/real.out"
-  has "the $version sync names dispatch.lane_layout among the settings it added" \
-    "dispatch.lane_layout" "$WORK/$version/real.out"
+  # A fixture from 0.13.0 on already holds every `[dispatch]` key, so its sync
+  # adds none and names none.
+  if grep -q '^lane_layout = ' "$fixture_dir/.spoolway/config.toml"; then
+    lacks "the $version sync adds no dispatch.lane_layout, which it already holds" \
+      "dispatch.lane_layout" "$WORK/$version/real.out"
+  else
+    has "the $version sync names dispatch.lane_layout among the settings it added" \
+      "dispatch.lane_layout" "$WORK/$version/real.out"
+  fi
   assert_dispatch_keys_written "$version"
-  has "sync names the deprecated spoolway stack in the $version project" \
-    "\`spoolway stack\` is deprecated" "$WORK/$version/real.out"
+  # Only a pipeline that still runs `spoolway stack` earns the warning.
+  if grep -rq 'spoolway stack' "$fixture_dir/.spoolway/pipelines"; then
+    has "sync names the deprecated spoolway stack in the $version project" \
+      "\`spoolway stack\` is deprecated" "$WORK/$version/real.out"
+  else
+    lacks "sync names no deprecated spoolway stack in the $version project, whose pipelines never run it" \
+      "\`spoolway stack\` is deprecated" "$WORK/$version/real.out"
+  fi
   says "and a second sync of the $version project has nothing left to do" \
     "Nothing updating." \
     "$SPOOLWAY" sync
