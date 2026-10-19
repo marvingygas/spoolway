@@ -237,7 +237,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `system-prompts/` | What finished runs left behind. An entry of a task still in the queue is kept, except in `system-prompts/`. | `retention_days` |
 | `commands/`, `tracking/` | Run files of a task still in the queue | Deleted when the task is archived; `retention_days` sweeps only strays, and keeps an entry whose task is still in the queue |
-| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
+| `project.toml`, `lanes.json`, `plans-since`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
