@@ -604,8 +604,14 @@ Every lane runs in a git worktree. A branch cannot be checked out twice.
 
 | The task's branch is | The lane |
 |---|---|
-| already checked out somewhere | borrows that checkout and leaves it alone |
+| checked out in the main checkout | does not start; the task is blocked with the remedy in its Status Log |
+| checked out in another checkout | borrows that checkout and leaves it alone |
 | nowhere | gets a fresh worktree, removed at `done` |
+
+A lane never runs in the main checkout, because it would edit your own files and cleanup would
+commit them. The start fails, is retried, and then the task moves to `blocked`. The message names
+the branch and the main checkout's path. Switch that checkout to another branch, such as `git switch
+main`, then resume the task.
 
 The task file records which it was as `borrowed:`. A borrowed checkout and its branch are never
 removed.

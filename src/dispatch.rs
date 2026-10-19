@@ -7183,6 +7183,25 @@ fn ensure_workspace(
             // cleanup has to know that, so it is written down rather than
             // guessed at later — by then our own worktree would look the same.
             Some(checkout) => {
+                // Borrowing is for a checkout a person lent, never the main
+                // one: a lane there edits the person's own files, and cleanup
+                // commits all of them with `git add -A`, unsaved edits
+                // included. Both sides are resolved, because git lists the
+                // real path while `repo.root` may be spelled through a link.
+                // Refusing here fails the start like any other, so it is
+                // retried and then blocked with this message in the log.
+                if !own_cut
+                    && crate::platform::resolve_through_existing(&checkout)
+                        == crate::platform::resolve_through_existing(&repo.root)
+                {
+                    anyhow::bail!(
+                        "{}: the branch `{branch}` is checked out in the main checkout, {}. \
+                         A lane never runs there. Switch that checkout to another branch, \
+                         such as `git switch main`, then resume the task",
+                        task.id(),
+                        repo.root.display()
+                    );
+                }
                 let label = format!("spoolway/{}", task.display_name());
                 let workspace = match own_cut {
                     true => mux.reopen_owned_pane(&checkout, &label)?,
@@ -7342,13 +7361,23 @@ fn ensure_workspace(
         mux.rename_tab(tab_id, task.display_name())?;
     }
 
-    Ok((
-        task.front
-            .worktree_path
-            .clone()
-            .unwrap_or_else(|| repo.root.clone()),
-        fresh_pane,
-    ))
+    Ok((recorded_worktree(task)?, fresh_pane))
+}
+
+/// The checkout recorded for `task`, or the error that fails its start.
+///
+/// There is no fallback to the main checkout: a lane never runs there, so a
+/// task with no `worktree_path` is a start that fails, is retried and then
+/// blocks, rather than one that quietly works in the person's own files.
+fn recorded_worktree(task: &Task) -> Result<PathBuf> {
+    task.front.worktree_path.clone().with_context(|| {
+        format!(
+            "{}: it has no checkout on record, and a lane never falls back to the main checkout. \
+             Remove `workspace_id` from its task file so spoolway cuts one, \
+             then resume the task",
+            task.id()
+        )
+    })
 }
 
 /// Everything [`Dispatcher::start_lanes`]' two threaded rounds need to boot a
@@ -8021,11 +8050,7 @@ fn prepare_boot(
         .clone()
         .or_else(|| task.front.pane_id.clone())
         .context("task has a workspace but no recorded tab or pane")?;
-    let worktree = task
-        .front
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| repo.root.clone());
+    let worktree = recorded_worktree(task)?;
     // An older spare may have been left in another folder by a person while
     // it sat idle. A pane opened a moment ago is where it should be.
     if let Some(spare) = fresh_pane.as_deref()
@@ -10438,11 +10463,17 @@ mod tests {
     #[test]
     fn a_borrowed_tasks_missing_base_holds_nothing() {
         let (repo, _root_guard) = fixture("borrowed-base-gone");
-        crate::repo::run(
-            &repo.root,
-            "git",
-            &["branch", "-m", "work", "task/borrowed"],
-        )
+        // A linked worktree, not the root: the main checkout is refused, not
+        // borrowed.
+        let worktree = crate::scratch::root("dispatch-borrowed-base-gone-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/borrowed",
+            worktree.to_str().unwrap(),
+        ])
         .unwrap();
         let path = add_task_with(&repo, "borrowed", crate::pipeline::QUEUED, |f| {
             f.branch = Some("task/borrowed".into());
@@ -13196,6 +13227,7 @@ mod tests {
         add_task(&repo, "fresh", crate::pipeline::QUEUED);
         add_task_with(&repo, "nearly-done", "document", |f| {
             f.workspace_id = Some("w2".into());
+            f.worktree_path = Some(repo.root.clone());
             f.tab_id = Some("w2:t1".into());
             f.pane_id = Some("w2:p1".into());
         });
@@ -17003,6 +17035,7 @@ mod tests {
         let (repo, _root_guard) = unattended_fixture("unattended-backoff-elapsed");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
             f.attempts = MAX_LAUNCHES;
@@ -18471,6 +18504,7 @@ mod tests {
         let (repo, _root_guard) = unattended_fixture("blocked-self-replace");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.pane_id = Some("w1:p1".into());
             f.blocked_from = Some("implement".into());
         });
@@ -18598,6 +18632,7 @@ mod tests {
         let (repo, _root_guard) = unattended_fixture("blocked-self-route");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.pane_id = Some("w1:p1".into());
             f.blocked_from = Some("implement".into());
         });
@@ -18707,6 +18742,7 @@ mod tests {
         let (repo, _root_guard) = fixture("block-holds-its-pane");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
         });
@@ -21798,6 +21834,7 @@ mod tests {
         let started_at_ms = second * 1000 + 100;
         let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.pane_id = Some("w1:p1".into());
             // Stamped the way `spoolway report` stamps it, within the same
             // whole second the lane started.
@@ -21891,6 +21928,7 @@ mod tests {
 
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
+            f.worktree_path = Some(repo.root.clone());
             f.pane_id = Some("w1:p1".into());
         });
 
@@ -21953,22 +21991,19 @@ mod tests {
         }
     }
 
-    /// Nothing says "run in place", and nothing ever should have. What decides
-    /// it is git: a branch cannot be checked out twice, so a task whose branch
-    /// somebody already has out borrows that checkout rather than being cut a
-    /// second one git would refuse.
-    ///
-    /// This used to be how the plan closeout worked, deliberately. That is gone
-    /// — the last task of a plan documents on its own branch — and what is left
-    /// is the general case it was a special use of.
+    /// A task whose branch is out in the main checkout is never run there: a
+    /// lane in the person's own checkout edits their files, and cleanup
+    /// commits all of them. The start fails like any other, so it is retried
+    /// and then blocked, with the checkout and the remedy in the Status Log.
+    /// No pane opens and no process starts, for the attempts or after them.
     #[test]
-    fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
+    fn a_task_whose_branch_is_checked_out_in_the_main_checkout_is_refused() {
         let (repo, _root_guard) = fixture("in-place");
         // A task may not set its own `branch:` — see
         // `queue::RESERVED_KEYS` — and this fixture never turns on
         // `issue_tracking.key_in_names`, so the branch is the plain
-        // `task/<id>` and the "already checked out" case is the fixture root
-        // itself sitting on `task/plan-closeout`.
+        // `task/<id>` and the main checkout is the fixture root sitting on
+        // `task/plan-closeout`.
         crate::repo::run(
             &repo.root,
             "git",
@@ -21978,46 +22013,67 @@ mod tests {
         let path = add_task_with(&repo, "plan-closeout", crate::pipeline::QUEUED, |f| {
             f.branch = Some("task/plan-closeout".into());
         });
-
         let mux = FakeMux::new(vec![]);
-        run_pass(&repo, &mux);
+        let home = crate::scratch::root("main-checkout-refused-home");
 
-        // No worktree: git already has this branch out somewhere.
+        for _ in 0..3 {
+            with_home(&home, || run_pass(&repo, &mux));
+        }
+
         assert!(mux.did("create_workspace").is_empty());
-        assert_eq!(
-            mux.did("create_pane"),
-            ["create_pane spoolway/plan-closeout"],
-            "the lane borrows the checkout, in a row labelled like any other task's"
-        );
-        assert_eq!(mux.did("start"), ["start plan-closeout · implement"]);
-
+        assert!(mux.did("create_pane").is_empty(), "{:?}", mux.calls());
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
         let task = reload(&path);
-        assert_eq!(task.stage(), "implement");
-        // Its workspace is recorded like any other task's, so cleanup closes
-        // it — but as a workspace, never as a worktree: what it points at is
-        // the person's own checkout.
+        assert_eq!(task.stage(), "blocked");
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert!(task.front.workspace_id.is_none());
+        assert!(!task.front.borrowed);
         assert!(
-            task.front.workspace_id.is_some(),
-            "the borrowed workspace is tracked"
-        );
-        assert_eq!(
-            task.front.worktree_path.as_deref().map(same_dir),
-            Some(same_dir(&repo.root)),
-            "the borrowed checkout is the one the person already had out"
+            task.body
+                .contains("`task/plan-closeout` is checked out in the main checkout")
+                && task.body.contains(&repo.root.display().to_string())
+                && task.body.contains("git switch main"),
+            "the log names the branch, the checkout and the remedy: {}",
+            task.body
         );
     }
 
-    /// One directory, however the platform spelled it.
-    ///
-    /// `worktree_path` here is git's answer, and git writes a Windows path its
-    /// own way: `C:/Users/runneradmin/…` where the fixture built
-    /// `C:\Users\RUNNER~1\…` — forward slashes and the long name against
-    /// backslashes and the 8.3 one. Both name the same directory, which is the
-    /// claim being made, so comparing the strings tested the spelling instead.
-    fn same_dir(path: &Path) -> PathBuf {
-        path.comparable()
+    /// The main checkout is recognised through a link to it, since git lists
+    /// the real path and `repo.root` may be spelled another way.
+    #[cfg(unix)]
+    #[test]
+    fn the_main_checkout_is_refused_through_a_symlinked_root() {
+        let (mut repo, _root_guard) = fixture("in-place-link");
+        crate::repo::run(&repo.root, "git", &["branch", "-m", "work", "task/linked"]).unwrap();
+        let link = crate::scratch::root("in-place-link-alias");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&repo.root, &link).unwrap();
+        repo.root = link.to_path_buf();
+        let mut task = reload(&add_task(&repo, "linked", "implement"));
+        let mux = FakeMux::new(vec![]);
+
+        let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("main checkout"), "{err:#}");
+        assert!(mux.did("create_pane").is_empty());
+        std::fs::remove_file(&link).ok();
     }
 
+    /// A task with no checkout on record fails its start rather than running
+    /// in the main checkout.
+    #[test]
+    fn a_task_with_no_worktree_on_record_fails_its_start() {
+        let (repo, _root_guard) = fixture("no-recorded-worktree");
+        let task = reload(&add_task(&repo, "demo", "implement"));
+        assert!(task.front.worktree_path.is_none());
+
+        let err = recorded_worktree(&task).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("never falls back to the main checkout"),
+            "{err:#}"
+        );
+    }
     #[test]
     fn a_task_waits_for_its_dependencies_to_finish() {
         let (repo, _root_guard) = fixture("deps");
