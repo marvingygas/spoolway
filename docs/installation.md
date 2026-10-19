@@ -581,12 +581,12 @@ memory to the system after each of these:
 - The Eval tab replaces its table or is left.
 - The board or the queue screen finishes a reading that took 250 ms or more.
 
-After a large read, spoolway's resident memory falls back instead of staying at its peak. The musl
+After a large read, spoolway's resident memory falls back toward its earlier level. The musl
 build and macOS do not run these calls.
 
 ### macOS
 
-The same as Linux.
+The same as Linux, without the memory calls.
 
 ### Windows
 
