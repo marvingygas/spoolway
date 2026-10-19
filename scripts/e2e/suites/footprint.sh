@@ -316,10 +316,11 @@ grow_history
 measure large
 
 # ------------------------------------------------------------ the Eval tab
-# Eval reads the ledger and the sessions on a background thread, so it may go over budget while
-# it does. What it may not do is stay there: freed memory has to go back to the
-# system within a few seconds of leaving. The screen of the large history is
-# still open, on the queue tab; Eval is three tabs to its right.
+# Eval reads the ledger and the sessions on a background thread, so it may go
+# over budget while it does. What it may not do is stay there: freed memory has
+# to go back to the system within a few seconds of leaving. The screen of the
+# large history is still open, on the queue tab; Eval is three tabs to its
+# right.
 eval_back_mb=""
 screen_press $'\x1b[C'   # routines
 screen_press $'\x1b[C'   # jobs
@@ -423,8 +424,8 @@ else
   bad "$eval_what: still $eval_back_mb MB after $EVAL_SETTLE_S s"
   hint eval-settle "Memory from the Eval tab was not given back. Large reads should happen
 on a background thread whose memory is returned to the system when the load
-ends, as src/eval.rs does. This check has no number to raise except EVAL_SETTLE_S,
-and a longer wait only hides the leak."
+ends. This check has no number to raise except EVAL_SETTLE_S, and a longer
+wait only hides the leak."
 fi
 
 if [ "${#HINTS[@]}" -gt 0 ]; then
