@@ -105,7 +105,8 @@ reading the file whole.
    area under its single group.
 
    **Ask it through request_user_input**, the same way the task ballot below does. That tool
-   has no preview field, so put this layout in the question text.
+   has no preview field, so put this layout in the question text. It takes two or three
+   options, so offer the recommended count and the two below it.
 
    **Then, for each group, in dependency order, route each subject inside it to a pipeline and
    decompose against that pipeline's own shape.** Read the pipelines before choosing task
@@ -148,7 +149,8 @@ reading the file whole.
    with a letter.
 
    **Ask the ballot through request_user_input.** That tool has no preview field, so the
-   layout below goes in the question text and each count is an option. Do not go on to write
+   layout below goes in the question text and each count is an option. It takes two or three
+   options, so offer the recommended count and the two below it. Do not go on to write
    anything until the person has answered.
 
    **Every candidate is written in this one layout, and never in another:**

@@ -34,7 +34,7 @@ or both.
   - Inside one version: `spoolway eval --by task --sort when:asc --per-task`.
   - Per complexity point, where tasks carry `complexity`: a task far above its neighbours' cost
     per point is a finding, even when it passed.
-- For a lane that went wrong, read `spoolway prompt contract --task <id>` to see what it was handed.
+- For a lane that went wrong, read `spoolway prompt contract --task <id> --step <step>` to see what it was handed.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
 - Read every skill named in `skills:` on a step those runs passed through. A skill lives in the
