@@ -1,6 +1,6 @@
 ---
 domain: cli
-covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**"]
+covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**", "src/watch.rs"]
 ---
 
 # CLI reference
@@ -92,6 +92,8 @@ Every tab keeps column 0 and the last column empty, and leaves two blank rows un
 line. The tab strip stays centred, and every popup stays centred on its tab. A key line wider
 than the tab breaks between two keys, and each broken row starts one column in. Every row it
 adds comes off the tab's body.
+
+The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
 with no title, as wide and as tall as the margin allows, from a `spoolway dispatch` child
