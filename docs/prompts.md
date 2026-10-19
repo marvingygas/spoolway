@@ -124,8 +124,12 @@ The system prompt opens with the step and the task, then nine rules:
   to another step than resuming would, the lane tells them to press `r` on its row and pick the
   step.
 
-A `blocked` step gets a different first rule — its remit is the run, not one task's step, and it
-lacks the "another step's" sentence — and a `READING THE RUN` block naming
+A `blocked` step gets a different first rule: its remit is the run, not one task's step, and it
+lacks the "another step's" sentence. Two rules follow it. The first says that whatever stands
+between the task and its next step is the lane's to clear: the code, the tests, a rebase, a red
+check, a missing tool, or a choice the task or the code already settles. Another step's work is
+the lane's too. The second says the prompt's `## Never` list still holds. A `blocked` step also
+gets a `READING THE RUN` block naming
 `spoolway queue list`, `spoolway queue show`, `spoolway lane`, `spoolway prompt show <name>` and
 `spoolway resume`.
 

@@ -1272,6 +1272,9 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 | `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
 
+The system prompt, the typed messages and the `--block` text are rendered for the mode that
+`unattended.enabled` sets in `config.toml`. The output names that mode above the report forms.
+
 With `--task` and no `--step`, a task on a step renders that step. A queued task renders the
 pipeline's first agent step. A paused task renders the step `spoolway resume` sends it to, the
 one `spoolway queue route` prints. If that step is a command step, the command says no agent
