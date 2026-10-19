@@ -236,12 +236,18 @@ reading the file whole.
    1  cart-core                    base  main
       1  cart-totals      medium   impl
       2  cart-discounts   small    impl_tdd
+
    2  cart-empty                   base  main
       3  cart-empty       small    bugfix
    ```
 
-   Give it two answers: `Write them`, which writes the tasks as drawn, and `Pick again`, which
-   goes back to the group ballot. Say that the person answers with one of the two.
+   Print the two answers under the breakdown, each followed by its words, and say that the
+   person answers with one of the two:
+
+   ```
+   Write them     the tasks are written as drawn
+   Pick again     back to the split ballot
+   ```
    `Write them` goes on to step 3. `Pick again` asks the group ballot again, and every ballot
    after it.
 
