@@ -6390,6 +6390,9 @@ fn build_queue_snapshot(
 /// when a call here actually adopts something, never on every call, so a
 /// reading this very call just woke is never rejected for having started
 /// "too recently" — the bug an earlier version of this function had.
+///
+/// The standing reading's broken files are offered to
+/// [`announce_unreadable`] on every call, adopted or not.
 fn refresh_from_reader(
     reader: &QueueReader,
     known: &mut u64,
@@ -6398,13 +6401,17 @@ fn refresh_from_reader(
 ) {
     reader.wake();
     let (snapshot, generation) = reader.latest_with_generation();
-    if generation <= *known {
-        return;
+    if generation > *known {
+        adopt_groups(snapshot.groups.clone(), groups, state);
+        state.board_branch = snapshot.branch.clone();
+        *known = generation;
     }
-    adopt_groups(snapshot.groups.clone(), groups, state);
-    state.board_branch = snapshot.branch.clone();
+    // Asked on every call, adopted or not. A tick that finds nothing changed
+    // lands no reading, so a file found broken while a filter or a question
+    // was open would otherwise wait for an unrelated change before it was
+    // named. This only compares the standing reading's list of broken files
+    // with the ones already named; it copies nothing.
     announce_unreadable(&snapshot.unreadable, groups, state);
-    *known = generation;
 }
 
 /// Name the pending files in `current` that this screen has not named yet.
@@ -6416,7 +6423,7 @@ fn refresh_from_reader(
 /// that is repaired is forgotten, so breaking it again is named again.
 ///
 /// The popup opens only over plain browsing. Over any other mode, the files
-/// stay unnamed and the next reading names them once that mode is closed, so
+/// stay unnamed and the next refresh names them once that mode is closed, so
 /// a notice never replaces a half-typed filter or an open question.
 fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: &mut ScreenState) {
     let browsing = matches!(state.mode, Mode::Browsing);
@@ -13762,6 +13769,39 @@ mod tests {
             }
         }
         assert!(matches!(state.mode, Mode::Browsing), "{:?}", state.mode);
+    }
+
+    /// A file found broken while a filter is open is named once browsing
+    /// returns, even though no reading lands in between: an idle tick lands
+    /// none. Before, the notice waited for an unrelated file to change.
+    #[test]
+    fn a_file_broken_under_a_filter_is_named_without_a_new_reading() {
+        let dir = std::path::PathBuf::from("/pending");
+        let bad = dir.join("tokens.md");
+        let mut seed = Some(QueueSnapshot {
+            unreadable: vec![bad.clone()],
+            ..Default::default()
+        });
+        let reader = QueueReader::start(move || seed.take());
+        let mut known = 0;
+        let mut groups = Vec::new();
+        let mut state = ScreenState::new();
+        state.named = Some(NamedFiles {
+            dir,
+            files: Default::default(),
+        });
+
+        state.mode = Mode::Filter;
+        refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+        assert!(matches!(state.mode, Mode::Filter), "{:?}", state.mode);
+
+        state.mode = Mode::Browsing;
+        refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+        assert!(
+            matches!(state.mode, Mode::Outcome { .. }),
+            "{:?}",
+            state.mode
+        );
     }
 
     /// [`announce_unreadable`] leaves a half-typed filter or an open question
