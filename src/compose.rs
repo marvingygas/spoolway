@@ -95,6 +95,7 @@ pub(crate) fn system_prompt(
     pipeline: &Pipeline,
     step: &Step,
     prompt: &str,
+    unattended: bool,
 ) -> Result<String> {
     // A toolbox for `blocked` alone — see [`toolbox`]. Every other step reads
     // this empty, which is also what keeps `cost`, `eval`, `doctor` and
@@ -114,7 +115,7 @@ pub(crate) fn system_prompt(
         situating = situating(pipeline, step, task, repo)?,
         prompt = prompt.trim(),
         policy = policy(repo, task, pipeline, step),
-        contract = report_contract(task, pipeline, step),
+        contract = report_contract(task, pipeline, step, unattended),
     ))
 }
 
@@ -132,8 +133,13 @@ pub(crate) fn system_prompt(
 /// step — and the reader has no glossary, so it is defined in the sentence
 /// that introduces it rather than assumed.
 ///
-/// One bullet varies by step — `blocked` alone rewrites the first: every
-/// other lane owns one task's own step, and `blocked`'s does not. The rest
+/// One bullet varies by step — `blocked` alone rewrites the first and adds
+/// two after it: every other lane owns one task's own step, and `blocked`'s
+/// does not. Whatever stops the task from moving on is its to clear, and the
+/// text says so here, in the binary, because `spoolway sync` never rewrites
+/// a prompt a project already has, so nothing a prompt says reaches every
+/// project the way this does. The prompt's own `## Never` list is what still
+/// bounds the lane. The rest
 /// read the same for every lane; a gated step's fact that a person opens
 /// this pane belongs to [`report_contract`], the form it qualifies, not
 /// here.
@@ -166,7 +172,11 @@ pub(crate) fn situating(
     let first_bullet = match step.id == crate::pipeline::BLOCKED {
         true => format!(
             "- Your remit is the run, not one task's step. `{task}` may have stopped inside \
-             its worktree or well outside it. Stay inside your prompt's bounds.",
+             its worktree or well outside it.\n\
+             - Whatever stands between this task and its next step is yours: the code, the \
+             tests, a rebase, a red check, a missing tool, a choice the task or the code \
+             already settles. Another step's work is yours too.\n\
+             - Your prompt's `## Never` list still holds.",
             task = task.id(),
         ),
         false => "- One step's worth of the job, and nothing enforces it. Your role, below, is \
@@ -719,6 +729,16 @@ const BLOCK: Form = (
      action and end with: then resume it on the board.",
 );
 
+/// `--block` in an unattended run. The unblocker reads a blocker first, and
+/// a request for a person in it gets copied into a `--pause` the unblocker
+/// should have checked itself, so a stuck lane here writes facts only.
+const BLOCK_UNATTENDED: Form = (
+    BLOCK.0,
+    "  You cannot settle this within what this step is allowed to do.\n  \
+     An unblocker lane picks it up next. Say what you tried and\n  \
+     what stopped you.",
+);
+
 const BLOCKED_PASS: Form = (
     "    spoolway report --pass  -m \"<one line on what happened>\"",
     "  You did the stuck step's work yourself, and it came out right.\n  \
@@ -738,6 +758,8 @@ const BLOCKED_PAUSE: Form = (
      change will remove it: only a person can provide or decide it.\n  \
      Whatever spoolway itself did, in how it ran, timed, counted or\n  \
      routed this task, is never that cause. Clear it and pass.\n  \
+     A blocker that names what a person must do is the stuck\n  \
+     lane's view, not a finding. Check it yourself before you pause.\n  \
      Say plainly what they need to do, and end with: then resume it\n  \
      on the board.",
 );
@@ -800,6 +822,12 @@ fn render_forms(forms: &[(&str, &str)]) -> String {
 /// all. A step with nothing left to withhold prints no "not available to
 /// you" block.
 ///
+/// `unattended` picks the `--block` text and nothing else: an unattended run
+/// has an unblocker lane to read a blocker next, an attended one a person.
+/// Each caller passes the mode of the run it is composing for, and
+/// `spoolway prompt contract` passes the one `config.toml` sets, so no
+/// caller keeps a copy of the text.
+///
 /// One line closes the whole contract when `step` would hold a pass here —
 /// see [`crate::commands::gate_hold`], read against a hypothetical pass,
 /// since no real outcome exists yet while a prompt is being composed. Which
@@ -807,8 +835,18 @@ fn render_forms(forms: &[(&str, &str)]) -> String {
 /// and nothing else, so it reads *a pass is held here*; a task's own
 /// `gate_at` catches whatever is reported, so it reads *this report is held
 /// here, whatever it is*.
-pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+pub(crate) fn report_contract(
+    task: &Task,
+    pipeline: &Pipeline,
+    step: &Step,
+    unattended: bool,
+) -> String {
     use crate::pipeline::Outcome;
+
+    let block = match unattended {
+        true => BLOCK_UNATTENDED,
+        false => BLOCK,
+    };
 
     let blocked = step.id == crate::pipeline::BLOCKED;
     let fail_redundant =
@@ -838,9 +876,9 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
         let blocked_stage: (&str, &str) = (BLOCKED_PASS_STAGE.0, stage_explanation.as_str());
         render_forms(&[BLOCKED_PASS, blocked_stage, BLOCKED_PAUSE, HANDOFF])
     } else if fail_redundant {
-        render_forms(&[PASS, BLOCK, HANDOFF])
+        render_forms(&[PASS, block, HANDOFF])
     } else {
-        render_forms(&[PASS, FAIL, BLOCK, HANDOFF])
+        render_forms(&[PASS, FAIL, block, HANDOFF])
     };
 
     // `--stage` is never withheld now — see this function's own doc for why.
@@ -1070,11 +1108,16 @@ pub(crate) fn park_prompt(task: &Task, _pipeline: &Pipeline, escalated: bool) ->
 /// repeating the report contract it was launched with. Its own function
 /// rather than inlined at the one call site, so `spoolway prompt contract`
 /// can render it too, against the same wording a real nudge would use.
-pub(crate) fn reminder_prompt(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+pub(crate) fn reminder_prompt(
+    task: &Task,
+    pipeline: &Pipeline,
+    step: &Step,
+    unattended: bool,
+) -> String {
     format!(
         "`{}` ended its turn without reporting.\n\n{}",
         step.id,
-        report_contract(task, pipeline, step),
+        report_contract(task, pipeline, step, unattended),
     )
 }
 
@@ -1090,6 +1133,7 @@ pub(crate) fn lane_prompt_for_state(
     pipeline: &Pipeline,
     step: &Step,
     state: &str,
+    unattended: bool,
 ) -> Vec<String> {
     match state {
         "opening" => opening_messages(task, pipeline, step, false),
@@ -1099,7 +1143,67 @@ pub(crate) fn lane_prompt_for_state(
         "carry" => vec![carry_prompt(task, pipeline)],
         "park" => vec![park_prompt(task, pipeline, false)],
         "park-escalated" => vec![park_prompt(task, pipeline, true)],
-        "reminder" => vec![reminder_prompt(task, pipeline, step)],
+        "reminder" => vec![reminder_prompt(task, pipeline, step, unattended)],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contract(step: &str, unattended: bool) -> String {
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = Pipeline::parse("demo", yaml).unwrap();
+        let task = Task::parse(
+            std::path::PathBuf::from("example.md"),
+            &format!("---\nid: example\nstage: {step}\n---\n"),
+        )
+        .unwrap();
+        report_contract(&task, &pipeline, pipeline.step(step).unwrap(), unattended)
+    }
+
+    /// Attended runs keep the `--block` text they always had, word for word.
+    #[test]
+    fn an_attended_block_asks_for_a_person_when_one_has_to_act() {
+        let text = contract("implement", false);
+        let expected = "  You cannot settle this within what this step is allowed to do. It\n  \
+             goes up to a person, or to a stronger agent. Say what you tried\n  \
+             and what stopped you. When a person has to act, name the\n  \
+             action and end with: then resume it on the board.";
+        assert!(text.contains(expected), "{text}");
+    }
+
+    /// An unattended run's stuck lane writes facts only, for every step.
+    #[test]
+    fn an_unattended_block_names_the_unblocker_and_asks_for_no_person() {
+        let text = contract("implement", true);
+        let expected = "    spoolway report --block -m \"<what is in the way>\"\n\n  \
+             You cannot settle this within what this step is allowed to do.\n  \
+             An unblocker lane picks it up next. Say what you tried and\n  \
+             what stopped you.";
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("resume it on the board"), "{text}");
+        assert!(!text.contains("a person"), "{text}");
+    }
+
+    /// `--pause` tells the unblocker to check a blocker written to a person,
+    /// in both modes, and `--pass` and `--fail` do not vary with the mode.
+    #[test]
+    fn the_pause_text_is_the_same_in_both_modes_and_tells_the_unblocker_to_check() {
+        let expected = "routed this task, is never that cause. Clear it and pass.\n  \
+             A blocker that names what a person must do is the stuck\n  \
+             lane's view, not a finding. Check it yourself before you pause.\n  \
+             Say plainly what they need to do, and end with: then resume it\n  \
+             on the board.";
+        let attended = contract("blocked", false);
+        assert!(attended.contains(expected), "{attended}");
+        assert_eq!(attended, contract("blocked", true));
+        assert_eq!(
+            contract("implement", false).replace(BLOCK.1, ""),
+            contract("implement", true).replace(BLOCK_UNATTENDED.1, ""),
+        );
     }
 }

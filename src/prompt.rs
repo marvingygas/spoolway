@@ -222,7 +222,14 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
             missing_prompt_fix(step.prompt_name())
         )
     });
-    for line in crate::compose::system_prompt(repo, &task, pipeline, step, &prompt)?.lines() {
+    // The mode `unattended.enabled` sets, which is what a run started with
+    // no flag takes. A run's `--unattended` or `--attended` is decided at
+    // dispatch time and is not known here, so the mode is named above
+    // section 6 for a reader to check against theirs.
+    let unattended = repo.config.unattended.enabled;
+    for line in
+        crate::compose::system_prompt(repo, &task, pipeline, step, &prompt, unattended)?.lines()
+    {
         println!("   | {line}");
     }
 
@@ -236,7 +243,8 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     for state in crate::compose::STATES {
         println!();
         println!("   This is `{state}`:");
-        let messages = crate::compose::lane_prompt_for_state(&task, pipeline, step, state);
+        let messages =
+            crate::compose::lane_prompt_for_state(&task, pipeline, step, state, unattended);
         for (i, message) in messages.iter().enumerate() {
             if messages.len() > 1 {
                 let when = match i {
@@ -288,7 +296,12 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // `crate::compose::report_contract` for why `blocked` keeps two forms,
     // and why every other step offers `--fail` only when it routes
     // somewhere `--block` does not.
-    for line in crate::compose::report_contract(&task, pipeline, step).lines() {
+    println!(
+        "   Rendered for {} runs, as `unattended.enabled` in config.toml sets it. The --block text differs by mode.",
+        if unattended { "unattended" } else { "attended" }
+    );
+    println!();
+    for line in crate::compose::report_contract(&task, pipeline, step, unattended).lines() {
         println!("   {line}");
     }
     println!();
