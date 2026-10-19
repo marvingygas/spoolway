@@ -698,9 +698,10 @@ mod tests {
         assert!(page.exists());
     }
 
-    /// Only an `.html` file directly in `plans/` goes, so a folder there,
-    /// another kind of file, or a page anywhere else is refused before
-    /// anything is removed.
+    /// Only an `.html` file directly in `plans/` goes: another kind of file,
+    /// or a page anywhere else, is refused before anything is removed. A
+    /// folder named like a page passes that check, but fails to remove and
+    /// stays.
     #[test]
     fn anything_but_a_page_in_plans_is_refused() {
         let (repo, _guard) = crate::commands::testutil::fixture("pdel-plan-refused");

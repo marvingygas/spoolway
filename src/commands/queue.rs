@@ -9933,6 +9933,19 @@ const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
                                Nothing was deleted.\n\
                                Pick delete again to see the current list.";
 
+/// The last line of a notice for a delete that failed: what to fix before
+/// picking delete again, chosen by the kind of error removing a file gave.
+/// Shared by the pending tasks' and the plan page's notices, so the two
+/// never word the same remedy differently.
+fn delete_remedy(kind: Option<std::io::ErrorKind>) -> &'static str {
+    match kind {
+        Some(std::io::ErrorKind::PermissionDenied) => {
+            "Fix the file's permissions, then pick delete again."
+        }
+        _ => "Fix the error above, then pick delete again.",
+    }
+}
+
 /// The pending screen after `enter` on delete's popup, whatever the delete
 /// answered: `groups` read again so the removed files drop out, the
 /// selection cut to groups that can still be queued, gates dropped for
@@ -9986,12 +9999,7 @@ fn after_pending_delete(
             removed,
             left,
         } => {
-            let remedy = match kind {
-                Some(std::io::ErrorKind::PermissionDenied) => {
-                    "Fix the file's permissions, then pick delete again."
-                }
-                _ => "Fix the error above, then pick delete again.",
-            };
+            let remedy = delete_remedy(kind);
             let mut text = partial_delete(&anyhow::Error::msg(error.clone()), &removed, &left);
             // A delete stopped by this same read failing already opens on
             // its error; naming it a second time says nothing more.
@@ -10111,12 +10119,7 @@ fn after_plan_delete(
             outcome("not deleted", text)
         }
         PlanDeleteOutcome::Failed { error, kind } => {
-            let remedy = match kind {
-                Some(std::io::ErrorKind::PermissionDenied) => {
-                    "Fix the file's permissions, then pick delete again."
-                }
-                _ => "Fix the error above, then pick delete again.",
-            };
+            let remedy = delete_remedy(kind);
             let mut text = format!("{error}\n  {file}");
             // A delete stopped by this same read failing already opens on
             // its error; naming it a second time says nothing more.
