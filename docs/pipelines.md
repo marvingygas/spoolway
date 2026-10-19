@@ -553,8 +553,8 @@ clean exit never reaches the gate.
     on_pass: create-pr
 ```
 
-The exit code decides, not the lane. An agent step cannot do this on its own, because a lane
-that resolves a conflict reports `--pass`.
+The exit code decides, not the lane. An agent step cannot do this on its own: a lane that
+resolves a conflict reports `--pass`.
 
 The `resolve-conflicts` step starts in the worktree the failed rebase left behind.
 `spoolway pipeline check` warns that it has no `on_fail`. The recipe keeps it that way, so a
