@@ -1296,19 +1296,7 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
         return state.last;
     }
 
-    let mut file = std::fs::File::open(path).ok()?;
-    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).ok()?;
-    let mut raw = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut raw).ok()?;
-    // Only whole lines are parsed. A line the agent is still writing has no
-    // newline yet, and parsing its half would drop the turn for good once the
-    // offset moved past it; the offset stays at the end of the last whole line
-    // so the next read starts the line over.
-    let whole = raw
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |i| i + 1);
-    let text = String::from_utf8_lossy(&raw[..whole]);
+    let (text, whole) = new_whole_lines(path, state.offset)?;
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1333,7 +1321,7 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
             state.last = Some(turn);
         }
     }
-    state.offset += whole as u64;
+    state.offset += whole;
     state.identity = identity;
     let last = state.last.clone();
     if let Ok(mut reads) = TAIL_READS.lock() {
@@ -1343,6 +1331,28 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
         reads.insert(key, state);
     }
     last
+}
+
+/// The whole lines of `path` from byte `offset` on, and how many bytes they
+/// took.
+///
+/// Only whole lines are returned. A line the agent is still writing has no
+/// newline yet, and parsing its half would drop the turn for good once the
+/// offset moved past it; the caller advances by the returned length, which
+/// ends at the last newline, so the next read starts that line over.
+fn new_whole_lines(path: &Path, offset: u64) -> Option<(String, u64)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset)).ok()?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut raw).ok()?;
+    let whole = raw
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    Some((
+        String::from_utf8_lossy(&raw[..whole]).into_owned(),
+        whole as u64,
+    ))
 }
 
 /// What [`last_turn_at`] knows about a transcript after reading it: how far it
@@ -1802,36 +1812,100 @@ struct Transcript {
 
 /// The totals of one transcript, deduped by request, with its cost summed
 /// turn by turn against `prices` — the project's `[models]` table.
+///
+/// A transcript read before is not read again from its start: the fold over
+/// its lines so far is kept in [`TRANSCRIPT_FOLDS`], and only the whole lines
+/// appended since are fed to it. A file that shrank or was replaced, or a
+/// `prices` table that changed, starts the fold over, since either makes the
+/// kept totals describe something else.
 fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Transcript {
     let none = Transcript {
         total: None,
         context: 0,
     };
-    let Some(values) = records_at(kind, path) else {
+    // The guard `records_at` used to apply: an unresolvable kind reads as
+    // "nothing yet" rather than as a transcript at `path`.
+    if self::kind(kind).is_none() {
+        return none;
+    }
+    let Some(identity) = std::fs::metadata(path).ok().map(|m| FileIdentity::of(&m)) else {
         return none;
     };
+    let key = (kind.to_string(), path.to_path_buf());
+    // Taken out of the map rather than cloned: its `seen` set is the size of
+    // the transcript.
+    let kept = TRANSCRIPT_FOLDS
+        .lock()
+        .ok()
+        .and_then(|mut folds| folds.remove(&key))
+        .filter(|kept| kept.identity.continues_as(&identity) && kept.prices == *prices);
+    let mut kept = kept.unwrap_or_else(|| KeptFold {
+        identity: FileIdentity::default(),
+        offset: 0,
+        prices: prices.clone(),
+        fold: TranscriptFold::default(),
+    });
+    if !(kept.offset == identity.len && kept.identity == identity) {
+        let Some((text, whole)) = new_whole_lines(path, kept.offset) else {
+            return none;
+        };
+        for line in text.lines() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                kept.fold.feed(kind, prices, &value);
+            }
+        }
+        kept.offset += whole;
+        kept.identity = identity;
+    }
+    let read = kept.fold.finish();
+    if let Ok(mut folds) = TRANSCRIPT_FOLDS.lock() {
+        if folds.len() >= MAX_REMEMBERED {
+            folds.clear();
+        }
+        folds.insert(key, kept);
+    }
+    read.unwrap_or(none)
+}
 
-    let mut tokens = Tokens::default();
-    let mut tier_tokens = Tokens::default();
-    let mut model = String::new();
-    let mut turns = 0u32;
-    let mut context = 0u64;
+/// A [`TranscriptFold`] and how far into its file it has read.
+struct KeptFold {
+    identity: FileIdentity,
+    /// The byte after the last whole line already fed to the fold.
+    offset: u64,
+    /// The price table the fold's cost was summed against.
+    prices: BTreeMap<String, ModelPrice>,
+    fold: TranscriptFold,
+}
+
+/// The fold of each transcript read so far by [`read_transcript`], by agent
+/// kind and path.
+static TRANSCRIPT_FOLDS: Mutex<BTreeMap<(String, PathBuf), KeptFold>> = Mutex::new(BTreeMap::new());
+
+/// Everything [`read_transcript`] accumulates over a transcript's records, so
+/// that it can stop after any whole line and carry on from the next.
+#[derive(Default)]
+struct TranscriptFold {
+    tokens: Tokens,
+    tier_tokens: Tokens,
+    model: String,
+    turns: u32,
+    context: u64,
     // The running maximum of every deduped turn's own `context` reading,
     // alongside `context` itself — the last turn's alone can't tell a lane
     // that compacted after peaking close to its window from one that never
     // did. See [`Harvest::ctx_peak`].
-    let mut ctx_peak = 0u64;
-    let mut spent = 0.0f64;
+    ctx_peak: u64,
+    spent: f64,
     // Set by a turn that neither reports a cost nor has a price, which makes
     // the lane's cost unknown rather than the sum of the turns that did.
-    let mut any_unpriced = false;
-    let mut resolved: HashMap<String, Option<ModelPrice>> = HashMap::new();
+    any_unpriced: bool,
+    resolved: HashMap<String, Option<ModelPrice>>,
     // One request, several records: Claude Code writes an assistant line per
     // content block — text, thinking, each tool call — and repeats that
     // request's usage verbatim on every one of them. In a real transcript half
     // the assistant lines are such repeats, so counting them all roughly
     // doubles a lane's reported spend. Bank each request once.
-    let mut seen: HashSet<String> = HashSet::new();
+    seen: HashSet<String>,
     // The same repeat, from a kind whose format mints no id to bank a
     // request by at all — `seen` above has nothing to catch it on, and
     // without this every one of those repeats got counted as its own turn.
@@ -1840,56 +1914,63 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
     // turn. Only the immediately preceding turn is compared, not every turn
     // seen so far, because two *different* requests that happen to cost the
     // same are not the repeat this exists to catch.
-    let mut last_unidentified: Option<(String, Tokens, Option<f64>)> = None;
+    last_unidentified: Option<(String, Tokens, Option<f64>)>,
     // The model a kind announces beside its turns rather than on them.
-    let mut announced = String::new();
-    let mut reported = ReportedRuns::default();
+    announced: String,
+    reported: ReportedRuns,
+}
 
-    for value in values {
-        if let Some((total, models)) = reported_state(kind, &value) {
-            reported.observe(total, models);
-            continue;
+impl TranscriptFold {
+    fn feed(
+        &mut self,
+        kind: &str,
+        prices: &BTreeMap<String, ModelPrice>,
+        value: &serde_json::Value,
+    ) {
+        if let Some((total, models)) = reported_state(kind, value) {
+            self.reported.observe(total, models);
+            return;
         }
-        if let Some(model) = turn_model(kind, &value) {
-            announced = model;
-            continue;
+        if let Some(model) = turn_model(kind, value) {
+            self.announced = model;
+            return;
         }
-        let Some(mut turn) = read_turn(kind, &value) else {
-            continue;
+        let Some(mut turn) = read_turn(kind, value) else {
+            return;
         };
         if turn.model.is_empty() {
-            turn.model = announced.clone();
+            turn.model.clone_from(&self.announced);
         }
         // A synthetic turn — see [`SYNTHETIC_MODEL`] — names no model that
         // ever spent, and its all-zero usage is not the conversation's real
         // size. Drop it before it can overwrite `model` or `context` below.
         if turn.model == SYNTHETIC_MODEL {
-            continue;
+            return;
         }
         if let Some(id) = turn.id {
-            if !seen.insert(id) {
-                continue;
+            if !self.seen.insert(id) {
+                return;
             }
             // An identified turn breaks any run of fingerprint-matched
             // no-id turns before it — the comparison below only means
             // anything between genuinely consecutive records.
-            last_unidentified = None;
+            self.last_unidentified = None;
         } else {
             let fingerprint = (turn.model.clone(), turn.tokens, turn.cost);
-            if last_unidentified.as_ref() == Some(&fingerprint) {
-                continue;
+            if self.last_unidentified.as_ref() == Some(&fingerprint) {
+                return;
             }
-            last_unidentified = Some(fingerprint);
+            self.last_unidentified = Some(fingerprint);
         }
 
-        tokens.add(&turn.tokens);
-        turns += 1;
-        // Overwritten by every turn, so what survives the loop is the last
-        // one's — the only reading that means "how big has this got".
-        context = turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write();
-        ctx_peak = ctx_peak.max(context);
+        self.tokens.add(&turn.tokens);
+        self.turns += 1;
+        // Overwritten by every turn, so what survives is the last one's — the
+        // only reading that means "how big has this got".
+        self.context = turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write();
+        self.ctx_peak = self.ctx_peak.max(self.context);
         if !turn.model.is_empty() {
-            model = turn.model.clone();
+            self.model.clone_from(&turn.model);
         }
         // Priced one turn at a time because a tier depends on a single
         // request's prompt, which the summed tokens cannot show. The agent's
@@ -1898,38 +1979,41 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         // Resolved once per distinct model: a lookup for a model with no
         // `[models]` row reads the refreshed price file from disk, and a
         // transcript has hundreds of turns on one or two models.
-        let entry = *resolved
+        let entry = *self
+            .resolved
             .entry(turn.model.clone())
             .or_insert_with(|| crate::models::resolve(prices, &turn.model).price);
         // Banked whatever pays for the turn: `spoolway eval` re-prices the
         // token classes from today's table, so the split must not depend on
         // whether the agent reported its own cost.
         if entry.is_some_and(|price| price.tier_reached(&turn.tokens).is_some()) {
-            tier_tokens.add(&turn.tokens);
+            self.tier_tokens.add(&turn.tokens);
         }
         match turn.cost.or_else(|| Some(entry?.apply_turn(&turn.tokens))) {
-            Some(cost) => spent += cost,
-            None => any_unpriced = true,
+            Some(cost) => self.spent += cost,
+            None => self.any_unpriced = true,
         }
     }
 
-    if turns == 0 {
-        return none;
-    }
-
-    let (reported_usd, reported_models) = reported.finish();
-    Transcript {
-        total: Some(Harvest {
-            model,
-            tokens,
-            tier_tokens,
-            turns,
-            ctx_peak,
-            cost_usd: (!any_unpriced).then_some(spent),
-            reported_usd,
-            reported_models,
-        }),
-        context,
+    /// The reading so far; `None` while no assistant turn has been fed.
+    fn finish(&self) -> Option<Transcript> {
+        if self.turns == 0 {
+            return None;
+        }
+        let (reported_usd, reported_models) = self.reported.clone().finish();
+        Some(Transcript {
+            total: Some(Harvest {
+                model: self.model.clone(),
+                tokens: self.tokens,
+                tier_tokens: self.tier_tokens,
+                turns: self.turns,
+                ctx_peak: self.ctx_peak,
+                cost_usd: (!self.any_unpriced).then_some(self.spent),
+                reported_usd,
+                reported_models,
+            }),
+            context: self.context,
+        })
     }
 }
 
@@ -1975,7 +2059,7 @@ fn reported_state(
 /// marks a restart and the earlier run is closed at its last record. A restart
 /// that happens to open above where the last run ended looks like growth and
 /// is undercounted; the record offers nothing to tell the two apart.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ReportedRuns {
     closed: f64,
     closed_models: BTreeMap<String, f64>,
@@ -2197,11 +2281,10 @@ fn turn_model(kind_name: &str, value: &serde_json::Value) -> Option<String> {
 
 /// Every record of one session, in file order.
 ///
-/// [`read_transcript`] and [`live_of`] work on the `Vec<Value>` this returns
-/// and never learn which [`Store`] it came out of. The last-record readers —
-/// [`last_turn_at`] and [`last_record`] — do not use this: they need one
-/// record, not every one, so they stream lines or seek to the tail rather
-/// than collect the whole file (review finding 48).
+/// Only [`transcript_tail`] collects every record this way. The readers that
+/// run on a timer — [`read_transcript`], [`last_turn_at`] and [`last_record`] —
+/// parse the lines added since their last read and keep a running reading
+/// instead of holding the whole file as values (review finding 48).
 ///
 /// `None` means the store could not be read at all: no transcript yet, an
 /// agent still starting up. Absence is never an error here — see
@@ -5653,6 +5736,131 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, replacement + &claude_turn("m4", 4)).unwrap();
         assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 4);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The board's live reading after an append equals a read of the whole
+    /// file, and the second read starts at the first one's end.
+    #[test]
+    fn a_second_live_read_matches_a_full_read_of_the_grown_file() {
+        let session = "0198e2c0-5555-4000-8000-000000000006";
+        // `r1` appears twice: the repeat of a request must still be banked once
+        // across the two reads.
+        let home = home_with(
+            "claude",
+            session,
+            &(claude_turn("r1", 10) + &claude_turn("r1", 10)),
+        );
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let prices = BTreeMap::new();
+        let first = read_transcript("claude", &path, &prices);
+        assert_eq!(first.total.as_ref().unwrap().turns, 1);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        let offset_of = |path: &Path| {
+            TRANSCRIPT_FOLDS
+                .lock()
+                .unwrap()
+                .get(&("claude".to_string(), path.to_path_buf()))
+                .map(|kept| kept.offset)
+        };
+        assert_eq!(offset_of(&path), Some(first_len));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for line in [
+            claude_turn("r1", 10),
+            claude_turn("r2", 20),
+            claude_turn("r3", 30),
+        ] {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+        drop(file);
+        let second = read_transcript("claude", &path, &prices);
+        assert_eq!(
+            offset_of(&path),
+            Some(std::fs::metadata(&path).unwrap().len())
+        );
+
+        TRANSCRIPT_FOLDS.lock().unwrap().clear();
+        let full = read_transcript("claude", &path, &prices);
+        let (second, full) = (second.total.unwrap(), full.total.unwrap());
+        assert_eq!(second.turns, 3);
+        assert_eq!(second.turns, full.turns);
+        assert_eq!(second.tokens, full.tokens);
+        assert_eq!(second.ctx_peak, full.ctx_peak);
+        assert_eq!(second.cost_usd, full.cost_usd);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A transcript rewritten shorter, or priced by a different table, is
+    /// read from the start: the kept totals describe something else.
+    #[test]
+    fn a_live_read_starts_over_when_the_file_shrank_or_the_prices_changed() {
+        let session = "0198e2c0-5555-4000-8000-000000000007";
+        let home = home_with(
+            "claude",
+            session,
+            &(claude_turn("r1", 10) + &claude_turn("r2", 20) + &claude_turn("r3", 30)),
+        );
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        assert_eq!(
+            read_transcript("claude", &path, &none).total.unwrap().turns,
+            3
+        );
+
+        std::fs::write(&path, claude_turn("n1", 7)).unwrap();
+        let after = read_transcript("claude", &path, &none);
+        assert_eq!(after.total.unwrap().turns, 1);
+        assert_eq!(after.context, 7);
+
+        let priced = BTreeMap::from([(
+            "claude-opus-5".to_string(),
+            ModelPrice {
+                input: 1.0,
+                ..ModelPrice::default()
+            },
+        )]);
+        let before = read_transcript("claude", &path, &none).total.unwrap();
+        let with = read_transcript("claude", &path, &priced).total.unwrap();
+        assert_ne!(before.cost_usd, with.cost_usd);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A file that grew but carries an older modified time than the one read
+    /// was rewritten, not appended to, even though its inode is the same and
+    /// its offset still falls inside it.
+    #[test]
+    fn a_longer_file_with_an_older_modified_time_is_read_from_the_start() {
+        let session = "0198e2c0-5555-4000-8000-000000000008";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        read_transcript("claude", &path, &none);
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 10);
+
+        // The first line is longer than the one read, so a read from the old
+        // offset would begin inside it.
+        let rewritten = claude_turn("a-much-longer-request-id", 1000)
+            + &claude_turn("r2", 2000)
+            + &claude_turn("r3", 3000);
+        let handle = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut &handle, rewritten.as_bytes()).unwrap();
+        handle
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000))
+            .unwrap();
+        drop(handle);
+
+        assert_eq!(
+            read_transcript("claude", &path, &none).total.unwrap().turns,
+            3
+        );
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 3000);
 
         std::fs::remove_dir_all(&home).ok();
     }
