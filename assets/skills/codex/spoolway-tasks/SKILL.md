@@ -105,8 +105,7 @@ reading the file whole.
    area under its single group.
 
    **Ask it through request_user_input**, the same way the task ballot below does. That tool
-   has no preview field, so put this layout in the question text. It takes two or three
-   options, so offer the recommended count and the two below it.
+   has no preview field, so put this layout in the question text.
 
    **Then, for each group, in dependency order, route each subject inside it to a pipeline and
    decompose against that pipeline's own shape.** Read the pipelines before choosing task
@@ -149,8 +148,7 @@ reading the file whole.
    with a letter.
 
    **Ask the ballot through request_user_input.** That tool has no preview field, so the
-   layout below goes in the question text and each count is an option. It takes two or three
-   options, so offer the recommended count and the two below it. Do not go on to write
+   layout below goes in the question text and each count is an option. Do not go on to write
    anything until the person has answered.
 
    **Every candidate is written in this one layout, and never in another:**
@@ -266,11 +264,11 @@ reading the file whole.
    - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
      plan's own words, or the source issue's own labels when this breakdown started at one.
      Dropped for a task that proposed none.
-   - `group_description` — the group's own words for the issue a mirror opens above it. Required
+   - `group_description` — the text of the parent issue that `issue_tracking.hook` opens for the group. Required
      on one task per group when `issue_tracking.hook` is set. Otherwise left off.
    - `starts_from` — the branch this task's worktree is cut from, when it is not the default.
-     Set it only when a dependency's branch no longer exists. Never invented here.
-   - `gate_at` — a step id to pause the task on once it passes. Set it only when the person
+     Set it only when a dependency's branch no longer exists. Use a branch that exists; never make one up.
+   - `gate_at` — a step id. The task pauses once it passes that step. Set it only when the person
      asked for that pause.
    - `complexity` — a whole number from 1 to 100, 100 being extremely complex. Judge it against
      the other tasks in the same cut. Set it on every task, once, and never revise it.
@@ -320,7 +318,7 @@ reading the file whole.
    loud to the caller if you judged them safe beside each other on a shared file, and never
    tell them something downstream will check it; do not invent a section for it.
 
-   **Then check the ends of each group's chain.** Its first task should carry the step marked
+   **Then check each group's first task.** It should carry the step marked
    `first_of_chain` in step 1's contract, if the pipeline has one.
 
    **Then check each group's own last task carries a `last:` step.** A group's last task —

@@ -28,9 +28,9 @@ or both.
   records. Read a single task's peak context as `CTX PEAK` there. Use
   figures where they help; do not make them a gate for findings. Its "Command steps" table
   counts gate and suite runs. BLOCKS counts lane blocks only.
-- Read where the tokens went, for every step that costs the most:
+- Read where the tokens went, for the steps that cost the most:
   - Turns and context: cache reads grow with TURNS/TASK times CTX AVG. Name which of the two moved.
-  - Across changes: `spoolway eval --by version --step <step> --per-task`.
+  - Between versions of the step: `spoolway eval --by version --step <step> --per-task`.
   - Inside one version: `spoolway eval --by task --sort when:asc --per-task`.
   - Per complexity point, where tasks carry `complexity`: a task far above its neighbours' cost
     per point is a finding, even when it passed.
