@@ -8501,6 +8501,48 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// `bank_lane` streams the ledger for a hand line instead of reading it
+    /// whole. The subagents it banks must be those the full-list rule leaves to
+    /// the lane: in with no hand line, out with one.
+    #[test]
+    fn bank_lane_leaves_subagents_out_exactly_when_the_ledger_has_a_hand_line() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _, _root_guard) = fixture("bank-lane-hand");
+        for (session, hand, output) in [
+            ("0198e2c0-9999-4000-8000-000000000041", false, 100 + 30),
+            ("0198e2c0-9999-4000-8000-000000000042", true, 100),
+        ] {
+            if hand {
+                let line = Entry {
+                    task: "other".into(),
+                    step: "implement".into(),
+                    session: session.into(),
+                    hand: true,
+                    ..Entry::neutral()
+                };
+                append(&repo, &line).unwrap();
+            }
+            let home = home_with("claude", session, &transcript(&[("", 100)]));
+            let subagents = home
+                .join(".claude/projects/-home-someone-work")
+                .join(session)
+                .join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
+
+            let line = crate::platform::test_home::with_home(&home, || {
+                bank_lane(&repo, "claude", session, "demo", "implement")
+            })
+            .expect("a banked line");
+
+            let owns =
+                LedgerTotals::from_entries(&read(&repo).unwrap()).lane_owns_subagents(session);
+            assert_eq!(owns, !hand);
+            assert_eq!(line.tokens.output, output, "hand line: {hand}");
+            std::fs::remove_dir_all(&home).ok();
+        }
+    }
+
     /// A session banked twice banks only what it had not banked before: the
     /// new total minus the banked cost, never below zero.
     #[test]

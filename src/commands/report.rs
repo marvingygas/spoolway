@@ -3450,6 +3450,44 @@ mod tests {
     use super::*;
     use crate::commands::testutil::*;
 
+    /// `abandoned_session` says `banked` from the ledger's totals. Checked
+    /// against the full list in both cases: the lane's session on the ledger,
+    /// and the lane's session known only from its record.
+    #[test]
+    fn an_abandoned_session_is_banked_exactly_when_the_ledger_holds_a_line_for_it() {
+        let (repo, _root_guard) = fixture("abandoned-banked");
+        add(&repo, "login", &[]);
+        let task = queued(&repo, "login");
+        let (lane, key) = (
+            crate::mux::lane_name("implement", &task),
+            crate::mux::run_key("implement", task.id()),
+        );
+        let line = crate::usage::Entry {
+            task: "login".into(),
+            step: "implement".into(),
+            session: "abandoned-1".into(),
+            ..crate::usage::Entry::neutral()
+        };
+        // The lane's record names the session; the ledger does not hold it yet.
+        let known = crate::usage::LedgerTotals::from_entries([&line]);
+        let record = crate::dispatch::LaneRecord::readopted(&repo, &lane, 0, &known);
+        crate::dispatch::save_lane_records(&repo, &[(lane.clone(), record)].into()).unwrap();
+
+        for banked in [false, true] {
+            if banked {
+                crate::usage::append(&repo, &line).unwrap();
+            }
+            let abandoned = abandoned_session(&repo, "implement", &task).expect("a session");
+            let in_full_list = crate::usage::read(&repo)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.session == abandoned.id);
+            assert_eq!(abandoned.id, "abandoned-1", "{key}");
+            assert_eq!(abandoned.banked, in_full_list);
+            assert_eq!(abandoned.banked, banked);
+        }
+    }
+
     /// Every choice a stop offers is printed key first, then the command
     /// that does the same thing, and no offered choice lacks a key —
     /// acceptance criterion 3, checked against the exact three lines a
