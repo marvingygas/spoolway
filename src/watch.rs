@@ -62,11 +62,14 @@ impl Identity {
     /// second write could no longer hide inside the same tick. A missing or
     /// future modified time is not settled.
     fn settled(&self) -> bool {
-        self.modified.is_some_and(|at| {
-            SystemTime::now()
-                .duration_since(at)
-                .is_ok_and(|age| age >= SETTLE)
-        })
+        self.settled_at(SystemTime::now())
+    }
+
+    /// [`Identity::settled`] as of `now`, so a caller that holds a clock of
+    /// its own can judge against it.
+    fn settled_at(&self, now: SystemTime) -> bool {
+        self.modified
+            .is_some_and(|at| now.duration_since(at).is_ok_and(|age| age >= SETTLE))
     }
 }
 
@@ -133,6 +136,10 @@ pub(crate) struct BranchWatch {
     head: Option<PathBuf>,
     resolved: bool,
     seen: Option<Seen>,
+    /// A clock for a test to move while `run` is in flight, which a file
+    /// write cannot do without also changing the identity under test.
+    #[cfg(test)]
+    clock: Option<fn() -> SystemTime>,
 }
 
 struct Seen {
@@ -149,7 +156,16 @@ impl BranchWatch {
             head: Some(head),
             resolved: true,
             seen: None,
+            clock: None,
         }
+    }
+
+    fn now(&self) -> SystemTime {
+        #[cfg(test)]
+        if let Some(clock) = self.clock {
+            return clock();
+        }
+        SystemTime::now()
     }
 
     /// Where `dir`'s `HEAD` file is, or `None` when it cannot be found, in
@@ -176,7 +192,8 @@ impl BranchWatch {
         let identity = self.head_path(dir).and_then(|head| Identity::of(&head));
         // Judged now, before `run`: how long git takes must not age a
         // modified time that was still inside the settle window when taken.
-        let settled = identity.as_ref().is_some_and(Identity::settled);
+        let now = self.now();
+        let settled = identity.as_ref().is_some_and(|id| id.settled_at(now));
         if let (Some(now), Some(seen)) = (&identity, &self.seen)
             && seen.settled
             && seen.identity == *now
@@ -267,19 +284,29 @@ mod tests {
         assert_eq!(runs.get(), 3);
     }
 
+    /// The clock [`branch_watch_judges_head_before_git_runs`] moves forward
+    /// while git is running.
+    static SKEW_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn skewed_now() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(SKEW_SECS.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     /// Whether `HEAD` was settled is judged when its identity was taken, not
-    /// after git has finished: a slow `run` must not make a young `HEAD`
-    /// look old.
+    /// after git has finished: time passing during a slow `run` must not make
+    /// a young `HEAD` look old. The clock jumps past the settle window inside
+    /// `run` while `HEAD` itself stays untouched, so the second read sees the
+    /// same identity and only the settled flag decides whether git runs
+    /// again. Judged after `run`, it was recorded as settled and git did not.
     #[test]
     fn branch_watch_judges_head_before_git_runs() {
         let dir = scratch("watch-slow-git");
         let head = dir.join("HEAD");
         std::fs::write(&head, "ref: refs/heads/one\n").unwrap();
-        unsettle(&head);
-        let mut watch = BranchWatch::with_head(head.clone());
+        let mut watch = BranchWatch::with_head(head);
+        watch.clock = Some(skewed_now);
         watch.read(&dir, || {
-            // Git "takes long enough" that the file now reads as old.
-            age(&head);
+            SKEW_SECS.store(10, std::sync::atomic::Ordering::SeqCst);
             Ok("one".to_string())
         });
         let runs = Cell::new(0);
@@ -287,6 +314,7 @@ mod tests {
             runs.set(runs.get() + 1);
             Ok("one".to_string())
         });
+        SKEW_SECS.store(0, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(runs.get(), 1, "the young HEAD must be asked about again");
     }
 
