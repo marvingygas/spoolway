@@ -5899,10 +5899,9 @@ fn run_screen_from(
                 // unticked, and the tab under the question is held as it
                 // stands while it does — the `issue tracking` progress popup
                 // is laid over that frame as each call starts and returns.
-                // Whatever was typed
-                // while the hook ran is thrown away once it returns: the
-                // result popup takes `enter` only once it is on screen, never
-                // an `enter` pressed while the hook was running.
+                // Whatever was typed while the hook ran is thrown away once it
+                // returns: the result popup takes `enter` only once it is on
+                // screen, never an `enter` pressed while the hook was running.
                 Key::Enter => {
                     let then = then.clone();
                     let tracking = Tracking::Open(checklist.ticked.clone());
@@ -6153,7 +6152,8 @@ fn resume(
 }
 
 /// The tab as it stood when the issue question was answered, with no popup
-/// on it — what the `issue tracking` progress popup is laid over while the hook runs.
+/// on it — what the `issue tracking` progress popup is laid over while the
+/// hook runs.
 /// Rendered once and owned, so drawing it again borrows nothing the submit
 /// itself is busy changing.
 struct Held {
