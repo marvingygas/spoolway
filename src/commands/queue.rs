@@ -4985,7 +4985,9 @@ impl<'a> PopupHook<'a> {
     /// The popup while the hook is still answering.
     fn panel(&self) -> Vec<String> {
         // `total` is zero only when the hook is never called, and then no
-        // panel is drawn; the guard keeps the division total anyway.
+        // panel is drawn; the guard keeps a zero total from dividing by
+        // zero. The clamp keeps `PROGRESS_BAR_CELLS - filled` below from
+        // underflowing if a row is ever counted twice.
         let filled = (self.finished * PROGRESS_BAR_CELLS)
             .checked_div(self.total)
             .unwrap_or(0)
@@ -23158,11 +23160,39 @@ depends_on: [search-old]
                 assert!(!frame.contains("created"), "{frame}");
             }
 
+            /// A task that already names its `ticket:` is `kept` without a
+            /// call, so it is no call returning: the bar stays empty until
+            /// the one task that reaches the hook is answered.
+            #[test]
+            fn a_kept_task_does_not_advance_the_bar() {
+                let (repo, _root_guard) = cart("issue-question-kept");
+                write_pending(
+                    &repo,
+                    "cart-empty-state",
+                    &task_text(
+                        "cart-empty-state",
+                        "group: cart
+group_description: the cart
+ticket: \"#9\"
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(hook_calls(&repo), ["cart-totals"]);
+                assert_eq!(
+                    running_popups(&drawn),
+                    [["", bar(0).as_str()], ["", bar(44).as_str()]],
+                    "{drawn}"
+                );
+            }
+
             /// A hook answering `slug=` with `key_in_names` on prefixes the
             /// names, as the shipped `github.sh` does on every batch — and
             /// the result is still the `queued` popup: no names-prefixed
-            /// note, the box held to the issue popups' width, and the last
-            /// `running hook` frame counting the last call.
+            /// note, the box held to the issue popups' width, and the
+            /// `issue tracking` bar filling one call's share as each call
+            /// returns, the epic row counting for nothing.
             #[test]
             fn a_slug_answer_keeps_the_result_to_the_queued_popup() {
                 let (mut repo, _root_guard) = cart("issue-question-slug");
