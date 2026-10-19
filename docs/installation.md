@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
+covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh", "src/memory.rs"]
 ---
 
 # Installation and setup
@@ -573,6 +573,16 @@ lists it as `would remove`.
 ### Linux
 
 The reference platform.
+
+On the glibc builds, spoolway limits glibc to four memory pools when it starts. It returns freed
+memory to the system after each of these:
+
+- An Eval load finishes.
+- The Eval tab replaces its table or is left.
+- The board or the queue screen finishes a reading that took 250 ms or more.
+
+After a large read, spoolway's resident memory falls back instead of staying at its peak. The musl
+build and macOS do not run these calls.
 
 ### macOS
 
