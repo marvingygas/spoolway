@@ -132,8 +132,7 @@ whole prompt, or any key `spoolway config contract` lists:
 - Otherwise, reach for the override layer by default:
   - a step's field: `spoolway pipeline override <name> --set <step>.<key>=<value>`
   - a whole prompt: `spoolway prompt override <name>`, then edit the fork
-  - a config key: `spoolway config override`, or set one key by hand in
-    `overrides/config.toml`
+  - a config key: set one key by hand in `overrides/config.toml`
 - Say which layer you wrote, every time, and offer to undo it: `spoolway
   override drop <target>`.
 
@@ -158,6 +157,8 @@ whole prompt, or any key `spoolway config contract` lists:
 **Repairing a project** — something is broken, refused or behind:
 
 - Read `spoolway doctor --json` and `spoolway pipeline check`.
+- A project that is behind: run `spoolway sync --dry-run` to see what it would
+  change, then `spoolway sync`.
 - Propose every fix in one list, each marked as keeping behaviour or
   changing it. Apply only what the person confirms.
 - Run both again and show what cleared.

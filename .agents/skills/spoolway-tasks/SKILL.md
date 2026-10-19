@@ -56,7 +56,7 @@ reading the file whole.
    carry on with what it now reports, without asking the person first — say one line about it,
    `Installed the two shipped pipelines; routing against them.`, ahead of the ballot in step 2.
 
-2. **Settle the groups first, as one printed ballot, before anything is sized.**
+2. **Settle the groups first, as one ballot, before anything is sized.**
 
    **A group is always one chain**, so work that would not chain goes in a group of its own
    instead of a fan inside one. Cut groups so that no two of them touch the same files: two
@@ -104,8 +104,8 @@ reading the file whole.
    pipelines here. The one-group section draws the same layout, with every subject and every
    area under its single group.
 
-   **Print the ballot and end the turn there**, the same way the task ballot below does. The
-   answer arrives as the person's next prompt.
+   **Ask it through request_user_input**, the same way the task ballot below does. That tool
+   has no preview field, so put this layout in the question text.
 
    **Then, for each group, in dependency order, route each subject inside it to a pipeline and
    decompose against that pipeline's own shape.** Read the pipelines before choosing task
@@ -139,7 +139,7 @@ reading the file whole.
    for the shape at hand, judged by subject first and size second, with each task's criteria
    kept under five bullets or split again.
 
-   **Offer this group's shape, as one printed ballot.** Settle on a recommended count first,
+   **Offer this group's shape, with one request_user_input.** Settle on a recommended count first,
    then put **that count and the three below it** on the ballot, floored at 1 — a
    recommendation of 6 names 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3, floored
    rather than padded back up to four. Open with the line that names every member and the
@@ -147,9 +147,9 @@ reading the file whole.
    section, largest first, the recommended one marked as such, and say that the person answers
    with a letter.
 
-   **Print the ballot and end the turn there.** Do not reach for a dialog tool: codex has none
-   outside plan mode, and a ballot half-asked is worse than one printed whole. The answer
-   arrives as the person's next prompt, so do not go on to write anything until it does.
+   **Ask the ballot through request_user_input.** That tool has no preview field, so the
+   layout below goes in the question text and each count is an option. Do not go on to write
+   anything until the person has answered.
 
    **Every candidate is written in this one layout, and never in another:**
 
@@ -200,8 +200,8 @@ reading the file whole.
    branch is taken as written. A `#<n>` is resolved with `gh pr view <n> --json
    headRefName,state,isCrossRepository`, and its `headRefName` is the base.
 
-   Then print the ballot once more, with the resolved bases drawn, and end the turn there
-   again. Open it with the notes line, `notes: 1 from #412, cart-empty from main`, and draw
+   Then ask the ballot once more through request_user_input, with the resolved bases drawn in
+   the question text. Open it with the notes line, `notes: 1 from #412, cart-empty from main`, and draw
    each task on its one row, with every chain's `base` line under its first task and no
    sentences:
 
@@ -264,6 +264,14 @@ reading the file whole.
    - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
      plan's own words, or the source issue's own labels when this breakdown started at one.
      Dropped for a task that proposed none.
+   - `group_description` — the group's own words for the issue a mirror opens above it. Required
+     on one task per group when `issue_tracking.hook` is set. Otherwise left off.
+   - `starts_from` — the branch this task's worktree is cut from, when it is not the default.
+     Set it only when a dependency's branch no longer exists. Never invented here.
+   - `gate_at` — a step id to pause the task on once it passes. Set it only when the person
+     asked for that pause.
+   - `complexity` — a whole number from 1 to 100, 100 being extremely complex. Judge it against
+     the other tasks in the same cut. Set it on every task, once, and never revise it.
 
    **Link a source; never redraw it.** Whatever the shape came from as a file — the calling
    page, a screenshot, anything the person named or pasted — is linked from the task, never
@@ -310,13 +318,16 @@ reading the file whole.
    loud to the caller if you judged them safe beside each other on a shared file, and never
    tell them something downstream will check it; do not invent a section for it.
 
+   **Then check the ends of each group's chain.** Its first task should carry the step marked
+   `first_of_chain` in step 1's contract, if the pipeline has one.
+
    **Then check each group's own last task carries a `last:` step.** A group's last task —
    the one nothing else in its own group depends on — is the task whose run of the
-   pipeline reaches a step marked `last-of-chain` in step 1's contract. When that task's own
+   pipeline reaches a step marked `last_of_chain` in step 1's contract. When that task's own
    routed pipeline carries none, the step still runs, but on the nearest task below it whose
    pipeline has one, so it checks a stack without the tasks above it. If the whole stack should
    pass it, re-route that last task to the first pipeline from step 1's gathering that carries a
-   `last-of-chain` step — there is no project default to prefer over the rest — and say the swap
+   `last_of_chain` step — there is no project default to prefer over the rest — and say the swap
    out loud to the caller instead of just writing a different `pipeline:` into its task.
 
 5. **Prove the tasks.** `spoolway task contract --from <home>/pending` —

@@ -22,15 +22,19 @@ or both.
 - Read `## Status Log`, `## Handoff` and `## Blocker` — the three fixed sections a lane writes to
   in every archived task — and follow the sequence of events. Work out why review sent work
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
-- Collect every `Follow-up:` and `Sibling:` line lanes left in a Handoff. Each is a defect a lane
-  saw outside its task; one that no later task fixed is a finding of its own.
 - Read `spoolway eval --by step --per-task --since <window>`. Check pass rates, block counts,
-  context pressure (the `CTX AVG` column), tokens per task, cost and time. Use `--step` to inspect
+  context pressure (the `CTX AVG` column), turns, tokens per task, cost and time. Use `--step` to inspect
   a troubled step and `spoolway eval --by task --since <window>` to connect its figures to task
   records. Read a single task's peak context as `CTX PEAK` there. Use
-  figures where they help; do not make them a gate for findings. `eval` has no rows for command
-  steps, and BLOCKS counts lane blocks only: count gate and suite failures and arrivals at
-  `blocked` from each archived task's `steps:` edges and Status Log.
+  figures where they help; do not make them a gate for findings. Its "Command steps" table
+  counts gate and suite runs. BLOCKS counts lane blocks only.
+- Read where the tokens went, for every step that costs the most:
+  - Turns and context: cache reads grow with TURNS/TASK times CTX AVG. Name which of the two moved.
+  - Across changes: `spoolway eval --by version --step <step> --per-task`.
+  - Inside one version: `spoolway eval --by task --sort when:asc --per-task`.
+  - Per complexity point, where tasks carry `complexity`: a task far above its neighbours' cost
+    per point is a finding, even when it passed.
+- For a lane that went wrong, read `spoolway prompt contract --task <id>` to see what it was handed.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
 - Read every skill named in `skills:` on a step those runs passed through. A skill lives in the
