@@ -382,11 +382,6 @@ pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("html"))
-        .filter(|path| {
-            !path
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-        })
         .collect();
     let since = plans_since(repo, !pages.is_empty());
     if pages.is_empty() {
@@ -1891,6 +1886,7 @@ mod tests {
                 "2026-01-04-archived.html",
                 "2026-01-05-new.html",
                 "undated.html",
+                ".draft.html",
                 "2026-01-06-notes.txt",
             ],
         );
@@ -1907,7 +1903,7 @@ mod tests {
         std::fs::write(repo.queue_dir().join("q.md"), task("q", pages[2].as_str())).unwrap();
         archive(&repo, "a", &format!("group: g\nplan: {}\n", pages[3]));
 
-        assert_eq!(names(&repo), ["undated", "new", "old"]);
+        assert_eq!(names(&repo), [".draft", "undated", "new", "old"]);
     }
 
     /// Only an exact path counts: a task naming another folder's page of the
