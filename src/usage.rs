@@ -1333,6 +1333,54 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
     last
 }
 
+/// Declares a process-wide memo: a `Mutex` around a map, read as
+/// `NAME.lock()`.
+///
+/// Under test every thread gets a map of its own behind the same `lock()`.
+/// The tests assert on what these memos hold, and a memo shared by the whole
+/// test process would let one test's reads fill or clear what another is
+/// looking at.
+macro_rules! process_memo {
+    ($(#[$doc:meta])* $name:ident, $map:ty) => {
+        $(#[$doc])*
+        #[cfg(not(test))]
+        static $name: Mutex<$map> = Mutex::new(BTreeMap::new());
+        $(#[$doc])*
+        #[cfg(test)]
+        static $name: PerThreadMemo<$map> = PerThreadMemo::new();
+    };
+}
+
+/// [`process_memo!`]'s stand-in under test: one leaked map per thread, so a
+/// guard can borrow `'static` like the real memo's does.
+#[cfg(test)]
+struct PerThreadMemo<M: 'static>(Mutex<Vec<(std::thread::ThreadId, &'static Mutex<M>)>>);
+
+#[cfg(test)]
+impl<M: Default + 'static> PerThreadMemo<M> {
+    const fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, M>> {
+        let me = std::thread::current().id();
+        let mut threads = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mine = match threads.iter().find(|(id, _)| *id == me) {
+            Some((_, memo)) => *memo,
+            None => {
+                let memo: &'static Mutex<M> = Box::leak(Box::new(Mutex::new(M::default())));
+                threads.push((me, memo));
+                memo
+            }
+        };
+        drop(threads);
+        mine.lock()
+    }
+}
+
 /// The whole lines of `path` from byte `offset` on, and how many bytes they
 /// took.
 ///
@@ -1367,8 +1415,9 @@ struct TailRead {
     announced: String,
 }
 
+process_memo!(
 /// The reading of each transcript so far, by agent kind and path.
-static TAIL_READS: Mutex<BTreeMap<(String, PathBuf), TailRead>> = Mutex::new(BTreeMap::new());
+    TAIL_READS, BTreeMap<(String, PathBuf), TailRead>);
 
 /// What a file looked like when it was last read.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -1823,9 +1872,10 @@ struct Transcript {
 /// The totals of one transcript, deduped by request, with its cost summed
 /// turn by turn against `prices` — the project's `[models]` table.
 ///
-/// A transcript read before is not read again from its start: the fold over
-/// its lines so far is kept in [`TRANSCRIPT_FOLDS`], and only the whole lines
-/// appended since are fed to it. A file that shrank or was replaced, or a
+/// A transcript written within [`KEEP_FOLD_FOR`] is not read again from its
+/// start: the fold over its lines so far is kept in [`TRANSCRIPT_FOLDS`], and
+/// only the whole lines appended since are fed to it. A quieter one is read
+/// whole each time it is read. A file that shrank or was replaced, or a
 /// `prices` table that changed, starts the fold over, since either makes the
 /// kept totals describe something else. So does a model that now resolves to
 /// another price, which is what `spoolway models refresh` mid-lane does to a
@@ -1911,12 +1961,13 @@ struct KeptFold {
     fold: TranscriptFold,
 }
 
+process_memo!(
 /// The fold of each recently written transcript read so far by
 /// [`read_transcript`], by agent kind and path.
 ///
 /// Each holds the transcript's request-id set, so it is the size of the
 /// transcript's turn count rather than of a path and an offset.
-static TRANSCRIPT_FOLDS: Mutex<BTreeMap<(String, PathBuf), KeptFold>> = Mutex::new(BTreeMap::new());
+    TRANSCRIPT_FOLDS, BTreeMap<(String, PathBuf), KeptFold>);
 
 /// Everything [`read_transcript`] accumulates over a transcript's records, so
 /// that it can stop after any whole line and carry on from the next.
@@ -2504,14 +2555,14 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
     Some(path)
 }
 
+process_memo!(
 /// Where [`session_file_in`] last found each session's transcript, by home,
 /// agent kind and session id.
 ///
 /// Finding a transcript walks every session an agent has ever written, which
 /// on a machine with a long Claude history is thousands of files. The
 /// dispatcher asks about every lane every pass, so the answer is remembered.
-static FOUND_TRANSCRIPTS: Mutex<BTreeMap<(PathBuf, String, String), PathBuf>> =
-    Mutex::new(BTreeMap::new());
+    FOUND_TRANSCRIPTS, BTreeMap<(PathBuf, String, String), PathBuf>);
 
 /// How many remembered transcript paths and read positions are kept before
 /// the memory is dropped and rebuilt from the lanes still asking.
