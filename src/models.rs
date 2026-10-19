@@ -21,6 +21,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -474,17 +475,19 @@ struct FileStamp {
     mode: u32,
 }
 
-/// The stamp of `path`, and whether it is old enough to vouch for the bytes
-/// behind it — a file written within [`crate::watch::SETTLE`] may be written
-/// again inside the same modified-time tick with the same length.
-fn file_stamp(path: &Path) -> Option<(FileStamp, bool)> {
+/// The stamp of `path`, and whether it is settled as of `now`: old enough to
+/// vouch for the bytes behind it. A file written within
+/// [`crate::watch::SETTLE`] may be written again inside the same modified-time
+/// tick with the same length. A modified time ahead of `now` is not settled
+/// either, since the file can be rewritten at that same time later.
+fn file_stamp(path: &Path, now: SystemTime) -> Option<(FileStamp, bool)> {
     let meta = fs::metadata(path).ok()?;
     #[cfg(unix)]
     let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
     #[cfg(not(unix))]
     let mode = 0;
     let identity = crate::watch::Identity::from_metadata(&meta);
-    let settled = !identity.written_within(crate::watch::SETTLE);
+    let settled = identity.settled_at(now);
     Some((FileStamp { identity, mode }, settled))
 }
 
@@ -500,8 +503,14 @@ fn file_stamp(path: &Path) -> Option<(FileStamp, bool)> {
 /// is why the mode is part of the stamp. Comparing bytes still avoids
 /// reparsing a table that was rewritten with the same contents.
 fn refreshed_file() -> Option<Arc<BuiltinFile>> {
+    refreshed_file_at(SystemTime::now())
+}
+
+/// [`refreshed_file`] judging how settled the file is against `now`, so a
+/// test can place the clock either side of the file's modified time.
+fn refreshed_file_at(now: SystemTime) -> Option<Arc<BuiltinFile>> {
     let path = crate::mux::home().join(".spoolway/model-prices.json");
-    let (stamp, settled) = file_stamp(&path)?;
+    let (stamp, settled) = file_stamp(&path, now)?;
 
     // One slot per path, so a caller that points `HOME` elsewhere (every test
     // does) never evicts the table another is holding.
@@ -1780,40 +1789,68 @@ mod tests {
         });
     }
 
+    /// Rewrite the fixture table in place with `input` as the one price and
+    /// put its modified time back to `at`, so the stat looks as it did before
+    /// the rewrite: same length, same time.
+    fn rewrite_in_place(home: &std::path::Path, input: f64, at: SystemTime) {
+        write_refreshed(
+            home,
+            serde_json::json!({ "claude-opus-5": { "input": input } }),
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(home.join(".spoolway/model-prices.json"))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn cached_input(now: SystemTime) -> f64 {
+        refreshed_file_at(now).unwrap().models["claude-opus-5"].input
+    }
+
     /// A stat taken while the file was still young cannot vouch for it once
     /// the file has aged: a rewrite of the same length inside one
     /// modified-time tick looks identical, and the cache must read it anyway.
     #[test]
     fn a_stat_cached_while_the_file_was_young_is_not_trusted_once_it_ages() {
         let home = fixture_home("models-refreshed-young-stat");
-        let path = home.join(".spoolway/model-prices.json");
-        write_refreshed(
-            &home,
-            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
-        );
-        let written = fs::metadata(&path).unwrap().modified().unwrap();
+        let written = SystemTime::now();
+        rewrite_in_place(&home, 2.0, written);
 
         crate::platform::test_home::with_home(&home, || {
-            let input = || {
-                resolve(&BTreeMap::new(), "claude-opus-5")
-                    .price
-                    .unwrap()
-                    .input
-            };
-            assert_eq!(input(), 2.0);
+            let young = written + crate::watch::SETTLE / 2;
+            assert_eq!(cached_input(young), 2.0);
 
-            write_refreshed(
-                &home,
-                serde_json::json!({ "claude-opus-5": { "input": 3.0 } }),
+            rewrite_in_place(&home, 3.0, written);
+            let aged = written + crate::watch::SETTLE * 10;
+            assert_eq!(
+                cached_input(aged),
+                3.0,
+                "a young stamp vouched for an aged file"
             );
-            fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(written)
-                .unwrap();
-            std::thread::sleep(crate::watch::SETTLE + std::time::Duration::from_millis(100));
-            assert_eq!(input(), 3.0, "a young stamp vouched for an aged file");
+        });
+    }
+
+    /// A modified time ahead of the clock (skew, a copied file) is not
+    /// settled: the file can be rewritten at that same time later, so the
+    /// cache must keep reading it rather than trust the stamp.
+    #[test]
+    fn a_stat_with_a_modified_time_in_the_future_is_not_trusted() {
+        let home = fixture_home("models-refreshed-future-stat");
+        let written = SystemTime::now() + std::time::Duration::from_secs(3600);
+        rewrite_in_place(&home, 2.0, written);
+
+        crate::platform::test_home::with_home(&home, || {
+            let now = SystemTime::now();
+            assert_eq!(cached_input(now), 2.0);
+
+            rewrite_in_place(&home, 3.0, written);
+            assert_eq!(
+                cached_input(now),
+                3.0,
+                "a future stamp vouched for the file"
+            );
         });
     }
 

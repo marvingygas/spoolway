@@ -67,7 +67,7 @@ impl Identity {
 
     /// [`Identity::settled`] as of `now`, so a caller that holds a clock of
     /// its own can judge against it.
-    fn settled_at(&self, now: SystemTime) -> bool {
+    pub(crate) fn settled_at(&self, now: SystemTime) -> bool {
         self.modified
             .is_some_and(|at| now.duration_since(at).is_ok_and(|age| age >= SETTLE))
     }

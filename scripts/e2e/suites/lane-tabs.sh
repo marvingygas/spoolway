@@ -346,13 +346,25 @@ DYING_PANE=$(agent_panes_of dies | head -n 1)
 awk -F'\t' -v p="$DYING_PANE" '$2 != p' "$HSTATE/agents" > "$HSTATE/agents.tmp" \
   && mv "$HSTATE/agents.tmp" "$HSTATE/agents"
 is_blocked() { [ "$(stage_of dies)" = blocked ]; }
+# What a person abandoning the blocked task by hand would do: its checkout and
+# branch go back through git, and the task file leaves the queue. Its lane has
+# no process to kill, since the stub's agents are registrations, so this is
+# not the headless suites' `forget`. Left in place, the task would sit blocked
+# in the queue through every section after this one.
+forget_task() { # task
+  local wt; wt=$(worktree_of "$1")
+  [ -n "$wt" ] && git worktree remove --force "$wt" 2>/dev/null
+  git branch -D "task/$1" 2>/dev/null
+  rm -f "$SPOOLWAY_PROJECT_HOME/queue/$1.md"
+  true
+}
 if [ -n "$DYING_PANE" ] && poll_until 60 is_blocked; then
   ok "a lane whose agent vanished is found on a later pass, and its task blocked"
 else
   bad "a lane whose agent vanished is found on a later pass, and its task blocked (was $DYING_PANE, stage $(stage_of dies))"
   sed 's/^/        /' "$HSTATE/agents"
 fi
-forget dies
+forget_task dies
 
 # ------------------------------------------------------ with a limit of 1
 # One tab at a time. The new tab opens before the old one closes, so the
