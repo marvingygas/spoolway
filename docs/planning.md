@@ -130,6 +130,27 @@ Bare `spoolway` opens the screen, on the queue tab. The left pane, titled `group
 row per group in the pending directory. The right pane, titled `tasks`, lists the highlighted
 group's tasks and what each waits on.
 
+A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
+forgotten. A page counts as named once any pending, queued or archived task points at it in
+`plan:`. Plan rows sit right under the queueable groups, newest first, and above the done
+groups. A plan row shows only its name, without the date in front of it, with no checkbox and
+no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-tasks`:
+
+```
+╭─ groups ───────────────┬─ tasks ────────────────────────────────────────────╮
+│   [ ] checkout         │                                                    │
+│   [ ] cart             │   Use /spoolway-tasks                              │
+│ >     search           │                                                    │
+│       onboarding       │                                                    │
+╰────────────────────────┴────────────────────────────────────────────────────╯
+```
+
+`space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
+name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
+instead. Only pages written after the project first listed plans are shown. That moment is
+kept in `~/.spoolway/<label>-<id>/plans-since`, so plans from before the upgrade stay off the
+screen.
+
 | Key | What it does |
 |---|---|
 | `tab` | Switch focus between the groups and tasks panes. |

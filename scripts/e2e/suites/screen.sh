@@ -14,7 +14,8 @@
 # dispatcher will pick it up. `→` from the queue tab reaches the routines tab.
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
-# popup.
+# popup. A plan page no task names draws as a row of its own, and the tasks
+# pane beside it says `Use /spoolway-tasks`.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -390,6 +391,21 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the cursor is on the group that is left" "> [ ] checkout" "$LAST"
 lacks "the deleted group has left the list" "cart" "$LAST"
 lacks "with no popup over it" "[enter] confirm" "$LAST"
+
+# A plan page no task names gets a row of its own under the queueable
+# groups. The screen opened above over an empty `plans/`, so the stamp it
+# wrote then lets every later page through. `↓` moves onto the plan row, and
+# the tasks pane beside it names only the skill that cuts it.
+PLAN_ROW="$LIVE/plan-row.txt"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/plans"
+echo '<html></html>' >"$SPOOLWAY_PROJECT_HOME/plans/2026-10-21-search.html"
+on_screen '\x1b[B' "$PLAN_ROW"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$PLAN_ROW" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the queueable group keeps its checkbox" "[ ] checkout" "$LAST"
+has "the plan row is drawn under it, by name, with no checkbox" "│ >     search " "$LAST"
+has "the tasks pane beside it says how to cut it" "│   Use /spoolway-tasks " "$LAST"
+lacks "with no task drawn for it" "Pipeline:" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
