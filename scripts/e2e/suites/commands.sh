@@ -1519,7 +1519,14 @@ mkdir -p "$SPOOLWAY_PROJECT_HOME/plans"
 echo "<html></html>" > "$PLAN_PAGE"
 says "group list prints a plan page no task names as a 0 open line" \
   "lonely-plan                   0 open — plan $PLAN_PAGE" "$SPOOLWAY" group list
-rm -f "$PLAN_PAGE"
+
+# A page a pending task names is already being cut, so it prints no line.
+NAMED_PAGE="$SPOOLWAY_PROJECT_HOME/plans/2099-01-02-named-plan.html"
+echo "<html></html>" > "$NAMED_PAGE"
+pending_doc names-a-plan "$BODY" "group: names-a-plan" "plan: $NAMED_PAGE"
+silent_about "a plan page a pending task names prints no line" \
+  "$NAMED_PAGE" "$SPOOLWAY" group list
+rm -f "$PLAN_PAGE" "$NAMED_PAGE" "$SPOOLWAY_PROJECT_HOME/pending/names-a-plan.md"
 
 works "the aged prompt went" test ! -e "$OLD_PROMPT"
 works "the aged queue entry did not — queue/ is never swept, whatever its age" \
