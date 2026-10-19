@@ -1622,13 +1622,16 @@ fn lanes_table(
     // width — see [`turns_width`] — has to be known before the header is.
     let turns_cell = |turns: u64, per_task: f64| match figures {
         Figures::Totals => turns.to_string(),
-        Figures::Average => format!("{per_task:.0}"),
+        // Rounded the way the token and time cells beside it are, half away
+        // from zero; `{:.0}` alone would round a tie to even.
+        Figures::Average => format!("{:.0}", per_task.round()),
     };
     let row_turns: Vec<String> = rows
         .iter()
         .map(|r| turns_cell(r.metrics.turns, r.metrics.turns_per_task()))
         .collect();
     let total_turns = turns_cell(total.turns, total.per_task(total.turns as f64));
+    // `TURNS` is the fourth figure column in either view, after `BLOCKS`.
     let turns_title = match figures {
         Figures::Totals => LANE_TOTAL_COLUMNS[3].0,
         Figures::Average => LANE_FIGURE_COLUMNS[3].0,
@@ -7678,6 +7681,155 @@ mod tests {
             "{:?}",
             table.total
         );
+    }
+
+    /// `TURNS` sums each row's turns, and the `Total` line sums every row's;
+    /// per task it is that sum over the row's tasks, the way `BLOCKS/TASK`
+    /// is. Both exports carry the same figure under `turns` or
+    /// `turns_per_task`. Fails while eval draws and exports no turns at all.
+    #[test]
+    fn turns_sum_per_row_and_in_the_total_and_divide_by_tasks_per_task() {
+        let mut entries = vec![
+            lane("login", "implement", 1, Some("pass")),
+            lane("login", "review", 1, Some("pass")),
+            lane("logout", "implement", 1, Some("pass")),
+        ];
+        for (entry, turns) in entries.iter_mut().zip([10, 4, 7]) {
+            entry.turns = turns;
+        }
+        let rows = rows_by(&entries, EvalBy::Step);
+        let total = total_of(&entries);
+        let cell =
+            |line: &str, column: usize| line.split_whitespace().nth(column).map(String::from);
+
+        // PIPELINE, STEP, TASKS, PASS, BLOCKS, then TURNS.
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::Totals);
+        assert!(
+            table.header.contains("  BLOCKS  TURNS  CTX AVG"),
+            "{}",
+            table.header
+        );
+        assert_eq!(
+            cell(&table.rows[0], 5).as_deref(),
+            Some("17"),
+            "{}",
+            table.rows[0]
+        );
+        assert_eq!(
+            cell(&table.rows[1], 5).as_deref(),
+            Some("4"),
+            "{}",
+            table.rows[1]
+        );
+        // `Total`, TASKS, BLOCKS, then TURNS: `PASS` stays blank.
+        assert_eq!(
+            cell(&table.total, 3).as_deref(),
+            Some("21"),
+            "{}",
+            table.total
+        );
+
+        // 17 over two tasks is 8.5, drawn as 9 the way a token or time cell
+        // rounds a tie; 21 over the table's two tasks is 10.5, drawn as 11.
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::Average);
+        assert!(
+            table.header.contains("  BLOCKS/TASK  TURNS/TASK  CTX AVG"),
+            "{}",
+            table.header
+        );
+        assert_eq!(
+            cell(&table.rows[0], 5).as_deref(),
+            Some("9"),
+            "{}",
+            table.rows[0]
+        );
+        assert_eq!(
+            cell(&table.total, 3).as_deref(),
+            Some("11"),
+            "{}",
+            table.total
+        );
+
+        let totals = lanes_json(EvalBy::Step, Figures::Totals, &rows, &total);
+        assert_eq!(totals["rows"][0]["turns"], 17);
+        assert_eq!(totals["rows"][1]["turns"], 4);
+        assert_eq!(totals["total"]["turns"], 21);
+        let average = lanes_json(EvalBy::Step, Figures::Average, &rows, &total);
+        assert_eq!(average["rows"][0]["turns_per_task"], 8.5);
+        assert_eq!(average["total"]["turns_per_task"], 10.5);
+        assert!(average["rows"][0].get("turns").is_none(), "{average}");
+
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Totals, &rows, &total);
+        assert_eq!(csv_cell(&header, &lines[0], "turns"), "17");
+        assert_eq!(csv_cell(&header, &lines[2], "turns"), "21");
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Average, &rows, &total);
+        assert_eq!(csv_cell(&header, &lines[1], "turns_per_task"), "4");
+    }
+
+    /// `--sort turns` orders rows by their turn count as a number, and
+    /// `turns_per_task` by the per-task figure. Fails while `--sort` has no
+    /// such column.
+    #[test]
+    fn a_sort_on_turns_orders_the_rows_by_their_count() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("b", "implement", 1, Some("pass")),
+            lane("c", "implement", 1, Some("pass")),
+        ];
+        for (entry, (pipeline, turns)) in
+            entries
+                .iter_mut()
+                .zip([("few", 9), ("many", 120), ("some", 30)])
+        {
+            entry.pipeline = pipeline.into();
+            entry.turns = turns;
+        }
+        let mut rows = rows_by(&entries, EvalBy::Pipeline);
+        for (key, order) in [
+            ("turns", ["many", "some", "few"]),
+            ("turns:asc", ["few", "some", "many"]),
+            ("turns_per_task", ["many", "some", "few"]),
+        ] {
+            let sort = parse_sort(EvalBy::Pipeline, key).unwrap();
+            sort_lane_rows(EvalBy::Pipeline, &mut rows, &sort);
+            let names: Vec<&str> = rows.iter().map(|r| r.keys[0].as_str()).collect();
+            assert_eq!(names, order, "{key}");
+        }
+    }
+
+    /// A turn count wider than its title widens the `TURNS` column for every
+    /// line, so the header, each row and the `Total` line still end their
+    /// cell at the same place. Fails while the column is drawn at a fixed
+    /// width, which pushes only the wide row out of line.
+    #[test]
+    fn a_wide_turn_count_widens_the_turns_column_on_every_line() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("b", "implement", 1, Some("pass")),
+        ];
+        entries[0].pipeline = "wide".into();
+        entries[0].turns = 1_234_567;
+        entries[1].turns = 42;
+        let rows = rows_by(&entries, EvalBy::Pipeline);
+        let total = total_of(&entries);
+        let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
+        let end = |line: &str, cell: &str| line.find(cell).map(|i| i + cell.len());
+        let header_end = end(&table.header, "TURNS");
+        assert!(table.header.contains("BLOCKS    TURNS"), "{}", table.header);
+        let wide = rows.iter().position(|r| r.keys[0] == "wide").unwrap();
+        assert_eq!(
+            end(&table.rows[wide], "1234567"),
+            header_end,
+            "{}",
+            table.rows[wide]
+        );
+        assert_eq!(
+            end(&table.rows[1 - wide], "42"),
+            header_end,
+            "{}",
+            table.rows[1 - wide]
+        );
+        assert_eq!(end(&table.total, "1234609"), header_end, "{}", table.total);
     }
 
     #[test]
