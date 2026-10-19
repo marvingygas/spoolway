@@ -1817,7 +1817,9 @@ struct Transcript {
 /// its lines so far is kept in [`TRANSCRIPT_FOLDS`], and only the whole lines
 /// appended since are fed to it. A file that shrank or was replaced, or a
 /// `prices` table that changed, starts the fold over, since either makes the
-/// kept totals describe something else.
+/// kept totals describe something else. So does a model that now resolves to
+/// another price, which is what `spoolway models refresh` mid-lane does to a
+/// model with no `[models]` row.
 fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Transcript {
     let none = Transcript {
         total: None,
@@ -1838,7 +1840,11 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         .lock()
         .ok()
         .and_then(|mut folds| folds.remove(&key))
-        .filter(|kept| kept.identity.continues_as(&identity) && kept.prices == *prices);
+        .filter(|kept| {
+            kept.identity.continues_as(&identity)
+                && kept.prices == *prices
+                && kept.fold.prices_still_resolve(prices)
+        });
     let mut kept = kept.unwrap_or_else(|| KeptFold {
         identity: FileIdentity::default(),
         offset: 0,
@@ -1993,6 +1999,19 @@ impl TranscriptFold {
             Some(cost) => self.spent += cost,
             None => self.any_unpriced = true,
         }
+    }
+
+    /// Whether every model priced so far still resolves to the price it was
+    /// priced at.
+    ///
+    /// `models::resolve` reads the machine's refreshed price file on each call,
+    /// so a full read of the same transcript would price with a refresh made
+    /// since. The kept totals are only equal to that read while this holds; the
+    /// file is compared by bytes there, so asking once per model is cheap.
+    fn prices_still_resolve(&self, prices: &BTreeMap<String, ModelPrice>) -> bool {
+        self.resolved
+            .iter()
+            .all(|(model, price)| crate::models::resolve(prices, model).price == *price)
     }
 
     /// The reading so far; `None` while no assistant turn has been fed.
@@ -5861,6 +5880,51 @@ mod tests {
             3
         );
         assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 3000);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `spoolway models refresh` mid-lane reprices the models a transcript
+    /// already used, and the next read answers as a full read would.
+    #[test]
+    fn a_live_read_follows_a_price_refresh_made_between_reads() {
+        let session = "0198e2c0-5555-4000-8000-000000000009";
+        let home = home_with("claude", session, &claude_turn("r1", 1_000_000));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let write_price = |input: f64| {
+            let table = serde_json::json!({
+                "source": "fixture",
+                "license": "MIT",
+                "generated": "2026-09-09",
+                "models": { "claude-opus-5": { "input": input } },
+            });
+            std::fs::create_dir_all(home.join(".spoolway")).unwrap();
+            std::fs::write(
+                home.join(".spoolway/model-prices.json"),
+                serde_json::to_vec(&table).unwrap(),
+            )
+            .unwrap();
+        };
+        crate::platform::test_home::with_home(&home, || {
+            let none = BTreeMap::new();
+            write_price(2.0);
+            let before = read_transcript("claude", &path, &none).total.unwrap();
+
+            write_price(9.0);
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(claude_turn("r2", 1_000_000).as_bytes())
+                .unwrap();
+            drop(file);
+            let kept = read_transcript("claude", &path, &none).total.unwrap();
+
+            TRANSCRIPT_FOLDS.lock().unwrap().clear();
+            let full = read_transcript("claude", &path, &none).total.unwrap();
+            assert_eq!(kept.cost_usd, full.cost_usd);
+            assert_ne!(before.cost_usd, kept.cost_usd);
+        });
 
         std::fs::remove_dir_all(&home).ok();
     }
