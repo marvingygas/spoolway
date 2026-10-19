@@ -15,7 +15,7 @@
 //! [`refresh`] is the only network edge: it shells out to curl, distils the
 //! answer completely, and only then atomically replaces one of those tables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -452,10 +452,14 @@ fn builtin() -> &'static BTreeMap<String, ModelPrice> {
 }
 
 struct RefreshedCache {
-    path: std::path::PathBuf,
     /// What the file looked like when `file` was parsed from it; see
     /// [`file_stamp`].
     stamp: FileStamp,
+    /// Whether that stamp was old enough to vouch for the bytes. A stamp
+    /// taken while the file was younger cannot: a rewrite of the same length
+    /// inside one modified-time tick would leave it looking identical, even
+    /// once the file has since aged.
+    settled: bool,
     contents: Vec<u8>,
     file: Arc<BuiltinFile>,
 }
@@ -486,8 +490,9 @@ fn file_stamp(path: &Path) -> Option<(FileStamp, bool)> {
 
 /// The optional machine-wide table, parsed once per change of the file.
 ///
-/// A stat that matches the one taken when the table was parsed, on a file
-/// old enough to trust it, answers from the cache without reading the file:
+/// A stat that matches the one taken when the table was parsed, if that one
+/// was taken on a file old enough to trust, answers from the cache without
+/// reading the file:
 /// every lane of every pass asks, and the file is hundreds of kilobytes.
 /// Anything else reads first. That order is deliberate: permissions can make
 /// an otherwise unchanged file unreadable, and serving its cached row then
@@ -498,17 +503,18 @@ fn refreshed_file() -> Option<Arc<BuiltinFile>> {
     let path = crate::mux::home().join(".spoolway/model-prices.json");
     let (stamp, settled) = file_stamp(&path)?;
 
-    static CACHE: OnceLock<Mutex<Option<RefreshedCache>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    // One slot per path, so a caller that points `HOME` elsewhere (every test
+    // does) never evicts the table another is holding.
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, RefreshedCache>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let cached = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if settled
-        && cached
-            .as_ref()
-            .is_some_and(|cached| cached.path == path && cached.stamp == stamp)
+    if let Some(held) = cached.get(&path)
+        && held.settled
+        && held.stamp == stamp
     {
-        return Some(Arc::clone(&cached.as_ref()?.file));
+        return Some(Arc::clone(&held.file));
     }
     drop(cached);
 
@@ -517,25 +523,30 @@ fn refreshed_file() -> Option<Arc<BuiltinFile>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(held) = cached
-        .as_mut()
-        .filter(|held| held.path == path && held.contents == contents)
+        .get_mut(&path)
+        .filter(|held| held.contents == contents)
     {
         // Same bytes under a new stat (a `touch`, a permission change back):
         // keep the parse, and remember the stat so the next call skips the read.
         held.stamp = stamp;
+        held.settled = settled;
         return Some(Arc::clone(&held.file));
     }
     drop(cached);
 
     let file = Arc::new(serde_json::from_slice::<BuiltinFile>(&contents).ok()?);
-    *cache
+    cache
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RefreshedCache {
-        path,
-        stamp,
-        contents,
-        file: Arc::clone(&file),
-    });
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path,
+            RefreshedCache {
+                stamp,
+                settled,
+                contents,
+                file: Arc::clone(&file),
+            },
+        );
     Some(file)
 }
 
@@ -1704,6 +1715,14 @@ mod tests {
             serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
         );
         let path = home.join(".spoolway/model-prices.json");
+        // Old enough to be served from the stat alone. A file written this
+        // second is read on every call, which would pass without the mode.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
 
         crate::platform::test_home::with_home(&home, || {
             assert_eq!(
@@ -1758,6 +1777,43 @@ mod tests {
 
             set_mtime(long_ago + std::time::Duration::from_secs(5));
             assert_eq!(input(), 3.0, "a moved modified time reads the file");
+        });
+    }
+
+    /// A stat taken while the file was still young cannot vouch for it once
+    /// the file has aged: a rewrite of the same length inside one
+    /// modified-time tick looks identical, and the cache must read it anyway.
+    #[test]
+    fn a_stat_cached_while_the_file_was_young_is_not_trusted_once_it_ages() {
+        let home = fixture_home("models-refreshed-young-stat");
+        let path = home.join(".spoolway/model-prices.json");
+        write_refreshed(
+            &home,
+            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
+        );
+        let written = fs::metadata(&path).unwrap().modified().unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let input = || {
+                resolve(&BTreeMap::new(), "claude-opus-5")
+                    .price
+                    .unwrap()
+                    .input
+            };
+            assert_eq!(input(), 2.0);
+
+            write_refreshed(
+                &home,
+                serde_json::json!({ "claude-opus-5": { "input": 3.0 } }),
+            );
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(written)
+                .unwrap();
+            std::thread::sleep(crate::watch::SETTLE + std::time::Duration::from_millis(100));
+            assert_eq!(input(), 3.0, "a young stamp vouched for an aged file");
         });
     }
 
