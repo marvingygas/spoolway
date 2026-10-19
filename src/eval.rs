@@ -1919,11 +1919,13 @@ impl ExportCell {
         }
     }
 
-    /// An average of tokens or seconds: rounded to a whole one in CSV, the
-    /// unrounded figure in JSON.
+    /// An average of turns, tokens or seconds: rounded to a whole one in CSV,
+    /// the unrounded figure in JSON. Rounded half away from zero, as the drawn
+    /// cell beside it is, so a tie reads the same on screen and in the file;
+    /// `{:.0}` alone would round `6.5` to `6` where the table draws `7`.
     fn whole(v: Option<f64>) -> ExportCell {
         ExportCell {
-            csv: v.map_or(String::new(), |v| format!("{v:.0}")),
+            csv: v.map_or(String::new(), |v| format!("{:.0}", v.round())),
             json: v.into(),
         }
     }
@@ -7685,8 +7687,10 @@ mod tests {
 
     /// `TURNS` sums each row's turns, and the `Total` line sums every row's;
     /// per task it is that sum over the row's tasks, the way `BLOCKS/TASK`
-    /// is. Both exports carry the same figure under `turns` or
-    /// `turns_per_task`. Fails while eval draws and exports no turns at all.
+    /// is. `--json` carries the figure under `turns` or `turns_per_task`, and
+    /// `--csv` the figure the table draws, a tie rounded the same way. Fails
+    /// while eval draws and exports no turns at all, and the CSV half while it
+    /// rounded `8.5` to even.
     #[test]
     fn turns_sum_per_row_and_in_the_total_and_divide_by_tasks_per_task() {
         let mut entries = vec![
@@ -7763,7 +7767,9 @@ mod tests {
         assert_eq!(csv_cell(&header, &lines[0], "turns"), "17");
         assert_eq!(csv_cell(&header, &lines[2], "turns"), "21");
         let (header, lines) = lanes_csv(EvalBy::Step, Figures::Average, &rows, &total);
+        assert_eq!(csv_cell(&header, &lines[0], "turns_per_task"), "9");
         assert_eq!(csv_cell(&header, &lines[1], "turns_per_task"), "4");
+        assert_eq!(csv_cell(&header, &lines[2], "turns_per_task"), "11");
     }
 
     /// `--sort turns` orders rows by their turn count as a number, and
