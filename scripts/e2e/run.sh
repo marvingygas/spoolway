@@ -148,7 +148,7 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               it spends nothing.
 smoke_suites=(flow)
 pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-tabs lane-names lane-orphans)
-nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-tabs lane-names lane-orphans faults)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes lane-tabs lane-names lane-orphans faults footprint)
 cloud_suites=(warmth)
 live_suites=(live)
 
