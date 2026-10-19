@@ -323,28 +323,37 @@ measure large
 # large history is still open, on the queue tab; Eval is three tabs to its
 # right.
 eval_back_mb=""
+eval_stuck=""
+frames_before=$(screen_frames)
 screen_press $'\x1b[C'   # routines
 screen_press $'\x1b[C'   # jobs
 screen_press $'\x1b[C'   # eval
 # Left only once the load is over. Leaving mid-load would trim while the load
 # thread still holds its memory, and the check would then fail at random on a
-# slow runner. The popup is waited for first, briefly, so a frame drawn before
-# Eval began is not mistaken for a finished load; a load too quick to be seen
-# has finished by the time it is asked about.
+# slow runner. Each tab change draws a frame, so three new frames mean Eval has
+# opened, however slowly the presses were read; only then is the load asked
+# about. Its popup is waited for briefly, since a load too quick to be seen has
+# finished by the time it is asked about.
 eval_loading() { screen_last_frame | grep -qa 'Loading…'; }
-poll_until 3 eval_loading
-if ! poll_while 120 eval_loading; then
-  printf '  \033[31mSETUP\033[0m the Eval tab was still loading after 120 s\n' >&2
-  exit 2
-fi
-screen_press $'\x1b[D'   # back to jobs
+eval_opened() { [ "$(screen_frames)" -ge $((frames_before + 3)) ]; }
 settled=0
-for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
-  kb=$(now_kb "$E2E_SCREEN_PID")
-  eval_back_mb=$(mb "${kb:-0}")
-  if [ "${kb:-0}" -le $((UI_LIMIT_MB * 1024)) ]; then settled=1; break; fi
-  sleep 0.1
-done
+if ! poll_until 60 eval_opened; then
+  eval_stuck="the Eval tab never opened"
+else
+  poll_until 3 eval_loading
+  poll_while 120 eval_loading || eval_stuck="still loading after 120 s"
+fi
+# A load that never ends is an Eval that holds its memory for good, so it fails
+# the Eval check below rather than ending the suite before any verdict prints.
+if [ -z "$eval_stuck" ]; then
+  screen_press $'\x1b[D'   # back to jobs
+  for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
+    kb=$(now_kb "$E2E_SCREEN_PID")
+    eval_back_mb=$(mb "${kb:-0}")
+    if [ "${kb:-0}" -le $((UI_LIMIT_MB * 1024)) ]; then settled=1; break; fi
+    sleep 0.1
+  done
+fi
 
 # ------------------------------------------------------------ the verdicts
 check_under() { # label peak-kb limit-mb formula
@@ -432,8 +441,12 @@ eval_what="UI back under $UI_LIMIT_MB MB within $EVAL_SETTLE_S s of leaving Eval
 if [ "$settled" -eq 1 ]; then
   ok "$eval_what"
 else
-  bad "$eval_what: still $eval_back_mb MB after $EVAL_SETTLE_S s"
-  hint eval-settle "Memory from the Eval tab was not given back. Large reads should happen
+  if [ -n "$eval_stuck" ]; then
+    bad "$eval_what: $eval_stuck"
+  else
+    bad "$eval_what: still $eval_back_mb MB after $EVAL_SETTLE_S s"
+  fi
+  hint eval-settle "The Eval tab did not finish loading, or its memory was not given back. Large reads should happen
 on a background thread whose memory is returned to the system when the load
 ends. This check has no number to raise except EVAL_SETTLE_S, and a longer
 wait only hides the leak."
