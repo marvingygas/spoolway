@@ -689,28 +689,35 @@ fn dispatch_tab(
                 out,
             );
         }
-        let mut ticked = Instant::now();
-        let Some(key) = wait_key_every(input, READING_LANDED_POLL, || {
-            if ticked.elapsed() >= crate::status::POLL {
-                // The idle tick, once a [`crate::status::POLL`] as it always
-                // was: notice a dispatcher child that ended, ask for a
-                // reading, and redraw, so a resize alone still repaints.
-                ticked = Instant::now();
-                tab.reap(repo);
-                board.wake_reader();
-            } else if !board.reading_landed() {
-                return;
-            }
-            draw_board_from_memory(
-                repo,
-                pipelines,
-                board,
-                tab,
-                crate::screen::pane_size(),
-                writer,
-                out,
-            )
-        }) else {
+        let ticked = std::cell::Cell::new(Instant::now());
+        let landed = board.landed_signal();
+        let Some(key) = wait_key_woken(
+            input,
+            landed.as_deref(),
+            || crate::status::POLL.saturating_sub(ticked.get().elapsed()),
+            || {
+                if ticked.get().elapsed() >= crate::status::POLL {
+                    // The idle tick, once a [`crate::status::POLL`] as it
+                    // always was: notice a dispatcher child that ended, ask
+                    // for a reading, and redraw, so a resize alone still
+                    // repaints.
+                    ticked.set(Instant::now());
+                    tab.reap(repo);
+                    board.wake_reader();
+                } else if !board.reading_landed() {
+                    return;
+                }
+                draw_board_from_memory(
+                    repo,
+                    pipelines,
+                    board,
+                    tab,
+                    crate::screen::pane_size(),
+                    writer,
+                    out,
+                )
+            },
+        ) else {
             return Ok(Leave::Quit);
         };
         // The board's own panel is drawn over the tab's popup — see
@@ -750,28 +757,29 @@ fn dispatch_tab(
 /// second would kill the process with the terminal still raw — the default
 /// action the handler hands back after one catch.
 pub(crate) fn wait_key(input: &mut impl PollableRead, idle: impl FnMut()) -> Option<Key> {
-    wait_key_every(input, crate::status::POLL, idle)
+    wait_key_woken(input, None, || crate::status::POLL, idle)
 }
 
-/// How often the dispatch tab looks between keys for a reading that has
-/// just landed, so a reading a key asked for is drawn when it lands rather
-/// than up to a whole [`crate::status::POLL`] later. Checking costs one
-/// uncontended lock and a pointer compare; a frame is painted only when a
-/// new reading is actually there.
-const READING_LANDED_POLL: Duration = Duration::from_millis(50);
-
-/// [`wait_key`], calling `idle` on every `slice` with nothing typed rather
-/// than on every [`crate::status::POLL`].
-fn wait_key_every(
+/// [`wait_key`], for a tab that also has a reading landing in the
+/// background: it waits until a key is typed, `wake` is signalled, or `next`
+/// says the tab's own tick is due, and calls `idle` after each of the last
+/// two. Nothing runs in between, so an idle tab sleeps instead of looking
+/// every few milliseconds for a reading that has not landed.
+///
+/// `next` is how long until the tab's own tick, so a signal that arrives
+/// partway does not push the tick later. The tick stays the upper bound on
+/// how long a landed reading can wait, should a signal be missed.
+fn wait_key_woken(
     input: &mut impl PollableRead,
-    slice: Duration,
+    wake: Option<&crate::screen::Wake>,
+    mut next: impl FnMut() -> Duration,
     mut idle: impl FnMut(),
 ) -> Option<Key> {
     loop {
         if crate::platform::stop::asked() {
             return None;
         }
-        if !cfg!(unix) || input.byte_pending(slice) {
+        if !cfg!(unix) || input.wait_pending(next(), wake) {
             return read_key(input);
         }
         idle();
@@ -2267,5 +2275,50 @@ mod tests {
             crate::repo::runs_under(&repo.root) > here,
             "the keys should have woken the reader into another reading"
         );
+    }
+
+    /// An input that reports no byte pending a fixed number of times, and
+    /// records how long each wait was asked to last.
+    struct Quiet {
+        waits: std::cell::RefCell<Vec<Duration>>,
+        quiet_for: usize,
+        keys: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for Quiet {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for Quiet {
+        fn byte_pending(&self, timeout: Duration) -> bool {
+            let mut waits = self.waits.borrow_mut();
+            waits.push(timeout);
+            waits.len() > self.quiet_for
+        }
+    }
+
+    /// An idle tab waits out the time to its own tick in one go and runs its
+    /// idle step once per wait, so a quiet second is one wakeup rather than a
+    /// run of short slices.
+    #[test]
+    fn wait_key_woken_sleeps_until_the_tick_not_in_short_slices() {
+        let mut input = Quiet {
+            waits: Default::default(),
+            quiet_for: 2,
+            keys: std::io::Cursor::new(b"q".to_vec()),
+        };
+        let mut idles = 0;
+        let key = wait_key_woken(
+            &mut input,
+            None,
+            || Duration::from_millis(900),
+            || idles += 1,
+        );
+
+        assert_eq!(key, Some(Key::Char('q')));
+        assert_eq!(idles, 2);
+        assert_eq!(*input.waits.borrow(), vec![Duration::from_millis(900); 3]);
     }
 }

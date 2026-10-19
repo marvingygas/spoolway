@@ -66,6 +66,7 @@ mod tracking;
 mod update;
 mod usage;
 mod version;
+mod watch;
 
 use std::path::PathBuf;
 

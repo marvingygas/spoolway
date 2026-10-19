@@ -552,6 +552,12 @@ impl Board {
         }
     }
 
+    /// The signal the board's reader sends when a reading lands, `None`
+    /// before the first hosted frame has started it.
+    pub(crate) fn landed_signal(&self) -> Option<Arc<crate::screen::Wake>> {
+        self.reader.as_ref().and_then(Reader::landed_signal)
+    }
+
     /// The board's [`Reader`], started on its first hosted frame rather than
     /// in a constructor, so a board whose own tests never host anything
     /// never pays for a thread. Starting it reads once on this thread — see
@@ -3399,6 +3405,10 @@ pub(crate) struct Reader<T> {
     /// How many readings have started and finished, and whether the last
     /// one to finish succeeded — see [`Readings`].
     readings: Arc<(Mutex<Readings>, std::sync::Condvar)>,
+    /// Signalled each time a reading lands, so a screen waiting on its
+    /// input can wake for it rather than look every few milliseconds. `None`
+    /// where no descriptor can be made.
+    landed_signal: Option<Arc<crate::screen::Wake>>,
 }
 
 /// The reader thread's own count of its readings, kept so
@@ -3456,6 +3466,8 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
             std::sync::Condvar::new(),
         ));
 
+        let landed_signal = crate::screen::Wake::new().map(Arc::new);
+        let thread_signal = landed_signal.clone();
         let thread_snapshot = Arc::clone(&snapshot);
         let thread_readings = Arc::clone(&readings);
         let handle = std::thread::spawn(move || {
@@ -3485,6 +3497,9 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
                     && let Ok(mut guard) = thread_snapshot.lock()
                 {
                     *guard = (Arc::new(fresh), generation);
+                    if let Some(signal) = &thread_signal {
+                        signal.notify();
+                    }
                 }
                 if let Ok(mut state) = state.lock() {
                     state.finished += 1;
@@ -3499,7 +3514,14 @@ impl<T: Send + Sync + Default + 'static> Reader<T> {
             handle: Some(handle),
             snapshot,
             readings,
+            landed_signal,
         }
+    }
+
+    /// The signal sent each time a reading lands — see
+    /// [`crate::screen::PollableRead::wait_pending`].
+    pub(crate) fn landed_signal(&self) -> Option<Arc<crate::screen::Wake>> {
+        self.landed_signal.clone()
     }
 
     /// Ask for one more reading. Never blocks, and a wake with a reading
@@ -6261,6 +6283,27 @@ mod tests {
         );
     }
 
+    /// The reader signals the screen waiting on its input each time a
+    /// reading lands, so the dispatch tab can sleep until it does.
+    #[cfg(unix)]
+    #[test]
+    fn a_landed_reading_signals_the_waiting_screen() {
+        let (repo, _root_guard) = fixture("reader-landed-reading-signals");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], None);
+
+        let mut board = Board::for_test();
+        assert!(board.landed_signal().is_none(), "no reader before a frame");
+        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        let signal = board.landed_signal().expect("a reader makes a signal");
+        let ready = |wait| crate::screen::poll_ready(&[signal.read_fd()], wait)[0];
+        assert!(!ready(Duration::ZERO), "the seed reading is not signalled");
+
+        board.wake_reader();
+        assert!(ready(Duration::from_secs(10)), "a landed reading signals");
+        signal.drain();
+        assert!(!ready(Duration::ZERO), "draining forgets the signal");
+    }
     /// [`Board::hosted_frame`] waits for a reading that started after it was
     /// called, so a task written just before it is always on the frame —
     /// even with keys having woken the reader into readings of their own.

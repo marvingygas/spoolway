@@ -60,6 +60,16 @@ const ESCAPE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50)
 pub(crate) trait PollableRead: std::io::Read {
     fn byte_pending(&self, timeout: std::time::Duration) -> bool;
 
+    /// [`PollableRead::byte_pending`], cut short when `wake` is signalled.
+    /// `true` only when a byte is pending; a signal alone returns `false`
+    /// early, with the signal drained, so the caller can look at whatever it
+    /// was signalled about and wait again. An in-memory reader has no
+    /// descriptor to poll beside its own and ignores `wake`.
+    fn wait_pending(&self, timeout: std::time::Duration, wake: Option<&Wake>) -> bool {
+        let _ = wake;
+        self.byte_pending(timeout)
+    }
+
     /// Throw away whatever was typed and not yet read — keys pressed while
     /// the screen was busy and could not answer them, which a person meant
     /// for a screen that was not yet drawn. An in-memory reader holds a
@@ -110,6 +120,16 @@ impl PollableRead for RawStdin {
         fd_has_byte_within(libc::STDIN_FILENO, timeout)
     }
 
+    #[cfg(unix)]
+    fn wait_pending(&self, timeout: std::time::Duration, wake: Option<&Wake>) -> bool {
+        let Some(wake) = wake else {
+            return self.byte_pending(timeout);
+        };
+        let ready = poll_ready(&[libc::STDIN_FILENO, wake.read_fd()], timeout);
+        wake.drain();
+        ready.first().copied().unwrap_or(false)
+    }
+
     fn discard_typed(&mut self) {
         // SAFETY: stdin's descriptor is open for the life of the process;
         // on anything but a terminal this fails harmlessly and discards
@@ -119,6 +139,95 @@ impl PollableRead for RawStdin {
             libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
         }
     }
+}
+
+/// A signal one thread sends another that is waiting in [`poll_ready`]: a
+/// pipe whose read end is polled beside stdin, written to by
+/// [`Wake::notify`].
+///
+/// The dispatch tab waits on this, rather than polling for a landed
+/// reading on a short timer. A signal is a hint, never the only way to learn: the tab
+/// still wakes once a [`crate::status::POLL`], so a missed signal costs at
+/// most that second.
+#[cfg(unix)]
+pub(crate) struct Wake {
+    read: std::os::unix::io::RawFd,
+    write: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+impl Wake {
+    /// `None` when the pipe cannot be made, which leaves the caller on its
+    /// plain timeout.
+    pub(crate) fn new() -> Option<Self> {
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a well-formed two-element buffer `pipe` fills in.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        for fd in fds {
+            // SAFETY: `fd` was just opened above and is still owned here.
+            // Non-blocking so neither a full pipe stalls `notify` nor an
+            // empty one stalls `drain`; close-on-exec so a lane's child
+            // process does not inherit them.
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        Some(Self {
+            read: fds[0],
+            write: fds[1],
+        })
+    }
+
+    /// The descriptor [`poll_ready`] watches.
+    pub(crate) fn read_fd(&self) -> std::os::unix::io::RawFd {
+        self.read
+    }
+
+    /// Signal the waiter. A full pipe already holds a signal, so a failed
+    /// write loses nothing.
+    pub(crate) fn notify(&self) {
+        // SAFETY: `write` is this value's own open descriptor and the buffer
+        // is one valid byte.
+        unsafe {
+            libc::write(self.write, [1u8].as_ptr().cast(), 1);
+        }
+    }
+
+    /// Forget every signal sent so far.
+    pub(crate) fn drain(&self) {
+        let mut buf = [0u8; 64];
+        // SAFETY: `read` is this value's own open descriptor and `buf` is
+        // valid for its length.
+        while unsafe { libc::read(self.read, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Wake {
+    fn drop(&mut self) {
+        // SAFETY: both descriptors belong to this value and are closed once.
+        unsafe {
+            libc::close(self.read);
+            libc::close(self.write);
+        }
+    }
+}
+
+/// The non-Unix half of [`Wake`]: nothing waits on a descriptor there, so
+/// [`Wake::new`] never returns one and the tab keeps its plain timeout.
+#[cfg(not(unix))]
+pub(crate) struct Wake;
+
+#[cfg(not(unix))]
+impl Wake {
+    pub(crate) fn new() -> Option<Self> {
+        None
+    }
+
+    pub(crate) fn notify(&self) {}
 }
 
 /// Whether `fd` has something for the next read to see within `timeout`,

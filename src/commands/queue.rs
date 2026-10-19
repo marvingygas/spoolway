@@ -6308,12 +6308,52 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
     // it guards that: `take` empties it on that first call, so every call
     // after it really does read.
     let mut initial = Some(initial);
+    let mut idle = IdleCheck::default();
     QueueReader::start(move || {
         if let Some(seed) = initial.take() {
             return Some(seed);
         }
-        build_queue_snapshot(&repo, &cwd)
+        idle.read(&repo, &cwd)
     })
+}
+
+/// What lets a reading of the queue tab be skipped when nothing it looks at
+/// has moved.
+///
+/// A reading looks at the pending, queue and archive directories, the files
+/// in the first two, and the checkout's `HEAD`. [`crate::watch::Stamp`]
+/// records all of them before each reading, and a tick whose stamp equals the
+/// last settled one returns `None` without starting a process, reading a
+/// file or building a snapshot. The reader keeps the snapshot it already
+/// holds when a reading is `None`, so [`refresh_from_reader`] sees no new
+/// generation and copies nothing.
+///
+/// A reading that fails also returns `None`, and keeps no stamp, so the next
+/// tick tries again rather than treating the failure as the current state.
+#[derive(Default)]
+struct IdleCheck {
+    stamp: Option<crate::watch::Stamp>,
+    branch: crate::watch::BranchWatch,
+}
+
+impl IdleCheck {
+    fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
+        let head: Vec<std::path::PathBuf> = self.branch.head_path(cwd).into_iter().collect();
+        let stamp = crate::watch::Stamp::capture(
+            &[repo.pending_dir(), repo.queue_dir()],
+            &[repo.archive_dir()],
+            &head,
+        );
+        if let Some(before) = &self.stamp
+            && stamp.unchanged_since(before)
+        {
+            return None;
+        }
+        self.stamp = None;
+        let snapshot = build_queue_snapshot(repo, cwd, &mut self.branch)?;
+        self.stamp = Some(stamp);
+        Some(snapshot)
+    }
 }
 
 /// [`super::pending::list_groups_and_skipped`] and
@@ -6322,10 +6362,14 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 /// handed back once. `None` when the pending directory itself cannot be
 /// read; a detached checkout reads as no branch rather than a reason to
 /// fail the whole reading, the same tolerance the inline `branch_at` call
-/// this replaces always gave.
-fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
+/// this replaces always gave. `watch` starts git only when `HEAD` moved.
+fn build_queue_snapshot(
+    repo: &Repo,
+    cwd: &std::path::Path,
+    watch: &mut crate::watch::BranchWatch,
+) -> Option<QueueSnapshot> {
     let (groups, unreadable) = super::pending::list_groups_and_skipped(repo).ok()?;
-    let branch = crate::repo::branch_at(cwd).ok();
+    let branch = watch.read(cwd, || crate::repo::branch_at(cwd));
     Some(QueueSnapshot {
         groups,
         branch,
@@ -13613,6 +13657,56 @@ mod tests {
         );
     }
 
+    /// Back-date a file or directory so a stamp counts it as settled.
+    fn age(path: &std::path::Path) {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+    }
+
+    /// With nothing changed, [`IdleCheck::read`] returns no reading, reads no
+    /// pending file and starts no `git`. Edited, it reads again, and
+    /// starts `git` only once `HEAD` has moved. Before [`IdleCheck`] every
+    /// reading read every file and started `git`.
+    #[test]
+    fn an_idle_reading_reads_no_file_and_starts_no_process() {
+        let (repo, _root_guard) = fixture("queue-idle-check");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: demo\n", BODY));
+        let mut idle = IdleCheck::default();
+        let git_runs = || crate::repo::runs_here_under(&repo.root);
+        let file_reads = || super::pending::pending_reads_here_under(&repo.pending_dir());
+        for dir in [repo.pending_dir(), repo.queue_dir(), repo.archive_dir()] {
+            age(&dir);
+        }
+        age(&path);
+        if let Some(head) = idle.branch.head_path(&repo.root) {
+            age(&head);
+        }
+
+        assert!(idle.read(&repo, &repo.root).is_some(), "the first reading");
+        let (runs, reads) = (git_runs(), file_reads());
+        assert!(reads > 0);
+
+        for _ in 0..3 {
+            assert!(idle.read(&repo, &repo.root).is_none(), "nothing changed");
+        }
+        assert_eq!(git_runs(), runs, "an idle reading must start no process");
+        assert_eq!(file_reads(), reads, "an idle reading must read no file");
+
+        std::fs::write(
+            &path,
+            task_text("wire", "group: demo\n", "A longer body.\n"),
+        )
+        .unwrap();
+        age(&path);
+        age(&repo.pending_dir());
+        let changed = idle.read(&repo, &repo.root);
+        assert!(changed.is_some(), "an edited file is read again");
+        assert!(file_reads() > reads);
+        assert_eq!(git_runs(), runs, "an edit to a task does not move HEAD");
+    }
+
     /// A file that breaks while the queue tab stays open is named when the
     /// reader lands it, once — not only on the next visit to the tab. Before,
     /// only the tab's opening message named such files, so a task written
@@ -13738,9 +13832,10 @@ mod tests {
         let (thread_repo, thread_cwd) = (repo.clone(), repo.root.clone());
         let (thread_calls, thread_gate) =
             (std::sync::Arc::clone(&calls), std::sync::Arc::clone(&gate));
+        let mut watch = crate::watch::BranchWatch::default();
         let reader = QueueReader::start(move || {
             let call = thread_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let fresh = build_queue_snapshot(&thread_repo, &thread_cwd);
+            let fresh = build_queue_snapshot(&thread_repo, &thread_cwd, &mut watch);
             if call == blocked_call {
                 let (lock, cond) = &*thread_gate;
                 let mut released = lock.lock().unwrap();
