@@ -7337,7 +7337,7 @@ fn wrapped(prefix: &str, body: &str, width: usize) -> Vec<String> {
 }
 
 /// A group's pane tail: the bare `" queued"` or `" done"`, or empty for a
-/// group still in [`GroupState::Queueable`].
+/// group still in [`GroupState::Queueable`] and for a plan row.
 ///
 /// Used to carry the queue file's own modification time too, but the
 /// dispatcher rewrites that file at every step boundary, so the instant read
@@ -7409,10 +7409,10 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 }
 
 /// The left pane's rows: one per distinct `group:` across the pending
-/// tasks, its checkbox, and whether the archive already holds it — or,
-/// once `h` has hidden every one of them, a single line saying so rather
-/// than an empty pane a person could mistake for a project with nothing
-/// pending at all.
+/// tasks and one per plan page no task names, its checkbox, and whether
+/// the archive already holds it — or, once `h` has hidden every one of
+/// them, a single line saying so rather than an empty pane a person could
+/// mistake for a project with nothing pending at all.
 ///
 /// The checkbox is here and nowhere else, because a group is what gets
 /// submitted. A group not still [`GroupState::Queueable`] has no box at all
