@@ -166,7 +166,7 @@ for the list of agents once.
 | Rename a tab | Only when herdr shows a name other than the one the dispatcher wants |
 
 A lane that ends is noticed on the next pass, because the list of agents no longer shows it.
-That pass makes the full look.
+That pass also asks herdr for workspaces, panes and tabs.
 
 ## What runs next
 
