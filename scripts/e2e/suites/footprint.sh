@@ -120,12 +120,13 @@ must "the lane patience" "$SPOOLWAY" config set dispatch.lane_quiet 1h
 must "room for every lane" "$SPOOLWAY" config set dispatch.visible_lanes "$LANES"
 
 # ------------------------------------------------------------ five held lanes
-# Each lane runs a step of its own, in a pipeline of its own. The double names
-# an agent after its step and offers three candidate names per step, so five lanes
-# in one step could not all start. They are also queued one at a time, each
-# waited for before the next: lanes started in one pass pick the same free name
-# from the same list, and `lane-tabs.sh` drives its tasks one at a time for
-# the same reason.
+# Each lane runs a step of its own, in a pipeline of its own. An agent is named
+# `<step>-<tag>`, the tag being the leading characters of a hash of the task id
+# (`src/lane_alias.rs`). Ids that differ only in their last character, as
+# `lane1` to `lane5` do, share every tag prefix the name may use, so a step
+# offers them three names between them and five lanes in one step could not
+# all start. The lanes are queued one at a time, each waited for before the
+# next, so the suite knows every one is recorded before it measures.
 MODEL=$(awk '/id: implement/ {found=1} found && /model:/ {print $2; exit}' \
   .spoolway/pipelines/default.yml)
 n=0
@@ -155,25 +156,17 @@ while [ "$n" -lt "$LANES" ]; do
   must "lane$n running" poll_until 90 lanes_recorded "$n"
 done
 
-# A transcript for each lane at the path its session id names, one assistant turn
-# in the shape its agent kind writes.
+# A transcript for each lane at the path its session id names, one assistant
+# turn in the shape `pi` writes. Every held pipeline runs `pi`, so that is the
+# only kind written.
 write_lane_transcripts() {
-  local kind session
-  awk -F'"' '/"session":/ {s = $4} /"kind":/ {print s, $4}' \
-    "$SPOOLWAY_PROJECT_HOME/lanes.json" | while read -r session kind; do
-    case "$kind" in
-      pi)
-        mkdir -p "$HOME/.pi/agent/sessions/e2e"
-        printf '{"type":"message","id":"t1","message":{"role":"assistant","model":"fake-local","usage":{"input":1200,"output":16,"cacheRead":0,"cacheWrite":0}}}\n' \
-          > "$HOME/.pi/agent/sessions/e2e/2020-01-01T00-00-00_$session.jsonl"
-        ;;
-      claude)
-        mkdir -p "$HOME/.claude/projects/e2e"
-        printf '{"type":"assistant","requestId":"r1","timestamp":"%s","message":{"model":"fake-cloud","usage":{"input_tokens":1200,"output_tokens":16}}}\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.claude/projects/e2e/$session.jsonl"
-        ;;
-    esac
-  done
+  local session
+  mkdir -p "$HOME/.pi/agent/sessions/e2e"
+  awk -F'"' '/"session":/ {print $4}' "$SPOOLWAY_PROJECT_HOME/lanes.json" \
+    | while read -r session; do
+      printf '{"type":"message","id":"t1","message":{"role":"assistant","model":"fake-local","usage":{"input":1200,"output":16,"cacheRead":0,"cacheWrite":0}}}\n' \
+        > "$HOME/.pi/agent/sessions/e2e/2020-01-01T00-00-00_$session.jsonl"
+    done
 }
 write_lane_transcripts
 
@@ -204,7 +197,7 @@ spawns_under() { # from-line pid
 # Reads the spawns of one window into per-pass counts: how many git, and how
 # many herdr, calls fall between one `herdr agent list` and the next.
 #   passes   how many passes the window held
-#   git      git spawns of any pass
+#   git      git spawns anywhere in the window
 #   sweeps   passes that made more than IDLE_HERDR_CALLS herdr calls
 #   median   the middle pass's count of all spawns, for the flatness check
 analyse_passes() { # spawn-lines-file
@@ -216,16 +209,24 @@ analyse_passes() { # spawn-lines-file
       if (herdr > max) sweeps++
     }
     {
+      # Counted before the first pass starts: a git spawn between the window
+      # opening and its first `agent list` is still a spawn in the window.
+      if ($1 == "git") git++
       if ($1 == "herdr" && $3 == "agent list") { close_pass(); started = 1; total = 0; herdr = 0 }
       if (!started) next
       total++
       if ($1 == "herdr") herdr++
-      if ($1 == "git") git++
     }
     END {
       close_pass()
-      n = asort(sizes)
-      printf "passes=%d git=%d sweeps=%d median=%d\n", passes, git, sweeps, (n ? sizes[int((n + 1) / 2)] : 0)
+      # Sorted by hand: `asort` is a gawk extension, and the awk on Debian and
+      # Ubuntu runners is mawk.
+      for (i = 2; i <= passes; i++) {
+        v = sizes[i]
+        for (j = i - 1; j >= 1 && sizes[j] > v; j--) sizes[j + 1] = sizes[j]
+        sizes[j + 1] = v
+      }
+      printf "passes=%d git=%d sweeps=%d median=%d\n", passes + 0, git + 0, sweeps + 0, (passes ? sizes[int((passes + 1) / 2)] : 0)
     }' "$1"
 }
 
@@ -257,19 +258,19 @@ measure() { # history-name
   dispatcher_stop
 
   # The tab the screen opens on, and where it sits when nobody is using it. The
-  # dispatch tab lists herdr's agents every second to show which lanes are
-  # live, which is its job and not idle work, so it is not what this measures.
+  # dispatch tab is not measured: it asks herdr for its agents every second.
   screen_start "$LIVE/screen-$h.log"
   sleep "$UI_SETTLE_S"
-  UI_PEAK[$h]=$(peak_kb "$E2E_SCREEN_PID")
   mark=$(($(wc -l < "$SPAWNS") + 1))
   sleep "$UI_WINDOW_S"
   UI_SPAWNS[$h]=$(spawns_under "$mark" "$E2E_SCREEN_PID" | wc -l)
+  # Read last, so whatever the UI took while it sat idle is in its peak.
+  UI_PEAK[$h]=$(peak_kb "$E2E_SCREEN_PID")
 }
 declare -A PASSES GIT SWEEPS UI_SPAWNS
 
 # The history grows by adding to what is already there, in the suite's scratch
-# home, and `rm -rf` of that home when the run ends takes it away again. Many
+# home. `drop_history`, in the exit trap, takes it away again. Many
 # small files rather than a few large ones: what grows is the number of
 # transcripts a walk has to visit and the number of lines a ledger read has to
 # parse, and a few big files would grow neither.
@@ -325,7 +326,17 @@ eval_back_mb=""
 screen_press $'\x1b[C'   # routines
 screen_press $'\x1b[C'   # jobs
 screen_press $'\x1b[C'   # eval
-sleep 8
+# Left only once the load is over. Leaving mid-load would trim while the load
+# thread still holds its memory, and the check would then fail at random on a
+# slow runner. The popup is waited for first, briefly, so a frame drawn before
+# Eval began is not mistaken for a finished load; a load too quick to be seen
+# has finished by the time it is asked about.
+eval_loading() { screen_last_frame | grep -qa 'Loading…'; }
+poll_until 3 eval_loading
+if ! poll_while 120 eval_loading; then
+  printf '  \033[31mSETUP\033[0m the Eval tab was still loading after 120 s\n' >&2
+  exit 2
+fi
 screen_press $'\x1b[D'   # back to jobs
 settled=0
 for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
@@ -336,7 +347,7 @@ for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
 done
 
 # ------------------------------------------------------------ the verdicts
-check_under() { # label peak-kb limit-mb formula hint-key
+check_under() { # label peak-kb limit-mb formula
   local label=$1 kb=$2 limit=$3 formula=$4
   if [ "${kb:-0}" -le $((limit * 1024)) ] && [ -n "$kb" ]; then
     ok "$label peak RSS under $limit MB ($formula)"
