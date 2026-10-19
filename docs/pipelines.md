@@ -535,6 +535,32 @@ instead.
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.
 
+### Holding only when something goes wrong
+
+Put the check in a command step. Put the gate on the step its `on_fail` sends the task to. A
+clean exit never reaches the gate.
+
+```yaml
+  - id: rebase
+    run: git fetch origin && git rebase origin/main
+    on_pass: create-pr
+    on_fail: resolve-conflicts
+
+  - id: resolve-conflicts
+    agent: claude
+    model: claude-sonnet-5-5
+    gate: true
+    on_pass: create-pr
+```
+
+The exit code decides, not the lane. An agent step cannot do this on its own, because a lane
+that resolves a conflict reports `--pass`.
+
+The `resolve-conflicts` step starts in the worktree the failed rebase left behind.
+`spoolway pipeline check` warns that it has no `on_fail`. The recipe keeps it that way, so a
+lane that cannot resolve the conflict goes to `blocked`. A task's `gate_at:` field still holds
+any outcome for a single task.
+
 ## The agent path in the shipped `default` pipeline
 
 ```mermaid
@@ -637,6 +663,7 @@ The `spoolway-config` skill writes and edits pipelines with you, starting from t
 | A stage that is a command with an exit code | A `run:` step |
 | "If that fails, go back and fix it" | `on_fail` pointing back, plus a `loop` |
 | "Check with me before this one" | `gate: true`, then `spoolway resume` |
+| "Check with me only if it goes wrong" | A `run:` step whose `on_fail` points at a `gate: true` step |
 | A handoff that only tells a person the last stage finished | Nothing. Delete it. |
 
 There is no nesting. A stage with three parts is three steps, or one step whose prompt
