@@ -236,6 +236,9 @@ A model is priced from the first table that knows it:
 | Refreshed | `~/.spoolway/model-prices.json`, written by `spoolway models refresh` | exact name |
 | Built-in | `assets/model-prices.json`, compiled into the binary | exact name |
 
+spoolway reads `~/.spoolway/model-prices.json` again only when the file has changed or can no longer be read.
+Otherwise it prices a model from the copy it already holds.
+
 A project row keeps the refreshed or built-in value for every field it leaves out, when those tables
 know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
