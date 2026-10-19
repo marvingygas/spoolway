@@ -121,9 +121,10 @@ pub(crate) const RETIRED_PARK_KEYS: &[&str] = &[
 /// The values `complexity:` may take: the planner's estimate of how complex a
 /// task is, from 1 to 100, 100 being extremely complex. Experimental, and so
 /// carried in `extra` rather than as a typed field on [`Frontmatter`]: a
-/// typed field would refuse an out-of-range value on a task already queued,
-/// which [`Task::complexity`] reads as absent instead. A submitted task is
-/// held to this range by `commands::queue::parse_submission`.
+/// typed field would stop a task file holding a quoted or fractional value
+/// from loading at all, where [`Task::complexity`] reads it as absent. A
+/// submitted task is held to this range by
+/// `commands::queue::parse_submission`.
 pub(crate) const COMPLEXITY_RANGE: std::ops::RangeInclusive<u64> = 1..=100;
 
 /// `value` as a complexity, if it is a whole number within

@@ -271,9 +271,10 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine: Option<String>,
 
-    /// The planner's complexity estimate for this line's task, banked from
-    /// [`crate::task::Task::complexity`] wherever [`Entry::plan`] is read
-    /// from the task, so the two on one line always agree. `spoolway eval
+    /// The planner's complexity estimate for this line's task — see
+    /// [`crate::task::Task::complexity`]. Read off the task where
+    /// [`Entry::plan`] is, or carried beside it onto a catch-up line, so the
+    /// two on one line come from the same copy of the task. `spoolway eval
     /// --by task` draws it as `COMPLEXITY`. Absent on a line whose task set
     /// none, on every directory line, and on every line written before the
     /// field existed: those read exactly as they did.
