@@ -284,6 +284,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // The same for a record of the last good config that cannot be written.
     let mut record_error: Option<String> = None;
     let mut config_watch = ConfigWatch::default();
+    // What the multiplexer was last asked, carried across the dispatchers
+    // built one per pass — see `crate::dispatch::PassMemory`.
+    let mut pass_memory = crate::dispatch::PassMemory::default();
 
     loop {
         // Before anything is read or moved: a dispatcher whose lock file was
@@ -304,7 +307,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
         config_watch.reload(&mut live, &mut reload_error, &mut record_error);
-        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref());
+        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref())
+            .with_memory(std::mem::take(&mut pass_memory));
 
         let mut spent_out = None;
         // Whether this pass moved a task and so has more ready to try at
@@ -313,7 +317,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // one wait, not be retried with no pause at all.
         let mut worked = false;
 
-        match dispatcher.pass(&mut || {}) {
+        let outcome = dispatcher.pass(&mut || {});
+        pass_memory = dispatcher.into_memory();
+        match outcome {
             Ok(report) => {
                 worked = skip_wait(&report, consecutive_working);
                 // The ceiling drains rather than kills: the run is over, but not

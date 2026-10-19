@@ -12,10 +12,10 @@
 //! A pass is safe to interrupt at any point: it derives all its state fresh
 //! from task files and the multiplexer, and never remembers anything.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -629,6 +629,73 @@ impl LaneRecord {
     }
 }
 
+/// How long the dispatcher goes without a full look at the multiplexer's
+/// workspaces, panes and tabs while its lanes stay as they are. A lane that
+/// starts or ends brings the look forward; this only bounds how long a tab
+/// the dispatcher did not expect (a person's, a crashed boot's) can sit
+/// unnoticed.
+pub const FULL_SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// What the dispatcher remembers of the multiplexer between passes.
+///
+/// A pass always asks for the lane list, which is how a lane that died is
+/// noticed. It asks for the workspace, pane and tab lists as well only when
+/// the lanes of this project differ from the ones the last full look saw, or
+/// when [`FULL_SWEEP_EVERY`] has gone by. Those lists cost one call per
+/// workspace on top of three, every pass, to learn nothing on a quiet
+/// project.
+///
+/// The same look tells the dispatcher what each tab is called, so a tab that
+/// already carries its label is not renamed again by a pass that has not
+/// looked.
+#[derive(Default)]
+pub struct PassMemory {
+    /// The `(name, pane)` of each of this project's lanes at the last full
+    /// look; `None` before there has been one.
+    lanes: Option<BTreeSet<(String, String)>>,
+    swept_at: Option<Instant>,
+    /// What each tab was called at the last full look, updated by each
+    /// rename since.
+    tab_labels: HashMap<String, String>,
+    /// A clock for a test to move; see [`PassMemory::backdate`].
+    #[cfg(test)]
+    skew: Duration,
+}
+
+impl PassMemory {
+    /// Whether this pass should look at everything, given the lanes it found.
+    fn sweep_due(&self, lanes: &BTreeSet<(String, String)>) -> bool {
+        let Some(seen) = &self.lanes else {
+            return true;
+        };
+        let age = self.swept_at.map(|at| at.elapsed());
+        #[cfg(test)]
+        let age = age.map(|age| age + self.skew);
+        seen != lanes || age.is_none_or(|age| age >= FULL_SWEEP_EVERY)
+    }
+
+    /// Record a full look that succeeded.
+    fn swept(&mut self, lanes: BTreeSet<(String, String)>, tabs: &[crate::mux::SweepTab]) {
+        self.lanes = Some(lanes);
+        self.swept_at = Some(Instant::now());
+        #[cfg(test)]
+        {
+            self.skew = Duration::ZERO;
+        }
+        self.tab_labels = tabs
+            .iter()
+            .filter_map(|tab| Some((tab.tab_id.clone(), tab.label.clone()?)))
+            .collect();
+    }
+
+    /// Make the last full look `by` older than it is, so a test need not wait
+    /// out [`FULL_SWEEP_EVERY`].
+    #[cfg(test)]
+    pub(crate) fn backdate(&mut self, by: Duration) {
+        self.skew += by;
+    }
+}
+
 pub struct Dispatcher<'a> {
     // `pub(crate)`: read and written directly by `crate::teardown`'s own
     // `impl Dispatcher` block, the same way every method here already does.
@@ -636,6 +703,10 @@ pub struct Dispatcher<'a> {
     pub(crate) pipelines: &'a Pipelines,
     pub(crate) mux: &'a dyn Mux,
     pub(crate) lanes: HashMap<String, LaneRecord>,
+    /// What the multiplexer was last asked, kept from one pass to the next;
+    /// see [`PassMemory`]. A dispatcher built for one pass alone starts with
+    /// none, so it asks everything.
+    memory: PassMemory,
     /// Whether this run stops for a person. Settled once when the run takes its
     /// lock and carried here rather than re-read per decision, so that one pass
     /// cannot make half its choices in each mode.
@@ -1224,6 +1295,7 @@ impl<'a> Dispatcher<'a> {
             pipelines,
             mux,
             lanes: load_lane_records(repo),
+            memory: PassMemory::default(),
             // From the lock this run already holds, so the dispatcher and every
             // lane's own `spoolway report` answer the question the same way.
             unattended: repo.unattended(),
@@ -1235,6 +1307,20 @@ impl<'a> Dispatcher<'a> {
             pending_command_forget: None,
             pending_command_result: None,
         }
+    }
+
+    /// Start from what an earlier dispatcher learned about the multiplexer,
+    /// so this pass can skip what that already settled; see [`PassMemory`].
+    /// The run loop builds a new dispatcher every pass and hands the memory
+    /// from one to the next.
+    pub fn with_memory(mut self, memory: PassMemory) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// What this dispatcher learned, for the next one to start from.
+    pub fn into_memory(self) -> PassMemory {
+        self.memory
     }
 
     /// Save `task`, but only under its per-task lock and only if nothing —
@@ -1417,7 +1503,7 @@ impl<'a> Dispatcher<'a> {
         // below: closing a tab here can leave that snapshot naming a pane in
         // a tab that no longer exists, which is why `sweep_anchor_tabs` never
         // closes a workspace's only tab — see its own doc.
-        self.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        self.sweep_anchor_tabs(&tasks, &mine, &all_lanes, &mut report);
         tick();
 
         // Only sessions we named, in a directory that is ours, are ours.
@@ -1551,16 +1637,37 @@ impl<'a> Dispatcher<'a> {
     /// within the four conditions as the task specifies them, and it heals
     /// itself — `ensure_workspace`'s `workspace_alive` check finds the
     /// recorded tab gone on the very next pass and reopens one.
-    fn sweep_anchor_tabs(&self, tasks: &[Task], mine: &HashSet<PathBuf>, report: &mut Report) {
+    ///
+    /// Looks only when [`PassMemory::sweep_due`] says to: a pass that finds
+    /// this project's lanes as the last look left them has nothing new to
+    /// find, and the look costs a call per workspace. A lane that has gone
+    /// shows in `lanes` on the very pass that notices it, so that pass looks.
+    fn sweep_anchor_tabs(
+        &mut self,
+        tasks: &[Task],
+        mine: &HashSet<PathBuf>,
+        lanes: &[Lane],
+        report: &mut Report,
+    ) {
+        let ours: BTreeSet<(String, String)> = lanes
+            .iter()
+            .filter(|lane| owns_cwd(mine, &lane.cwd))
+            .map(|lane| (lane.name.clone(), lane.pane_id.clone()))
+            .collect();
+        if !self.memory.sweep_due(&ours) {
+            return;
+        }
         let tabs = match self.mux.tabs_for_sweep() {
             Ok(tabs) => tabs,
             Err(err) => {
+                // Nothing is remembered, so the next pass asks again.
                 report
                     .problems
                     .push(format!("could not list tabs for the anchor sweep: {err:#}"));
                 return;
             }
         };
+        self.memory.swept(ours, &tabs);
         if tabs.is_empty() {
             return;
         }
@@ -5875,7 +5982,10 @@ impl<'a> Dispatcher<'a> {
     /// Name every tab a task's steps run in after its step, under
     /// `lane_layout = "tabs"`. Run on every pass, because herdr forgets a
     /// tab's label when it restarts, and a lane that outlives the restart
-    /// would show herdr's numeric one from then on.
+    /// would show herdr's numeric one from then on. A tab is renamed only
+    /// when its label is not already the one [`PassMemory`] holds for it,
+    /// which each full sweep reads off herdr's own tab list: a restart
+    /// changes the lanes, so the next pass sweeps and finds the labels gone.
     ///
     /// `lanes` is every lane of this project's tasks that still has a pane,
     /// running or kept, as the pass reads them. Each shown command's pane
@@ -5886,7 +5996,7 @@ impl<'a> Dispatcher<'a> {
     /// A failure to rename is reported and the pass goes on: the label is
     /// cosmetic.
     fn assert_tab_labels<'l>(
-        &self,
+        &mut self,
         tasks: &[Task],
         lanes: impl Iterator<Item = &'l (String, String, &'l Lane)>,
         report: &mut Report,
@@ -5927,10 +6037,16 @@ impl<'a> Dispatcher<'a> {
             .map(|task| (task.id(), task.display_name()))
             .collect();
         for (tab, label) in tab_labels(&on_tabs, &names) {
-            if let Err(err) = self.mux.rename_tab(&tab, &label) {
-                report
+            if self.memory.tab_labels.get(&tab) == Some(&label) {
+                continue;
+            }
+            match self.mux.rename_tab(&tab, &label) {
+                Ok(()) => {
+                    self.memory.tab_labels.insert(tab, label);
+                }
+                Err(err) => report
                     .problems
-                    .push(format!("could not name tab {tab}: {err:#}"));
+                    .push(format!("could not name tab {tab}: {err:#}")),
             }
         }
     }
@@ -9128,6 +9244,10 @@ mod tests {
         pane_tabs: Mutex<HashMap<String, crate::mux::PaneTab>>,
         /// Hands each `create_tab` a distinct tab id.
         tabs_opened: Mutex<usize>,
+        /// The questions the dispatcher asked, as `list_lanes` and
+        /// `tabs_for_sweep`, kept apart from `calls` because other tests
+        /// compare that log whole.
+        asked: Mutex<Vec<&'static str>>,
     }
 
     impl FakeMux {
@@ -9168,6 +9288,7 @@ mod tests {
                 sweep_tabs: Vec::new(),
                 pane_tabs: Mutex::new(HashMap::new()),
                 tabs_opened: Mutex::new(0),
+                asked: Mutex::new(Vec::new()),
             }
         }
         /// Place `pane` in `tab`, which holds `panes` panes, for
@@ -9362,6 +9483,10 @@ mod tests {
         fn clear_calls(&self) {
             self.calls.lock().unwrap().clear();
         }
+        /// What the dispatcher has asked since the last call, oldest first.
+        fn take_asked(&self) -> Vec<&'static str> {
+            std::mem::take(&mut *self.asked.lock().unwrap())
+        }
     }
 
     /// Whatever a test left running in a pane ends with the test, whether
@@ -9396,6 +9521,7 @@ mod tests {
             self.resident
         }
         fn list_lanes(&self) -> Result<Vec<Lane>> {
+            self.asked.lock().unwrap().push("list_lanes");
             Ok(self.lanes.clone())
         }
         /// Answers `Some(true)` for a lane a test has marked with
@@ -9528,6 +9654,7 @@ mod tests {
             Ok(())
         }
         fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+            self.asked.lock().unwrap().push("tabs_for_sweep");
             Ok(self.sweep_tabs.clone())
         }
         fn create_tab(
@@ -13659,6 +13786,7 @@ mod tests {
             checkout_path: checkout.to_path_buf(),
             holds_agent: false,
             pane_ids: std::iter::once(format!("{tab_id}:p1")).collect(),
+            label: None,
         }
     }
 
@@ -13773,6 +13901,7 @@ mod tests {
             checkout_path: checkout.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+            label: None,
         };
         let holding_the_recorded_pane = SweepTab {
             workspace_id: "w1".into(),
@@ -13780,16 +13909,17 @@ mod tests {
             checkout_path: checkout,
             holds_agent: false,
             pane_ids: std::iter::once("w1:t1:p9".to_string()).collect(),
+            label: None,
         };
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![anchor, holding_the_recorded_pane]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
 
-        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &[], &mut report);
 
         assert_eq!(
             mux.did("close_tab"),
@@ -13817,6 +13947,7 @@ mod tests {
             checkout_path: repo.root.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t1:p1".to_string()).collect(),
+            label: None,
         };
         let dispatch = SweepTab {
             workspace_id: "w1".into(),
@@ -13824,16 +13955,17 @@ mod tests {
             checkout_path: repo.root.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+            label: None,
         };
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![work, dispatch]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
 
-        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &[], &mut report);
 
         assert_eq!(
             mux.did("close_tab"),
@@ -14414,6 +14546,151 @@ mod tests {
         }
         save_lane_records(&repo, &records).unwrap();
         (repo, guard, FakeMux::new(lanes))
+    }
+
+    /// One pass of a dispatcher that starts from `memory`, handing back what
+    /// it learned for the next.
+    fn pass_remembering(repo: &Repo, mux: &FakeMux, memory: PassMemory) -> (Report, PassMemory) {
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(repo, &pipelines, mux).with_memory(memory);
+        let report = dispatcher.pass(&mut || {}).unwrap();
+        (report, dispatcher.into_memory())
+    }
+
+    /// A project with one running lane, in tab `w1:t1` under the tabs layout.
+    fn project_with_a_running_lane(name: &str) -> (Repo, FixtureRoot, FakeMux) {
+        let (mut repo, guard) = fixture(name);
+        repo.config.dispatch.lane_layout = crate::config::LaneLayout::Tabs;
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Working,
+            "w1:p7",
+        )]);
+        (repo, guard, mux)
+    }
+
+    /// A pass that finds this project's lanes as the last full look left them
+    /// asks the multiplexer for the lane list and nothing else, and names no
+    /// tab that already carries its name.
+    ///
+    /// Fails before `PassMemory`: every pass listed the tabs again and
+    /// renamed the lane's tab again.
+    #[test]
+    fn an_idle_pass_asks_the_multiplexer_once_and_renames_nothing() {
+        let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-asks-once");
+
+        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default());
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+        assert_eq!(mux.did("rename_tab"), ["rename_tab w1:t1 implement"]);
+        mux.clear_calls();
+
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
+        let (_, _memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes", "list_lanes"]);
+        assert!(
+            mux.did("rename_tab").is_empty(),
+            "a tab already named was named again: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// The full look comes back when a lane starts or ends, and once a
+    /// minute without either.
+    ///
+    /// Fails before `PassMemory`: there was no quiet pass to bring it back
+    /// from, and the dead-lane pass looked only because every pass did.
+    #[test]
+    fn a_lane_starting_or_ending_brings_the_full_look_forward_and_so_does_a_minute() {
+        let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-lane-change");
+        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default());
+        mux.take_asked();
+
+        // The lane has gone: the lane list alone shows it, and that pass
+        // looks.
+        let gone = FakeMux::new(vec![]);
+        let (_, memory) = pass_remembering(&repo, &gone, memory);
+        assert_eq!(gone.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+
+        // A lane has started.
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+
+        let (_, mut memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes"]);
+
+        memory.backdate(FULL_SWEEP_EVERY - Duration::from_secs(1));
+        let (_, mut memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(
+            mux.take_asked(),
+            ["list_lanes"],
+            "a second short of a minute"
+        );
+
+        memory.backdate(Duration::from_secs(1));
+        let (_, _memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+    }
+
+    /// A tab that herdr already shows under its name is left alone by the
+    /// pass that looks, and one it shows under another name is renamed.
+    ///
+    /// Fails before the label was read off the tab list: the lane's tab was
+    /// renamed whatever herdr called it.
+    #[test]
+    fn a_tab_is_renamed_only_when_herdr_shows_another_name() {
+        for (shown, renamed) in [("implement", false), ("2", true)] {
+            let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-shown-label");
+            let mut tab = sweepable_tab("w1", "w1:t1", &repo.root);
+            tab.label = Some(shown.to_string());
+            let mux = mux.with_sweep_tabs(vec![tab]);
+
+            pass_remembering(&repo, &mux, PassMemory::default());
+
+            assert_eq!(
+                mux.did("rename_tab").len(),
+                usize::from(renamed),
+                "herdr showing {shown:?}: {:?}",
+                mux.calls()
+            );
+        }
+    }
+
+    /// `lanes.json` is written when its records change and not otherwise,
+    /// including for a pass that fails after building them.
+    ///
+    /// Fails before the comparison: the file was rewritten, and so given a
+    /// new modified time, by every pass.
+    #[test]
+    fn lanes_json_is_written_only_when_its_records_change() {
+        let (repo, _root_guard) = fixture("lanes-json-unchanged");
+        let path = lanes_path(&repo);
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let backdate = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        };
+        let modified = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut records: HashMap<String, LaneRecord> = (0..8)
+            .map(|n| (format!("demo-{n} · implement"), LaneRecord::adopted(n)))
+            .collect();
+
+        save_lane_records(&repo, &records).unwrap();
+        backdate();
+        // A map built again from the file iterates in an order of its own.
+        let reloaded = load_lane_records(&repo);
+        save_lane_records(&repo, &reloaded).unwrap();
+        assert_eq!(modified(), long_ago, "equal records were written again");
+
+        records.insert("demo-9 · implement".into(), LaneRecord::adopted(9));
+        save_lane_records(&repo, &records).unwrap();
+        assert_ne!(modified(), long_ago, "changed records were not written");
+        assert_eq!(load_lane_records(&repo).len(), 9);
     }
 
     /// The first step takes the workspace's own first tab and names it, and

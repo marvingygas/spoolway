@@ -140,6 +140,10 @@ pub struct SweepTab {
     /// Every pane this tab currently has, checked against a run's `.pane`
     /// file — see condition three, "holds no recorded command pane".
     pub pane_ids: HashSet<String>,
+    /// The name the backend shows for the tab right now, `None` when its row
+    /// carried none. Not part of the sweep's judgement: the dispatcher keeps
+    /// it so that a tab already named as it should be is not renamed again.
+    pub label: Option<String>,
 }
 
 /// How to start one agent in one pane.
@@ -1648,11 +1652,13 @@ struct TabList {
     tabs: Vec<RawTabRow>,
 }
 
-/// One row of `tab list`. Only the id is read; the label a row carries is
-/// dropped rather than rejected.
+/// One row of `tab list`: the id, and the label herdr shows for it when the
+/// row carries one. Anything else on a row is dropped rather than rejected.
 #[derive(Debug, Deserialize)]
 struct RawTabRow {
     tab_id: String,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// `pane layout` answers about the whole tab the pane it was given sits in,
@@ -1907,6 +1913,7 @@ impl Mux for Herdr {
                     checkout_path: worktree.checkout_path.clone(),
                     holds_agent,
                     pane_ids,
+                    label: tab.label,
                 });
             }
         }
