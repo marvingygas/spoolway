@@ -122,7 +122,8 @@ pub struct PaneTab {
 }
 
 /// One tab [`Mux::tabs_for_sweep`] found, with the four facts
-/// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions.
+/// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions
+/// and the name the tab shows.
 /// Raw material for that policy, not a verdict — see [`Mux::tabs_for_sweep`]'s
 /// own doc for why the split sits there.
 #[derive(Debug, Clone)]

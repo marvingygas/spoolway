@@ -275,8 +275,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let watch = crate::screen::open_dir_watch(&repo.commands_dir());
 
     // The config this run is using. Starts as the one `main` loaded and is
-    // replaced at the top of every pass by whatever `config.toml` and the
-    // config override say then — see `reload_config`.
+    // replaced at the top of any pass that finds `config.toml` or the config
+    // override changed, by whatever they say then — see `ConfigWatch` and
+    // `reload_config`.
     let mut live = repo.clone();
     // The parse error the last reload reported, so a config that stays broken
     // is announced on the pass that found it and not on every pass after.
