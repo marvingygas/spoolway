@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1272,18 +1273,43 @@ pub fn lane_owns_subagents(ledger: &[Entry], session: &str) -> bool {
 /// The last assistant turn a transcript records, in whichever of the two
 /// shapes this agent writes. See [`last_turn`], the public form built on it.
 ///
-/// The whole file is read, but one line is parsed at a time and dropped rather
-/// than collected into a `Vec<serde_json::Value>` — a 50MB transcript on a
-/// board tick is heavy enough without also holding every record of it in
-/// memory at once (review finding 48).
+/// One line is parsed at a time and dropped rather than collected into a
+/// `Vec<serde_json::Value>` — a 50MB transcript on a board tick is heavy
+/// enough without also holding every record of it in memory at once (review
+/// finding 48). Only the lines added since the previous read of the same file
+/// are parsed: the reading so far is kept in [`TAIL_READS`], and a file that
+/// shrank or was replaced is read again from its start.
 fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
     // The guard `records_at` used to apply: an unresolvable kind reads as
     // "nothing yet" rather than as a transcript at `path`.
     kind(kind_name)?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let mut last: Option<Turn> = None;
-    let mut announced = String::new();
-    for line in raw.lines() {
+    let meta = std::fs::metadata(path).ok()?;
+    let identity = FileIdentity::of(&meta);
+    let key = (kind_name.to_string(), path.to_path_buf());
+    let mut state = TAIL_READS
+        .lock()
+        .ok()
+        .and_then(|reads| reads.get(&key).cloned())
+        .filter(|state| state.identity.continues_as(&identity))
+        .unwrap_or_default();
+    if state.offset == identity.len && state.identity == identity {
+        return state.last;
+    }
+
+    let mut file = std::fs::File::open(path).ok()?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).ok()?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut raw).ok()?;
+    // Only whole lines are parsed. A line the agent is still writing has no
+    // newline yet, and parsing its half would drop the turn for good once the
+    // offset moved past it; the offset stays at the end of the last whole line
+    // so the next read starts the line over.
+    let whole = raw
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&raw[..whole]);
+    for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -1291,12 +1317,12 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
         // its model beside the turn rather than on it, the turn alone does not
         // know what ran it.
         if let Some(model) = turn_model(kind_name, &value) {
-            announced = model;
+            state.announced = model;
             continue;
         }
         if let Some(mut turn) = read_turn(kind_name, &value) {
             if turn.model.is_empty() {
-                turn.model.clone_from(&announced);
+                turn.model.clone_from(&state.announced);
             }
             // A synthetic turn is not an answer — see [`SYNTHETIC_MODEL`] — so
             // it must not become "the last turn" a caller sizes the
@@ -1304,10 +1330,77 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
             if turn.model == SYNTHETIC_MODEL {
                 continue;
             }
-            last = Some(turn);
+            state.last = Some(turn);
         }
     }
+    state.offset += whole as u64;
+    state.identity = identity;
+    let last = state.last.clone();
+    if let Ok(mut reads) = TAIL_READS.lock() {
+        if reads.len() >= MAX_REMEMBERED {
+            reads.clear();
+        }
+        reads.insert(key, state);
+    }
     last
+}
+
+/// What [`last_turn_at`] knows about a transcript after reading it: how far it
+/// got and what it had found by then.
+#[derive(Clone, Default)]
+struct TailRead {
+    identity: FileIdentity,
+    /// The byte after the last whole line already parsed.
+    offset: u64,
+    last: Option<Turn>,
+    /// The model a kind announced beside its turns, carried across reads.
+    announced: String,
+}
+
+/// The reading of each transcript so far, by agent kind and path.
+static TAIL_READS: Mutex<BTreeMap<(String, PathBuf), TailRead>> = Mutex::new(BTreeMap::new());
+
+/// What a file looked like when it was last read.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct FileIdentity {
+    inode: u64,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileIdentity {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Self {
+            inode,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        }
+    }
+
+    /// Whether a file now looking like `now` is this one with lines appended,
+    /// or not touched at all.
+    ///
+    /// A compacted or restarted session rewrites its transcript: the file is
+    /// shorter, or a new inode, or older than what was read. A saved offset
+    /// would then point past the end or into the middle of a line, so none of
+    /// those counts as a continuation. Neither does a file of the same length
+    /// with a newer modified time, which is a rewrite that happened to land on
+    /// the same size.
+    fn continues_as(&self, now: &Self) -> bool {
+        if self == now {
+            return true;
+        }
+        self.inode == now.inode
+            && self.len < now.len
+            && match (self.modified, now.modified) {
+                (Some(before), Some(after)) => before <= after,
+                _ => true,
+            }
+    }
 }
 
 /// What a conversation still in flight looks like from outside it.
@@ -1916,6 +2009,7 @@ impl ReportedRuns {
     }
 }
 
+#[derive(Clone)]
 struct Turn {
     id: Option<String>,
     /// The record's own top-level `timestamp`, when it has one that parses.
@@ -2191,9 +2285,9 @@ fn session_file(kind: &str, session: &str) -> Option<PathBuf> {
 /// The same lookup, for a caller that wants to know whether the transcript has
 /// changed before paying to read it.
 ///
-/// The search itself is a directory walk over every session an agent has ever
-/// written, so a caller asking about once a second — the board — is
-/// expected to hold on to what this returns rather than ask again.
+/// The first search is a directory walk over every session an agent has ever
+/// written. Its answer is remembered, so later asks for the same session cost
+/// one existence check; a caller can still hold on to the path itself.
 pub fn session_path(kind: &str, session: &str) -> Option<PathBuf> {
     session_file(kind, session)
 }
@@ -2235,15 +2329,55 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
         }
     };
 
+    let key = (
+        home.to_path_buf(),
+        kind_name.to_string(),
+        session.to_string(),
+    );
+    let remembered = FOUND_TRANSCRIPTS
+        .lock()
+        .ok()
+        .and_then(|found| found.get(&key).cloned());
+    // Re-checked rather than trusted: a session that moved or was cleaned up
+    // leaves a path that no longer exists, and answering with it would read as
+    // "no transcript" for a lane that has one elsewhere.
+    if let Some(path) = remembered.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+
     // A full recursive walk rather than the project directory's own files,
     // because a subagent's transcript sits two levels deeper still, at
     // `<project-dir>/<parent-session>/subagents/agent-<id>.jsonl` — see
     // `dir_candidates`, which is what surfaces that id to callers in the
     // first place.
-    newest_matching(&home.join(agent.sessions_dir), |stem| {
+    let path = newest_matching(&home.join(agent.sessions_dir), |stem| {
         format!("{stem}.jsonl").ends_with(&suffix)
-    })
+    })?;
+    // Only a found path is remembered: a lane that has not written its first
+    // turn yet answers `None` and is looked for again on the next pass.
+    if let Ok(mut found) = FOUND_TRANSCRIPTS.lock() {
+        // Bounded so a long-lived dispatcher does not keep one entry per
+        // session it ever ran; a cleared map costs each live lane one walk.
+        if found.len() >= MAX_REMEMBERED {
+            found.clear();
+        }
+        found.insert(key, path.clone());
+    }
+    Some(path)
 }
+
+/// Where [`session_file_in`] last found each session's transcript, by home,
+/// agent kind and session id.
+///
+/// Finding a transcript walks every session an agent has ever written, which
+/// on a machine with a long Claude history is thousands of files. The
+/// dispatcher asks about every lane every pass, so the answer is remembered.
+static FOUND_TRANSCRIPTS: Mutex<BTreeMap<(PathBuf, String, String), PathBuf>> =
+    Mutex::new(BTreeMap::new());
+
+/// How many remembered transcript paths and read positions are kept before
+/// the memory is dropped and rebuilt from the lanes still asking.
+const MAX_REMEMBERED: usize = 256;
 
 /// The session `session` is a subagent of, if it is one at all.
 ///
@@ -5380,6 +5514,145 @@ mod tests {
         let live = live_of("codex", "s", true, &path, &BTreeMap::new()).expect("no live reading");
         assert_eq!(live.context, 9723);
         assert_eq!(live.harvest.tokens.output, 76 + 42);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One Claude assistant line whose context reads as `input` tokens.
+    fn claude_turn(id: &str, input: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"{id}","timestamp":"2026-08-04T06:14:44.000Z","message":{{"model":"claude-opus-5","usage":{{"input_tokens":{input},"output_tokens":1}}}}}}"#
+        ) + "\n"
+    }
+
+    /// The offset [`last_turn_at`] has saved for `path`, if it saved one.
+    fn saved_offset(path: &Path) -> Option<u64> {
+        TAIL_READS
+            .lock()
+            .unwrap()
+            .get(&("claude".to_string(), path.to_path_buf()))
+            .map(|state| state.offset)
+    }
+
+    /// The board and the dispatcher ask about the same lane over and over.
+    /// After the first lookup, none of those asks may walk the store again.
+    #[test]
+    fn a_found_transcript_is_not_searched_for_again() {
+        let session = "0198e2c0-5555-4000-8000-000000000001";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+
+        let first = session_file_in(&home, "claude", session).expect("not found");
+        let before = STORE_WALKS.with(|walks| walks.get());
+        for _ in 0..5 {
+            assert_eq!(
+                session_file_in(&home, "claude", session),
+                Some(first.clone())
+            );
+        }
+        assert_eq!(STORE_WALKS.with(|walks| walks.get()) - before, 0);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A remembered path that no longer exists must not be answered with: the
+    /// session may have moved, so one walk finds it again.
+    #[test]
+    fn a_remembered_transcript_that_moved_is_searched_for_once() {
+        let session = "0198e2c0-5555-4000-8000-000000000002";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let old = session_file_in(&home, "claude", session).expect("not found");
+        let moved = home
+            .join(".claude/projects/-home-someone-elsewhere")
+            .join(old.file_name().unwrap());
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&old, &moved).unwrap();
+
+        assert_eq!(session_file_in(&home, "claude", session), Some(moved));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Appended lines are the only ones read the second time, and the answer
+    /// is the one a read of the whole file gives.
+    #[test]
+    fn a_second_read_parses_only_the_appended_lines() {
+        let session = "0198e2c0-5555-4000-8000-000000000003";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+
+        let first = last_turn_at("claude", &path).unwrap();
+        assert_eq!(first.tokens.input, 10);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(saved_offset(&path), Some(first_len));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(claude_turn("r2", 20).as_bytes()).unwrap();
+        drop(file);
+        let second = last_turn_at("claude", &path).unwrap();
+        assert_eq!(second.tokens.input, 20);
+        assert_eq!(
+            saved_offset(&path),
+            Some(std::fs::metadata(&path).unwrap().len())
+        );
+
+        // The same file read from nothing: what a full read answers.
+        TAIL_READS.lock().unwrap().clear();
+        let full = last_turn_at("claude", &path).unwrap();
+        assert_eq!(full.tokens, second.tokens);
+        assert_eq!(full.id, second.id);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A line the agent is half-way through writing is not parsed, and is
+    /// read whole once its newline lands.
+    #[test]
+    fn a_half_written_line_is_left_for_the_next_read() {
+        let session = "0198e2c0-5555-4000-8000-000000000004";
+        let first = claude_turn("r1", 10);
+        let home = home_with("claude", session, &first);
+        let path = session_file_in(&home, "claude", session).unwrap();
+        last_turn_at("claude", &path).unwrap();
+
+        let second = claude_turn("r2", 20);
+        let (head, tail) = second.split_at(second.len() / 2);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(head.as_bytes()).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 10);
+        assert_eq!(saved_offset(&path), Some(first.len() as u64));
+
+        file.write_all(tail.as_bytes()).unwrap();
+        drop(file);
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 20);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A rewritten transcript — shorter, as after a compaction — is read from
+    /// its start rather than from an offset that no longer means anything.
+    #[test]
+    fn a_shrunken_or_replaced_transcript_is_read_from_the_start() {
+        let session = "0198e2c0-5555-4000-8000-000000000005";
+        let long = claude_turn("r1", 10) + &claude_turn("r2", 20) + &claude_turn("r3", 30);
+        let home = home_with("claude", session, &long);
+        let path = session_file_in(&home, "claude", session).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 30);
+
+        std::fs::write(&path, claude_turn("n1", 7)).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 7);
+
+        // Replaced by a new file under the same name, longer than the offset
+        // the old one left: only its identity says it is not a continuation.
+        let replacement = claude_turn("m1", 1) + &claude_turn("m2", 2) + &claude_turn("m3", 3);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, replacement + &claude_turn("m4", 4)).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 4);
 
         std::fs::remove_dir_all(&home).ok();
     }
