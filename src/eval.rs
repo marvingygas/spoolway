@@ -1126,8 +1126,8 @@ fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
 const COMPLEXITY_HEADER: &str = "COMPLEXITY";
 
 /// A run's `COMPLEXITY` cell: its estimate, or `-` where its lines carry
-/// none, right-aligned under the header the way every figure is. The naming
-/// columns are padded on the left by [`naming`], so the cell carries its own
+/// none, right-aligned under the header the way every figure is. [`naming`]
+/// left-aligns every naming column, so this cell carries its own left
 /// padding to the header's width; no estimate is wider than the header, so
 /// the column stays exactly that wide.
 fn complexity_cell(complexity: Option<u32>) -> String {
@@ -1761,9 +1761,9 @@ fn trial_delta_line(baseline: &LaneRow, row: &LaneRow) -> String {
 
 /// Every column `--sort` takes under `by`: `project`, the `by`'s own naming
 /// columns, `complexity` under `task`, `pipeline_version`, then the figures
-/// of both views, beside
-/// `lanes` and `unpriced`, which no view draws. A sort outlives `t`, so it
-/// has to name a column whichever view is drawn — see [`Figures::carry`].
+/// of both views, beside `lanes` and `unpriced`, which no view draws. A sort
+/// outlives `t`, so it has to name a column whichever view is drawn — see
+/// [`Figures::carry`].
 fn lane_sort_keys(by: EvalBy) -> Vec<&'static str> {
     let mut cols = vec!["project"];
     cols.extend(lane_csv_keys(by));
@@ -6867,18 +6867,21 @@ mod tests {
         assert_eq!(drawn, ["         -", "        64", "         9"]);
 
         let json = lanes_json(EvalBy::Task, Figures::Totals, &rows, &total);
+        // Through `get`, not indexing: an index reads a missing key as
+        // `null` too, and a run without an estimate has to carry the key.
         let by_task = |task: &str| {
             json["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|row| row["task"] == task)
-                .unwrap()["complexity"]
-                .clone()
+                .unwrap()
+                .get("complexity")
+                .cloned()
         };
-        assert_eq!(by_task("easy"), serde_json::json!(9));
-        assert_eq!(by_task("hard"), serde_json::json!(64));
-        assert_eq!(by_task("plain"), serde_json::Value::Null);
+        assert_eq!(by_task("easy"), Some(serde_json::json!(9)));
+        assert_eq!(by_task("hard"), Some(serde_json::json!(64)));
+        assert_eq!(by_task("plain"), Some(serde_json::Value::Null));
 
         let (header, lines) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total);
         let cells: Vec<String> = lines[..3]
@@ -11387,6 +11390,64 @@ mod screen_tests {
         for by in ["group", "task", "pipeline", "step", "version"] {
             let table = print(&repo, &["--by", by]).unwrap();
             assert!(table.contains("Command steps\n"), "--by {by}: {table}");
+        }
+    }
+
+    /// Under `--by task` the command steps table draws `COMPLEXITY` with the
+    /// lanes table's other naming columns, and `--json`'s `commands` rows
+    /// carry `complexity` as a number, or `null` for a task without one.
+    /// Under any other `by` they carry no such key. Fails without the
+    /// `commands_json` insert: the key is missing from every row.
+    #[test]
+    fn by_task_the_command_steps_table_carries_each_runs_complexity() {
+        use crate::usage::CommandEnd::Exited;
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-complexity");
+        let run = |task: &str, ts: &str, complexity: Option<u32>| Entry {
+            complexity,
+            ..command_line(task, "test", ts, Exited, Some(0), 10, false)
+        };
+        for line in [
+            run("hard", "2026-08-01T12:00:00+00:00", Some(42)),
+            run("plain", "2026-08-01T12:10:00+00:00", None),
+        ] {
+            crate::usage::append(&repo, &line).unwrap();
+        }
+
+        let table = print(&repo, &["--by", "task"]).unwrap();
+        let (_, commands) = table.split_once("Command steps\n").expect(&table);
+        let header = commands.lines().next().unwrap();
+        let at = header
+            .find(COMPLEXITY_HEADER)
+            .unwrap_or_else(|| panic!("{table}"));
+        let cell = |task: &str| {
+            let line = commands
+                .lines()
+                .find(|l| l.starts_with(task))
+                .unwrap_or_else(|| panic!("{table}"));
+            line[at..at + COMPLEXITY_HEADER.len()].to_string()
+        };
+        assert_eq!(cell("hard"), "        42");
+        assert_eq!(cell("plain"), "         -");
+
+        let json_by = |by: EvalBy| -> serde_json::Value {
+            let mut out = Vec::new();
+            let args = EvalArgs { by, ..no_args() };
+            run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        let json = json_by(EvalBy::Task);
+        let rows = json["commands"]["rows"].as_array().unwrap();
+        let row = |task: &str| rows.iter().find(|r| r["task"] == task).unwrap();
+        assert_eq!(row("hard").get("complexity"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            row("plain").get("complexity"),
+            Some(&serde_json::Value::Null),
+            "present and null, not left out"
+        );
+
+        let json = json_by(EvalBy::Step);
+        for row in json["commands"]["rows"].as_array().unwrap() {
+            assert!(row.get("complexity").is_none(), "{row}");
         }
     }
 
