@@ -824,7 +824,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--trial <ID>` | | One trial's arms. With `--by task`, one row per arm and a delta line per arm against the first |
 | `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
-| `--csv` | | Print the lanes table's rows as CSV: the drawn view's columns as raw numbers, plus `project`, and `run` under `--by task` |
+| `--csv` | | Print the lanes table's rows as CSV: the drawn view's columns as raw numbers, plus `project`, and `run` and `complexity` under `--by task` |
 | `--per-task` | | Print each token, cost and time figure divided by the row's tasks. `--csv` and `--json` then carry the per-task columns. Not with `--discard` |
 | `--sort <column>[:asc\|:desc]` | | Sort the rows by one column, descending when the direction is left off. Not with `--discard` |
 

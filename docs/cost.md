@@ -13,6 +13,10 @@ command step run. A command step line carries no tokens and no cost. See
 A line written for a copy of a routine carries `routine`, the routine's id. A line for any other
 task leaves it out.
 
+A line for a task that sets `complexity:` carries that number as `complexity`. Lane lines, command
+step lines and the lines the sweep banks for a lane's missed spend all carry it. A line for a task
+without the key leaves it out. See [The frontmatter is spoolway's](tasks.md#the-frontmatter-is-spoolways).
+
 ## How the numbers get there
 
 spoolway does not talk to a model. Each agent writes its own transcript with per-turn token

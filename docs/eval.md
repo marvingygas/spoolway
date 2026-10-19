@@ -109,7 +109,7 @@ screen shows, and `--sort` orders `--csv` and `--json` the same way.
 The lanes table opens on `by pipeline`, one row per pipeline. `by` also takes `group`, `task`,
 `step` and `version`, changing the columns that name a row. The figure columns are the same
 under every `by`, and each figure keeps its value. `by task` adds one column, `CTX PEAK`,
-right after `CTX AVG`.
+right after `CTX AVG`, and names each row with a `COMPLEXITY` column.
 
 | `by` | One row is |
 |---|---|
@@ -125,8 +125,9 @@ Under `by task`, each row is one run. Two runs of the same task or routine stay 
 |---|---|
 | `TASK` | The routine's name when the run's ledger lines carry `routine`. Otherwise the task id. |
 | `WHEN` | The run's start in local time, as `YYYY-MM-DD HH:MM`. It is the time of the run's earliest ledger line. |
+| `COMPLEXITY` | The task's `complexity:`, the planner's experimental estimate from 1 to 100, right after `WHEN`. `-` when the run's ledger lines carry none. See [The frontmatter is spoolway's](tasks.md#the-frontmatter-is-spoolways). |
 
-Rows read newest start first. `--json` and `--csv` carry the same label in `task` and the same time in `when`. `--task` still matches the task id.
+Rows read newest start first. `--json` and `--csv` carry the same label in `task`, the same time in `when` and the estimate in `complexity`, a number or blank in CSV and `null` in JSON. `--task` still matches the task id.
 
 | Column | What it is |
 |---|---|
@@ -216,7 +217,7 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
 
 `--sort` takes a column name as the export's header spells it, below. It also takes `lanes` and
-`unpriced`. It accepts the totals names and the per-task names in both views. A name the printed view does not draw still sorts
+`unpriced`. Under `--by task`, `--sort complexity` orders the runs by their estimate, and runs with no estimate come last. It accepts the totals names and the per-task names in both views. A name the printed view does not draw still sorts
 the rows and marks no header. An unknown name is refused, naming every column `--by`'s current
 value accepts. It cannot be combined with `--discard`.
 
@@ -230,10 +231,10 @@ trial id. See [Trials](planning.md#trials).
 spoolway eval --by task --trial t-8c21e0
 ```
 ```
-TASK                PIPELINE   VER  WHEN             TASKS  PASS  BLOCKS  CTX AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
-cart-totals-1       impl       1.0  2026-09-26 14:05     1   83%       0      19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
-cart-totals-2       impl_fast  1.0  2026-09-26 14:07     1  100%       0      14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
-Total                                                    2             0                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
+TASK                PIPELINE   VER  WHEN             COMPLEXITY  TASKS  PASS  BLOCKS  CTX AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+cart-totals-1       impl       1.0  2026-09-26 14:05         24      1   83%       0      19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
+cart-totals-2       impl_fast  1.0  2026-09-26 14:07         24      1  100%       0      14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
+Total                                                                2             0                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -247,7 +248,7 @@ delta line still reads against the arm that started first.
 A command step, one with a `run:` line, runs no lane and spends no tokens, so it has no row in
 the lanes table. Every run of one that ends banks its own line in the usage ledger, and the
 printed `spoolway eval` shows those lines in a second table below the lanes table. It is drawn
-under every `by`, and its rows are named the way the lanes table names them. No lane figure
+under every `by`, and its rows are named the way the lanes table names them. Under `--by task` that includes the `COMPLEXITY` column. No lane figure
 changes when the ledger holds command steps, and the board's eval tab stays lanes only.
 
 ```
@@ -378,7 +379,7 @@ the trial's pipelines is a row.
 An export is the table on screen. It carries the columns of the view that is drawn, in the
 order they are drawn, with every figure as a raw number a spreadsheet can add up: `195812`
 rather than `195.8k`, and `2244` seconds rather than `37m 24s`. Every row also starts with
-`project`, and under `--by task` the run id follows it as `run`.
+`project`, and under `--by task` the run id follows it as `run`. Under `--by task`, `complexity` follows `when`.
 
 `[e]` writes the lanes or directory table on screen to
 `.spoolway/evals/eval-by-<by>-<view>-<date>-<time>.csv`. `<view>` is `totals`, `per-task` or
