@@ -296,6 +296,132 @@ pub(crate) fn list_groups_and_skipped(repo: &Repo) -> Result<(Vec<Group>, Vec<Pa
     list_groups_in(repo, &mut guard, &mut parsed)
 }
 
+/// The file in [`Repo::home`] that holds when plan listing began, in
+/// nanoseconds since the epoch.
+const PLANS_SINCE: &str = "plans-since";
+
+/// One plan page that no task names, as the queue screen will draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanPage {
+    /// The page's absolute path, which is what a task's `plan:` would hold.
+    pub(crate) path: PathBuf,
+    /// The file stem without its leading `<YYYY-MM-DD>-`.
+    pub(crate) name: String,
+    /// When the page was created, as [`crate::archive_index::created_at`]
+    /// gives it for a group.
+    pub(crate) created: std::time::SystemTime,
+}
+
+/// A page's name: its file stem, without the date `/spoolway-plan` puts in
+/// front. A stem with no such date is kept whole.
+fn plan_name(stem: &str) -> String {
+    let b = stem.as_bytes();
+    let dated = b.len() > 11
+        && b[10] == b'-'
+        && b[..10].iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    stem[if dated { 11 } else { 0 }..].to_string()
+}
+
+fn nanos(at: std::time::SystemTime) -> u128 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// When plan listing began for this project, writing the stamp if it is
+/// missing.
+///
+/// Most pages in an old project were cut before tasks carried `plan:`, so
+/// without a cutoff every one of them would read as having no tasks. The
+/// stamp is the time of the first listing, which puts those pages before it.
+/// A project whose `plans/` held no page then has nothing to exclude, so its
+/// stamp is zero and every later page is listed, even one written in the same
+/// clock tick. A stamp that does not read as a number is treated as missing.
+/// If it cannot be written the value is still used, and the next call tries
+/// again.
+fn plans_since(repo: &Repo, any_page: bool) -> u128 {
+    let file = repo.home().join(PLANS_SINCE);
+    if let Some(since) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+    {
+        return since;
+    }
+    let since = if any_page {
+        nanos(std::time::SystemTime::now())
+    } else {
+        0
+    };
+    let _ = crate::task::write_atomic(&file, since.to_string());
+    since
+}
+
+/// Every plan page that no pending, queued or archived task names in `plan:`
+/// and that was created after the `plans-since` stamp, newest first.
+///
+/// Only the folder's file names and creation times are read, never a page.
+/// Only `.html` files directly inside `plans/` count. A page whose creation
+/// time cannot be read is left out, since nothing says it is newer than the
+/// stamp. Pages with the same time sort by name, so the list does not
+/// reshuffle between two reloads.
+///
+/// The three task folders are read for their `plan:` keys. The archive comes
+/// from its index, which carries each task's plan.
+// Nothing outside the tests calls this until the queue screen draws plan rows.
+#[cfg_attr(not(test), expect(dead_code, reason = "nothing draws plan rows yet"))]
+pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
+    let plans = repo.plans_dir();
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(&plans)
+        .with_context(|| format!("reading {}", plans.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("html"))
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        })
+        .collect();
+    let since = plans_since(repo, !pages.is_empty());
+    if pages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut named: std::collections::HashSet<String> = Default::default();
+    for dir in [repo.pending_dir(), repo.queue_dir()] {
+        named.extend(md_files(&dir)?.iter().filter_map(|path| plan_of(path)));
+    }
+    named.extend(
+        crate::archive_index::read_at(&repo.archive_dir())?
+            .into_iter()
+            .filter_map(|entry| entry.plan),
+    );
+
+    let mut out: Vec<PlanPage> = pages
+        .drain(..)
+        .filter(|path| !named.contains(path.to_string_lossy().as_ref()))
+        .filter_map(|path| {
+            let created = created_time(&path)?;
+            let name = plan_name(&path.file_stem()?.to_string_lossy());
+            (nanos(created) > since).then_some(PlanPage {
+                name,
+                path,
+                created,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        newest_first(Some(a.created), Some(b.created)).then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(out)
+}
+
 /// Every file [`list_groups_in`] has read the bytes of so far in this
 /// process, with the thread that read it — test-only, the same shape as
 /// [`crate::status::QUEUE_READS`] and [`crate::repo::PROCESS_RUNS`]: scoped
@@ -1717,5 +1843,155 @@ mod tests {
     fn every_letter_on_a_word_start_scores_flat() {
         let s = score("qb", "queue-browse").unwrap();
         assert_eq!(s, 150 + 20 /* window itself starts on a word start */);
+    }
+
+    /// A project with plans on disk: the pages `plans_without_tasks` is
+    /// asked about, made a moment apart so their creation times differ.
+    fn plan_pages(repo: &Repo, names: &[&str]) -> Vec<String> {
+        let dir = repo.plans_dir();
+        names
+            .iter()
+            .map(|name| {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                let path = dir.join(name);
+                std::fs::write(&path, "<html></html>").unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect()
+    }
+
+    fn names(repo: &Repo) -> Vec<String> {
+        plans_without_tasks(repo)
+            .unwrap()
+            .into_iter()
+            .map(|page| page.name)
+            .collect()
+    }
+
+    /// The stamp is set to the earliest instant so only the behaviour under
+    /// test decides what is listed.
+    fn open_stamp(repo: &Repo) {
+        std::fs::write(repo.home().join(PLANS_SINCE), "1").unwrap();
+    }
+
+    /// A page named by a pending, a queued or an archived task is not listed,
+    /// and neither is a subfolder or a file that is not `.html`. The date comes
+    /// off the name of the pages that are, newest first.
+    #[test]
+    fn a_plan_no_task_names_is_listed_newest_first_without_its_date() {
+        use crate::archive_index::testutil::*;
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-listed");
+        open_stamp(&repo);
+        let pages = plan_pages(
+            &repo,
+            &[
+                "2026-01-01-old.html",
+                "2026-01-02-pending.html",
+                "2026-01-03-queued.html",
+                "2026-01-04-archived.html",
+                "2026-01-05-new.html",
+                "undated.html",
+                "2026-01-06-notes.txt",
+            ],
+        );
+        std::fs::create_dir(repo.plans_dir().join("2026-01-07-mockups.html")).unwrap();
+        std::fs::create_dir(repo.plans_dir().join("mockups")).unwrap();
+        std::fs::write(repo.plans_dir().join("mockups/inner.html"), "x").unwrap();
+        let task =
+            |id: &str, plan: &str| format!("---\nid: {id}\ngroup: g\nplan: {plan}\n---\nbody\n");
+        std::fs::write(
+            repo.pending_dir().join("p.md"),
+            task("p", pages[1].as_str()),
+        )
+        .unwrap();
+        std::fs::write(repo.queue_dir().join("q.md"), task("q", pages[2].as_str())).unwrap();
+        archive(&repo, "a", &format!("group: g\nplan: {}\n", pages[3]));
+
+        assert_eq!(names(&repo), ["undated", "new", "old"]);
+    }
+
+    /// Only an exact path counts: a task naming another folder's page of the
+    /// same file name does not hide this one.
+    #[test]
+    fn a_plan_is_named_only_by_its_exact_path() {
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-exact");
+        open_stamp(&repo);
+        plan_pages(&repo, &["2026-01-01-x.html"]);
+        std::fs::write(
+            repo.pending_dir().join("p.md"),
+            "---\nid: p\ngroup: g\nplan: /elsewhere/2026-01-01-x.html\n---\n",
+        )
+        .unwrap();
+
+        assert_eq!(names(&repo), ["x"]);
+    }
+
+    /// A page created before the stamp is never listed; one after it is.
+    #[test]
+    fn a_plan_older_than_the_stamp_is_not_listed() {
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-stamp");
+        plan_pages(&repo, &["2026-01-01-before.html"]);
+        let stamp = nanos(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        std::fs::write(repo.home().join(PLANS_SINCE), stamp.to_string()).unwrap();
+
+        assert!(names(&repo).is_empty());
+        open_stamp(&repo);
+        assert_eq!(names(&repo), ["before"]);
+    }
+
+    /// The first listing in a project that already has pages writes the
+    /// stamp after them, so none is listed; a page written afterwards is.
+    #[test]
+    fn the_first_listing_stamps_after_the_pages_already_there() {
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-first");
+        plan_pages(&repo, &["2026-01-01-before.html"]);
+        assert!(!repo.home().join(PLANS_SINCE).exists());
+
+        assert!(names(&repo).is_empty());
+
+        assert!(repo.home().join(PLANS_SINCE).exists());
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        plan_pages(&repo, &["2026-01-02-after.html"]);
+        assert_eq!(names(&repo), ["after"]);
+    }
+
+    /// A project whose `plans/` held no page when the stamp was written lists
+    /// every page after it, however close to that moment it was written.
+    #[test]
+    fn a_stamp_written_over_no_pages_lists_every_later_page() {
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-empty");
+        assert!(names(&repo).is_empty());
+        plan_pages(&repo, &["2026-01-01-first.html"]);
+
+        assert_eq!(names(&repo), ["first"]);
+    }
+
+    /// A plan whose only task is archived stays unlisted even when the
+    /// index was written before lines carried `plan`.
+    #[test]
+    fn an_archived_plan_stays_unlisted_after_an_old_index_rebuilds() {
+        use crate::archive_index::testutil::*;
+        let (repo, _root) = crate::commands::testutil::fixture("pending-plans-old-index");
+        open_stamp(&repo);
+        let pages = plan_pages(&repo, &["2026-01-01-done.html"]);
+        archive(&repo, "a", &format!("group: g\nplan: {}\n", pages[0]));
+        let index = repo.archive_dir().join(crate::archive_index::FILE_NAME);
+        let old: String = std::fs::read_to_string(&index)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
+                line.as_object_mut().unwrap().remove("plan");
+                format!("{line}\n")
+            })
+            .collect();
+        std::fs::write(&index, old).unwrap();
+        let folder = std::fs::metadata(repo.archive_dir())
+            .unwrap()
+            .modified()
+            .unwrap();
+        crate::scratch::set_mtime(&index, folder);
+
+        assert!(names(&repo).is_empty());
     }
 }

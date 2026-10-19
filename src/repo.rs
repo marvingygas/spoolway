@@ -659,6 +659,13 @@ impl Repo {
         self.home_subdir(crate::config::ARCHIVE_DIR)
     }
 
+    /// Where plan pages are written: `plans/` under [`Repo::home`], created
+    /// silently like its siblings. Only `.html` files directly inside it are
+    /// plans; the folders in it hold mockups copied for tasks.
+    pub fn plans_dir(&self) -> PathBuf {
+        self.home_subdir(crate::config::PLANS_DIR)
+    }
+
     /// Where a producer leaves tasks for the queue screen to list:
     /// one flat directory of `.md` files, no subdirectories and no index.
     ///
