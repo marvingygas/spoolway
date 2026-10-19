@@ -83,6 +83,9 @@ pub(crate) struct PendingTask {
     /// [`super::queue::tasks_pane_lines`]'s `Starts from:` row draws when
     /// it is set. See [`front_starts_from`].
     pub(crate) starts_from: Option<String>,
+    /// This task's own `plan:` key, read the same way — the page
+    /// [`plans_without_tasks`] counts as having a task.
+    pub(crate) plan: Option<String>,
 }
 
 impl PendingTask {
@@ -370,8 +373,11 @@ fn plans_since(repo: &Repo, any_page: bool) -> u128 {
 /// stamp. Pages with the same time sort by name, so the list does not
 /// reshuffle between two reloads.
 ///
-/// The three task folders are read for their `plan:` keys. The archive comes
-/// from its index, which carries each task's plan.
+/// The pages tasks name come from the listing the queue screen already
+/// reloads every second, [`list_groups_and_skipped`], so its caches apply:
+/// the pending and queue files are parsed again only when their bytes change,
+/// and the archive comes from its index. A task with no `group:` is not in
+/// that listing, so a page only it names still counts as having no task.
 // Nothing outside the tests calls this until the queue screen draws plan rows.
 #[cfg_attr(not(test), expect(dead_code, reason = "nothing draws plan rows yet"))]
 pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
@@ -388,15 +394,12 @@ pub(crate) fn plans_without_tasks(repo: &Repo) -> Result<Vec<PlanPage>> {
         return Ok(Vec::new());
     }
 
-    let mut named: std::collections::HashSet<String> = Default::default();
-    for dir in [repo.pending_dir(), repo.queue_dir()] {
-        named.extend(md_files(&dir)?.iter().filter_map(|path| plan_of(path)));
-    }
-    named.extend(
-        crate::archive_index::read_at(&repo.archive_dir())?
-            .into_iter()
-            .filter_map(|entry| entry.plan),
-    );
+    let named: std::collections::HashSet<String> = list_groups_and_skipped(repo)?
+        .0
+        .into_iter()
+        .flat_map(|group| group.tasks)
+        .filter_map(|task| task.plan)
+        .collect();
 
     let mut out: Vec<PlanPage> = pages
         .drain(..)
@@ -548,6 +551,7 @@ pub(crate) fn list_groups_in(
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
             starts_from: front_starts_from(&front),
+            plan: front_str(&front, "plan"),
             path,
             id,
             doc,
@@ -611,6 +615,7 @@ pub(crate) fn list_groups_in(
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
             starts_from: front_starts_from(&front),
+            plan: front_str(&front, "plan"),
             path,
             id,
             doc,
@@ -894,6 +899,7 @@ fn archive_tasks(dir: &Path) -> Result<Vec<ArchivedTask>> {
                     pipeline: Some(entry.pipeline.clone()).filter(|name| !name.is_empty()),
                     base: entry.base.as_deref().and_then(trimmed),
                     starts_from: entry.starts_from.as_deref().and_then(trimmed),
+                    plan: entry.plan.as_deref().and_then(trimmed),
                     path: dir.join(format!("{}.md", entry.id)),
                     id: entry.id.clone(),
                     doc: String::new(),

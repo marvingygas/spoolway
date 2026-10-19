@@ -672,7 +672,7 @@ mod tests {
         std::fs::write(index_path(&repo), old).unwrap();
         stamp(&repo.archive_dir());
         assert!(is_current(&repo), "only the missing key may be the fault");
-        reset_rebuilds_for_test();
+        testutil::reset_rebuilds();
 
         let entries = read(&repo);
 
@@ -681,10 +681,6 @@ mod tests {
         read(&repo);
         assert_eq!(REBUILDS.with(std::cell::Cell::get), 1, "rebuilt twice");
         std::fs::remove_dir_all(&base).ok();
-    }
-
-    fn reset_rebuilds_for_test() {
-        REBUILDS.with(|c| c.set(0));
     }
 
     #[test]
