@@ -1240,7 +1240,7 @@ pub struct Harvest {
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
 ///
 /// `own_subagents` says whether the session's subagents are part of this
-/// reading; see [`lane_owns_subagents`] for who decides.
+/// reading; see [`LedgerTotals::lane_owns_subagents`] for who decides.
 pub fn harvest(
     kind: &str,
     session: &str,
@@ -1253,21 +1253,6 @@ pub fn harvest(
     } else {
         harvest_file(kind, &path, prices)
     }
-}
-
-/// Whether a dispatched lane banks the subagent spend of `session`.
-///
-/// One rule for every reader of a lane's transcript: the subagents are the
-/// lane's unless the ledger holds a hand line for the session. A session a
-/// person ran by hand is banked by [`sweep_dirs`] with its subagents as lines
-/// of their own, and a dispatched lane can resume it, so folding the
-/// subagents into the lane's line as well would count them twice. The sweep
-/// applies the same test from its side: it banks a subagent exactly when the
-/// parent has a hand line.
-pub fn lane_owns_subagents(ledger: &[Entry], session: &str) -> bool {
-    !ledger
-        .iter()
-        .any(|entry| entry.session == session && entry.hand)
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
@@ -1502,7 +1487,7 @@ pub struct Live {
 /// subtracts the ledger's banked lines from this reading, and those lines
 /// include the subagents' spend, so leaving them out would read as zero until
 /// the root alone passed what was banked. `own_subagents` is
-/// [`lane_owns_subagents`]'s answer. `context` stays the root's.
+/// [`LedgerTotals::lane_owns_subagents`]'s answer. `context` stays the root's.
 pub fn live_of(
     kind: &str,
     session: &str,
@@ -1794,7 +1779,7 @@ fn subagent_transcripts(path: &Path, session: &str) -> Vec<PathBuf> {
 /// A subagent's spend is the lane's — [`sweep_dirs`] leaves the subagents of
 /// a lane session alone, and a lane's live reading ([`live_of`]) sums them
 /// the same way. The exception is a session with a hand line, where the sweep
-/// banks them: see [`lane_owns_subagents`]. They are summed here, into the one
+/// banks them: see [`LedgerTotals::lane_owns_subagents`]. They are summed here, into the one
 /// reading the lane's ledger line is diffed against, so a subagent whose
 /// transcript grows after the lane was banked shows up as a delta on the
 /// lane's session like any later root turn.
@@ -2822,12 +2807,7 @@ pub fn new_trial_id() -> String {
 /// same arm each bank their own row, and "kept usage rows for 3 trial
 /// tasks" (see the plan's own "Clean finish" mockup) counts arms.
 pub fn trial_task_count(repo: &Repo, trial: &str) -> usize {
-    read_cached(repo)
-        .iter()
-        .filter(|entry| entry.trial.as_deref() == Some(trial))
-        .map(|entry| entry.task.as_str())
-        .collect::<HashSet<_>>()
-        .len()
+    totals(repo).trials.get(trial).map_or(0, HashSet::len)
 }
 
 pub fn ledger_path(repo: &Repo) -> PathBuf {
@@ -2883,42 +2863,458 @@ pub fn bank_command_run(repo: &Repo, entry: &Entry) -> bool {
 
 /// Whether the ledger already holds a line for the command run with this id.
 pub fn command_run_banked(repo: &Repo, id: &str) -> bool {
-    read_cached(repo)
-        .iter()
-        .any(|line| line.command.as_ref().is_some_and(|c| c.id == id))
+    totals(repo).command_runs.contains(id)
 }
 
 /// Every entry, oldest first. A line that will not parse is skipped rather than
 /// fatal — one bad line must not cost you the rest of the history.
+///
+/// For a reader that needs every line: it streams the file, so the text of
+/// the ledger is never held beside the entries, and what it returns is the
+/// caller's to drop. A reader that asks a narrow question of the same file
+/// every second wants [`totals`] instead.
 pub fn read(repo: &Repo) -> Result<Vec<Entry>> {
     read_at(&ledger_path(repo))
 }
 
 pub fn read_at(path: &Path) -> Result<Vec<Entry>> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-    };
-    Ok(raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .collect())
+    let mut entries = Vec::new();
+    match stream_entries(path, 0, |entry| entries.push(entry)) {
+        Ok(_) => Ok(entries),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
-/// What [`read_cached`] last read: the entries it parsed, the byte offset the
-/// next call resumes from, and the file identity that offset is only valid
+/// Hand each entry `path` holds from byte `from` to `each`, one line at a
+/// time, and answer where the read stopped — measured from what was actually
+/// read rather than a separate `stat` taken first, so a writer appending
+/// mid-read can never be double-counted or skipped over. `Ok(None)` when the
+/// file is shorter than `from`: it was rotated or truncated out from under
+/// the offset, which tells [`totals`] to rebuild instead of trusting an offset
+/// that no longer means anything.
+///
+/// A line that will not parse is skipped, as [`read`] always did. Bytes that
+/// are not UTF-8 are an error, as they were when the file was read whole.
+fn stream_entries(
+    path: &Path,
+    from: u64,
+    mut each: impl FnMut(Entry),
+) -> std::io::Result<Option<u64>> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    if file.seek(SeekFrom::End(0))? < from {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(from))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut at = from;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(Some(at));
+        }
+        at += n as u64;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<Entry>(&line) {
+            each(entry);
+        }
+    }
+}
+
+/// What one task has banked at one step, every round of it summed.
+#[derive(Debug, Clone, Default)]
+struct StepSpend {
+    /// Whether a lane's line (not a command run's) was banked here. Decides
+    /// whether `output` and `wall_s` are answers or "never paid for".
+    lane: bool,
+    output: u64,
+    wall_s: i64,
+    /// `None` until a line carrying a price arrives — a lane nothing could
+    /// price adds nothing rather than zero.
+    cost_usd: Option<f64>,
+}
+
+/// What one task has banked under one group, lanes only.
+#[derive(Debug, Clone, Default)]
+pub struct GroupSpend {
+    pub output: u64,
+    pub wall_s: i64,
+    pub cost_usd: Option<f64>,
+}
+
+/// What one session has banked so far.
+///
+/// Both the dispatcher, diffing a transcript's cumulative reading against it,
+/// and the board, subtracting it from a live reading, ask this. A line with
+/// no session is not a lane's and is not kept.
+#[derive(Debug, Clone, Default)]
+pub struct SessionBanked {
+    pub tokens: Tokens,
+    /// The part of `tokens` already banked as over a price threshold.
+    pub tier_tokens: Tokens,
+    pub turns: u32,
+    pub cost_usd: f64,
+    /// The part of the session's reported total already banked — see
+    /// [`Entry::reported_usd`].
+    pub reported_usd: f64,
+    /// Whether a person's hand line is among them — see
+    /// [`LedgerTotals::lane_owns_subagents`].
+    pub hand: bool,
+}
+
+/// The newest line a run key or a (task, step) pair has banked under a
+/// session: enough to resume that session, or to adopt its lane.
+#[derive(Debug, Clone)]
+pub struct LastLane {
+    /// Position in the ledger, so the newest of several steps can be told.
+    seq: u64,
+    pub kind: String,
+    pub session: String,
+    pub agent: String,
+    pub model: String,
+    pub pipeline_version: String,
+}
+
+/// The ledger as running totals, built a line at a time and keeping no line.
+///
+/// Its size follows the number of tasks, steps and sessions the ledger
+/// names, never the number of lines: a ledger of a million lines for a
+/// hundred tasks costs a hundred tasks' worth of memory. Every question the
+/// board and the dispatcher's banking path ask of the ledger is answered
+/// here, so none of them scans it.
+///
+/// A line is counted by [`LedgerTotals::fold`] exactly once. [`totals`]
+/// folds only what was appended since its last read, and rebuilds from
+/// nothing whenever the file is not a plain append, so the totals cannot
+/// drift from the file by a line counted twice.
+#[derive(Debug, Clone, Default)]
+pub struct LedgerTotals {
+    lines: u64,
+    steps: HashMap<(String, String), StepSpend>,
+    groups: HashMap<(String, String), GroupSpend>,
+    sessions: HashMap<String, SessionBanked>,
+    /// By [`crate::mux::run_key`] of the line's step and task.
+    last_by_run_key: HashMap<String, LastLane>,
+    /// By task and step id, for the newest session a prompt already holds.
+    last_by_step: HashMap<(String, String), LastLane>,
+    command_runs: HashSet<String>,
+    trials: HashMap<String, HashSet<String>>,
+    /// Lane output tokens and cost banked at or after the `since` that
+    /// [`LedgerTotals::read_since`] was given, and nothing from any other
+    /// constructor. An unattended run's ceilings are sums over this window,
+    /// which moves with every run, so it cannot be a total kept per task.
+    since_output: u64,
+    since_cost: f64,
+}
+
+impl LedgerTotals {
+    /// Count one line. The order lines arrive in is the order they were
+    /// banked, which "newest" below relies on.
+    pub fn fold(&mut self, entry: &Entry) {
+        self.lines += 1;
+        if let Some(run) = &entry.command {
+            self.command_runs.insert(run.id.clone());
+        }
+        if let Some(trial) = &entry.trial {
+            self.trials
+                .entry(trial.clone())
+                .or_default()
+                .insert(entry.task.clone());
+        }
+        let step = self
+            .steps
+            .entry((entry.task.clone(), entry.step.clone()))
+            .or_default();
+        // A command step's run is not a lane. It spent no tokens, and
+        // counting it would turn a step never paid for into `Some(0)`.
+        if entry.command.is_none() {
+            step.lane = true;
+            step.output += entry.tokens.output;
+            step.wall_s += entry.wall_s;
+        }
+        if let Some(usd) = entry.cost_usd {
+            *step.cost_usd.get_or_insert(0.0) += usd;
+        }
+        if let Some(group) = &entry.plan
+            && entry.command.is_none()
+        {
+            let spend = self
+                .groups
+                .entry((entry.task.clone(), group.clone()))
+                .or_default();
+            spend.output += entry.tokens.output;
+            spend.wall_s += entry.wall_s;
+            if let Some(usd) = entry.cost_usd {
+                *spend.cost_usd.get_or_insert(0.0) += usd;
+            }
+        }
+        if entry.session.is_empty() {
+            return;
+        }
+        let banked = self.sessions.entry(entry.session.clone()).or_default();
+        banked.tokens.add(&entry.tokens);
+        banked.tier_tokens.add(&entry.tier_tokens);
+        banked.turns += entry.turns;
+        banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
+        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
+        banked.hand |= entry.hand;
+        let last = LastLane {
+            seq: self.lines,
+            kind: entry.kind.clone(),
+            session: entry.session.clone(),
+            agent: entry.agent.clone(),
+            model: entry.model.clone(),
+            pipeline_version: entry.pipeline_version.clone(),
+        };
+        self.last_by_run_key
+            .insert(crate::mux::run_key(&entry.step, &entry.task), last.clone());
+        self.last_by_step
+            .insert((entry.task.clone(), entry.step.clone()), last);
+    }
+
+    /// Totals of exactly these lines, in this order.
+    #[cfg(test)]
+    pub fn from_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
+        let mut totals = Self::default();
+        for entry in entries {
+            totals.fold(entry);
+        }
+        totals
+    }
+
+    /// Totals of the ledger at `path`, streamed. A ledger that is not there is
+    /// nothing banked.
+    pub fn read_at(path: &Path) -> Result<Self> {
+        let mut totals = Self::default();
+        match stream_entries(path, 0, |entry| totals.fold(&entry)) {
+            Ok(_) => Ok(totals),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// [`LedgerTotals::read_at`], also summing the lane output tokens and cost
+    /// of every line stamped at or after `since` — all of them when it is
+    /// `None`. Lines with no task are a person's own sessions, not the run's,
+    /// and are left out of those two sums.
+    pub fn read_since(path: &Path, since: Option<&str>) -> Result<Self> {
+        let mut totals = Self::default();
+        let mut output = 0;
+        let mut cost = 0.0;
+        match stream_entries(path, 0, |entry| {
+            if !entry.task.is_empty() && since.is_none_or(|since| entry.ts.as_str() >= since) {
+                output += entry.tokens.output;
+                cost += entry.cost_usd.unwrap_or(0.0);
+            }
+            totals.fold(&entry);
+        }) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        }
+        totals.since_output = output;
+        totals.since_cost = cost;
+        Ok(totals)
+    }
+
+    /// The window sums [`LedgerTotals::read_since`] took: output tokens, then
+    /// cost in dollars.
+    pub fn since(&self) -> (u64, f64) {
+        (self.since_output, self.since_cost)
+    }
+
+    /// Output tokens banked for `task` at `step`, every round of it summed, or
+    /// `None` where the step has never been paid for at all. A command step's
+    /// run is not counted.
+    pub fn spent_at(&self, task: &str, step: &str) -> Option<u64> {
+        let spend = self.step(task, step)?;
+        spend.lane.then_some(spend.output)
+    }
+
+    /// What `task` has cost at `step`, every round of it summed, or `None`
+    /// where nothing banked there carried a price.
+    pub fn cost_at(&self, task: &str, step: &str) -> Option<f64> {
+        self.step(task, step)?.cost_usd
+    }
+
+    /// Seconds the lanes of `task` were busy at `step`, every round of it
+    /// summed, or `None` where no lane ever banked there.
+    pub fn lane_time_at(&self, task: &str, step: &str) -> Option<i64> {
+        let spend = self.step(task, step)?;
+        spend.lane.then_some(spend.wall_s)
+    }
+
+    fn step(&self, task: &str, step: &str) -> Option<&StepSpend> {
+        // The pair is two owned strings in the map, so a borrowed lookup
+        // would need a key type of its own for no saving worth having here.
+        self.steps.get(&(task.to_string(), step.to_string()))
+    }
+
+    /// What `session` has banked, or nothing for a session never banked.
+    pub fn session(&self, session: &str) -> SessionBanked {
+        self.sessions.get(session).cloned().unwrap_or_default()
+    }
+
+    /// Every session banked, for a pass that diffs transcripts against them.
+    pub fn sessions(&self) -> &HashMap<String, SessionBanked> {
+        &self.sessions
+    }
+
+    /// Whether a dispatched lane banks the subagent spend of `session`.
+    ///
+    /// One rule for every reader of a lane's transcript: the subagents are the
+    /// lane's unless the ledger holds a hand line for the session. A session a
+    /// person ran by hand is banked by [`sweep_dirs`] with its subagents as
+    /// lines of their own, and a dispatched lane can resume it, so folding the
+    /// subagents into the lane's line as well would count them twice. The
+    /// sweep applies the same test from its side: it banks a subagent exactly
+    /// when the parent has a hand line.
+    pub fn lane_owns_subagents(&self, session: &str) -> bool {
+        !self.sessions.get(session).is_some_and(|banked| banked.hand)
+    }
+
+    /// The newest line banked under [`crate::mux::run_key`] `key` that named a
+    /// session.
+    pub fn last_lane(&self, key: &str) -> Option<&LastLane> {
+        self.last_by_run_key.get(key)
+    }
+
+    /// The newest line banked for `task` at any of `steps` that named a
+    /// session.
+    pub fn last_lane_of<'a>(
+        &self,
+        task: &str,
+        steps: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&LastLane> {
+        steps
+            .into_iter()
+            .filter_map(|step| self.last_by_step.get(&(task.to_string(), step.to_string())))
+            .max_by_key(|last| last.seq)
+    }
+
+    /// Lane spend by (task, group), for the board's group totals.
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &str, &GroupSpend)> {
+        self.groups
+            .iter()
+            .map(|((task, group), spend)| (task.as_str(), group.as_str(), spend))
+    }
+}
+
+/// The ledger's totals, cached process-wide and refreshed only past what was
+/// already read, exploiting the one thing [`append`] guarantees: the ledger
+/// only ever grows, one full line at a time. For a reader that asks the same
+/// question every frame — the board, above all — this turns most calls into
+/// "did the file get bigger" rather than a re-parse.
+///
+/// Nothing per line is kept, so the process holds memory that follows the
+/// number of tasks. A warm cache that found nothing new hands back a clone of
+/// the `Arc`. A call that finds the file grown folds the new lines into the
+/// totals in place whenever no caller still holds the previous answer, and
+/// into a copy of the totals (never of the lines) when one does.
+///
+/// Falls back to rebuilding from nothing for anything that is not a plain
+/// append: a shorter file (rotated, truncated, gone), an inode that changed
+/// under the path (rotated onto a fresh file), or a same-inode file whose
+/// length did not grow but whose mtime moved (rewritten in place — a person
+/// trimming bad lines while the board is up). That is what keeps a total
+/// from carrying a line the file no longer has. Errors read as nothing
+/// banked, the same as `read(..).unwrap_or_default()` every caller of this
+/// already wrote.
+///
+/// The one case left unguarded is a same-inode in-place rewrite that also
+/// nets *longer* — rare, since editors and `sed -i` write a new inode — and
+/// the inode check catches the common shape of it. On Windows there is no
+/// inode: [`file_ino`] returns `None`, so `ino == ino` is always true and
+/// only the length and mtime checks guard the cache there.
+pub fn totals(repo: &Repo) -> std::sync::Arc<LedgerTotals> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<LedgerCache>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let path = ledger_path(repo);
+    let (len_now, mtime_now, ino_now) = ledger_identity(&path);
+
+    let Ok(mut guard) = cache.lock() else {
+        return std::sync::Arc::new(LedgerTotals::read_at(&path).unwrap_or_default());
+    };
+    if let Some(cached) = guard.as_mut()
+        && cached.path == path
+        && cached.ino == ino_now
+    {
+        // Nothing moved: same length, same mtime. The existing `Arc` is still
+        // the right answer and cloning it costs nothing but a refcount — this
+        // is the common case a board sitting idle between passes takes.
+        if len_now == cached.len && mtime_now == cached.mtime {
+            return std::sync::Arc::clone(&cached.totals);
+        }
+        // A plain append: strictly longer, and no older than what was cached.
+        // The ledger only ever gains whole lines at its end, so every byte
+        // before `cached.len` is unchanged and the tail is all that is new.
+        if len_now > cached.len
+            && mtime_now
+                .zip(cached.mtime)
+                .is_none_or(|(now, was)| now >= was)
+        {
+            // Taken out of the cache so a caller that has let go of the
+            // previous answer leaves the totals unshared and they are folded
+            // in place. A read that fails halfway leaves lines counted that
+            // the offset does not cover; the rebuild below then replaces the
+            // whole entry rather than keeping them.
+            let mut grown = std::mem::take(&mut cached.totals);
+            let folded = stream_entries(&path, cached.len, |entry| {
+                std::sync::Arc::make_mut(&mut grown).fold(&entry)
+            });
+            if let Ok(Some(len)) = folded {
+                cached.totals = grown;
+                cached.len = len;
+                cached.mtime = mtime_now;
+                return std::sync::Arc::clone(&cached.totals);
+            }
+        }
+    }
+
+    // The length is what the read actually consumed, not the `stat` taken
+    // before it: a line the dispatcher appends while a multi-megabyte ledger
+    // is being parsed is in the totals already, and a shorter recorded
+    // length would have the next call fold it again as new tail and carry the
+    // duplicate for the life of the process (release review finding 4).
+    // The mtime stays the pre-read one — a write that lands between the two
+    // costs one full re-read, never a duplicate.
+    let mut built = LedgerTotals::default();
+    let len = stream_entries(&path, 0, |entry| built.fold(&entry))
+        .ok()
+        .flatten();
+    let (built, len) = match len {
+        Some(len) => (built, len),
+        None => (LedgerTotals::default(), 0),
+    };
+    let built = std::sync::Arc::new(built);
+    *guard = Some(LedgerCache {
+        path,
+        len,
+        mtime: mtime_now,
+        ino: ino_now,
+        totals: std::sync::Arc::clone(&built),
+    });
+    built
+}
+
+/// What [`totals`] last read: the totals it folded, the byte offset the next
+/// call resumes from, and the file identity that offset is only valid
 /// against — the inode and the modification time. A length that did not shrink
 /// is not proof the file only grew: it can also have been rewritten in place
-/// to the same or a greater length, which leaves the cached prefix wrong
+/// to the same or a greater length, which leaves the folded prefix wrong
 /// (review finding 41).
 struct LedgerCache {
     path: PathBuf,
     len: u64,
     mtime: Option<std::time::SystemTime>,
     ino: Option<u64>,
-    entries: std::sync::Arc<Vec<Entry>>,
+    totals: std::sync::Arc<LedgerTotals>,
 }
 
 /// The file's length, modification time and inode in one `stat` — `(0, None,
@@ -2935,122 +3331,6 @@ fn ledger_identity(path: &Path) -> (u64, Option<std::time::SystemTime>, Option<u
 fn file_ino(meta: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(meta.ino())
-}
-
-/// [`read`], cached process-wide and refreshed only past what was already
-/// read, exploiting the one thing [`append`] guarantees: the ledger only
-/// ever grows, one full line at a time. For a reader that asks the same
-/// question every frame — the board, above all, whose own comment used to
-/// call re-reading a 40MB ledger a second the most expensive thing in a pass
-/// that decides nothing — this turns most calls into "did the file get
-/// bigger" rather than a full re-parse.
-///
-/// Returns a shared handle rather than an owned `Vec`: a warm cache that
-/// found nothing new hands back a clone of the `Arc` — a refcount bump — not
-/// a copy of however many entries the ledger holds. Only a call that finds
-/// the file has actually grown pays to build a new `Vec`, and that cost is
-/// proportional to what changed, once, not to the whole history on every
-/// frame that finds nothing new.
-///
-/// A one-shot command is no worse off using this than calling [`read`]
-/// directly: the first call is a full read either way, and the cache dies
-/// with the process. `read` stays what banking and pricing logic reaches
-/// for, since a single pass wants one settled answer to diff its own writes
-/// against rather than a boundary that can move under it mid-pass.
-///
-/// Falls back to a full read for anything that is not a plain append: a
-/// shorter file (rotated, truncated, gone), an inode that changed under the
-/// path (rotated onto a fresh file), or a same-inode file whose length did not
-/// grow but whose mtime moved (rewritten in place — a person trimming bad
-/// lines while the board is up). Errors read as empty, the same as
-/// `read(..).unwrap_or_default()` every caller of this already wrote.
-///
-/// The one case left unguarded is a same-inode in-place rewrite that also
-/// nets *longer* — rare, since editors and `sed -i` write a new inode — and
-/// the inode check catches the common shape of it. On Windows there is no
-/// inode: [`file_ino`] returns `None`, so `ino == ino` is always true and
-/// only the length and mtime checks guard the cache there.
-pub fn read_cached(repo: &Repo) -> std::sync::Arc<Vec<Entry>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<LedgerCache>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    let path = ledger_path(repo);
-    let (len_now, mtime_now, ino_now) = ledger_identity(&path);
-
-    let Ok(mut guard) = cache.lock() else {
-        return std::sync::Arc::new(read_at(&path).unwrap_or_default());
-    };
-    if let Some(cached) = guard.as_mut()
-        && cached.path == path
-        && cached.ino == ino_now
-    {
-        // Nothing moved: same length, same mtime. The existing `Arc` is still
-        // the right answer and cloning it costs nothing but a refcount — this
-        // is the common case a board sitting idle between passes takes.
-        if len_now == cached.len && mtime_now == cached.mtime {
-            return std::sync::Arc::clone(&cached.entries);
-        }
-        // A plain append: strictly longer, and no older than what was cached.
-        // The ledger only ever gains whole lines at its end, so every byte
-        // before `cached.len` is unchanged and the tail is all that is new.
-        if len_now > cached.len
-            && mtime_now
-                .zip(cached.mtime)
-                .is_none_or(|(now, was)| now >= was)
-            && let Some((tail, len)) = read_tail(&path, cached.len)
-        {
-            if !tail.is_empty() {
-                let mut merged = (*cached.entries).clone();
-                merged.extend(tail);
-                cached.entries = std::sync::Arc::new(merged);
-            }
-            cached.len = len;
-            cached.mtime = mtime_now;
-            return std::sync::Arc::clone(&cached.entries);
-        }
-    }
-
-    // The length is what the read actually consumed, not the `stat` taken
-    // before it: a line the dispatcher appends while a multi-megabyte ledger
-    // is being parsed is in `entries` already, and a shorter recorded
-    // length would have the next call re-read it as new tail and carry the
-    // duplicate for the life of the process (release review finding 4).
-    // The mtime stays the pre-read one — a write that lands between the two
-    // costs one full re-read, never a duplicate.
-    let (entries, len) = read_tail(&path, 0).unwrap_or_default();
-    let entries = std::sync::Arc::new(entries);
-    *guard = Some(LedgerCache {
-        path,
-        len,
-        mtime: mtime_now,
-        ino: ino_now,
-        entries: std::sync::Arc::clone(&entries),
-    });
-    entries
-}
-
-/// The entries `path` has gained since byte `from`, and the file's length
-/// once the read finished — measured from what was actually read rather
-/// than a separate `stat` taken first, so a writer appending mid-read can
-/// never be double-counted or skipped over. `None` when the file is shorter
-/// than `from` — it was rotated or truncated out from under the offset —
-/// which tells [`read_cached`] to fall back to a full read instead of
-/// trusting an offset that no longer means anything.
-fn read_tail(path: &Path, from: u64) -> Option<(Vec<Entry>, u64)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    if file.seek(SeekFrom::End(0)).ok()? < from {
-        return None;
-    }
-    file.seek(SeekFrom::Start(from)).ok()?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw).ok()?;
-    let entries = raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .collect();
-    Some((entries, from + raw.len() as u64))
 }
 
 /// A half-open window `[from, until)` over the ledger.
@@ -3390,8 +3670,13 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let own_subagents = lane_owns_subagents(&read(repo).unwrap_or_default(), session);
-    let harvest = harvest(kind, session, &repo.config.models, own_subagents)?;
+    // Streamed, so a project's whole history is never held to find one flag.
+    // The rule is [`LedgerTotals::lane_owns_subagents`]'s, asked of one session.
+    let mut hand_line = false;
+    let _ = stream_entries(&ledger_path(repo), 0, |entry| {
+        hand_line |= entry.hand && entry.session == session;
+    });
+    let harvest = harvest(kind, session, &repo.config.models, !hand_line)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -3594,7 +3879,7 @@ struct LaneFacts<'a> {
     /// inherits.
     carry: Option<&'a Entry>,
     /// Whether any line for the session is a hand line — the negation of
-    /// [`lane_owns_subagents`].
+    /// [`LedgerTotals::lane_owns_subagents`].
     hand: bool,
 }
 
@@ -3678,7 +3963,7 @@ fn catch_up_with_facts(
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
     let carry = facts.carry?;
-    // See [`lane_owns_subagents`]: a hand session's subagents are the sweep's.
+    // See [`LedgerTotals::lane_owns_subagents`]: a hand session's subagents are the sweep's.
     let subagents_are_ours = !facts.hand;
     let touched = if subagents_are_ours {
         // A subagent can finish after the root transcript's last write, so its
@@ -4643,7 +4928,7 @@ pub fn read_session(kind: &str, session: &str) -> SessionRead {
 
 /// [`session_read_from_path`], cached process-wide and gated on the
 /// transcript's length and modification time — the same shape of problem
-/// [`read_cached`] solves for the ledger. `eval::load` calls [`read_sessions`]
+/// [`totals`] solves for the ledger. `eval::load` calls [`read_sessions`]
 /// fresh on every `[r]` and every filter-panel commit, over the very same
 /// transcripts each time, and a file that has not changed since the last
 /// call costs nothing to answer again here.
@@ -6682,44 +6967,102 @@ mod tests {
         assert_eq!(entry.pipeline_version, "1.0");
     }
 
-    /// `read_cached` reads the ledger once and again only past what it has
-    /// already read — proven here by reading it, appending, and reading
-    /// again, rather than by reasoning about `append`'s own atomicity from a
-    /// distance.
+    /// A lane line that spent something, for the totals to tell apart.
+    fn spend_entry(task: &str, step: &str, output: u64, cost: f64, wall_s: i64) -> Entry {
+        Entry {
+            step: step.into(),
+            tokens: Tokens {
+                output,
+                ..Tokens::default()
+            },
+            cost_usd: Some(cost),
+            wall_s,
+            session: format!("{task}-{step}"),
+            ..minimal_entry(task)
+        }
+    }
+
+    /// Whether two totals give the same answer to every question the board
+    /// and the dispatcher ask about `tasks`, and counted the same lines.
+    fn same_answers(a: &LedgerTotals, b: &LedgerTotals, tasks: &[&str]) {
+        assert_eq!(a.lines, b.lines, "a line was counted twice or missed");
+        for task in tasks {
+            for step in ["implement", "review"] {
+                assert_eq!(
+                    a.spent_at(task, step),
+                    b.spent_at(task, step),
+                    "{task} {step}"
+                );
+                assert_eq!(
+                    a.cost_at(task, step),
+                    b.cost_at(task, step),
+                    "{task} {step}"
+                );
+                assert_eq!(
+                    a.lane_time_at(task, step),
+                    b.lane_time_at(task, step),
+                    "{task} {step}"
+                );
+            }
+            let session = format!("{task}-implement");
+            assert_eq!(
+                a.session(&session).tokens.output,
+                b.session(&session).tokens.output
+            );
+        }
+    }
+
+    /// `totals` reads the ledger once and folds in only what was appended
+    /// since. Proven by appending between reads and comparing the answer with
+    /// totals built from a full re-read: a line counted twice or missed shows
+    /// in the line count and in the sums.
     #[test]
-    fn read_cached_picks_up_only_what_was_appended_since() {
-        let (repo, _, _root_guard) = fixture("read-cached");
+    fn totals_pick_up_only_what_was_appended_since() {
+        let (repo, _, _root_guard) = fixture("totals-append");
+        append(&repo, &spend_entry("first", "implement", 10, 1.0, 5)).unwrap();
+        let after_first = totals(&repo);
+        assert_eq!(after_first.spent_at("first", "implement"), Some(10));
 
-        append(&repo, &minimal_entry("first")).unwrap();
-        let after_first = read_cached(&repo);
-        assert_eq!(after_first.iter().filter(|e| e.task == "first").count(), 1);
+        append(&repo, &spend_entry("second", "implement", 20, 2.0, 7)).unwrap();
+        append(&repo, &spend_entry("first", "implement", 3, 0.5, 1)).unwrap();
+        let after_second = totals(&repo);
+        assert_eq!(after_second.spent_at("second", "implement"), Some(20));
+        assert_eq!(after_second.spent_at("first", "implement"), Some(13));
+        assert_eq!(after_second.cost_at("first", "implement"), Some(1.5));
+        assert_eq!(after_second.lane_time_at("first", "implement"), Some(6));
 
-        append(&repo, &minimal_entry("second")).unwrap();
-        let after_second = read_cached(&repo);
-        assert_eq!(
-            after_second.iter().filter(|e| e.task == "second").count(),
-            1,
-            "the second call must see what was appended after the first"
-        );
-        assert_eq!(
-            after_second.iter().filter(|e| e.task == "first").count(),
-            1,
-            "and still carry what the first call already read"
-        );
+        let rebuilt = LedgerTotals::from_entries(&read(&repo).unwrap());
+        same_answers(&after_second, &rebuilt, &["first", "second"]);
+        // The handle a caller kept is a snapshot, not a view of later lines.
+        assert_eq!(after_first.spent_at("second", "implement"), None);
+    }
+
+    /// Many lines for one task are one entry in the totals, not many: nothing
+    /// the cache keeps grows with the number of ledger lines.
+    #[test]
+    fn totals_keep_one_entry_per_task_and_step_however_many_lines() {
+        let (repo, _, _root_guard) = fixture("totals-size");
+        for _ in 0..50 {
+            append(&repo, &spend_entry("busy", "implement", 1, 0.1, 1)).unwrap();
+        }
+        let held = totals(&repo);
+        assert_eq!(held.lines, 50);
+        assert_eq!(held.steps.len(), 1);
+        assert_eq!(held.sessions.len(), 1);
+        assert_eq!(held.last_by_run_key.len(), 1);
+        assert_eq!(held.spent_at("busy", "implement"), Some(50));
     }
 
     /// A ledger rewritten in place to the same byte length — a person trimming
-    /// a bad line out while the board reads through the cache — is re-read
-    /// whole rather than served from the stale prefix an offset-and-length
-    /// check would still trust (review finding 41).
+    /// a bad line out while the board reads through the cache — is rebuilt
+    /// rather than served from the stale prefix an offset-and-length check
+    /// would still trust (review finding 41).
     #[test]
-    fn read_cached_re_reads_a_ledger_rewritten_in_place() {
-        let (repo, _, _root_guard) = fixture("read-cached-rewrite");
-        append(&repo, &minimal_entry("keep")).unwrap();
-        append(&repo, &minimal_entry("drop")).unwrap();
-
-        let before = read_cached(&repo);
-        assert_eq!(before.iter().filter(|e| e.task == "drop").count(), 1);
+    fn totals_rebuild_after_a_ledger_is_rewritten_in_place() {
+        let (repo, _, _root_guard) = fixture("totals-rewrite");
+        append(&repo, &spend_entry("keep", "implement", 4, 1.0, 1)).unwrap();
+        append(&repo, &spend_entry("drop", "implement", 9, 1.0, 1)).unwrap();
+        assert_eq!(totals(&repo).spent_at("drop", "implement"), Some(9));
 
         // Same length, same inode, only the content and the mtime change. The
         // sleep is to make the mtime move by more than the filesystem's
@@ -6731,59 +7074,183 @@ mod tests {
             .replace("\"drop\"", "\"kept\"");
         std::fs::write(&path, &rewritten).unwrap();
 
-        let after = read_cached(&repo);
-        assert_eq!(
-            after.iter().filter(|e| e.task == "drop").count(),
-            0,
-            "the rewrite dropped `drop`, and the cache must not resurrect it"
+        let after = totals(&repo);
+        assert_eq!(after.spent_at("drop", "implement"), None);
+        assert_eq!(after.spent_at("kept", "implement"), Some(9));
+        same_answers(
+            &after,
+            &LedgerTotals::from_entries(&read(&repo).unwrap()),
+            &["keep", "kept", "drop"],
         );
-        assert_eq!(after.iter().filter(|e| e.task == "kept").count(), 1);
     }
 
-    /// `board-reads-changed-only`: `live_session` now resolves a lane through
-    /// `read_cached`'s ledger rather than a fresh `read`, on the strength of
-    /// the two agreeing — proven directly here rather than just assumed from
-    /// both being backed by the same file. Covers the plain-append case and
-    /// the in-place rewrite [`read_cached_re_reads_a_ledger_rewritten_in_place`]
-    /// already covers for `read_cached` alone, this time checked against what
-    /// `read` sees of the same file.
+    /// A ledger that shrinks — rotated or truncated out from under the
+    /// offset — is rebuilt from what is left, not added to.
     #[test]
-    fn read_cached_agrees_with_read_including_after_a_rewrite() {
-        let (repo, _, _root_guard) = fixture("read-cached-agrees-with-read");
-        append(&repo, &minimal_entry("first")).unwrap();
-        append(&repo, &minimal_entry("drop")).unwrap();
+    fn totals_rebuild_after_a_ledger_shrinks() {
+        let (repo, _, _root_guard) = fixture("totals-shrink");
+        append(&repo, &spend_entry("old", "implement", 4, 1.0, 1)).unwrap();
+        append(&repo, &spend_entry("old", "implement", 4, 1.0, 1)).unwrap();
+        assert_eq!(totals(&repo).spent_at("old", "implement"), Some(8));
 
-        // `Entry` carries no `PartialEq`, so the two are compared by their own
-        // serialised form rather than field by field.
-        let as_json = |entries: &[Entry]| -> Vec<String> {
-            entries
-                .iter()
-                .map(|e| serde_json::to_string(e).unwrap())
-                .collect()
-        };
-
-        assert_eq!(
-            as_json(&read_cached(&repo)),
-            as_json(&read(&repo).unwrap()),
-            "a plain append must read the same through either path"
-        );
-
-        // Same byte length, same inode — the in-place rewrite `read_cached`
-        // guards against (review finding 41), kept the same length here on
-        // purpose: see `read_cached`'s own doc comment for the one, longer
-        // shape of in-place rewrite it does not guard against.
         std::thread::sleep(std::time::Duration::from_millis(20));
         let path = ledger_path(&repo);
-        let rewritten = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("\"drop\"", "\"kept\"");
-        std::fs::write(&path, &rewritten).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        append(&repo, &spend_entry("new", "implement", 1, 1.0, 1)).unwrap();
 
+        let after = totals(&repo);
+        assert_eq!(after.spent_at("old", "implement"), None);
+        assert_eq!(after.spent_at("new", "implement"), Some(1));
+        assert_eq!(after.lines, 1);
+    }
+
+    /// A command step's run is not a lane: it adds no output and no lane
+    /// time, so a step only ever run as a command reads as never paid for.
+    #[test]
+    fn a_command_run_is_not_counted_as_spend_but_is_remembered_by_id() {
+        let (repo, _, _root_guard) = fixture("totals-command");
+        let run = Entry {
+            step: "gate".into(),
+            wall_s: 90,
+            command: Some(CommandRun {
+                id: "run-1".into(),
+                ended: CommandEnd::Exited,
+                exit: Some(0),
+            }),
+            ..minimal_entry("login")
+        };
+        append(&repo, &run).unwrap();
+        let held = totals(&repo);
+        assert_eq!(held.spent_at("login", "gate"), None);
+        assert_eq!(held.lane_time_at("login", "gate"), None);
+        assert!(command_run_banked(&repo, "run-1"));
+        assert!(!command_run_banked(&repo, "run-2"));
+    }
+
+    /// A trial's task count is tasks, not rows: several steps of one arm each
+    /// bank their own line.
+    #[test]
+    fn trial_task_count_counts_tasks_not_lines() {
+        let (repo, _, _root_guard) = fixture("totals-trial");
+        for (task, step) in [("a", "implement"), ("a", "review"), ("b", "implement")] {
+            let line = Entry {
+                trial: Some("t1".into()),
+                ..spend_entry(task, step, 1, 0.1, 1)
+            };
+            append(&repo, &line).unwrap();
+        }
+        append(&repo, &spend_entry("c", "implement", 1, 0.1, 1)).unwrap();
+        assert_eq!(trial_task_count(&repo, "t1"), 2);
+        assert_eq!(trial_task_count(&repo, "other"), 0);
+    }
+
+    /// The unattended ceilings sum a window the totals are not kept per task
+    /// for. Streaming the window must give what summing the full list gives:
+    /// lines before the start and lines with no task are not the run's.
+    #[test]
+    fn read_since_sums_the_window_a_full_read_would() {
+        let (repo, _, _root_guard) = fixture("totals-since");
+        let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+        let lines = [
+            Entry {
+                ts: at(-300),
+                ..spend_entry("before", "implement", 100, 9.0, 1)
+            },
+            Entry {
+                ts: at(10),
+                ..spend_entry("in", "implement", 7, 0.5, 1)
+            },
+            Entry {
+                ts: at(20),
+                ..spend_entry("in", "review", 5, 0.25, 1)
+            },
+            Entry {
+                ts: at(30),
+                task: String::new(),
+                ..spend_entry("", "implement", 1000, 50.0, 1)
+            },
+        ];
+        for line in &lines {
+            append(&repo, line).unwrap();
+        }
+        let start = at(0);
+        let streamed = LedgerTotals::read_since(&ledger_path(&repo), Some(&start)).unwrap();
+
+        let all = read(&repo).unwrap();
+        let in_window = |entry: &&Entry| !entry.task.is_empty() && entry.ts >= start;
+        let output: u64 = all.iter().filter(in_window).map(|e| e.tokens.output).sum();
+        let cost: f64 = all
+            .iter()
+            .filter(in_window)
+            .filter_map(|e| e.cost_usd)
+            .sum();
+        assert_eq!(streamed.since(), (output, cost));
+        assert_eq!(streamed.since(), (12, 0.75));
+
+        let everything = LedgerTotals::read_since(&ledger_path(&repo), None).unwrap();
+        assert_eq!(everything.since().0, 112);
+    }
+
+    /// What a session has banked, as the dispatcher diffs a transcript against
+    /// it and the board subtracts it from a live reading, is the sum of that
+    /// session's lines — checked against summing the full list.
+    #[test]
+    fn a_sessions_banked_totals_equal_the_sum_of_its_lines() {
+        let lines: Vec<Entry> = (1..=4)
+            .map(|n| Entry {
+                session: "shared".into(),
+                turns: n,
+                reported_usd: Some(0.5),
+                tier_tokens: Tokens {
+                    output: n as u64,
+                    ..Tokens::default()
+                },
+                ..spend_entry("login", "implement", n as u64 * 10, 0.25, 1)
+            })
+            .collect();
+        let held = LedgerTotals::from_entries(&lines);
+        let banked = held.session("shared");
         assert_eq!(
-            as_json(&read_cached(&repo)),
-            as_json(&read(&repo).unwrap()),
-            "a rewrite in place must still leave the two in agreement"
+            banked.tokens.output,
+            lines.iter().map(|e| e.tokens.output).sum::<u64>()
         );
+        assert_eq!(banked.tier_tokens.output, 10);
+        assert_eq!(banked.turns, 10);
+        assert_eq!(banked.cost_usd, 1.0);
+        assert_eq!(banked.reported_usd, 2.0);
+        assert_eq!(held.sessions().len(), 1);
+    }
+
+    /// The newest session wins across steps, a session with a hand line is
+    /// not owned by its lane, and a line with no session is nobody's.
+    #[test]
+    fn totals_answer_which_session_is_newest_and_who_owns_its_subagents() {
+        let older = Entry {
+            session: "s-old".into(),
+            ..spend_entry("login", "implement", 1, 0.1, 1)
+        };
+        let newer = Entry {
+            session: "s-new".into(),
+            ..spend_entry("login", "review", 1, 0.1, 1)
+        };
+        let hand = Entry {
+            hand: true,
+            session: "s-hand".into(),
+            ..spend_entry("login", "implement", 1, 0.1, 1)
+        };
+        let anonymous = Entry {
+            session: String::new(),
+            ..spend_entry("login", "review", 1, 0.1, 1)
+        };
+        let held = LedgerTotals::from_entries(&[older, newer, hand, anonymous]);
+        let last = held.last_lane_of("login", ["implement", "review"]).unwrap();
+        assert_eq!(last.session, "s-hand");
+        let last = held.last_lane_of("login", ["review"]).unwrap();
+        assert_eq!(last.session, "s-new");
+        assert!(held.last_lane_of("login", ["merge"]).is_none());
+        assert!(held.lane_owns_subagents("s-new"));
+        assert!(!held.lane_owns_subagents("s-hand"));
+        assert!(held.session("").tokens.is_zero());
     }
 
     /// A line written before runs existed has none, and must still parse —
@@ -8778,8 +9245,9 @@ mod tests {
         std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
 
         let ledger = read(&repo).unwrap();
-        assert!(!lane_owns_subagents(&ledger, "s"));
-        assert!(lane_owns_subagents(&ledger, "another"));
+        let totals = LedgerTotals::from_entries(&ledger);
+        assert!(!totals.lane_owns_subagents("s"));
+        assert!(totals.lane_owns_subagents("another"));
         let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("root moved");
         assert_eq!(line.tokens.output, 5, "the subagent's 30 is the sweep's");
     }

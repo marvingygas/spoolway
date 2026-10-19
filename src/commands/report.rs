@@ -3302,11 +3302,12 @@ pub(crate) fn restart_with(
 /// Shared by `spoolway restart`'s own report and the board's `restart` panel,
 /// so the session a person confirms is the one the command says it abandoned.
 pub(crate) fn abandoned_session(repo: &Repo, step: &str, task: &Task) -> Option<AbandonedSession> {
-    let ledger = crate::usage::read(repo).unwrap_or_default();
+    let ledger =
+        crate::usage::LedgerTotals::read_at(&crate::usage::ledger_path(repo)).unwrap_or_default();
     let lane = crate::mux::lane_name(step, task);
     let key = crate::mux::run_key(step, task.id());
     let (_, session) = crate::dispatch::lane_session_in(repo, &ledger, &lane, &key)?;
-    let banked = ledger.iter().any(|entry| entry.session == session);
+    let banked = ledger.sessions().contains_key(&session);
     Some(AbandonedSession {
         id: session,
         banked,

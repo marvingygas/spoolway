@@ -3102,7 +3102,7 @@ pub fn rows_of(
     let graph = Graph::build(tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
-    let ledger = crate::usage::read_cached(repo);
+    let ledger = crate::usage::totals(repo);
     // A plain snapshot, not the live board: it holds no memory of a task's
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
@@ -3274,7 +3274,7 @@ fn build(
     // Read once and shared: the rows want it for the OUT column and the
     // footer wants it for the spend, and it is the largest file the board
     // opens.
-    let ledger = crate::usage::read_cached(repo);
+    let ledger = crate::usage::totals(repo);
     let mut active_rows = build_rows(
         repo,
         &tasks,
@@ -4373,7 +4373,7 @@ fn build_rows(
     pipelines: &Pipelines,
     graph: &Graph,
     lanes: &[crate::mux::Lane],
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
     // Every row's NEXT names the step a resume takes, and while a dispatcher
@@ -4964,11 +4964,11 @@ struct ArchiveCache {
 /// and never of the task files themselves, so a task being archived adds one
 /// entry here however many are already held. Holding index entries rather
 /// than whole tasks also keeps every archived task's full text out of memory.
-/// This is the same shape [`crate::usage::read_cached`] takes for the ledger
+/// This is the same shape [`crate::usage::totals`] takes for the ledger
 /// beside it.
 ///
 /// Returns a shared handle rather than an owned `Vec`, for the same reason
-/// `read_cached` does: a warm cache the directory's mtime says is still
+/// `totals` does: a warm cache the directory's mtime says is still
 /// current hands back a clone of the `Arc` — a refcount bump — never a copy
 /// of however many tasks are archived. Only the pass that finds the mtime
 /// has moved pays to re-read the index, not every idle frame after.
@@ -5362,16 +5362,11 @@ fn archived_pipeline_name(pipelines: &Pipelines, declared: Option<&str>) -> Stri
 /// `wall_s` banked for `task` at `stage`, every round of it summed — the same
 /// shape as [`spent_at`] and [`cost_at`], for the same reason: a task that
 /// came back round to a step has spent both rounds' time getting through it.
-fn lane_time_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<i64> {
-    let mut wall = None;
-    for entry in ledger {
-        // A command step's run is timed on its own wall clock, not by a
-        // lane's busy time, and the board's TIME has never held it.
-        if entry.task == task && entry.step == stage && entry.command.is_none() {
-            *wall.get_or_insert(0) += entry.wall_s;
-        }
-    }
-    wall
+fn lane_time_at(ledger: &crate::usage::LedgerTotals, task: &str, stage: &str) -> Option<i64> {
+    // A command step's run is timed on its own wall clock, not by a lane's
+    // busy time, and the board's TIME has never held it: the totals leave it
+    // out.
+    ledger.lane_time_at(task, stage)
 }
 
 /// How full the conversation `session` holds has got, against the window of the
@@ -5403,14 +5398,8 @@ fn percent_of(repo: &Repo, session: &Reading, step: Option<&crate::pipeline::Ste
 /// A command step's run is not counted. It spent no tokens, and counting it
 /// would turn a step that was never paid for into `Some(0)`, so the board
 /// would show `0` where it shows `—`.
-fn spent_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<u64> {
-    let mut spent = None;
-    for entry in ledger {
-        if entry.task == task && entry.step == stage && entry.command.is_none() {
-            *spent.get_or_insert(0) += entry.tokens.output;
-        }
-    }
-    spent
+fn spent_at(ledger: &crate::usage::LedgerTotals, task: &str, stage: &str) -> Option<u64> {
+    ledger.spent_at(task, stage)
 }
 
 /// What `task` has cost at `stage`, every round of it summed, or `None` where
@@ -5422,17 +5411,8 @@ fn spent_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<u
 /// An entry with no `cost_usd` is a lane nothing could price — a local worker —
 /// and adds nothing rather than adding zero. A command step's run is such an
 /// entry: it carries no `cost_usd`, so it adds nothing here without a guard.
-fn cost_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<f64> {
-    let mut cost = None;
-    for entry in ledger {
-        if entry.task == task
-            && entry.step == stage
-            && let Some(usd) = entry.cost_usd
-        {
-            *cost.get_or_insert(0.0) += usd;
-        }
-    }
-    cost
+fn cost_at(ledger: &crate::usage::LedgerTotals, task: &str, stage: &str) -> Option<f64> {
+    ledger.cost_at(task, stage)
 }
 
 /// What the conversation `harvest` reads has spent that nothing has banked yet
@@ -5454,18 +5434,12 @@ fn cost_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<f6
 /// Both figures subtract the same banked total, so OUT and COST on a row are
 /// one reading of one step rather than two windows onto it.
 fn live_spend(
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     session: &str,
     harvest: &crate::usage::Harvest,
 ) -> (u64, Option<f64>) {
-    let mut banked = crate::usage::Tokens::default();
-    let mut banked_cost = 0.0f64;
-    for entry in ledger {
-        if entry.session == session {
-            banked.add(&entry.tokens);
-            banked_cost += entry.cost_usd.unwrap_or(0.0);
-        }
-    }
+    let banked = ledger.session(session);
+    let (banked, banked_cost) = (banked.tokens, banked.cost_usd);
     let unbanked = harvest.tokens.since(&banked);
     // The harvest priced each turn at its own tier, so what is left is the
     // part not banked before. Absent when some turn had no price, as the
@@ -5516,7 +5490,7 @@ static LIVE_SESSION_CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::
 
 fn live_session(
     repo: &Repo,
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     lane: &str,
     key: &str,
     touched: &mut HashSet<String>,
@@ -5548,7 +5522,7 @@ fn live_session(
     }
     let path = cached.path.clone()?;
 
-    let own_subagents = crate::usage::lane_owns_subagents(ledger, &session);
+    let own_subagents = ledger.lane_owns_subagents(&session);
     let mtime = if own_subagents {
         crate::usage::lane_touched_at(&path, &session)
     } else {
@@ -6202,6 +6176,11 @@ mod tests {
     use super::*;
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     use crate::status::testutil::*;
+
+    /// The totals the board reads, of exactly these ledger lines.
+    fn totals_of(entries: &[crate::usage::Entry]) -> crate::usage::LedgerTotals {
+        crate::usage::LedgerTotals::from_entries(entries)
+    }
     use crate::status::view::{GUTTER, Move, OSC8, RecentEvent, ST, ticker};
 
     // ---- Reader: coalescing and shutdown ----
@@ -7267,13 +7246,31 @@ mod tests {
 
         let mut working = lane("login · implement", &repo.root);
         working.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[working], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[working],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
         let mut settled = lane("login · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[settled], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[settled],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(
             matches!(row.state, State::Running),
@@ -7296,7 +7293,16 @@ mod tests {
 
         let mut prompting = lane("login · implement", &repo.root);
         prompting.status = crate::mux::LaneStatus::Blocked;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[prompting], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[prompting],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Prompt), "{}", row.next);
         assert_eq!(row.next, "press a key in pane `login · implement`");
@@ -7306,7 +7312,16 @@ mod tests {
         // to un-mark, the row is just `Running` again.
         let mut answered = lane("login · implement", &repo.root);
         answered.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[answered], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[answered],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
     }
@@ -7341,7 +7356,16 @@ mod tests {
         let state = |status: crate::mux::LaneStatus| {
             let mut l = lane("login · implement", &repo.root);
             l.status = status;
-            let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[l], &[], None).unwrap();
+            let rows = build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                &[l],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
             rows.into_iter().find(|r| r.id == "login").unwrap()
         };
         let silent_secs = |row: &Row| match row.state {
@@ -7411,8 +7435,16 @@ mod tests {
         l.status = crate::mux::LaneStatus::Idle;
 
         for _ in 0..2 {
-            let rows =
-                build_rows(&repo, &tasks, &pipelines, &graph, &[l.clone()], &[], None).unwrap();
+            let rows = build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                &[l.clone()],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
             let row = rows.iter().find(|r| r.id == "login").unwrap();
             assert!(matches!(row.state, State::Running), "{}", row.state.word());
         }
@@ -7444,7 +7476,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let mut rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &lanes,
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let mut frozen = BTreeMap::new();
         let working = finish_settled(&repo, &tasks, &mut rows, &lanes, &mut frozen);
 
@@ -7477,7 +7518,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let mut rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &lanes,
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let working = finish_settled(&repo, &tasks, &mut rows, &lanes, &mut BTreeMap::new());
 
         assert_eq!(working, 0);
@@ -7507,7 +7557,16 @@ mod tests {
         let frame = |frozen: &mut BTreeMap<String, Option<i64>>, lanes: &[crate::mux::Lane]| {
             let tasks = repo.tasks().unwrap();
             let graph = Graph::build(&tasks, &repo.archive_dir());
-            let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, lanes, &[], None).unwrap();
+            let mut rows = build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                lanes,
+                &Default::default(),
+                None,
+            )
+            .unwrap();
             let working = finish_settled(&repo, &tasks, &mut rows, lanes, frozen);
             (working, rows.into_iter().find(|r| r.id == "login").unwrap())
         };
@@ -7559,7 +7618,16 @@ mod tests {
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
         let mut frozen = BTreeMap::new();
-        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let mut rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             finish_settled(&repo, &tasks, &mut rows, &[], &mut frozen),
             1
@@ -7567,7 +7635,16 @@ mod tests {
         assert!(matches!(rows[0].state, State::Running));
 
         std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
-        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let mut rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(rows[0].state, State::Queued), "the premise");
         assert_eq!(
             finish_settled(&repo, &tasks, &mut rows, &[], &mut frozen),
@@ -7631,7 +7708,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         runs.stop(&key);
 
         let row = rows.iter().find(|r| r.id == "other").unwrap();
@@ -7667,7 +7753,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "paused-board").unwrap();
         assert!(
@@ -7709,7 +7804,16 @@ mod tests {
         // ready it. The board draws `search-facets` `queued` anyway.
         assert!(!graph.ready("search-facets"));
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "search-facets").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.state.word(), "○ queued");
@@ -7743,7 +7847,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Starting), "{}", row.next);
@@ -7757,7 +7870,16 @@ mod tests {
 
         // The boot returned: the mark is gone and the row reads as before.
         claims.release("login");
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.stage, crate::pipeline::QUEUED);
@@ -7772,7 +7894,16 @@ mod tests {
         add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(rows[0].state, State::Queued));
 
         assert!(spool_turns(Some(42), None));
@@ -7809,7 +7940,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.stage, crate::pipeline::QUEUED);
@@ -7829,7 +7969,16 @@ mod tests {
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &lanes,
+            &Default::default(),
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row.lane_time.expect("a live lane answers");
@@ -7854,7 +8003,16 @@ mod tests {
         // Nothing started yet: the step is where the task sits, not what it is
         // doing, so this half is what the running half below is measured
         // against.
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued));
 
@@ -7870,7 +8028,16 @@ mod tests {
         )
         .unwrap();
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running));
         // Its own clock, off the pid file, and not the last lane's
@@ -7913,7 +8080,16 @@ mod tests {
         let pid = dir.join(format!("{key}.pid"));
         std::fs::write(&pid, std::process::id().to_string()).unwrap();
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let login = rows.iter().find(|r| r.id == "a-login").unwrap();
         assert!(matches!(login.state, State::Running));
         let export = rows.iter().find(|r| r.id == "b-export").unwrap();
@@ -7927,7 +8103,16 @@ mod tests {
         // The run ahead exited: nothing holds the step any more, and the
         // row reads as any other task a pass is about to start.
         std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let export = rows.iter().find(|r| r.id == "b-export").unwrap();
         assert!(matches!(export.state, State::Queued), "{}", export.next);
     }
@@ -7977,7 +8162,16 @@ mod tests {
         )
         .unwrap();
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let export = rows.iter().find(|r| r.id == "b-export").unwrap();
         assert!(matches!(export.state, State::Waiting), "{}", export.next);
         assert_eq!(export.next, "serial: after a-login");
@@ -8003,7 +8197,16 @@ mod tests {
         // Just arrived: well inside the window, no lane anywhere.
         let mut grace = BTreeMap::new();
         grace.insert("login".to_string(), Instant::now());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], Some(&grace)).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            Some(&grace),
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
@@ -8012,7 +8215,16 @@ mod tests {
             "login".to_string(),
             Instant::now() - window - Duration::from_secs(1),
         );
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], Some(&grace)).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            Some(&grace),
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
     }
@@ -8038,7 +8250,16 @@ mod tests {
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &lanes,
+            &Default::default(),
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row
@@ -8058,10 +8279,13 @@ mod tests {
             entry
         };
         assert_eq!(
-            lane_time_at(&[entry(30), entry(45)], "login", "implement"),
+            lane_time_at(&totals_of(&[entry(30), entry(45)]), "login", "implement"),
             Some(75)
         );
-        assert_eq!(lane_time_at(&[entry(30)], "login", "review"), None);
+        assert_eq!(
+            lane_time_at(&totals_of(&[entry(30)]), "login", "review"),
+            None
+        );
     }
 
     /// A paused task's own `stage()` is `paused` — not a step any pipeline
@@ -8089,6 +8313,7 @@ mod tests {
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
 
+        let ledger = crate::usage::LedgerTotals::from_entries(&ledger);
         let first = build_rows(&repo, &tasks, &pipelines, &graph, &[], &ledger, None).unwrap();
         let row = first.iter().find(|r| r.id == "cart-totals").unwrap();
         assert!(matches!(row.state, State::Paused));
@@ -8161,7 +8386,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
         assert_eq!(row("add-api").stage, "review");
@@ -8206,7 +8440,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
         for (id, step) in [("release", DONE), ("retry-flag", QUEUED)] {
@@ -8238,7 +8481,16 @@ mod tests {
             &crate::mux::lane_name(crate::pipeline::BLOCKED, &task),
             &repo.root,
         );
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[live], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[live],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "fix-auth").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
         assert_eq!(row.stage, crate::pipeline::BLOCKED);
@@ -8263,6 +8515,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
+        let ledger = crate::usage::LedgerTotals::from_entries(&ledger);
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &ledger, None).unwrap();
         let row = rows.iter().find(|r| r.id == "add-api").unwrap();
         assert_eq!(row.stage, "review");
@@ -8564,7 +8817,7 @@ mod tests {
     }
 
     /// `board-reads-changed-only`: `live_session` already held the ledger
-    /// `build` reads once through `usage::read_cached`, as its own `ledger`
+    /// `build` reads once through `usage::totals`, as its own `ledger`
     /// parameter — but it used to resolve a lane's session through
     /// `crate::dispatch::lane_session`, which ignored that parameter and ran
     /// its own full, uncached `usage::read` instead. A frame with ten live
@@ -8587,12 +8840,12 @@ mod tests {
             &testutil::banked("demo", "implement", "disk-session", None),
         )
         .unwrap();
-        let ledger = vec![testutil::banked(
+        let ledger = totals_of(&[testutil::banked(
             "demo",
             "implement",
             "memory-session",
             None,
-        )];
+        )]);
 
         let mut touched = HashSet::new();
         live_session(&repo, &ledger, &lane, &lane, &mut touched);
@@ -8727,6 +8980,7 @@ mod tests {
             entry("billing", "implement", 9_000),
         ];
 
+        let ledger = totals_of(&ledger);
         assert_eq!(spent_at(&ledger, "login", "implement"), Some(2_000));
         assert_eq!(spent_at(&ledger, "login", "review"), Some(400));
         assert_eq!(spent_at(&ledger, "login", "handover"), None);
@@ -8743,8 +8997,9 @@ mod tests {
             exit: Some(1),
         });
 
-        assert_eq!(spent_at(&[run.clone()], "login", "test"), None);
-        assert_eq!(cost_at(&[run], "login", "test"), None);
+        let ledger = totals_of(&[run]);
+        assert_eq!(spent_at(&ledger, "login", "test"), None);
+        assert_eq!(cost_at(&ledger, "login", "test"), None);
     }
 
     /// COST is the step's, not the task's. A task deep in a pipeline has spent
@@ -8761,6 +9016,7 @@ mod tests {
             banked("billing", "implement", "s3", Some(9.0)),
         ];
 
+        let ledger = totals_of(&ledger);
         assert_eq!(cost_at(&ledger, "login", "implement"), Some(10.0));
         // Both rounds of the step, as OUT sums both rounds of it.
         assert_eq!(cost_at(&ledger, "login", "review"), Some(6.0));
@@ -8774,7 +9030,7 @@ mod tests {
     /// table gave the harvest turn by turn is subtracted the same way.
     #[test]
     fn a_reported_cost_is_taken_at_its_word_less_whatever_is_banked() {
-        let ledger = [banked("login", "implement", "s1", Some(1.5))];
+        let ledger = totals_of(&[banked("login", "implement", "s1", Some(1.5))]);
         let harvest = |cost: f64| crate::usage::Harvest {
             tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
@@ -8821,13 +9077,13 @@ mod tests {
         // The half-million this step has produced, at $15/M — not $22.50. OUT
         // is that same half-million, off the same subtraction: the two figures
         // beside each other on a row are one reading of one step.
-        let (out, cost) = live_spend(&[entry], "s1", &harvest);
+        let (out, cost) = live_spend(&totals_of(&[entry]), "s1", &harvest);
         assert_eq!(out, 500_000);
         assert_eq!(cost, Some(7.5));
 
         // And a fresh session, which is what a step ordinarily gets, is read
         // in full: its delta is its total.
-        let (out, cost) = live_spend(&[], "s2", &harvest);
+        let (out, cost) = live_spend(&Default::default(), "s2", &harvest);
         assert_eq!(out, 1_500_000);
         assert_eq!(cost, Some(22.5));
     }
@@ -8851,7 +9107,7 @@ mod tests {
             ctx_peak: 0,
         };
 
-        let (out, cost) = live_spend(&[], "s1", &harvest);
+        let (out, cost) = live_spend(&crate::usage::LedgerTotals::default(), "s1", &harvest);
         assert_eq!(out, 1_000_000);
         assert_eq!(cost, None);
     }
@@ -10584,7 +10840,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
 
         assert!(!row.resumable, "{}", row.next);
@@ -10610,7 +10875,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let free = rows.iter().find(|r| r.id == "free").unwrap();
         assert!(free.resumable);
         assert_eq!(free.next, "[r] resume");
@@ -10640,7 +10914,16 @@ mod tests {
         // own.
         let mut busy = lane("gate-board · implement", &repo.root);
         busy.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[busy], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[busy],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(!row.resumable, "{}", row.next);
         assert_eq!(row.next, "→ review");
@@ -10648,7 +10931,16 @@ mod tests {
         // Same pane, settled: the round is over and the key comes back.
         let mut settled = lane("gate-board · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[settled], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[settled],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(row.resumable, "{}", row.next);
         assert_eq!(row.next, "[r] → review");
@@ -10677,7 +10969,16 @@ mod tests {
 
         let mut working = lane("gate-board · implement", &repo.root);
         working.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[working], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[working],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(
             row.resumable,
@@ -10687,7 +10988,16 @@ mod tests {
 
         let mut blocked = lane("gate-board · implement", &repo.root);
         blocked.status = crate::mux::LaneStatus::Blocked;
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[blocked], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[blocked],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(row.resumable, "nor Blocked: {}", row.next);
     }
@@ -10708,7 +11018,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert!(row.resumable, "{}", row.next);
@@ -10734,7 +11053,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert_eq!(
@@ -10801,7 +11129,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         let pipeline = pipelines.pipelines.get("default").unwrap();
@@ -10845,7 +11182,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "lost").unwrap();
         assert!(matches!(row.state, State::Unknown));
         assert_eq!(row.state.word(), "● unknown");
@@ -10953,7 +11299,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "never-run").unwrap();
 
         assert!(row.resumable, "{}", row.next);
@@ -12065,7 +12420,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
         assert_eq!(
@@ -12844,7 +13208,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert_eq!(row.next, "→ paused after implement");
     }
@@ -13222,7 +13595,16 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(!row.next.contains("loop"), "{}", row.next);
     }

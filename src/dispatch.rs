@@ -589,7 +589,7 @@ impl LaneRecord {
         repo: &Repo,
         name: &str,
         now: i64,
-        ledger: &[crate::usage::Entry],
+        ledger: &crate::usage::LedgerTotals,
     ) -> LaneRecord {
         let tasks = repo.tasks().unwrap_or_default();
         let key = crate::mux::lane_key(name, &tasks);
@@ -599,14 +599,12 @@ impl LaneRecord {
         if let Some(task) = crate::mux::lane_owner(crate::mux::lane_task(name), &tasks) {
             record.task = task.id().to_string();
         }
-        if let Some(entry) = ledger.iter().rev().find(|entry| {
-            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
-        }) {
-            record.session = entry.session.clone();
-            record.kind = entry.kind.clone();
-            record.agent = entry.agent.clone();
-            record.model = entry.model.clone();
-            record.pipeline_version = entry.pipeline_version.clone();
+        if let Some(last) = ledger.last_lane(&key) {
+            record.session = last.session.clone();
+            record.kind = last.kind.clone();
+            record.agent = last.agent.clone();
+            record.model = last.model.clone();
+            record.pipeline_version = last.pipeline_version.clone();
         }
         record
     }
@@ -655,14 +653,14 @@ pub struct Dispatcher<'a> {
     /// [`Dispatcher::new`] unconditionally was the bug: every pass paid to
     /// parse the whole ledger whether or not it had anything to bank.
     usage_banked: Option<HashMap<String, BankedTotals>>,
-    /// The whole ledger, parsed once on first use and shared for the rest of
-    /// the pass — see [`Dispatcher::ledger`]. The ceiling checks,
+    /// The ledger's totals, streamed once on first use and shared for the rest
+    /// of the pass — see [`Dispatcher::ledger`]; no line of it is kept. The ceiling checks,
     /// `carried_session`, `readopted` and `lane_session` all used to parse
     /// `usage.jsonl` end to end on their own (review finding 33); now they
     /// answer from this one snapshot, and `usage_banked` is folded out of it
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
-    ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
+    ledger: Option<std::sync::Arc<crate::usage::LedgerTotals>>,
     /// The lines this pass appended to the ledger after `ledger` was loaded.
     /// The unattended ceilings add them to the snapshot's sum, so the lane a
     /// pass has just banked counts toward the brake it may have crossed; every
@@ -1276,14 +1274,25 @@ impl<'a> Dispatcher<'a> {
         persist_task(self.repo, task, &mut self.file_seen)
     }
 
-    /// The whole usage ledger, parsed once per pass and shared thereafter.
-    /// Deferred to first use — most passes tear nothing down and never read it
+    /// The usage ledger's totals, streamed once per pass and shared
+    /// thereafter. Deferred to first use — most passes tear nothing down and never read it
     /// — see [`Dispatcher::ledger`](Self::ledger)'s field doc.
-    pub(crate) fn ledger(&mut self) -> std::sync::Arc<Vec<crate::usage::Entry>> {
+    pub(crate) fn ledger(&mut self) -> std::sync::Arc<crate::usage::LedgerTotals> {
         let repo = self.repo;
         self.ledger
             .get_or_insert_with(|| {
-                std::sync::Arc::new(crate::usage::read(repo).unwrap_or_default())
+                // Streamed into totals, so the pass holds what the ledger
+                // adds up to and not a copy of its lines. The run's start is
+                // read here, with the totals, so the ceilings sum the same
+                // lines the totals counted.
+                let start = crate::status::run_start(repo);
+                std::sync::Arc::new(
+                    crate::usage::LedgerTotals::read_since(
+                        &crate::usage::ledger_path(repo),
+                        start.as_deref(),
+                    )
+                    .unwrap_or_default(),
+                )
             })
             .clone()
     }
@@ -3413,7 +3422,7 @@ impl<'a> Dispatcher<'a> {
         let banked_at = chrono::Utc::now();
         // Off the pass's snapshot, not a fresh read: a hand line for the
         // session is already in it, which is all the rule looks for.
-        let own_subagents = crate::usage::lane_owns_subagents(&self.ledger(), &record.session);
+        let own_subagents = self.ledger().lane_owns_subagents(&record.session);
         let Some(harvest) = crate::usage::harvest(
             &record.kind,
             &record.session,
@@ -3544,10 +3553,10 @@ impl<'a> Dispatcher<'a> {
         // or earlier in the pass, before this line existed, so the ceiling
         // checks would sum a ledger missing the very lane just banked and
         // start more lanes over a brake already passed. The line is kept in
-        // `banked_this_pass` for them rather than pushed into the snapshot:
-        // the snapshot is shared, and pushing would copy the whole ledger
-        // whenever a caller still held it, and would change which session a
-        // later start in this pass carries. Only when the write landed: a
+        // `banked_this_pass` for them rather than folded into the snapshot:
+        // the snapshot is shared, and folding would copy its totals whenever
+        // a caller still held it, and would change which session a later
+        // start in this pass carries. Only when the write landed: a
         // line that is not on disk is not in the next run's sum either.
         if appended {
             self.banked_this_pass.push(entry.clone());
@@ -6457,18 +6466,18 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let ledger = self.ledger();
-        let spent: u64 = ledger
-            .iter()
-            .chain(&self.banked_this_pass)
-            .filter(|entry| {
-                start
-                    .as_ref()
-                    .is_none_or(|start| entry.ts.as_str() >= start.as_str())
-            })
-            .filter(|entry| !entry.task.is_empty())
-            .map(|entry| entry.tokens.output)
-            .sum();
+        let spent: u64 = self.ledger().since().0
+            + self
+                .banked_this_pass
+                .iter()
+                .filter(|entry| {
+                    start
+                        .as_ref()
+                        .is_none_or(|start| entry.ts.as_str() >= start.as_str())
+                })
+                .filter(|entry| !entry.task.is_empty())
+                .map(|entry| entry.tokens.output)
+                .sum::<u64>();
         if spent < ceiling {
             return None;
         }
@@ -6503,18 +6512,18 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let ledger = self.ledger();
-        let spent: f64 = ledger
-            .iter()
-            .chain(&self.banked_this_pass)
-            .filter(|entry| {
-                start
-                    .as_ref()
-                    .is_none_or(|start| entry.ts.as_str() >= start.as_str())
-            })
-            .filter(|entry| !entry.task.is_empty())
-            .filter_map(|entry| entry.cost_usd)
-            .sum();
+        let spent: f64 = self.ledger().since().1
+            + self
+                .banked_this_pass
+                .iter()
+                .filter(|entry| {
+                    start
+                        .as_ref()
+                        .is_none_or(|start| entry.ts.as_str() >= start.as_str())
+                })
+                .filter(|entry| !entry.task.is_empty())
+                .filter_map(|entry| entry.cost_usd)
+                .sum::<f64>();
         if spent < ceiling {
             return None;
         }
@@ -7941,7 +7950,7 @@ fn prepare_boot(
     file_seen: &mut HashMap<String, u64>,
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
 ) -> Result<Boot> {
     let name = lane_name(&step.id, task);
     let key = crate::mux::run_key(&step.id, task.id());
@@ -8527,19 +8536,19 @@ pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
     let key = crate::mux::lane_key(lane, &repo.tasks().unwrap_or_default());
     lane_session_in(
         repo,
-        &crate::usage::read(repo).unwrap_or_default(),
+        &crate::usage::LedgerTotals::read_at(&crate::usage::ledger_path(repo)).unwrap_or_default(),
         lane,
         &key,
     )
 }
 
 /// `pub(crate)`, not private: `status::live_session` calls this directly with
-/// the ledger `render` already read through `usage::read_cached`, rather than
+/// the ledger totals `render` already read through `usage::totals`, rather than
 /// through `lane_session` above, which would read the whole ledger again,
 /// uncached, for every live lane on every frame.
 pub(crate) fn lane_session_in(
     repo: &Repo,
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     lane: &str,
     key: &str,
 ) -> Option<(String, String)> {
@@ -8560,17 +8569,14 @@ pub(crate) fn lane_session_in(
         return Some((record.kind.clone(), record.session.clone()));
     }
 
-    // Composed with `run_key` rather than matched by hand, so a step id or a
-    // task id holding the separator still names the same lane both here and
-    // everywhere else one is built. The key, not `lane`: a routine's copies
-    // share one lane name, and an earlier copy's session is not this one's.
+    // Totals are filed under `run_key`, composed rather than matched by hand,
+    // so a step id or a task id holding the separator still names the same
+    // lane both here and everywhere else one is built. The key, not `lane`: a
+    // routine's copies share one lane name, and an earlier copy's session is
+    // not this one's.
     ledger
-        .iter()
-        .rev()
-        .find(|entry| {
-            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
-        })
-        .map(|entry| (entry.kind.clone(), entry.session.clone()))
+        .last_lane(key)
+        .map(|last| (last.kind.clone(), last.session.clone()))
 }
 
 /// Why a `session:` step did not carry its prompt's conversation over, said
@@ -8641,19 +8647,18 @@ fn carried_session(
     step: &Step,
     profile: &AgentProfile,
     model: &str,
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
 ) -> std::result::Result<(String, String), SessionMiss> {
     let prompt = step.prompt_name();
     let entry = ledger
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.task == task.front.id
-                && !entry.session.is_empty()
-                && pipeline
-                    .step(&entry.step)
-                    .is_some_and(|s| s.prompt_name() == prompt)
-        })
+        .last_lane_of(
+            &task.front.id,
+            pipeline
+                .steps
+                .iter()
+                .filter(|s| s.prompt_name() == prompt)
+                .map(|s| s.id.as_str()),
+        )
         .ok_or(SessionMiss::NotFound)?;
 
     let resolved = crate::models::resolve(&repo.config.models, model);
@@ -8958,20 +8963,21 @@ pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>
 /// [`Dispatcher::record_usage`] used to recompute from scratch, by re-reading
 /// the whole file, for every lane a pass banked. Reads nothing itself now: the
 /// pass's one [`Dispatcher::ledger`] snapshot is folded here.
-fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals> {
-    let mut totals: HashMap<String, BankedTotals> = HashMap::new();
-    for entry in ledger {
-        if entry.session.is_empty() {
-            continue;
-        }
-        let banked = totals.entry(entry.session.clone()).or_default();
-        banked.tokens.add(&entry.tokens);
-        banked.tier_tokens.add(&entry.tier_tokens);
-        banked.turns += entry.turns;
-        banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
-        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
-    }
-    totals
+fn banked_totals(ledger: &crate::usage::LedgerTotals) -> HashMap<String, BankedTotals> {
+    ledger
+        .sessions()
+        .iter()
+        .map(|(session, banked)| {
+            let totals = BankedTotals {
+                tokens: banked.tokens,
+                tier_tokens: banked.tier_tokens,
+                turns: banked.turns,
+                cost_usd: banked.cost_usd,
+                reported_usd: banked.reported_usd,
+            };
+            (session.clone(), totals)
+        })
+        .collect()
 }
 
 pub(crate) fn now_secs() -> i64 {
@@ -21331,7 +21337,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         })
         .expect("an earlier session for this prompt");
@@ -21372,7 +21378,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap()
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap())
             ),
             Err(SessionMiss::NotFound)
         );
@@ -21394,7 +21400,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap()
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap())
             ),
             Err(SessionMiss::WindowUnset),
             "`test-model` is priced by neither table, so there is nothing to \
@@ -21421,7 +21427,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         });
         std::fs::remove_dir_all(&home).ok();
@@ -21456,7 +21462,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         });
         assert_eq!(result, Err(SessionMiss::Stale));
@@ -21476,7 +21482,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         })
         .expect("a session with a zero horizon should resume however old its store");
@@ -21532,7 +21538,7 @@ mod tests {
                     step,
                     &profile,
                     model,
-                    &crate::usage::read(&repo).unwrap(),
+                    &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
                 )
             });
             std::fs::remove_dir_all(&home).ok();

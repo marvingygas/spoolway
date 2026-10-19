@@ -1194,50 +1194,35 @@ pub(super) struct GroupTotal {
 /// banked — including one whose lanes are all still running — simply have no
 /// total to print, which [`table`] reads the same as any other empty figure.
 pub(super) fn group_totals(
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     rows: &[Row],
 ) -> BTreeMap<String, GroupTotal> {
     // The tasks the board is drawing at all — its live queue plus the
-    // archived rows beside it. A ledger entry for a task not here belongs to
+    // archived rows beside it. Spend banked for a task not here belongs to
     // no row this board prints, so it is not this board's business either.
     let visible: BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-    let mut groups: BTreeSet<String> = BTreeSet::new();
-    let mut out: BTreeMap<String, u64> = BTreeMap::new();
-    let mut cost: BTreeMap<String, f64> = BTreeMap::new();
-    let mut wall: BTreeMap<String, i64> = BTreeMap::new();
-    for entry in ledger {
-        // `entry.plan` is the ledger's own field name — it carries a task's
-        // `group:` verbatim.
-        let Some(group) = &entry.plan else { continue };
-        // A command step's run is not a lane: its wall time is a gate's, and
-        // a group's TIME is what its lanes were busy.
-        if entry.command.is_some() {
+    let mut totals: BTreeMap<String, GroupTotal> = BTreeMap::new();
+    // The ledger's own `plan` field carries a task's `group:` verbatim. A
+    // command step's run is not counted: its wall time is a gate's, and a
+    // group's TIME is what its lanes were busy. A line only exists once its
+    // lane has settled — see [`GroupTotal`] — so the one thing left to rule
+    // out is a task this board is not drawing at all.
+    for (task, group, spend) in ledger.groups() {
+        if !visible.contains(task) {
             continue;
         }
-        // A ledger line only exists once its lane has settled — see
-        // [`GroupTotal`] — so the one thing left to rule out is a task this
-        // board is not drawing at all.
-        if !visible.contains(entry.task.as_str()) {
-            continue;
-        }
-        groups.insert(group.clone());
-        *out.entry(group.clone()).or_default() += entry.tokens.output;
-        *wall.entry(group.clone()).or_default() += entry.wall_s;
-        if let Some(usd) = entry.cost_usd {
-            *cost.entry(group.clone()).or_default() += usd;
+        let total = totals.entry(group.to_string()).or_insert(GroupTotal {
+            out: Some(0),
+            cost: None,
+            lane_time: Some(0),
+        });
+        total.out = total.out.map(|out| out + spend.output);
+        total.lane_time = total.lane_time.map(|wall| wall + spend.wall_s);
+        if let Some(usd) = spend.cost_usd {
+            *total.cost.get_or_insert(0.0) += usd;
         }
     }
-    groups
-        .into_iter()
-        .map(|group| {
-            let total = GroupTotal {
-                out: out.get(&group).copied(),
-                cost: cost.get(&group).copied(),
-                lane_time: wall.get(&group).copied(),
-            };
-            (group, total)
-        })
-        .collect()
+    totals
 }
 
 /// Below this many arrivals the count is not yet worth a reader's notice, so
@@ -2942,7 +2927,7 @@ mod tests {
         entry.plan = Some("auth".into());
         entry.wall_s = 42;
         entry.tokens.output = 500;
-        let totals = group_totals(&[entry], &all);
+        let totals = group_totals(&crate::usage::LedgerTotals::from_entries(&[entry]), &all);
 
         let board = strip(&table(&all, Style::board(200), &totals, None));
         // The band names the group and stops there, outdented past the cursor
@@ -3012,7 +2997,7 @@ mod tests {
         assert_eq!(done.len(), 0, "no archived copy is drawn");
         let mut all = active;
         all.extend(done);
-        let totals = group_totals(&ledger, &all);
+        let totals = group_totals(&crate::usage::LedgerTotals::from_entries(&ledger), &all);
 
         let board = strip(&table(&all, Style::board(200), &totals, None));
         assert!(
@@ -3252,7 +3237,10 @@ mod tests {
         };
         let rows = vec![running, parked];
 
-        let totals = group_totals(&[entry.clone()], &rows);
+        let totals = group_totals(
+            &crate::usage::LedgerTotals::from_entries(&[entry.clone()]),
+            &rows,
+        );
         let auth = totals
             .get("auth")
             .expect("the settled `implement` step should have banked into `auth`");
@@ -3283,7 +3271,7 @@ mod tests {
             },
             done,
         ];
-        let totals = group_totals(&[entry], &rows);
+        let totals = group_totals(&crate::usage::LedgerTotals::from_entries(&[entry]), &rows);
         let auth = totals.get("auth").expect("no total for `auth`");
         assert_eq!(auth.out, Some(500));
         assert_eq!(auth.cost, Some(1.25));
@@ -3316,7 +3304,7 @@ mod tests {
         };
         let rows = vec![parked];
 
-        let totals = group_totals(&[entry], &rows);
+        let totals = group_totals(&crate::usage::LedgerTotals::from_entries(&[entry]), &rows);
         let auth = totals
             .get("auth")
             .expect("the settled `implement` step should have banked into `auth`");
@@ -3354,7 +3342,10 @@ mod tests {
             ..row("login")
         }];
 
-        let totals = group_totals(&[first_pass, second_pass, review], &rows);
+        let totals = group_totals(
+            &crate::usage::LedgerTotals::from_entries(&[first_pass, second_pass, review]),
+            &rows,
+        );
         let auth = totals.get("auth").expect("no total for `auth`");
         assert_eq!(auth.out, Some(500 + 200 + 300));
         assert_eq!(auth.cost, Some(1.25 + 0.50 + 2.00));
