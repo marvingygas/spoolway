@@ -1379,6 +1379,16 @@ struct FileIdentity {
 }
 
 impl FileIdentity {
+    /// Whether the file was written within `window` of now. A file with no
+    /// readable modified time is not.
+    fn written_within(&self, window: std::time::Duration) -> bool {
+        self.modified.is_some_and(|at| {
+            std::time::SystemTime::now()
+                .duration_since(at)
+                .is_ok_and(|age| age <= window)
+        })
+    }
+
     fn of(meta: &std::fs::Metadata) -> Self {
         #[cfg(unix)]
         let inode = std::os::unix::fs::MetadataExt::ino(meta);
@@ -1864,14 +1874,32 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         kept.identity = identity;
     }
     let read = kept.fold.finish();
-    if let Ok(mut folds) = TRANSCRIPT_FOLDS.lock() {
-        if folds.len() >= MAX_REMEMBERED {
+    // Kept only for a transcript still being written. A settled session read
+    // once, as the eval tab's sweep does for all of history, would otherwise
+    // leave its request-id set behind for as long as the process lives.
+    if kept.identity.written_within(KEEP_FOLD_FOR)
+        && let Ok(mut folds) = TRANSCRIPT_FOLDS.lock()
+    {
+        // Folds of transcripts that have since gone quiet are let go here, so
+        // what is held follows the lanes running now rather than every lane
+        // that has run.
+        folds.retain(|_, other| other.identity.written_within(KEEP_FOLD_FOR));
+        if folds.len() >= MAX_KEPT_FOLDS {
             folds.clear();
         }
         folds.insert(key, kept);
     }
     read.unwrap_or(none)
 }
+
+/// How long after its last write a transcript's fold is kept. Longer than a
+/// lane waits between turns for a person, so a live lane keeps tailing; a
+/// session older than this is read whole when it is read at all.
+const KEEP_FOLD_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How many folds are held at once, before they are dropped and rebuilt from
+/// the lanes still asking. A running lane and its subagents are a few each.
+const MAX_KEPT_FOLDS: usize = 64;
 
 /// A [`TranscriptFold`] and how far into its file it has read.
 struct KeptFold {
@@ -1883,8 +1911,11 @@ struct KeptFold {
     fold: TranscriptFold,
 }
 
-/// The fold of each transcript read so far by [`read_transcript`], by agent
-/// kind and path.
+/// The fold of each recently written transcript read so far by
+/// [`read_transcript`], by agent kind and path.
+///
+/// Each holds the transcript's request-id set, so it is the size of the
+/// transcript's turn count rather than of a path and an offset.
 static TRANSCRIPT_FOLDS: Mutex<BTreeMap<(String, PathBuf), KeptFold>> = Mutex::new(BTreeMap::new());
 
 /// Everything [`read_transcript`] accumulates over a transcript's records, so
@@ -2301,9 +2332,9 @@ fn turn_model(kind_name: &str, value: &serde_json::Value) -> Option<String> {
 /// Every record of one session, in file order.
 ///
 /// Only [`transcript_tail`] collects every record this way. The readers that
-/// run on a timer — [`read_transcript`], [`last_turn_at`] and [`last_record`] —
-/// parse the lines added since their last read and keep a running reading
-/// instead of holding the whole file as values (review finding 48).
+/// run on a timer never hold the whole file as values (review finding 48):
+/// [`read_transcript`] and [`last_turn_at`] parse only the lines added since
+/// their last read, and [`last_record`] reads a bounded tail.
 ///
 /// `None` means the store could not be read at all: no transcript yet, an
 /// agent still starting up. Absence is never an error here — see
@@ -2387,9 +2418,11 @@ fn session_file(kind: &str, session: &str) -> Option<PathBuf> {
 /// The same lookup, for a caller that wants to know whether the transcript has
 /// changed before paying to read it.
 ///
-/// The first search is a directory walk over every session an agent has ever
-/// written. Its answer is remembered, so later asks for the same session cost
-/// one existence check; a caller can still hold on to the path itself.
+/// For a kind whose transcripts share the agent's home, the first search is a
+/// directory walk over every session the agent has ever written. A found path
+/// is remembered, and later asks cost one existence check. A lane that has
+/// written nothing yet, and a kind with a home of its own, are looked up each
+/// time.
 pub fn session_path(kind: &str, session: &str) -> Option<PathBuf> {
     session_file(kind, session)
 }
@@ -2442,7 +2475,10 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
         .and_then(|found| found.get(&key).cloned());
     // Re-checked rather than trusted: a session that moved or was cleaned up
     // leaves a path that no longer exists, and answering with it would read as
-    // "no transcript" for a lane that has one elsewhere.
+    // "no transcript" for a lane that has one elsewhere. The remembered path
+    // wins for as long as it exists, so a newer file that later appears with
+    // the same id is not picked up; that is the price of not walking every
+    // pass, and the walk below is `newest_matching`'s only for the first ask.
     if let Some(path) = remembered.filter(|path| path.is_file()) {
         return Some(path);
     }
@@ -2535,6 +2571,9 @@ fn newest_transcript(root: &Path) -> Option<PathBuf> {
 /// each: under a home of spoolway's making every transcript is the session's,
 /// and in the agent's own home a session that outlives a rollover has more than
 /// one file carrying its id. The last thing written is the live one either way.
+/// That holds at the moment of the walk. [`session_file_in`] remembers the
+/// answer of the walk it makes for the shared-home kinds, so it does not hold
+/// again for them until the remembered file is gone.
 fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     transcripts_matching(root, keep, &mut |at, path| {
@@ -5701,7 +5740,10 @@ mod tests {
         );
 
         // The same file read from nothing: what a full read answers.
-        TAIL_READS.lock().unwrap().clear();
+        TAIL_READS
+            .lock()
+            .unwrap()
+            .remove(&("claude".to_string(), path.clone()));
         let full = last_turn_at("claude", &path).unwrap();
         assert_eq!(full.tokens, second.tokens);
         assert_eq!(full.id, second.id);
@@ -5750,11 +5792,26 @@ mod tests {
         assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 7);
 
         // Replaced by a new file under the same name, longer than the offset
-        // the old one left: only its identity says it is not a continuation.
-        let replacement = claude_turn("m1", 1) + &claude_turn("m2", 2) + &claude_turn("m3", 3);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, replacement + &claude_turn("m4", 4)).unwrap();
+        // the old one left, so only its identity says it is not a
+        // continuation. Renamed over the old file while a handle keeps the old
+        // inode alive, so the new one cannot be handed the same number; and
+        // its first line is longer than the one read before, so a read from
+        // the old offset would start inside it and keep the old file's turn.
+        let none = BTreeMap::new();
+        assert_eq!(read_transcript("claude", &path, &none).context, 7);
+        let keep_old_inode = std::fs::File::open(&path).unwrap();
+        let replacement = claude_turn("a-much-longer-request-id", 1)
+            + &claude_turn("m2", 2)
+            + &claude_turn("m3", 3)
+            + &claude_turn("m4", 4);
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, replacement).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
         assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 4);
+        // Summed, so the turn the old file held (7) cannot hide in the count.
+        let replaced = read_transcript("claude", &path, &none).total.unwrap();
+        assert_eq!((replaced.turns, replaced.tokens.input), (4, 1 + 2 + 3 + 4));
+        drop(keep_old_inode);
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -5803,7 +5860,10 @@ mod tests {
             Some(std::fs::metadata(&path).unwrap().len())
         );
 
-        TRANSCRIPT_FOLDS.lock().unwrap().clear();
+        TRANSCRIPT_FOLDS
+            .lock()
+            .unwrap()
+            .remove(&("claude".to_string(), path.clone()));
         let full = read_transcript("claude", &path, &prices);
         let (second, full) = (second.total.unwrap(), full.total.unwrap());
         assert_eq!(second.turns, 3);
@@ -5920,11 +5980,38 @@ mod tests {
             drop(file);
             let kept = read_transcript("claude", &path, &none).total.unwrap();
 
-            TRANSCRIPT_FOLDS.lock().unwrap().clear();
+            TRANSCRIPT_FOLDS
+                .lock()
+                .unwrap()
+                .remove(&("claude".to_string(), path.clone()));
             let full = read_transcript("claude", &path, &none).total.unwrap();
             assert_eq!(kept.cost_usd, full.cost_usd);
             assert_ne!(before.cost_usd, kept.cost_usd);
         });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A settled session read once — as the eval tab's sweep reads all of
+    /// history — leaves no fold behind, while one being written does.
+    #[test]
+    fn only_a_recently_written_transcript_keeps_its_fold() {
+        let session = "0198e2c0-5555-4000-8000-00000000000a";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        let key = ("claude".to_string(), path.clone());
+
+        read_transcript("claude", &path, &none);
+        assert!(TRANSCRIPT_FOLDS.lock().unwrap().contains_key(&key));
+
+        let handle = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        handle
+            .set_modified(std::time::SystemTime::now() - KEEP_FOLD_FOR * 2)
+            .unwrap();
+        drop(handle);
+        assert_eq!(read_transcript("claude", &path, &none).context, 10);
+        assert!(!TRANSCRIPT_FOLDS.lock().unwrap().contains_key(&key));
 
         std::fs::remove_dir_all(&home).ok();
     }
