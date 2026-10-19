@@ -562,12 +562,18 @@ by hand, then run the command again.
 ### `spoolway group list`
 
 Print one line per group with open tasks: the group, how many tasks are open, and their ids.
+After the groups, it prints one line for each plan page that no task with a `group:` names,
+newest first. A plan line always reads `0 open — plan <path>`.
 
 ```
 $ spoolway group list
 auth                          2 open — auth-api, auth-session
 pipeline-handover             1 open — pipeline-and-prompts
+search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/plans/2026-10-21-search.html
 ```
+
+If the plan pages cannot be read, the group lines still print. A notice on stderr names the
+path that failed.
 
 ### `spoolway dispatch`
 

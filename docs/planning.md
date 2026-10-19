@@ -182,7 +182,7 @@ One more command:
 spoolway group list         # every group with open tasks, and which tasks are open
 ```
 
-After the groups it prints one line for each plan page that no task names yet, newest first:
+After the groups it prints one line for each plan page that no task with a `group:` names, newest first:
 
 ```
 payments                      2 open — payments-refunds, payments-webhooks
