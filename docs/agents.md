@@ -65,6 +65,11 @@ Every lane's spend is read from the transcript spoolway pinned to that lane.
 | `pi`, `claude` | spoolway mints a session id and passes it as `{session_id}`. The transcript file carries that id in its name. |
 | `codex` | codex mints its own id. spoolway gives the lane its own `$CODEX_HOME` directory, so that home holds exactly one session. |
 
+For `pi` and `claude`, spoolway searches the agent's transcript store until it finds that file. It then
+reads the same file for as long as it exists. Each later read parses only the whole lines added
+since the last read. A newer file that carries the same session id is not picked up while the
+first one exists.
+
 A codex lane's home links to the real `auth.json` and holds a copy of the real `config.toml`
 with the worktree marked trusted. The lane runs with `-c check_for_update_on_startup=false`.
 The home is removed when the task is archived.
