@@ -5227,7 +5227,11 @@ fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
     if let Err(err) = std::thread::Builder::new().spawn(move || {
         // A send into a dropped receiver is the screen having moved on — a
         // newer load, or the person leaving the tab — and nothing to report.
-        let _ = tx.send(load(&repo, &filters));
+        let result = load(&repo, &filters);
+        // The load's transcript buffers are freed by now. Without this, glibc
+        // keeps them resident for the rest of the session.
+        crate::memory::trim();
+        let _ = tx.send(result);
     }) {
         let _ = failed.send(Err(
             anyhow::Error::new(err).context("could not start the load")

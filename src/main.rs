@@ -33,6 +33,7 @@ mod known_copies;
 mod lane_alias;
 mod local;
 mod lock;
+mod memory;
 mod models;
 mod mux;
 mod overrides;
@@ -79,6 +80,8 @@ use pipeline::Pipelines;
 use repo::Repo;
 
 fn main() {
+    // First, before any thread exists: an arena already created stays.
+    memory::cap_arenas();
     if let Err(err) = run() {
         // A refusal the caller corrects by typing something else, not a
         // failure: exit 2, and no `spoolway:` prefix on the text.
