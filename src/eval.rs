@@ -897,6 +897,12 @@ struct LaneRow {
     /// The row's earliest and latest lane.
     first_ts: String,
     last_ts: String,
+    /// The planner's estimate the run's lines carry — see
+    /// [`Entry::complexity`] — under `task`, and `None` under every other
+    /// `by` or where no line of the run carries one. A number of its own
+    /// rather than read back off `cells`, so an export writes it as a number
+    /// and a sort orders `9` before `18`.
+    complexity: Option<u32>,
     metrics: Metrics,
 }
 
@@ -911,6 +917,7 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
             ("PIPELINE", "pipeline"),
             ("VER", "pipeline_version"),
             ("WHEN", "when"),
+            (COMPLEXITY_HEADER, "complexity"),
         ],
         EvalBy::Pipeline => &[("PIPELINE", "pipeline")],
         EvalBy::Step => &[("PIPELINE", "pipeline"), ("STEP", "step")],
@@ -1102,7 +1109,8 @@ const LANE_PAIRS: [(&str, &str); 11] = [
 
 /// The naming columns [`LaneRow::keys`] holds under each `by`: the run id
 /// under `task`, which the screen has no room for, then the `by`'s own but
-/// for `pipeline_version`, which an export reads off the drawn cell — see
+/// for `pipeline_version`, which an export reads off the drawn cell, and
+/// `complexity`, which it writes from [`LaneRow::complexity`] — see
 /// [`lane_export_cell`].
 fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
     match by {
@@ -1112,6 +1120,19 @@ fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
         EvalBy::Step => &["pipeline", "step"],
         EvalBy::Version => &["pipeline", "first"],
     }
+}
+
+/// The `COMPLEXITY` column's header, drawn under `by task` only.
+const COMPLEXITY_HEADER: &str = "COMPLEXITY";
+
+/// A run's `COMPLEXITY` cell: its estimate, or `-` where its lines carry
+/// none, right-aligned under the header the way every figure is. The naming
+/// columns are padded on the left by [`naming`], so the cell carries its own
+/// padding to the header's width; no estimate is wider than the header, so
+/// the column stays exactly that wide.
+fn complexity_cell(complexity: Option<u32>) -> String {
+    let value = complexity.map_or_else(|| "-".to_string(), |n| n.to_string());
+    format!("{value:>w$}", w = COMPLEXITY_HEADER.len())
 }
 
 /// What a lane without a `group:` groups under — a dash, the same "nothing
@@ -1198,6 +1219,14 @@ fn grouped_rows<'a>(
                 .iter()
                 .min_by(|a, b| a.ts.cmp(&b.ts))
                 .expect("a group always has a line");
+            // The latest line that carries one, as the label's routine is:
+            // a run whose task file was given a new estimate part-way reads
+            // as its newest, and one that began before the field existed
+            // still reads the estimate its later lines banked.
+            let complexity = match by {
+                EvalBy::Task => lanes.iter().rev().find_map(|e| e.complexity),
+                _ => None,
+            };
             let (cells, keys) = match by {
                 // Without the project this key ends with, which is not a cell.
                 EvalBy::Group | EvalBy::Pipeline => (key[..1].to_vec(), key[..1].to_vec()),
@@ -1221,6 +1250,7 @@ fn grouped_rows<'a>(
                             latest.pipeline.clone(),
                             latest.pipeline_version.clone(),
                             when.clone(),
+                            complexity_cell(complexity),
                         ],
                         vec![key[1].clone(), label, latest.pipeline.clone(), when],
                     )
@@ -1236,6 +1266,7 @@ fn grouped_rows<'a>(
                 project: first.project.clone(),
                 first_ts: earliest.ts.clone(),
                 last_ts: latest.ts.clone(),
+                complexity,
                 metrics: Metrics::default(),
             };
             (key, (row, lanes))
@@ -1729,12 +1760,16 @@ fn trial_delta_line(baseline: &LaneRow, row: &LaneRow) -> String {
 // ------------------------------------------------------------ lanes export
 
 /// Every column `--sort` takes under `by`: `project`, the `by`'s own naming
-/// columns, `pipeline_version`, then the figures of both views, beside
+/// columns, `complexity` under `task`, `pipeline_version`, then the figures
+/// of both views, beside
 /// `lanes` and `unpriced`, which no view draws. A sort outlives `t`, so it
 /// has to name a column whichever view is drawn — see [`Figures::carry`].
 fn lane_sort_keys(by: EvalBy) -> Vec<&'static str> {
     let mut cols = vec!["project"];
     cols.extend(lane_csv_keys(by));
+    if by == EvalBy::Task {
+        cols.push("complexity");
+    }
     cols.extend([
         "pipeline_version",
         "tasks",
@@ -1887,6 +1922,7 @@ fn lane_export_cell(by: EvalBy, row: &LaneRow, key: &str) -> ExportCell {
     let c = &m.class_cost;
     match key {
         "project" => ExportCell::text(&row.project),
+        "complexity" => ExportCell::count_or_blank(row.complexity.map(u64::from)),
         "tasks" => ExportCell::count(m.runs as u64),
         "pass" => ExportCell::decimal(m.pass_share().map(|p| p / 100.0)),
         "blocks" => ExportCell::count(m.blocked as u64),
@@ -2220,6 +2256,11 @@ fn commands_json(by: EvalBy, rows: &[CommandRow], total: &CommandMetrics) -> ser
             for (name, value) in lane_csv_keys(by).iter().zip(&row.naming.keys) {
                 obj.insert((*name).into(), value.clone().into());
             }
+            // The table draws `COMPLEXITY` among the naming columns it
+            // shares with the lanes table, so the export carries it too.
+            if by == EvalBy::Task {
+                obj.insert("complexity".into(), row.naming.complexity.into());
+            }
             obj.insert("runs".into(), m.runs.into());
             obj.insert("judged".into(), m.judged.into());
             obj.insert("pass".into(), m.pass_share().map(|p| p / 100.0).into());
@@ -2434,6 +2475,7 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
         // that started in the same minute still sort apart.
         "when" => SortValue::text(&row.first_ts),
         "first" => SortValue::text(&row.first_ts),
+        "complexity" => row.complexity.and_then(|n| SortValue::figure(n as f64)),
         "tasks" => SortValue::figure(m.runs as f64),
         "lanes" => SortValue::figure(m.lanes as f64),
         "pass" => m.pass_share().and_then(SortValue::figure),
@@ -6663,7 +6705,8 @@ mod tests {
                 "login",
                 "default",
                 "1.1",
-                &local_minute("2026-08-04T07:00:00+00:00")
+                &local_minute("2026-08-04T07:00:00+00:00"),
+                &complexity_cell(None),
             ]
         );
         assert_eq!(rows[0].keys[0], "r-login", "the export carries the run id");
@@ -6780,6 +6823,87 @@ mod tests {
         assert_eq!(runs, ["r6", "r7", "r8"]);
     }
 
+    /// Three runs, two with an estimate on their lines and one without,
+    /// oldest first: `easy` at 9, `hard` at 64, `plain` with none.
+    fn complexity_runs() -> Vec<Entry> {
+        let run = |task: &str, ts: &str, complexity: Option<u32>| Entry {
+            ts: ts.into(),
+            complexity,
+            ..lane(task, "implement", 1, Some("pass"))
+        };
+        vec![
+            run("easy", "2026-10-19T08:00:00+00:00", Some(9)),
+            run("hard", "2026-10-19T09:00:00+00:00", Some(64)),
+            run("plain", "2026-10-19T10:00:00+00:00", None),
+        ]
+    }
+
+    /// `--by task` draws each run's estimate right-aligned under
+    /// `COMPLEXITY`, right after `WHEN`, and `-` for a run without one; the
+    /// JSON carries it as a number or `null`, and the CSV as a column of its
+    /// own, blank where there is none. Fails without the column: the header
+    /// has no `COMPLEXITY` and the exports no `complexity`.
+    #[test]
+    fn by_task_draws_and_exports_each_runs_complexity() {
+        let entries = complexity_runs();
+        let rows = rows_by(&entries, EvalBy::Task);
+        let total = total_of(&entries);
+
+        let table = lanes_table(EvalBy::Task, &rows, &total, None, Figures::Totals);
+        let at = table
+            .header
+            .find(COMPLEXITY_HEADER)
+            .expect("a COMPLEXITY column");
+        assert!(
+            table.header[..at].trim_end().ends_with("WHEN"),
+            "{}",
+            table.header
+        );
+        let drawn: Vec<&str> = table
+            .rows
+            .iter()
+            .map(|line| &line[at..at + COMPLEXITY_HEADER.len()])
+            .collect();
+        assert_eq!(drawn, ["         -", "        64", "         9"]);
+
+        let json = lanes_json(EvalBy::Task, Figures::Totals, &rows, &total);
+        let by_task = |task: &str| {
+            json["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["task"] == task)
+                .unwrap()["complexity"]
+                .clone()
+        };
+        assert_eq!(by_task("easy"), serde_json::json!(9));
+        assert_eq!(by_task("hard"), serde_json::json!(64));
+        assert_eq!(by_task("plain"), serde_json::Value::Null);
+
+        let (header, lines) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total);
+        let cells: Vec<String> = lines[..3]
+            .iter()
+            .map(|line| csv_cell(&header, line, "complexity"))
+            .collect();
+        assert_eq!(cells, ["", "64", "9"]);
+    }
+
+    /// A sort on `complexity` orders the estimates as numbers, so `9` comes
+    /// before `64` ascending, where as text it would come after. Fails while
+    /// `--sort` does not take the column.
+    #[test]
+    fn a_sort_on_complexity_orders_the_estimates_as_numbers() {
+        let sort = parse_sort(EvalBy::Task, "complexity:asc").unwrap();
+        let mut rows = rows_by(&complexity_runs(), EvalBy::Task);
+        sort_lane_rows(EvalBy::Task, &mut rows, &sort);
+        let tasks: Vec<&str> = rows.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(&tasks[..2], ["easy", "hard"]);
+        assert!(
+            parse_sort(EvalBy::Step, "complexity").is_err(),
+            "no other `by` draws it"
+        );
+    }
+
     #[test]
     fn by_group_puts_lanes_with_no_group_under_a_dash() {
         let mut grouped = lane("a", "implement", 1, Some("pass"));
@@ -6888,6 +7012,7 @@ mod tests {
             project: "spoolway".into(),
             first_ts: String::new(),
             last_ts: String::new(),
+            complexity: None,
             metrics: Metrics::default(),
         };
         let total = LaneTotal {
@@ -6923,8 +7048,14 @@ mod tests {
             ),
             (
                 EvalBy::Task,
-                &["release-spoolway-1", "impl_tdd", "1.0", "2026-09-16"],
-                "TASK                PIPELINE  VER  WHEN        ",
+                &[
+                    "unblocker-prompt-text",
+                    "dependabot",
+                    "1.3",
+                    "2026-10-19 20:32",
+                    &complexity_cell(Some(22)),
+                ],
+                "TASK                   PIPELINE    VER  WHEN              COMPLEXITY  ",
             ),
         ];
         for (by, cells, naming) in cases {
@@ -7596,8 +7727,8 @@ mod tests {
         let (header, _) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total_of(&entries));
         assert_eq!(
             header,
-            "project,run,task,pipeline,pipeline_version,when,tasks,pass,blocks,ctx_avg_tokens,\
-             ctx_avg_pct,ctx_peak_tokens,ctx_peak_pct,in_tokens,in_usd,out_tokens,out_usd,\
+            "project,run,task,pipeline,pipeline_version,when,complexity,tasks,pass,blocks,\
+             ctx_avg_tokens,ctx_avg_pct,ctx_peak_tokens,ctx_peak_pct,in_tokens,in_usd,out_tokens,out_usd,\
              cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,\
              time_s"
         );
@@ -7659,6 +7790,7 @@ mod tests {
         };
         a.ctx_peak = Some(12_000);
         a.wall_s = 2244;
+        a.complexity = Some(18);
         let entries = vec![a];
         let models = priced_models(100_000);
         let rows = rows_by_with(&entries, EvalBy::Task, &models);
@@ -9299,8 +9431,8 @@ mod screen_tests {
 
     /// The eval tab draws the same label and start time, and a terminal too
     /// narrow for the whole row still cuts it from the right: the figure
-    /// columns go first, and the naming columns, `WHEN` last among them,
-    /// stay whole for as long as they fit.
+    /// columns go first, and the naming columns, `WHEN` among them, stay
+    /// whole for as long as they fit.
     #[test]
     fn the_eval_tab_draws_a_routine_runs_label_and_cuts_figures_first() {
         let line = |task: &str, run: &str, routine: Option<&str>, ts: &str| Entry {
@@ -10960,6 +11092,47 @@ mod screen_tests {
         );
         filters.figures = Figures::Average;
         assert!(header(&filters).contains("▲CTX PEAK"), "per task too");
+    }
+
+    /// The eval tab's task view draws `COMPLEXITY` as `--by task` does, a
+    /// run's estimate or `-` under it, and the pipeline view draws no such
+    /// column. Fails without the column: the task view's header lacks it.
+    #[test]
+    fn the_task_view_draws_each_runs_complexity() {
+        let mut hard = lane_entry("hard", "implement");
+        hard.ts = "2026-08-01T00:00:00+00:00".into();
+        hard.complexity = Some(64);
+        let mut plain = lane_entry("plain", "implement");
+        plain.ts = "2026-08-01T01:00:00+00:00".into();
+        let loaded = loaded(vec![hard, plain]);
+        let pipelines = Pipelines::builtin();
+        let mut filters = no_filters();
+        filters.by = EvalBy::Task;
+        // The header and the rows, each without the one-column marker drawn
+        // before it, so a column sits at the same offset in all of them.
+        let text = |filters: &Filters| {
+            view_lines(&loaded, filters, &pipelines, TableKind::Lanes)
+                .into_iter()
+                .filter_map(|line| match line {
+                    Line::Head(_, text) => Some(text),
+                    Line::Row(row) => Some(row.text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let lines = text(&filters);
+        let at = lines[0].find("COMPLEXITY").expect("{lines:?}");
+        let cell = |task: &str| {
+            let line = lines.iter().find(|l| l.contains(task)).unwrap();
+            line[at..at + "COMPLEXITY".len()].to_string()
+        };
+        assert_eq!(cell("hard"), "        64");
+        assert_eq!(cell("plain"), "         -");
+
+        filters.by = EvalBy::Pipeline;
+        let shown = &text(&filters)[0];
+        assert!(!shown.contains("COMPLEXITY"), "{shown}");
     }
 
     /// `e` writes the rows in the order the screen shows them, on both

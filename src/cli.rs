@@ -590,9 +590,11 @@ impl EvalBy {
         reported pass, and BLOCKS is how many lanes ended blocked. CTX AVG is the mean of \n  \
         every lane's own peak context reading, each as a share of its model's window. \n  \
         Under --by task alone, CTX PEAK beside it is the highest share any one of the \n  \
-        task's lanes reached. IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's \n  \
-        total. With --per-task, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, USD/TASK \n  \
-        and TIME/TASK are each that total over TASKS. IN USD, OUT USD, CACHE R USD and \n  \
+        task's lanes reached, and COMPLEXITY is the task's own `complexity:`, the \n  \
+        planner's experimental estimate from 1 to 100, or - where it set none. \n  \
+        IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's total. With \n  \
+        --per-task, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, USD/TASK and \n  \
+        TIME/TASK are each that total over TASKS. IN USD, OUT USD, CACHE R USD and \n  \
         CACHE W USD price the column before each at today's price table, so together \n  \
         they can differ from USD, which was banked when the lane settled. With \n  \
         --per-task each is divided by TASKS like the rest.\n\n  \

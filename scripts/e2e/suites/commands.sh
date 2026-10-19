@@ -195,6 +195,14 @@ works "eval prices a line's tier_tokens at the tier's rates in the four class co
     .total | near(.in_usd; 0.26) and near(.out_usd; 0.9)
       and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
       and .cost_usd == 1.5"' "$SPOOLWAY"
+# A task's `complexity:` rides on its ledger line, and `eval --by task` hands
+# it back as a number, or `null` for a run whose lines carry none — the
+# tiered line above has none.
+printf '%s\n' '{"ts":"2026-10-09T09:20:00+00:00","task":"complexity-eval","step":"implement","pipeline":"tiered","agent":"pi","kind":"pi","model":"fake-tiered","session":"complexity-eval-s1","turns":1,"tokens":{"output":10},"run":"r-complexity-eval","complexity":18}' >>"$LEDGER"
+works "eval --by task --json carries a ledger line's complexity, and null where it has none" \
+  bash -c '"$0" eval --by task --pipeline tiered --json | jq -e "
+    (.rows | map(select(.task == \"complexity-eval\")) | .[0].complexity == 18)
+    and (.rows | map(select(.task == \"tiered-eval\")) | .[0].complexity == null)"' "$SPOOLWAY"
 # A filter nothing matches leaves no rows. A script reading the output still
 # gets data: the object with empty rows, or the CSV header alone.
 works "eval --json with no rows prints the object with empty rows and nothing else" \
