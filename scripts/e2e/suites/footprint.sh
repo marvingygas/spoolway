@@ -336,9 +336,6 @@ for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
 done
 
 # ------------------------------------------------------------ the verdicts
-printf '  \033[33mnote\033[0m  peak RSS, small history → large: dispatcher %s → %s MB, UI %s → %s MB; %s passes in %s watched\n' \
-  "$(mb "${D_PEAK[small]}")" "$(mb "${D_PEAK[large]}")" \
-  "$(mb "${UI_PEAK[small]}")" "$(mb "${UI_PEAK[large]}")" "${PASSES[small]}" "${WINDOW_S}s"
 check_under() { # label peak-kb limit-mb formula hint-key
   local label=$1 kb=$2 limit=$3 formula=$4
   if [ "${kb:-0}" -le $((limit * 1024)) ] && [ -n "$kb" ]; then
@@ -408,13 +405,16 @@ no number to raise."
 fi
 
 procs_what="processes per idle pass unchanged with 5,000 transcripts"
+# The UI's idle second is judged here for the large history too: a tick that
+# only starts a process once the history is big is cost following history.
 if [ "${PER_PASS[small]}" -eq "${PER_PASS[large]}" ] \
-  && [ "${GIT[large]}" -le "$IDLE_GIT_SPAWNS" ]; then
+  && [ "${GIT[large]}" -le "$IDLE_GIT_SPAWNS" ] \
+  && [ "${UI_SPAWNS[large]}" -eq 0 ]; then
   ok "$procs_what"
 else
-  bad "$procs_what: ${PER_PASS[small]} → ${PER_PASS[large]} per pass, ${GIT[large]} git in the large run"
-  hint procs-flat "Dispatcher passes started more processes with a large history. Read
-$LIVE/window.large. This check has no number to raise."
+  bad "$procs_what: ${PER_PASS[small]} → ${PER_PASS[large]} per pass, ${GIT[large]} git in the large run, ${UI_SPAWNS[large]} started by the idle UI in $UI_WINDOW_S s"
+  hint procs-flat "Dispatcher passes or the idle UI started more processes with a large history.
+Read $LIVE/window.large for the dispatcher. This check has no number to raise."
 fi
 
 eval_what="UI back under $UI_LIMIT_MB MB within $EVAL_SETTLE_S s of leaving Eval"
