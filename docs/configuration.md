@@ -63,13 +63,15 @@ It then prints this line, with the worktree's branch:
 Commit the file on the branch and open a pull request. The dispatcher keeps reading the main
 checkout's config until the branch merges.
 
-`config set` refuses, and writes nothing, in three worktrees. Each refusal prints the command to
-run in the main checkout, as `spoolway -C <root> config set …`.
+`config set` refuses, and writes nothing, in three worktrees. Two refusals print the command to
+run in the main checkout, as `spoolway -C <root> config set …`. The refusal in a task's worktree
+does not. It tells the lane to write the setting it wanted into its report, so a person makes the
+change.
 
 | Worktree | Why it refuses |
 |---|---|
 | A worktree whose branch has no `.spoolway/` | There is no setup in it to write. |
-| A worktree the dispatcher made for a task | The dispatcher reads the project's config, not this worktree's. |
+| A worktree the dispatcher made for a task | The dispatcher reads the project's config, not this worktree's. A lane does not change the project's setup, so it writes the setting into its report. |
 | A worktree on a detached HEAD | The change would have no branch to be committed on. Check a branch out first. |
 
 ### What `config set` checks
