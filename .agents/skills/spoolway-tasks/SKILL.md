@@ -69,8 +69,8 @@ reading the file whole.
    short word for what it holds, never a number.
 
    Settle on a recommended group count first, leaning towards fewer groups, then put **that
-   count and up to three below it** on the ballot, floored at 1 — a recommendation of 4 names
-   1, 2, 3 and 4; a recommendation of 2 names 1 and 2. Every smaller count merges
+   count and up to two below it** on the ballot, floored at 1 — a recommendation of 4 names
+   2, 3 and 4; a recommendation of 2 names 1 and 2. Every smaller count merges
    neighbouring groups of the larger split and never makes a different cut, so no count cuts
    the plan anywhere the largest one does not. Open with the line that names every count —
    `Split <plan-slug> into groups: 1, 2 or 3` — then give every count its own lettered
@@ -141,10 +141,10 @@ reading the file whole.
    kept under five bullets or split again.
 
    **Offer this group's shape, with one request_user_input.** Settle on a recommended count first,
-   then put **that count and the three below it** on the ballot, floored at 1 — a
-   recommendation of 6 names 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3, floored
-   rather than padded back up to four. Open with the line that names every member and the
-   group — `Split <group>: 3, 4, 5 or 6 tasks` — then give every count its own lettered
+   then put **that count and the two below it** on the ballot, floored at 1 — a
+   recommendation of 6 names 4, 5 and 6; a recommendation of 2 names 1 and 2, floored
+   rather than padded back up to three. Open with the line that names every member and the
+   group — `Split <group>: 4, 5 or 6 tasks` — then give every count its own lettered
    section, largest first, the recommended one marked as such, and say that the person answers
    with a letter.
 
