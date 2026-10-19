@@ -258,9 +258,11 @@ group's tasks the batch queues. Nothing starts ticked.
 | `enter` | Queues the batch. A ticked group's tasks get `tracking: off` written onto them and never reach the hook. Every other group's tickets are opened. |
 | `esc` | Returns to the queue screen with nothing queued. |
 
-When no group has a task without a `ticket:`, no popup opens. While the hook runs, a `running
-hook` popup shows one line, `running the hook: <n> of <total> tasks`. `<total>` counts the tasks
-the hook is called for, so a ticked group's tasks are not in it. The `queued` popup then opens on
+When no group has a task without a `ticket:`, no popup opens. While the hook runs, an `issue
+tracking` popup shows one line, `Progress: ` followed by a 44-cell bar. A `█` marks a finished
+call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
+a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
+not in it. The `queued` popup then opens on
 `Hook executed successfully`, followed by `queued <n> tasks`, every queued id and the dispatcher
 line. When every group was ticked, the hook is never called and the popup has no success line.
 Queueing a routine from the routines tab asks the same question and shows the same popups. A
