@@ -1347,6 +1347,24 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     {
         bail!("{name}: `tracking:` may only be set to `off`");
     }
+    // Banked onto every ledger row the task writes, where `eval` reads it
+    // as a number. Refused here, at the one gate every submitted task
+    // passes, because a quoted `"18"` or a `250` would otherwise queue and
+    // then be dropped from every row without a word — see
+    // `Task::complexity`.
+    if let Some(value) = front.extra.get("complexity")
+        && crate::task::complexity_of(value).is_none()
+    {
+        let shown = serde_norway::to_string(value).unwrap_or_default();
+        bail!(
+            "{name} sets `complexity: {}`, which is not a whole number from {} to {}. \
+             Set it to a whole number in that range, 100 being extremely complex, or \
+             remove the key.",
+            shown.trim(),
+            crate::task::COMPLEXITY_RANGE.start(),
+            crate::task::COMPLEXITY_RANGE.end(),
+        );
+    }
     // `SPOOLWAY_LABELS` hands a hook every label comma-joined — see
     // `tracking::build_env` and `tracking::open_env` — and Jira's own
     // labels cannot hold a space at all, so a label carrying either would
@@ -12630,6 +12648,34 @@ mod tests {
             task.front.labels,
             vec!["bug".to_string(), "needs-triage".to_string()]
         );
+    }
+
+    /// `complexity:` is banked as a number, so anything but a whole number
+    /// from 1 to 100 is refused, naming the task, the value and the range.
+    /// A task within the range keeps its value, and one without the key
+    /// queues as before. Fails without the check: every value is accepted.
+    #[test]
+    fn a_complexity_outside_one_to_a_hundred_is_refused_naming_the_value() {
+        for bad in ["0", "101", "-3", "18.5", "\"18\"", "high", "~"] {
+            let text = task_text("demo", &format!("group: demo\ncomplexity: {bad}\n"), BODY);
+            let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+            let said = format!("{err:#}");
+            assert!(said.contains("mine.md"), "{bad}: {said}");
+            assert!(said.contains("from 1 to 100"), "{bad}: {said}");
+            assert!(said.contains("`complexity: "), "{bad}: {said}");
+        }
+        let text = task_text("demo", "group: demo\ncomplexity: 250\n", BODY);
+        let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(format!("{err:#}").contains("`complexity: 250`"), "{err:#}");
+
+        for good in [1, 18, 100] {
+            let text = task_text("demo", &format!("group: demo\ncomplexity: {good}\n"), BODY);
+            let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+            assert_eq!(task.complexity(), Some(good));
+        }
+        let text = task_text("demo", "group: demo\n", BODY);
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert_eq!(task.complexity(), None);
     }
 
     /// An empty label fails neither the whitespace nor the comma check, so

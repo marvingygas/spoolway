@@ -118,6 +118,25 @@ pub(crate) const RETIRED_PARK_KEYS: &[&str] = &[
     "parked_at",
 ];
 
+/// The values `complexity:` may take: the planner's estimate of how complex a
+/// task is, from 1 to 100, 100 being extremely complex. Experimental, and so
+/// carried in `extra` rather than as a typed field on [`Frontmatter`]: a
+/// typed field would refuse an out-of-range value on a task already queued,
+/// which [`Task::complexity`] reads as absent instead. A submitted task is
+/// held to this range by `commands::queue::parse_submission`.
+pub(crate) const COMPLEXITY_RANGE: std::ops::RangeInclusive<u64> = 1..=100;
+
+/// `value` as a complexity, if it is a whole number within
+/// [`COMPLEXITY_RANGE`]. A quoted `"18"`, a `18.0` or anything else YAML does
+/// not read as an integer is not one, so the refusal at `queue add` and the
+/// read at banking time agree on every value.
+pub(crate) fn complexity_of(value: &serde_norway::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .filter(|n| COMPLEXITY_RANGE.contains(n))
+        .map(|n| n as u32)
+}
+
 /// The typed half of a task file's frontmatter.
 ///
 /// Unrecognised keys are kept in `extra` and written back untouched, so a
@@ -1560,6 +1579,16 @@ impl Task {
     /// tracking off starts no hook run and is never held waiting on one.
     pub fn tracking_off(&self) -> bool {
         self.extra_str("tracking") == "off"
+    }
+
+    /// The planner's complexity estimate for this task, when it set one — see
+    /// [`COMPLEXITY_RANGE`]. Read where a ledger row reads `group:`, so the
+    /// two on one row come from the same copy of the task file. A value
+    /// outside the range, hand-written onto a task after `queue add` checked
+    /// it, reads as absent rather than banking a figure the contract does
+    /// not allow.
+    pub fn complexity(&self) -> Option<u32> {
+        self.front.extra.get("complexity").and_then(complexity_of)
     }
 }
 

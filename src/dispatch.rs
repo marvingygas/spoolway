@@ -879,6 +879,7 @@ fn bank_command_run(
         trial: task.front.trial.clone(),
         trial_group: task.front.trial_group.clone(),
         routine: task.front.routine.clone(),
+        complexity: task.complexity(),
         dir: None,
         hand: false,
         command: Some(crate::usage::CommandRun {
@@ -3641,6 +3642,7 @@ impl<'a> Dispatcher<'a> {
             trial: task.and_then(|t| t.front.trial.clone()),
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
             routine: task.and_then(|t| t.front.routine.clone()),
+            complexity: task.and_then(Task::complexity),
             dir: None,
             hand: false,
             command: None,
@@ -19348,6 +19350,55 @@ mod tests {
         assert_eq!(line.routine.as_deref(), Some("release"), "{banked:?}");
     }
 
+    /// A lane's own line carries its task's complexity, read off the task
+    /// beside `group:`. Fails while `record_usage` leaves it out: the line
+    /// has none.
+    #[test]
+    fn a_lanes_banked_line_carries_its_tasks_complexity() {
+        let (mut repo, _root_guard) = fixture("lane-banks-complexity");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "hard", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.extra
+                .insert("complexity".into(), serde_norway::Value::from(18u64));
+        }));
+
+        let session = "complex-lane";
+        let kind = local_kind(&repo);
+        write_entry(&repo, "hard", "implement", &kind, "priced-model", session);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "hard · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "hard · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .rfind(|e| e.session == session)
+            .expect("the finished lane's own bank");
+        assert_eq!(line.complexity, Some(18), "{banked:?}");
+    }
+
     /// A held lane's `wall_s` is a delta against what the hold-time line
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
@@ -25966,6 +26017,7 @@ mod tests {
         assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
         assert!(!rows[0].blocked);
         assert_eq!(rows[0].routine, None, "the task is no routine's copy");
+        assert_eq!(rows[0].complexity, None, "the task set no complexity");
     }
 
     /// A command step's row for a routine copy carries the routine's id, the
@@ -25985,6 +26037,28 @@ mod tests {
         let rows = command_rows(&repo);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].routine.as_deref(), Some("release"));
+    }
+
+    /// A command step's row carries its task's complexity, the same as a
+    /// lane's line does, and a task without one banks a row without it.
+    /// Fails while the builder leaves it out: the row has none.
+    #[test]
+    fn a_command_row_carries_its_tasks_complexity() {
+        let (repo, _root_guard) = fixture("command-ledger-complexity");
+        let path = add_task_with_worktree(&repo, "hard", "implement");
+        let mut task = reload(&path);
+        task.front
+            .extra
+            .insert("complexity".into(), serde_norway::Value::from(42u64));
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].complexity, Some(42));
     }
 
     /// A run's wall time is rounded to the nearest second, not cut down to

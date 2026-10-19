@@ -271,6 +271,15 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine: Option<String>,
 
+    /// The planner's complexity estimate for this line's task, banked from
+    /// [`crate::task::Task::complexity`] wherever [`Entry::plan`] is read
+    /// from the task, so the two on one line always agree. `spoolway eval
+    /// --by task` draws it as `COMPLEXITY`. Absent on a line whose task set
+    /// none, on every directory line, and on every line written before the
+    /// field existed: those read exactly as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<u32>,
+
     /// The watched root — see [`crate::config::Config::watch_roots`] — a
     /// session's `cwd` sat under, when this line was banked by
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
@@ -340,6 +349,7 @@ impl Entry {
             trial: None,
             trial_group: None,
             routine: None,
+            complexity: None,
             dir: None,
             hand: false,
             command: None,
@@ -3768,15 +3778,15 @@ pub(crate) fn reported_spend_moved(cost: Option<f64>, reported: Option<f64>) -> 
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial`, `trial_group`, `routine`, `round` and
+/// `plan`, `run`, `trial`, `trial_group`, `routine`, `complexity`, `round` and
 /// `pipeline_version` are copied onto the new line, so spend recovered by a
 /// sweep lands in the same `spoolway eval` row the lane's own turns did rather
 /// than in a pipeline-less one no group owns — and under the version the lane
 /// actually ran, not whatever a pipeline file says by the time the sweep runs.
 /// `None` for [`bank_lane`]'s caller — the headless interrupt has a lane name
 /// and a transcript, not a loaded pipeline — where those fields stay blank the
-/// way a line written before they existed carries them, bar `routine`, which
-/// is read off the task's own file.
+/// way a line written before they existed carries them, bar `routine` and
+/// `complexity`, which are read off the task's own file.
 #[allow(clippy::too_many_arguments)]
 fn bank_lane_at(
     repo: &Repo,
@@ -3790,6 +3800,12 @@ fn bank_lane_at(
     harvest: &Harvest,
 ) -> Option<Entry> {
     let delta = banked_delta(session, ledger, harvest)?;
+    // Only read with no line to carry from: see `routine` and `complexity`
+    // below.
+    let own = match carry {
+        Some(_) => None,
+        None => repo.task(task).ok(),
+    };
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -3829,7 +3845,15 @@ fn bank_lane_at(
         // already holds whatever the task's file would say.
         routine: match carry {
             Some(c) => c.routine.clone(),
-            None => repo.task(task).ok().and_then(|t| t.front.routine),
+            None => own.as_ref().and_then(|t| t.front.routine.clone()),
+        },
+        // Carried beside `plan`, so a catch-up line keeps the estimate its
+        // lane's own line banked. The headless interrupt's bank reads it off
+        // the task's file instead, as `routine` is, so that line is not the
+        // one row of the run without it.
+        complexity: match carry {
+            Some(c) => c.complexity,
+            None => own.as_ref().and_then(crate::task::Task::complexity),
         },
         dir: None,
         // Copied like the columns above: a catch-up of a hand session's own
@@ -4640,6 +4664,7 @@ fn bank_dir_session(
         trial: None,
         trial_group: None,
         routine: None,
+        complexity: None,
         dir: Some(dir.to_string()),
         hand: false,
         command: None,
@@ -8391,6 +8416,40 @@ mod tests {
         assert_eq!(line.outcome, None, "late turns were never judged");
     }
 
+    /// A catch-up line carries the complexity its lane's own line banked,
+    /// beside `plan`, and none where that line had none — so a run's rows
+    /// never disagree on it. Fails while the builder leaves it out: the
+    /// first line has no complexity.
+    #[test]
+    fn the_catch_up_line_carries_the_lanes_complexity() {
+        let (repo, path, _root_guard) = fixture("settled-lane-complexity");
+        let lane = |session: &str, complexity: Option<u32>| Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            plan: Some("epic".into()),
+            complexity,
+            session: session.into(),
+            tokens: Tokens {
+                output: 10,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &lane("s1", Some(18))).unwrap();
+        append(&repo, &lane("s2", None)).unwrap();
+        std::fs::write(&path, transcript(&[("", 10), ("", 7)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s1", &path, &ledger).expect("the catch-up line");
+        assert_eq!(line.complexity, Some(18));
+        let line = catch_up(&repo, "claude", "s2", &path, &ledger).expect("the catch-up line");
+        assert_eq!(line.complexity, None);
+        let written = std::fs::read_to_string(repo.usage_file()).unwrap();
+        let last = written.lines().last().unwrap();
+        assert!(!last.contains("complexity"), "{last}");
+    }
+
     /// The two requests of [`TIERED_TRANSCRIPT`], stamped with a working
     /// directory so the directory and worktree sweeps can place them.
     fn tiered_transcript_in(cwd: &Path) -> String {
@@ -9159,6 +9218,38 @@ mod tests {
             None,
             "no task file, no routine"
         );
+    }
+
+    /// With no line to carry from, the headless interrupt's line reads the
+    /// complexity off the task's own file, as it does the routine, so that
+    /// line is not the one row of the run without it. Fails while only a
+    /// carry could supply it: the line has none.
+    #[test]
+    fn a_line_banked_with_no_carry_reads_the_complexity_off_its_task() {
+        let (repo, path, _root_guard) = fixture("bank-no-carry-complexity");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("hard.md"),
+            "---\nid: hard\ncomplexity: 64\nstage: implement\n---\n## Goal\ndemo\n",
+        )
+        .unwrap();
+        std::fs::write(&path, transcript(&[("", 10)])).unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+
+        let bank = |task: &str, session: &str| {
+            bank_lane_from(
+                &repo,
+                "claude",
+                session,
+                task,
+                "implement",
+                chrono::Utc::now(),
+                &harvest,
+            )
+            .expect("a banked line")
+        };
+        assert_eq!(bank("hard", "s1").complexity, Some(64));
+        assert_eq!(bank("plain", "s2").complexity, None, "no task file");
     }
 
     /// A reported total that lands after the lane was banked, with no new turn
