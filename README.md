@@ -215,8 +215,11 @@ See **[The overrides layer](docs/configuration.md#the-overrides-layer)** and
 
 A routine is a saved task or group of tasks that you can queue again. It lives in
 `.spoolway/routines/`.
-On the queue screen, press `o` on a group and pick `save as routine` to save it there, and `r`
-to browse and queue what is saved.
+On the queue tab, press `o` on a group and pick `save as routine` to save it there. The
+routines tab lists what is saved. Select a routine and press `enter` to queue it.
+
+<img src="docs/screenshots/routines.png" alt="the routines tab" width="100%">
+
 
 A job runs a routine on a schedule. It has three parts: a cron expression, a pipeline, and a
 routine saved under `.spoolway/routines/`.
