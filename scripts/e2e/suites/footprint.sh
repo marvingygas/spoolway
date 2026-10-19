@@ -330,10 +330,9 @@ screen_press $'\x1b[C'   # jobs
 screen_press $'\x1b[C'   # eval
 # Left only once the load is over. Leaving mid-load would trim while the load
 # thread still holds its memory, and the check would then fail at random on a
-# slow runner. Each tab change draws a frame, so three new frames mean Eval has
-# opened, however slowly the presses were read; only then is the load asked
-# about. Its popup is waited for briefly, since a load too quick to be seen has
-# finished by the time it is asked about.
+# slow runner. Each tab change draws a frame, so three new frames mean the
+# presses have been read; the popup is then waited for briefly, since a load
+# too quick to be seen has finished by the time it is asked about.
 eval_loading() { screen_last_frame | grep -qa 'Loading…'; }
 eval_opened() { [ "$(screen_frames)" -ge $((frames_before + 3)) ]; }
 settled=0
@@ -446,10 +445,10 @@ else
   else
     bad "$eval_what: still $eval_back_mb MB after $EVAL_SETTLE_S s"
   fi
-  hint eval-settle "The Eval tab did not finish loading, or its memory was not given back. Large reads should happen
-on a background thread whose memory is returned to the system when the load
-ends. This check has no number to raise except EVAL_SETTLE_S, and a longer
-wait only hides the leak."
+  hint eval-settle "The Eval tab never opened, did not finish loading, or did not give its
+memory back. Large reads should happen on a background thread whose memory
+is returned to the system when the load ends. This check has no number to
+raise except EVAL_SETTLE_S, and a longer wait only hides the leak."
 fi
 
 if [ "${#HINTS[@]}" -gt 0 ]; then
