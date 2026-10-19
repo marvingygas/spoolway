@@ -453,29 +453,77 @@ fn builtin() -> &'static BTreeMap<String, ModelPrice> {
 
 struct RefreshedCache {
     path: std::path::PathBuf,
+    /// What the file looked like when `file` was parsed from it; see
+    /// [`file_stamp`].
+    stamp: FileStamp,
     contents: Vec<u8>,
     file: Arc<BuiltinFile>,
 }
 
-/// Read the optional machine-wide table before consulting its parsed cache.
-/// The read has to come first: permissions can make an otherwise unchanged
-/// file unreadable, and serving its cached row then would defeat the silent
-/// built-in fallback promised for that failure. Comparing bytes still avoids
-/// reparsing an unchanged table on every frame of a long-running `status`.
+/// What a stat says about the machine-wide table: the identity the screen's
+/// other caches use, plus the permission bits. Read permission can be taken
+/// away without moving the modified time or the length, so identity alone
+/// would go on serving a table the person can no longer read.
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    identity: crate::watch::Identity,
+    mode: u32,
+}
+
+/// The stamp of `path`, and whether it is old enough to vouch for the bytes
+/// behind it — a file written within [`crate::watch::SETTLE`] may be written
+/// again inside the same modified-time tick with the same length.
+fn file_stamp(path: &Path) -> Option<(FileStamp, bool)> {
+    let meta = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
+    #[cfg(not(unix))]
+    let mode = 0;
+    let identity = crate::watch::Identity::from_metadata(&meta);
+    let settled = !identity.written_within(crate::watch::SETTLE);
+    Some((FileStamp { identity, mode }, settled))
+}
+
+/// The optional machine-wide table, parsed once per change of the file.
+///
+/// A stat that matches the one taken when the table was parsed, on a file
+/// old enough to trust it, answers from the cache without reading the file:
+/// every lane of every pass asks, and the file is hundreds of kilobytes.
+/// Anything else reads first. That order is deliberate: permissions can make
+/// an otherwise unchanged file unreadable, and serving its cached row then
+/// would defeat the silent built-in fallback promised for that failure, which
+/// is why the mode is part of the stamp. Comparing bytes still avoids
+/// reparsing a table that was rewritten with the same contents.
 fn refreshed_file() -> Option<Arc<BuiltinFile>> {
     let path = crate::mux::home().join(".spoolway/model-prices.json");
-    let contents = fs::read(&path).ok()?;
+    let (stamp, settled) = file_stamp(&path)?;
 
     static CACHE: OnceLock<Mutex<Option<RefreshedCache>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let cached = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cached
-        .as_ref()
-        .is_some_and(|cached| cached.path == path && cached.contents == contents)
+    if settled
+        && cached
+            .as_ref()
+            .is_some_and(|cached| cached.path == path && cached.stamp == stamp)
     {
         return Some(Arc::clone(&cached.as_ref()?.file));
+    }
+    drop(cached);
+
+    let contents = fs::read(&path).ok()?;
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(held) = cached
+        .as_mut()
+        .filter(|held| held.path == path && held.contents == contents)
+    {
+        // Same bytes under a new stat (a `touch`, a permission change back):
+        // keep the parse, and remember the stat so the next call skips the read.
+        held.stamp = stamp;
+        return Some(Arc::clone(&held.file));
     }
     drop(cached);
 
@@ -484,6 +532,7 @@ fn refreshed_file() -> Option<Arc<BuiltinFile>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RefreshedCache {
         path,
+        stamp,
         contents,
         file: Arc::clone(&file),
     });
@@ -1666,6 +1715,49 @@ mod tests {
                 resolve(&BTreeMap::new(), "claude-opus-5").source,
                 Source::Builtin
             );
+        });
+    }
+
+    /// A table whose stat has not moved is not read again: the bytes are
+    /// swapped for others of the same length with the old modified time put
+    /// back, so only a read could notice. A moved modified time reads it.
+    #[test]
+    fn a_refreshed_file_with_an_unchanged_stat_is_served_without_a_read() {
+        let home = fixture_home("models-refreshed-stat-only");
+        let path = home.join(".spoolway/model-prices.json");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let set_mtime = |at: std::time::SystemTime| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        write_refreshed(
+            &home,
+            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
+        );
+        set_mtime(long_ago);
+
+        crate::platform::test_home::with_home(&home, || {
+            let input = || {
+                resolve(&BTreeMap::new(), "claude-opus-5")
+                    .price
+                    .unwrap()
+                    .input
+            };
+            assert_eq!(input(), 2.0);
+
+            write_refreshed(
+                &home,
+                serde_json::json!({ "claude-opus-5": { "input": 3.0 } }),
+            );
+            set_mtime(long_ago);
+            assert_eq!(input(), 2.0, "a stat that matches must not cost a read");
+
+            set_mtime(long_ago + std::time::Duration::from_secs(5));
+            assert_eq!(input(), 3.0, "a moved modified time reads the file");
         });
     }
 

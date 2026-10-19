@@ -18,7 +18,7 @@ use anyhow::Result;
 /// How old a modified time must be before an unchanged identity proves an
 /// unchanged file. Filesystems that stamp whole seconds cannot tell two
 /// writes inside one second apart, so anything younger is read again.
-const SETTLE: Duration = Duration::from_secs(1);
+pub(crate) const SETTLE: Duration = Duration::from_secs(1);
 
 /// What a file or directory looked like when it was last stat-ed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

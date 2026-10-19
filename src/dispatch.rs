@@ -8946,9 +8946,21 @@ pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
     }
 }
 
+/// Write `lanes.json`, unless it already holds exactly these records.
+///
+/// Every pass saves, whatever came of it, so an idle one would otherwise
+/// write and sync a file that has not changed. The records are rendered in
+/// key order: a `HashMap` iterates in an order of its own per instance, and
+/// the pass rebuilds its map from the file each time, so two equal maps would
+/// otherwise render differently and never compare equal.
 pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>) -> Result<()> {
-    let rendered = serde_json::to_string_pretty(lanes)?;
-    crate::task::write_atomic(&lanes_path(repo), &rendered)
+    let sorted: std::collections::BTreeMap<&String, &LaneRecord> = lanes.iter().collect();
+    let rendered = serde_json::to_string_pretty(&sorted)?;
+    let path = lanes_path(repo);
+    if std::fs::read_to_string(&path).is_ok_and(|held| held == rendered) {
+        return Ok(());
+    }
+    crate::task::write_atomic(&path, &rendered)
 }
 
 pub(crate) fn now_secs() -> i64 {
