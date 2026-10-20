@@ -7156,12 +7156,13 @@ fn ensure_workspace(
 
 /// [`ensure_workspace`], for a step that may not need a pane.
 ///
-/// With `want_pane` false, a backend that can cut a checkout on its own
-/// ([`Mux::cut_checkout`]) cuts the task's worktree and opens no workspace on
-/// it, so a task of hidden commands never holds the empty shell pane a
-/// workspace comes with. The workspace opens on the first call with
-/// `want_pane` true, through the same path that takes back a checkout cut
-/// earlier, and the pane it hands back is the first one.
+/// With `want_pane` false, no workspace is opened, so a task of hidden
+/// commands never holds the empty shell pane a workspace comes with. A backend
+/// that can cut a checkout on its own ([`Mux::cut_checkout`]) cuts the task's
+/// worktree bare; a checkout that already exists, borrowed or the task's own
+/// taken back, is recorded and nothing more. The workspace opens on the first
+/// call with `want_pane` true, through the path that takes back a checkout
+/// recorded earlier, and the pane it hands back is the first one.
 ///
 /// Only a task with no workspace on record is left alone when `want_pane` is
 /// false. A recorded workspace is still checked against the live multiplexer
@@ -7430,19 +7431,29 @@ fn ensure_checkout(
                 if !own_cut {
                     refuse_main_checkout(repo, task, &checkout)?;
                 }
-                let label = format!("spoolway/{}", task.display_name());
-                let workspace = match own_cut {
-                    true => mux.reopen_owned_pane(&checkout, &label)?,
-                    false => mux.create_pane(&checkout, &label)?,
-                };
-                task.front.workspace_id = Some(workspace.workspace_id);
-                task.front.pane_id = Some(workspace.pane_id.clone());
-                // Recorded only for a workspace with a tab: headless has none, so no
-                // step would ever take the pane and the record would stay for good.
-                task.front.spare_pane =
-                    workspace.tab_id.as_ref().map(|_| workspace.pane_id.clone());
-                task.front.tab_id = workspace.tab_id;
-                fresh_pane = Some(workspace.pane_id);
+                // The stale-placement blocks above clear `worktree_path`, so
+                // one still recorded here was written by an earlier visit that
+                // opened no workspace. Its `run` is already minted.
+                let visited_before = task.front.worktree_path.is_some();
+                // A step with no pane to show records the checkout and opens
+                // nothing, so the task has no workspace and no empty pane
+                // until the first step that shows one comes back through here.
+                if want_pane {
+                    let label = format!("spoolway/{}", task.display_name());
+                    let workspace = match own_cut {
+                        true => mux.reopen_owned_pane(&checkout, &label)?,
+                        false => mux.create_pane(&checkout, &label)?,
+                    };
+                    task.front.workspace_id = Some(workspace.workspace_id);
+                    task.front.pane_id = Some(workspace.pane_id.clone());
+                    // Recorded only for a workspace with a tab: headless has
+                    // none, so no step would ever take the pane and the record
+                    // would stay for good.
+                    task.front.spare_pane =
+                        workspace.tab_id.as_ref().map(|_| workspace.pane_id.clone());
+                    task.front.tab_id = workspace.tab_id;
+                    fresh_pane = Some(workspace.pane_id);
+                }
                 task.front.borrowed = !own_cut;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
@@ -7453,7 +7464,7 @@ fn ensure_checkout(
                 // checkout was cut from something before this task ever
                 // touched it, at a moment nothing here witnessed, so there is
                 // no honest commit to pin.
-                if !own_cut {
+                if !own_cut && !visited_before {
                     task.front.run = Some(crate::usage::new_run_id());
                 }
                 persist_task(repo, task, file_seen)?;
@@ -23194,6 +23205,58 @@ mod tests {
             task.front.base_commit, None,
             "nothing here witnessed where a borrowed checkout was cut from"
         );
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A hidden first step on a checkout somebody else has the task's branch
+    /// out in records the borrow and opens no workspace. The first step that
+    /// shows a pane opens it then, keeping the run the first visit minted.
+    ///
+    /// Fails before `want_pane` reached the borrow: the hidden step opened a
+    /// workspace and left its pane empty.
+    #[test]
+    fn a_hidden_step_on_a_borrowed_checkout_opens_no_workspace_until_a_pane_is_shown() {
+        let (repo, _root_guard) = fixture("lazy-workspace-borrowed");
+        let worktree = crate::scratch::root("dispatch-lazy-workspace-borrowed-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        let mux = FakeMux::new(vec![])
+            .offering_panes()
+            .cutting_checkouts_alone();
+
+        ensure_checkout(&repo, &mux, &mut task, &mut Default::default(), false).unwrap();
+
+        assert!(task.front.borrowed);
+        assert!(task.front.worktree_path.is_some());
+        assert_eq!(
+            (
+                &task.front.workspace_id,
+                &task.front.pane_id,
+                &task.front.tab_id,
+                &task.front.spare_pane
+            ),
+            (&None, &None, &None, &None)
+        );
+        assert!(mux.calls().is_empty(), "{:?}", mux.calls());
+        let run = task.front.run.clone();
+        assert!(run.is_some());
+
+        let (_, fresh) = ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(fresh.as_deref(), Some("w0:p9"));
+        assert_eq!(task.front.workspace_id.as_deref(), Some("w0"));
+        assert_eq!(task.front.spare_pane.as_deref(), Some("w0:p9"));
+        assert!(task.front.borrowed);
+        assert_eq!(task.front.run, run, "the run is minted once");
 
         std::fs::remove_dir_all(&worktree).ok();
     }
