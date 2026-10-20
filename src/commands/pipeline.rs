@@ -1024,9 +1024,13 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
 /// nowhere good, so both are caught here, while the edit can still be undone.
 /// Each of the four step fields is read because a task can be stopped on any
 /// of them: `stage:` for a running one, `paused_at` for a gate, `blocked_from`
-/// for a block and `parked_from` for a `p` park. A fifth name, the task's own
-/// `gate_at:`, is read for the step it is meant to stop at. The reserved stages are
+/// for a block and `parked_from` for a `p` park. The reserved stages are
 /// stand-ins rather than steps, so they are never reported as missing.
+///
+/// The task's own `gate_at:` is checked too, but not as a recorded step: it
+/// is the step the task is meant to stop at, so any name no step has is
+/// reported, a reserved word such as `done` included. A task already at
+/// `done` is past every gate and is left out.
 ///
 /// A task whose `pipeline:` is absent is left to the dispatcher's own start
 /// refusal; only a name the project no longer defines is reported here.

@@ -2562,9 +2562,10 @@ impl<'a> Dispatcher<'a> {
             let id = task.id().to_string();
             // A `gate_at:` no step has is never matched, so the task would
             // run to `done` past where its author asked it to stop. It waits
-            // on `paused` with the gate named, before a hook fires or a lane
-            // starts; a resume sends it back here, and parks it again until
-            // the task file names a step.
+            // on `paused` with the gate named, before the `started` hook fires
+            // or a lane starts (the `queued` hook has already run above); a
+            // resume sends it back here, and parks it again until the task
+            // file names a step.
             if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
                 let note = crate::commands::stale_gate_note(task, pipeline, gate_at);
                 let line = crate::commands::stale_gate_line(task, pipeline, gate_at);

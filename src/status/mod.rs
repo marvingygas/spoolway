@@ -13612,6 +13612,30 @@ mod tests {
         );
     }
 
+    /// The row a person sees after the dispatcher's park of a stale gate: the
+    /// task is on `paused` with no step recorded, and the row names the gate
+    /// and keeps the resume key. Fails without the row's check: it reads
+    /// "→ queued — [r] resumes it".
+    #[test]
+    fn a_parked_row_names_the_gate_at_its_pipeline_lacks() {
+        let (repo, _root_guard) = fixture("parked-stale-gate-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("review-renamed".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert!(rows[0].resumable);
+        assert!(
+            rows[0].next.contains("`gate_at: review-renamed`")
+                && rows[0].next.contains("Change `gate_at:` in the task"),
+            "{}",
+            rows[0].next
+        );
+    }
+
     /// A paused row whose held or parked step the pipeline dropped says what
     /// was lost, in place of "no step named" or a resume that would refuse.
     #[test]
