@@ -2013,15 +2013,18 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
 }
 
 /// The lowest-numbered `<id>-N` held by no queue file, archive file,
-/// `task/<id>` branch or routine name — see [`existing_task_path`] — and not
-/// already claimed earlier in the same trial, since a batch of arms is minted
-/// before any of them is saved and so cannot see each other on disk yet.
+/// `task/<id>` branch, local or remote-tracking, or routine name — see
+/// [`existing_task_path`] — and not already claimed earlier in the same trial,
+/// since a batch of arms is minted before any of them is saved and so cannot
+/// see each other on disk yet.
 ///
 /// The branch is checked because archive retention deletes an old task's
 /// file but not its branch. Minting the freed id again would hand dispatch a
 /// task whose first cut refuses the branch it finds already there, and the
-/// copy would sit blocked on every later window. Each candidate costs one
-/// `git show-ref`, the same lookup the first-cut guard makes.
+/// copy would sit blocked on every later window. Each candidate costs a
+/// `git show-ref`, plus a `git for-each-ref` when no local branch holds it.
+/// The remote check is mint's own; the first-cut guard looks only at local
+/// branches.
 ///
 /// Starts at 1: an ordinary submission already reaches the queue under the
 /// task's own bare id (see [`parse_submission`]), so the first minted
@@ -2071,7 +2074,7 @@ fn task_branch(task: &Task) -> String {
 }
 
 /// Whether `task/<id>` is a local branch, or a remote-tracking branch of any
-/// remote. A trial arm runs `create-pr` unless the person ticked it off, so an
+/// remote, whose name may itself hold a slash. A trial arm runs `create-pr` unless the person ticked it off, so an
 /// earlier arm's branch can sit on `origin` after the local one is cleaned up.
 /// An id minted over it would block on that branch and its pull request.
 fn branch_exists(repo: &Repo, id: &str) -> bool {
@@ -2081,7 +2084,7 @@ fn branch_exists(repo: &Repo, id: &str) -> bool {
             .git(&[
                 "for-each-ref",
                 "--format=%(refname)",
-                &format!("refs/remotes/*/{branch}"),
+                &format!("refs/remotes/**/{branch}"),
             ])
             .is_ok_and(|refs| !refs.trim().is_empty())
 }
@@ -19548,8 +19551,10 @@ mod tests {
         git(&["config", "user.name", "t"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         git(&["update-ref", "refs/remotes/origin/task/ping-1", "HEAD"]);
+        // A remote name may hold a slash, which a single `*` does not cross.
+        git(&["update-ref", "refs/remotes/up/stream/task/ping-2", "HEAD"]);
 
-        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-3");
     }
 
     /// Archive retention removes `archive/ping-1.md` and keeps the branch
