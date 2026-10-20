@@ -2567,11 +2567,12 @@ impl<'a> Dispatcher<'a> {
             // the task file names a step.
             if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
                 let note = crate::commands::stale_gate_note(task, pipeline, gate_at);
+                let line = crate::commands::stale_gate_line(task, pipeline, gate_at);
                 task.set_stage(crate::pipeline::PAUSED, None);
                 task.log_status(&note);
                 if self.persist(task)? {
                     report.moved = true;
-                    report.actions.push(format!("{id}: {note}"));
+                    report.actions.push(format!("{id}: {line}"));
                 }
                 return Ok(Routed::NextTask);
             }

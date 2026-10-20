@@ -2417,9 +2417,21 @@ mod tests {
         assert!(
             problems[0].contains("queued task `stale`")
                 && problems[0].contains("`gate_at: review-renamed`")
-                && problems[0].contains("Change `gate_at:` in the task"),
+                && problems[0].contains(
+                    "does not define.\n    Change `gate_at:` in the task to a step `default` has."
+                ),
             "{problems:?}"
         );
+        assert!(!problems[0].contains('('), "no step list: {problems:?}");
+
+        // A task at `done` that still sits in the queue directory is past
+        // every gate and is not reported.
+        let finished = crate::task::Task::parse(
+            std::path::PathBuf::from("finished.md"),
+            "---\nid: finished\npipeline: default\nstage: done\ngate_at: gone\n---\n",
+        )
+        .unwrap();
+        assert!(live_task_problems(&[finished], &pipelines).is_empty());
     }
 
     // -----------------------------------------------------------------

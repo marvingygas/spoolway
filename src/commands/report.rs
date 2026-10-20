@@ -1659,16 +1659,23 @@ pub fn missing_step_park_note(task: &Task, pipeline: &Pipeline, missing: &str) -
 /// has is never matched and the task runs past where its author asked it to
 /// stop. `queue add` refuses such a name up front; this finds the one a
 /// pipeline edit left behind afterwards, and is what a trial arm is judged by.
+/// A task already at `done` is past every gate, and one still in the queue
+/// directory for its `done` hook is not reported.
 pub fn stale_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
+    if task.stage() == crate::pipeline::DONE {
+        return None;
+    }
     task.front
         .gate_at
         .as_deref()
         .filter(|gate_at| pipeline.step(gate_at).is_none())
 }
 
-/// The line that names a task whose `gate_at:` is [`stale_gate_at`]: what the
-/// dispatcher logs when it parks the task, and what `pipeline check`, `doctor`
-/// and the queue row say of it. One wording, so the four cannot disagree.
+/// The note for a task whose `gate_at:` is [`stale_gate_at`]: the sentence
+/// naming the gate, then the remedy on a line of its own, indented under it.
+/// It is what `pipeline check`, `doctor` and the dispatcher's Status Log entry
+/// print; the queue row and the dispatcher's action line join the two lines
+/// with [`stale_gate_line`]. One wording, so they cannot disagree.
 pub fn stale_gate_note(task: &Task, pipeline: &Pipeline, gate_at: &str) -> String {
     let kind = if task.stage() == crate::pipeline::QUEUED {
         "queued"
@@ -1676,13 +1683,16 @@ pub fn stale_gate_note(task: &Task, pipeline: &Pipeline, gate_at: &str) -> Strin
         "live"
     };
     format!(
-        "{kind} task `{}` has `gate_at: {gate_at}`, which pipeline `{}` does not define. \
-         Change `gate_at:` in the task to a step `{}` has ({}).",
+        "{kind} task `{}` has `gate_at: {gate_at}`, which pipeline `{pipeline}` does not \
+         define.{PARK_NOTE_BREAK}Change `gate_at:` in the task to a step `{pipeline}` has.",
         task.front.id,
-        pipeline.name,
-        pipeline.name,
-        pipeline.step_ids().join(", ")
+        pipeline = pipeline.name,
     )
+}
+
+/// [`stale_gate_note`] on one line, for a table cell or an action line.
+pub fn stale_gate_line(task: &Task, pipeline: &Pipeline, gate_at: &str) -> String {
+    stale_gate_note(task, pipeline, gate_at).replace(PARK_NOTE_BREAK, " ")
 }
 
 /// Which of the two roads holds a task at `step` for `outcome`/`destination`

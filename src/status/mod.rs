@@ -4645,7 +4645,7 @@ fn build_rows(
                 // The dispatcher parks this task at its next pass, so the
                 // row says why now rather than "waiting for a worker slot".
                 let stale = crate::commands::stale_gate_at(task, pipeline)
-                    .map(|gate_at| crate::commands::stale_gate_note(task, pipeline, gate_at));
+                    .map(|gate_at| crate::commands::stale_gate_line(task, pipeline, gate_at));
                 match (stale, hook, dependency) {
                     (Some(stale), _, _) => (State::Queued, stale, false),
                     (None, hook, dependency) => match (hook, dependency) {
@@ -4693,7 +4693,7 @@ fn build_rows(
                     // Parked for a `gate_at:` its pipeline lost: a resume
                     // only parks it again until the task file is changed.
                     let next = match crate::commands::stale_gate_at(task, pipeline) {
-                        Some(gate_at) => crate::commands::stale_gate_note(task, pipeline, gate_at),
+                        Some(gate_at) => crate::commands::stale_gate_line(task, pipeline, gate_at),
                         None => "→ queued — [r] resumes it".to_string(),
                     };
                     (State::Paused, next, true)
