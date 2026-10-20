@@ -959,6 +959,7 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
 | `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
 | `dispatch.keep_finished_lanes` | `dispatch.visible_lanes`. `true` loads as `"all"` and `false` as `1`. |
+| `housekeeping.price_max_age_days` | Nothing. `spoolway models` prints how old the price table is. |
 | `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always moves its task to `hook_failed`. |
 | `[pipeline_gen]` | Nothing |
 | `models.<glob>.exclusive` | Nothing. Serving one model at a time, and sizing `slots` and `concurrency` to match, is up to you. |
