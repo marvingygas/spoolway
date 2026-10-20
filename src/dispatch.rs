@@ -10921,7 +10921,7 @@ mod tests {
     }
 
     /// Stand in for a real `git push`: a remote-tracking ref pointing at
-    /// `branch`'s own tip, which is all `Dispatcher::branch_fully_pushed`
+    /// `branch`'s own tip, which is all `Dispatcher::branch_keep_reason`
     /// ever reads. No actual remote is needed for that check to answer yes.
     fn mark_pushed(repo: &Repo, branch: &str) {
         let sha = crate::repo::run(&repo.root, "git", &["rev-parse", branch]).unwrap();
@@ -11426,16 +11426,13 @@ mod tests {
         );
     }
 
-    /// The one repository the check above does not apply to: with no remote
-    /// at all, `--remotes` matches nothing, so every commit would read as
-    /// unpushed and a local-only project would keep one `task/…` branch per
-    /// finished task forever, each with a problem line advising a push there
-    /// is nowhere to make. 0.1.0 deleted the branch after archiving; so does
-    /// this, and nothing lands on the problem list (lifecycle review
-    /// finding 7).
+    /// With no remote at all, `--remotes` matches nothing, so the push check
+    /// cannot apply. The question becomes whether the task's base branch
+    /// contains the branch. One it does not contain is the only copy of the
+    /// work, so it is kept and the line names the base.
     #[test]
-    fn with_no_remote_a_finished_tasks_branch_goes_with_its_archive() {
-        let (repo, _root_guard) = fixture("cleanup-branch-no-remote");
+    fn with_no_remote_an_unmerged_branch_is_kept_and_named() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote-unmerged");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
@@ -11445,6 +11442,45 @@ mod tests {
         let mut task = reload(&path);
         task.front.workspace_id = Some("w1".into());
         task.front.branch = Some("task/demo".into());
+        task.front.base = Some("work".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/demo"),
+            "no remote and not merged, so this is the only copy"
+        );
+        assert!(
+            report.problems.iter().any(|p| p.contains("`task/demo`")
+                && p.contains("no remote")
+                && p.contains("`work` does not contain it yet")),
+            "the line names the branch and the base: {:?}",
+            report.problems
+        );
+    }
+
+    /// Once the base branch contains the task's branch, a local-only project
+    /// has no reason to keep it: it goes with the archive and says nothing.
+    #[test]
+    fn with_no_remote_a_merged_branch_goes_with_its_archive() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["merge", "-q", "--ff-only", "task/demo"])
+            .unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.base = Some("work".into());
         task.save().unwrap();
 
         let mux = FakeMux::new(vec![]);
@@ -11455,7 +11491,7 @@ mod tests {
 
         assert!(
             !has_branch(&repo, "task/demo"),
-            "nowhere to push to, so nothing to keep the branch for"
+            "the base has the work, so the branch is debris"
         );
         assert!(
             !report
@@ -11469,18 +11505,21 @@ mod tests {
 
     /// The orphan sweep asks the same question and gets the same answer: a
     /// branch retained for a queued dependent is freed by the next cleanup
-    /// once nothing names it, without a push ever having been possible.
+    /// once nothing names it and its base contains it.
     #[test]
-    fn with_no_remote_the_orphan_sweep_frees_a_retained_branch() {
+    fn with_no_remote_the_orphan_sweep_frees_a_merged_retained_branch() {
         let (repo, _root_guard) = fixture("branch-freed-no-remote");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["merge", "-q", "--ff-only", "task/first"])
+            .unwrap();
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
+            f.base = Some("work".into());
         });
         let second = add_task_with(&repo, "second", "done", |f| {
             f.branch = Some("task/second".into());
@@ -11505,13 +11544,13 @@ mod tests {
             .unwrap();
         assert!(
             !has_branch(&repo, "task/first"),
-            "nothing queued needs it, and there is no remote to have pushed it to"
+            "nothing queued needs it, and its base contains it"
         );
         assert!(
             !report
                 .problems
                 .iter()
-                .any(|p| p.contains("branch") || p.contains("remote")),
+                .any(|p| p.contains("task/first") || p.contains("remote")),
             "{:?}",
             report.problems
         );
@@ -24485,6 +24524,8 @@ mod tests {
     #[test]
     fn an_orphaned_branch_is_freed_by_the_next_cleanup_that_finds_it() {
         let (repo, _root_guard) = fixture("branch-freed-later");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -24587,6 +24628,8 @@ mod tests {
     #[test]
     fn an_orphaned_prefixed_branch_is_recovered_and_freed() {
         let (repo, _root_guard) = fixture("prefixed-branch-freed");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/proj-12-auth-01"])
             .unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
@@ -24634,6 +24677,8 @@ mod tests {
     #[test]
     fn a_prefixed_branch_is_not_mis_attributed_to_a_task_its_slug_contains() {
         let (repo, _root_guard) = fixture("prefixed-branch-ambiguous");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         for branch in ["task/proj-old-x", "task/old-x"] {
             repo.git(&["checkout", "-q", "-b", branch]).unwrap();
             repo.git(&["commit", "-q", "--allow-empty", "-m", branch])

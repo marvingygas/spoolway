@@ -619,8 +619,10 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Give back everything a task's checkout is holding: its workspace, the
-    /// worktree under it, and — if every commit on it has reached a remote —
-    /// the local branch it was cut on.
+    /// worktree under it, and — if its work is safe elsewhere — the local branch
+    /// it was cut on. Safe is every commit on a remote, or with no remote at
+    /// all, the task's base branch containing it; see
+    /// [`Dispatcher::branch_keep_reason`].
     ///
     /// Called from [`Dispatcher::clean_up`], once a task has actually
     /// finished, and from `discard_arm` and `unqueue --force`, which tear a
@@ -806,7 +808,8 @@ impl<'a> Dispatcher<'a> {
             // the deal that mode signs. That same squash-merge is why git's own
             // "is this merged" check cannot stand in for the question asked
             // here either: the branch is asked directly whether every commit
-            // on it is reachable from some remote-tracking ref. A `handover`
+            // on it is reachable from some remote-tracking ref, or, with no
+            // remote, from the task's base branch. A `handover`
             // that never ran, or a push that failed silently, is otherwise the
             // last thing that happens to a finished task being the deletion of
             // the only copy of its work — which is exactly how one task lost
@@ -825,7 +828,7 @@ impl<'a> Dispatcher<'a> {
             // a branch that is not there. Any ref git cannot resolve counts
             // as absent, since git could neither keep nor delete it; a branch
             // that resolves but whose push state cannot be read still takes
-            // the keep path in `branch_fully_pushed`.
+            // the keep path in `branch_keep_reason`.
             if self
                 .repo
                 .git(&[
@@ -837,13 +840,14 @@ impl<'a> Dispatcher<'a> {
                 .is_err()
             {
                 // Nothing to delete and nothing to keep.
-            } else if task.front.trial.is_some() || self.branch_fully_pushed(&branch) {
+            } else if task.front.trial.is_some() {
                 let _ = self.repo.git(&["branch", "-D", &branch]);
+            } else if let Some(why) = self.branch_keep_reason(&branch, task.front.base.as_deref()) {
+                report
+                    .problems
+                    .push(format!("{}: kept branch `{branch}` — {why}", task.id()));
             } else {
-                report.problems.push(format!(
-                    "{}: kept branch `{branch}` — it has commits no remote has",
-                    task.id()
-                ));
+                let _ = self.repo.git(&["branch", "-D", &branch]);
             }
         }
         true
@@ -899,31 +903,52 @@ impl<'a> Dispatcher<'a> {
         })
     }
 
-    /// Whether every commit reachable from `branch` is also reachable from
-    /// some remote-tracking ref — not necessarily the same-named upstream,
-    /// just some `refs/remotes/*` ref, the way `sweep_orphaned_branches`
-    /// below reads the same question for a branch this check already kept.
+    /// Why `branch` must be kept, or `None` when it may be deleted. The answer
+    /// is the tail of the problem line, so a person reads what to do about it.
     ///
-    /// A repository with no remote at all is the one case the question does
-    /// not apply to: `--remotes` matches nothing there, so every commit would
-    /// read as unpushed, a local-only project would keep one `task/…` branch
-    /// per finished task forever, and the advice on the problem line — push
-    /// it — is one nobody can follow. With nowhere to push to, "pushed" is
-    /// not a state the branch can ever reach; 0.1.0 deleted it after
-    /// archiving, and so does this, without a problem line, since there is
-    /// nothing for anyone to do about it (lifecycle review finding 7).
+    /// With a remote, a branch may go once every commit reachable from it is
+    /// also reachable from some remote-tracking ref — not necessarily the
+    /// same-named upstream, just some `refs/remotes/*` ref, the way
+    /// `sweep_orphaned_branches` below reads the same question for a branch
+    /// this check already kept.
+    ///
+    /// Without one, `--remotes` matches nothing, so every commit would read as
+    /// unpushed and the advice to push it could not be followed. The question
+    /// becomes whether `base`, the branch the task was meant to land on,
+    /// already contains the branch. Deleting an unmerged branch there would
+    /// destroy the only copy of the work. A merge into `base` is the one way
+    /// such a project ever has a second copy, and once it has happened the
+    /// branch is debris, so a local-only project keeps only unmerged branches.
+    /// A task with no recorded `base`, or one that no longer resolves, cannot
+    /// be shown merged anywhere and is kept.
     ///
     /// A git failure otherwise — no such branch, a corrupt ref — reads as
-    /// "not pushed" rather than propagating: this gates whether the only
-    /// copy of a task's work gets deleted, so the safe side of any doubt is
-    /// to keep it.
-    fn branch_fully_pushed(&self, branch: &str) -> bool {
+    /// "not safe" rather than propagating: this gates whether the only copy of
+    /// a task's work gets deleted, so the safe side of any doubt is to keep it.
+    fn branch_keep_reason(&self, branch: &str, base: Option<&str>) -> Option<String> {
         if !self.repo.has_remote() {
-            return true;
+            return match base {
+                Some(base)
+                    if self
+                        .repo
+                        .git(&["merge-base", "--is-ancestor", branch, base])
+                        .is_ok() =>
+                {
+                    None
+                }
+                Some(base) => Some(format!(
+                    "this repo has no remote, and `{base}` does not contain it yet"
+                )),
+                None => Some(
+                    "this repo has no remote, and the task names no base branch to have \
+                     merged it"
+                        .to_string(),
+                ),
+            };
         }
         match self.repo.git(&["rev-list", branch, "--not", "--remotes"]) {
-            Ok(unpushed) => unpushed.trim().is_empty(),
-            Err(_) => false,
+            Ok(unpushed) if unpushed.trim().is_empty() => None,
+            _ => Some("it has commits no remote has".to_string()),
         }
     }
 
@@ -999,7 +1024,11 @@ impl<'a> Dispatcher<'a> {
             // of anything, whether it is freed the moment its own task
             // archives or, as here, only once a dependent still queued at
             // that moment has finished with it too.
-            if owner.front.trial.is_none() && !self.branch_fully_pushed(branch) {
+            if owner.front.trial.is_none()
+                && self
+                    .branch_keep_reason(branch, owner.front.base.as_deref())
+                    .is_some()
+            {
                 continue;
             }
             let _ = self.repo.git(&["branch", "-D", branch]);
