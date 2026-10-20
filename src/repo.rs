@@ -4101,7 +4101,7 @@ pub fn branch_at(dir: &Path) -> Result<String> {
 /// The branch `dir` has out, `None` on a detached HEAD, and an error when git
 /// cannot say. A caller that treats a detached HEAD as its own case reads
 /// this, so a git that failed to run is not reported as one.
-fn current_branch_at(dir: &Path) -> Result<Option<String>> {
+pub(crate) fn current_branch_at(dir: &Path) -> Result<Option<String>> {
     let branch = run(dir, "git", &["branch", "--show-current"])?;
     let branch = branch.trim();
     Ok((!branch.is_empty()).then(|| branch.to_string()))

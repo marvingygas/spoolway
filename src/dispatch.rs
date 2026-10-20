@@ -11646,7 +11646,7 @@ mod tests {
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11660,7 +11660,7 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"],
+            ["remove_checkout /tmp/spoolway-never-cut-worktree"],
             "the worktree goes with git when the multiplexer will not take it"
         );
         assert_eq!(
@@ -11682,7 +11682,7 @@ mod tests {
         let (repo, _root_guard) = fixture("stop-no-workspace");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11695,7 +11695,7 @@ mod tests {
         assert!(archived);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
+            ["remove_checkout /tmp/spoolway-never-cut-worktree"]
         );
     }
 
@@ -12960,7 +12960,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -13007,7 +13007,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -24725,6 +24725,102 @@ mod tests {
         );
     }
 
+    /// Cleanup of a task whose worktree is off `task/demo`, with `spoil` run
+    /// first to put it there. Returns what the task and the record look like
+    /// afterwards, so each case asserts the same hold.
+    fn off_branch_cleanup(name: &str, spoil: impl Fn(&std::path::Path)) -> Task {
+        let (repo, _root_guard) = fixture(name);
+        let worktree = crate::scratch::root(&format!("dispatch-{name}-wt"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| crate::repo::run(&worktree, "git", args).unwrap();
+        git(&["init", "-q", "-b", "task/demo"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(worktree.join("a.txt"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        spoil(&worktree);
+        std::fs::write(worktree.join("left.txt"), "work nobody recorded").unwrap();
+        let head_before = git(&["rev-parse", "HEAD"]);
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                ..crate::task::LastReport::neutral()
+            });
+        });
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(path.exists(), "the task must stay queued, not be archived");
+        assert!(!repo.archive_dir().join("demo.md").exists());
+        assert!(
+            mux.did("remove_workspace").is_empty(),
+            "the worktree must not be torn down"
+        );
+        assert!(worktree.join("left.txt").exists());
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            head_before,
+            "nothing may be committed while off the branch"
+        );
+        reload(&path)
+    }
+
+    fn assert_held_for(task: &Task, clause: &str) {
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains(clause),
+            "the record must name `{clause}`: {log}"
+        );
+    }
+
+    // covers: teardown holds a task on a detached HEAD instead of committing there
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_on_a_detached_head() {
+        let task = off_branch_cleanup("cleanup-detached", |wt| {
+            crate::repo::run(wt, "git", &["checkout", "-q", "--detach"]).unwrap();
+        });
+        assert_held_for(&task, "the worktree is on a detached HEAD, not `task/demo`");
+    }
+
+    // covers: teardown holds a task with a rebase in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_rebase() {
+        for dir in ["rebase-merge", "rebase-apply"] {
+            let task = off_branch_cleanup(&format!("cleanup-{dir}"), |wt| {
+                let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+                std::fs::create_dir_all(git_dir.join(dir)).unwrap();
+            });
+            assert_held_for(&task, "a rebase is in progress");
+        }
+    }
+
+    // covers: teardown holds a task with a merge in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_merge() {
+        let task = off_branch_cleanup("cleanup-merge", |wt| {
+            let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+            std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40)).unwrap();
+        });
+        assert_held_for(&task, "a merge is in progress");
+    }
+
+    // covers: teardown holds a task whose worktree is on another branch
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_switched_to_another_branch() {
+        let task = off_branch_cleanup("cleanup-other-branch", |wt| {
+            crate::repo::run(wt, "git", &["checkout", "-q", "-b", "elsewhere"]).unwrap();
+        });
+        assert_held_for(&task, "the worktree is on `elsewhere`, not `task/demo`");
+    }
+
     // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
     #[test]
     fn reaching_the_done_stage_tears_down_and_archives() {
@@ -25328,6 +25424,15 @@ mod tests {
     fn add_task_with_worktree(repo: &Repo, id: &str, stage: &str) -> PathBuf {
         let worktree = repo.root.join(format!("wt-{id}"));
         std::fs::create_dir_all(&worktree).unwrap();
+        // Its own repository on the task's branch. A bare directory inside
+        // the fixture would answer for the fixture's branch, and cleanup holds
+        // a task whose worktree is off its own.
+        crate::repo::run(
+            &worktree,
+            "git",
+            &["init", "-q", "-b", &format!("task/{id}")],
+        )
+        .unwrap();
         add_task_with(repo, id, stage, |front| {
             front.branch = Some(format!("task/{id}"));
             front.base = Some("work".into());
@@ -27994,17 +28099,23 @@ mod tests {
     #[test]
     fn cleanup_stops_a_background_command_still_running() {
         let (repo, _root_guard) = fixture("command-cleanup");
+        // On the task's own branch, as a real worktree is: cleanup holds a
+        // task whose worktree is anywhere else.
+        let worktree = crate::scratch::root("dispatch-command-cleanup-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
         let path = add_task_with(&repo, "demo", "done", |front| {
             front.branch = Some("task/demo".into());
             front.workspace_id = Some("w1".into());
-            front.worktree_path = Some(repo.root.clone());
+            front.worktree_path = Some(worktree.to_path_buf());
         });
         let mux = FakeMux::new(vec![]);
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("bench", "demo");
         let pid = runs
-            .start(&key, "sleep 60", &repo.root, &BTreeMap::new())
+            .start(&key, "sleep 60", &worktree, &BTreeMap::new())
             .unwrap();
 
         run_pass(&repo, &mux);

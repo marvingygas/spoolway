@@ -20,6 +20,11 @@
 //! the task at `done` and is named on the run's problem list, rather than
 //! archiving a task whose worktree is still registered or on disk.
 //!
+//! Nothing is committed or removed while the worktree is off its task's
+//! branch — a detached HEAD, a rebase or merge in progress, or another branch
+//! checked out. [`Dispatcher::clean_up`] holds the task on `blocked` instead,
+//! since a commit made there lands on no branch a dependent is cut from.
+//!
 //! The other is [`discard_trial`], called from `spoolway eval --discard` for
 //! a trial arm that has not finished and never will: a person has seen
 //! enough and wants it gone now. [`Dispatcher::discard_arm`] shares
@@ -187,31 +192,56 @@ impl<'a> Dispatcher<'a> {
                 .as_ref()
                 .map(|r| r.step.clone())
                 .unwrap_or_else(|| task.stage().to_string());
+            // Before anything is committed: `auto_commit` runs `git add -A` and
+            // `git commit` wherever HEAD is. On a detached HEAD, mid-rebase or
+            // on another branch that commit lands off `task/<id>`, the removal
+            // below then deletes the only checkout that shows it, and the
+            // branch a dependent is cut from comes out without the work. The
+            // check sits here and not inside `auto_commit` because `spoolway
+            // report` shares that, and a step may legitimately report mid-way.
+            // A borrowed checkout is a person's own, so what it has out is
+            // theirs to choose.
+            if !task.front.borrowed
+                && let Some(found) = self.off_branch(task, Path::new(&worktree))
+            {
+                self.hold_before_cleanup(
+                    task,
+                    &format!(
+                        "reached `{}` but {found} in {} — held at `{}` rather than \
+                         committing or removing anything",
+                        task.stage(),
+                        worktree.display(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                    "the worktree is off its task branch",
+                )?;
+                report.problems.push(format!(
+                    "{id}: {found} — held on `{blocked}`.\n    Nothing was committed or \
+                     removed. Put the work back on `{branch}` in {worktree}, then: \
+                     spoolway resume {id}",
+                    id = task.id(),
+                    blocked = crate::pipeline::BLOCKED,
+                    branch = self.task_branch(task),
+                    worktree = worktree.display(),
+                ));
+                return Ok(false);
+            }
             let outcome =
                 crate::commands::auto_commit(self.repo, Path::new(&worktree), "", task.id(), &step);
             if let Some(note) = outcome.note() {
                 task.log_status(note);
             }
             if outcome.is_unrecorded() {
-                let back = self
-                    .pipelines
-                    .for_task(task)
-                    .ok()
-                    .map(|pipeline| crate::commands::resume_target(task, pipeline))
-                    .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
-                    .unwrap_or_else(|| task.stage().to_string());
-                crate::commands::set_blocked_from(task, &back);
-                task.log_status(&format!(
-                    "reached `{}` with work that could not be committed — held at `{}` \
-                     rather than tearing the worktree down",
-                    task.stage(),
-                    crate::pipeline::BLOCKED,
-                ));
-                task.set_stage(
-                    crate::pipeline::BLOCKED,
-                    Some("uncommitted work could not be recorded before cleanup"),
-                );
-                task.save()?;
+                self.hold_before_cleanup(
+                    task,
+                    &format!(
+                        "reached `{}` with work that could not be committed — held at `{}` \
+                         rather than tearing the worktree down",
+                        task.stage(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                    "uncommitted work could not be recorded before cleanup",
+                )?;
                 // The reason travels with the line: a commit stopped by a
                 // hung git hook is otherwise named only in the task's
                 // `## Status Log`, and the dispatcher printed no cause.
@@ -733,6 +763,58 @@ impl<'a> Dispatcher<'a> {
             }
         }
         true
+    }
+
+    /// The branch this task's worktree is meant to be on.
+    fn task_branch(&self, task: &Task) -> String {
+        task.front
+            .branch
+            .clone()
+            .unwrap_or_else(|| crate::task::default_branch(task.id()))
+    }
+
+    /// What is wrong with `worktree`'s git state, as a clause for the problem
+    /// line, or `None` when it is on the task's branch with no rebase or merge
+    /// under way. A rebase or merge is named before the branch: a rebase also
+    /// leaves HEAD detached, and "rebase in progress" is the more useful half.
+    ///
+    /// A git failure reads as `None`. A worktree git cannot read has nothing
+    /// to commit on any branch, and refusing here would hold a task whose
+    /// checkout is already gone for a reason nobody can act on.
+    fn off_branch(&self, task: &Task, worktree: &Path) -> Option<String> {
+        let git_dir = crate::repo::worktree_git_dir(worktree).ok()?;
+        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+            return Some("a rebase is in progress in the worktree".to_string());
+        }
+        if git_dir.join("MERGE_HEAD").exists() {
+            return Some("a merge is in progress in the worktree".to_string());
+        }
+        let expected = self.task_branch(task);
+        let on = crate::repo::current_branch_at(worktree).ok()?;
+        match on {
+            Some(branch) if branch == expected => None,
+            Some(branch) => Some(format!("the worktree is on `{branch}`, not `{expected}`")),
+            None => Some(format!(
+                "the worktree is on a detached HEAD, not `{expected}`"
+            )),
+        }
+    }
+
+    /// Park the task on `blocked`, resumable at the step it came from, because
+    /// cleanup found something it must not tear down over. The log line goes
+    /// in the status log and `reason` is the stage change's own.
+    fn hold_before_cleanup(&self, task: &mut Task, log: &str, reason: &str) -> Result<()> {
+        let back = self
+            .pipelines
+            .for_task(task)
+            .ok()
+            .map(|pipeline| crate::commands::resume_target(task, pipeline))
+            .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
+            .unwrap_or_else(|| task.stage().to_string());
+        crate::commands::set_blocked_from(task, &back);
+        task.log_status(log);
+        task.set_stage(crate::pipeline::BLOCKED, Some(reason));
+        task.save()
     }
 
     /// Whether an earlier pass of this task's life began removing its checkout.
