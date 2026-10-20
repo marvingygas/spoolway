@@ -1263,38 +1263,59 @@ mod tests {
     // whether a sentence is true, and they do not look at a flag's value.
 
     /// Commands a skill names on purpose to say they are wrong or gone. One
-    /// entry per line, as `(the unknown name as the failure prints it, why it may stay)`.
-    /// Empty today: a skill that names a missing command is a bug in the skill
-    /// until a reason is written here.
+    /// entry per line, as `(the name the failure prints after "names", why it
+    /// may stay)`, for example `("spoolway eval --every", "…")`. Empty today:
+    /// a skill that names a missing command is a bug in the skill until a
+    /// reason is written here.
     const ALLOWED: &[(&str, &str)] = &[];
 
-    /// The `spoolway …` text a skill names on each line, as `(line, text after
-    /// the word spoolway)`. Only code spans and fenced blocks count: a prose
-    /// sentence such as "spoolway sync replaces a copy" is not a command.
+    /// The `spoolway …` text a skill names, as `(line, text after the word
+    /// spoolway)`, with the line a code span starts on. Only code spans and
+    /// fenced blocks count: a prose sentence such as "spoolway sync replaces a
+    /// copy" is not a command. A span may wrap onto the next line of its
+    /// paragraph, so an open span carries over until its closing backtick, and
+    /// a blank line or a fence ends it unclosed.
     fn named_commands(text: &str) -> Vec<(usize, String)> {
         let mut found = Vec::new();
         let mut fenced = false;
+        let mut span: Option<(usize, String)> = None;
         for (index, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("```") {
                 fenced = !fenced;
+                span = None;
                 continue;
             }
-            let segments: Vec<&str> = if fenced {
-                vec![line]
-            } else {
-                // Odd pieces of a split on a backtick lie inside a span.
-                line.split('`').skip(1).step_by(2).collect()
-            };
-            for segment in segments {
-                for rest in after_each_spoolway(segment) {
+            if fenced {
+                for rest in after_each_spoolway(line) {
                     // A fenced command is followed by a description set off
                     // by a run of spaces; those words are prose, not names.
-                    let rest = if fenced {
-                        rest.split("  ").next().unwrap_or(rest)
-                    } else {
-                        rest
-                    };
+                    let rest = rest.split("  ").next().unwrap_or(rest);
                     found.push((index + 1, rest.to_string()));
+                }
+                continue;
+            }
+            if line.trim().is_empty() {
+                span = None;
+                continue;
+            }
+            for (at, piece) in line.split('`').enumerate() {
+                // Every piece after the first follows a backtick, which closes
+                // the open span or opens a new one.
+                if at > 0 {
+                    match span.take() {
+                        Some((start, words)) => {
+                            for rest in after_each_spoolway(&words) {
+                                found.push((start, rest.to_string()));
+                            }
+                        }
+                        None => span = Some((index + 1, String::new())),
+                    }
+                }
+                if let Some((_, words)) = &mut span {
+                    if !words.is_empty() {
+                        words.push(' ');
+                    }
+                    words.push_str(piece);
                 }
             }
         }
@@ -1350,7 +1371,7 @@ mod tests {
                         || a.get_all_aliases().is_some_and(|all| all.contains(&name))
                 }) else {
                     return Some((
-                        format!("--{name}"),
+                        format!("{path} --{name}"),
                         format!(
                             "names `{path} --{name}`, and `{path}` has no `--{name}`.\n  \
                              Use a flag `{path} --help` lists, or add the flag to the CLI\n  \
@@ -1434,6 +1455,7 @@ mod tests {
             )
             .subcommand(
                 Command::new("prompt")
+                    .arg(Arg::new("by").long("by").num_args(1))
                     .subcommand(Command::new("show").arg(Arg::new("name")))
                     .subcommand(Command::new("list")),
             );
@@ -1472,6 +1494,37 @@ mod tests {
         assert_eq!(unknown("prompt list | show"), None);
     }
 
+    /// A value given to a flag on a command that has subcommands is not read
+    /// as one: `step` here is not a subcommand of `prompt`.
+    #[test]
+    fn a_flag_value_is_skipped_before_a_subcommand_is_read() {
+        assert_eq!(unknown("prompt --by step list"), None);
+        assert_eq!(
+            unknown("prompt --by step gone"),
+            Some("spoolway prompt gone".to_string())
+        );
+    }
+
+    /// A span that wraps onto the next line is one command; words after its
+    /// closing backtick are prose, on the same line or the next.
+    #[test]
+    fn a_span_that_wraps_a_line_is_read_whole() {
+        let wrapped = "Run `spoolway eval --by\nstep --per-task` now, then say spoolway x.\n";
+        assert_eq!(
+            named_commands(wrapped),
+            vec![(1, "eval --by step --per-task".to_string())]
+        );
+        let after =
+            "`spoolway eval` --nope and spoolway gone\nspoolway also `spoolway prompt list`\n";
+        assert_eq!(
+            named_commands(after),
+            vec![(1, "eval".to_string()), (2, "prompt list".to_string())]
+        );
+        // A blank line ends an unclosed span, so it cannot swallow later prose.
+        let open = "`spoolway eval\n\nspoolway gone `x`\n";
+        assert_eq!(named_commands(open), vec![]);
+    }
+
     /// Only code spans and fenced blocks are commands.
     #[test]
     fn prose_outside_a_code_span_is_not_read() {
@@ -1485,8 +1538,14 @@ mod tests {
     /// The check itself still fails: a guard that cannot fail guards nothing.
     #[test]
     fn an_unknown_flag_and_an_unknown_subcommand_are_named() {
-        assert_eq!(unknown("eval --every"), Some("--every".to_string()));
-        assert_eq!(unknown("eval --by x --nope"), Some("--nope".to_string()));
+        assert_eq!(
+            unknown("eval --every"),
+            Some("spoolway eval --every".to_string())
+        );
+        assert_eq!(
+            unknown("eval --by x --nope"),
+            Some("spoolway eval --nope".to_string())
+        );
         assert_eq!(
             unknown("prompt gone"),
             Some("spoolway prompt gone".to_string())
