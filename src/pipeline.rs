@@ -593,9 +593,11 @@ pub struct Step {
     pub hide: Option<bool>,
 
     /// The retired name of `hide: true`, still read so a pipeline written
-    /// before `hide:` loads and behaves as it did. A step may not carry both.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub headless: bool,
+    /// before `hide:` loads and behaves as it did. A step may not carry both
+    /// keys, whatever value `headless:` has: it is an `Option` so that a
+    /// written `headless: false` is told apart from an absent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headless: Option<bool>,
 
     /// Run this step only on the last task of a chain. Every other task walks
     /// past it to `on_pass` without starting the command.
@@ -920,7 +922,8 @@ impl Step {
     /// as `hide: true`; otherwise the project's `dispatch.hide_commands`
     /// decides.
     pub fn hides_command(&self, hide_commands: bool) -> bool {
-        self.hide.unwrap_or(self.headless || hide_commands)
+        self.hide
+            .unwrap_or(self.headless == Some(true) || hide_commands)
     }
 
     /// What this step is, read off the keys it carries.
@@ -1486,8 +1489,9 @@ impl Pipeline {
 
             // `headless:` is the old spelling of `hide: true`. Both on one step
             // could say opposite things, and the load cannot tell which the
-            // person meant.
-            if step.headless && step.hide.is_some() {
+            // person meant. Refused whatever `headless:` says, since
+            // `headless: false` beside `hide: true` is such a pair too.
+            if step.headless.is_some() && step.hide.is_some() {
                 bail!(
                     "step `{}` declares both `headless:` and `hide:` — they set the same \
                      thing, and the two could disagree; keep only `hide:`",
@@ -1531,7 +1535,7 @@ impl Pipeline {
                         step.id
                     );
                 }
-                if step.headless {
+                if step.headless == Some(true) {
                     bail!(
                         "step `{}` declares `headless:` but runs no command — only a `run:` \
                          has a pane to turn off",
@@ -2079,7 +2083,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         timeout: None,
         background: false,
         hide: None,
-        headless: false,
+        headless: None,
         last: false,
         first: false,
         serial: false,
@@ -3358,13 +3362,19 @@ mod tests {
     }
 
     /// A step carrying the old and the new spelling is refused at load, and
-    /// the message says which to keep.
+    /// the message says which to keep. Whatever value `headless:` is written
+    /// with: `headless: false` beside `hide: true` is as ambiguous a pair.
     #[test]
     fn a_step_with_both_headless_and_hide_is_refused() {
-        let err = parse("steps:\n  - id: a\n    run: x\n    headless: true\n    hide: false\n    on_pass: done\n")
+        for (headless, hide) in [("true", "false"), ("false", "true"), ("false", "false")] {
+            let err = parse(&format!(
+                "steps:\n  - id: a\n    run: x\n    headless: {headless}\n    \
+                 hide: {hide}\n    on_pass: done\n"
+            ))
             .unwrap_err();
-        assert!(err.to_string().contains("step `a`"), "{err}");
-        assert!(err.to_string().contains("keep only `hide:`"), "{err}");
+            assert!(err.to_string().contains("step `a`"), "{err}");
+            assert!(err.to_string().contains("keep only `hide:`"), "{err}");
+        }
     }
 
     /// The step's `hide:` beats the project default either way, `headless:`

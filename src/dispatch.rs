@@ -25656,7 +25656,7 @@ mod tests {
         let mut pipelines = pipelines_running("sleep 60", false);
         for step in &mut pipelines.pipelines.get_mut("default").unwrap().steps {
             if step.id == "implement" {
-                step.headless = true;
+                step.headless = Some(true);
             }
         }
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -26071,7 +26071,7 @@ mod tests {
             .iter_mut()
             .find(|s| s.id == "implement")
             .unwrap()
-            .headless = true;
+            .headless = Some(true);
 
         drive(&repo, &pipelines, &mux, &path, "review");
 

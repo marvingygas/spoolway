@@ -112,7 +112,7 @@ fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
                             .then(|| step.command_timeout().as_secs()),
                         background: step.background,
                         hide: step.hide,
-                        headless: step.headless,
+                        headless: step.headless.unwrap_or(false),
                         last: step.last,
                         first: step.first,
                         serial: step.serial,
@@ -733,7 +733,7 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
             // tell. The retired `headless: true` reads as `hide=true`.
             match step.hide {
                 Some(hide) => print!(" hide={hide}"),
-                None if step.headless => print!(" hide=true"),
+                None if step.headless == Some(true) => print!(" hide=true"),
                 None => {}
             }
             // Always, and resolved rather than only when written: a reader
