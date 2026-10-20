@@ -16,6 +16,29 @@ The tests are split by the question they answer.
 Anything decidable from files and exit codes is a unit test. A suite needs a real git
 repository, a real detached process or a real forge. Anything only a screen can show is a plan.
 
+## Skill commands
+
+`cargo test` checks every `spoolway` command that a shipped skill names. The test is
+`install::tests::skills_name_real_commands` in `src/install.rs`. It reads the skill files of all
+three providers, `claude`, `codex` and `pi`.
+
+The test reads only code spans and fenced blocks. For each `spoolway` command it checks the
+subcommand path and the long flags against the CLI's own command tree. It does not check short
+flags, flag values or the prose around a command. A placeholder such as `<step>`, a pipe or a
+description after a run of spaces in a fenced block ends the command.
+
+A name the CLI lacks fails the test. The failure gives the file, the line and the name:
+
+```
+assets/skills/pi/spoolway-calibrate/SKILL.md:25
+  names `spoolway eval --every`, and `spoolway eval` has no `--every`.
+  Use a flag `spoolway eval --help` lists, or add the flag to the CLI
+  before the skill names it.
+```
+
+A skill that names a missing command on purpose goes in the `ALLOWED` list in the test, with
+the reason.
+
 ## Running the suites
 
 ```sh
