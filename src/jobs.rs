@@ -464,7 +464,33 @@ pub struct FireRecord {
     /// between that minute and this pass, so nothing in the gap is caught up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_by: Option<String>,
+    /// The workspace clone whose dispatcher is waiting on this job's `open`
+    /// hook, in a shared record only. A pending firing records nothing else
+    /// there, so without it the next clone's pass would find the window due
+    /// and start a second hook, and a second ticket would open. See
+    /// [`Opening`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening: Option<Opening>,
 }
+
+/// A clone's claim on a shared job: its firing is waiting on an `open` hook
+/// that runs in that clone's own tracking directory, which no other clone
+/// reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Opening {
+    /// The workspace dispatcher name of the clone that started the hook, from
+    /// [`Repo::workspace_dispatcher`].
+    pub clone: Option<String>,
+    /// Epoch seconds when the claim was made.
+    pub at: i64,
+}
+
+/// How long another clone honours an [`Opening`]. The holder stops its hook
+/// at [`crate::tracking::OPEN_FETCH_TIMEOUT`] and records the window then,
+/// which ends the claim; the extra minute covers its pass cadence. A claim
+/// older than this belongs to a dispatcher that is gone, and holding every
+/// other clone off for ever would stop the job from firing at all.
+const OPENING_HELD_SECS: i64 = crate::tracking::OPEN_FETCH_TIMEOUT.as_secs() as i64 + 60;
 
 /// Names this process, so a pass can tell its own earlier look from one a
 /// previous dispatcher run left behind. A pid alone is reused after a
@@ -710,8 +736,9 @@ fn note_look(record: &mut FireRecord, shared: bool, path: &Path, name: &str, min
 
 /// Where the clone keeps the mark that a job's firing is waiting on its `open`
 /// hook: next to the hook's own run files, so it is the clone that holds the
-/// run that holds the mark — a workspace's shared job record is read by every
-/// clone and could not say whose hook is running.
+/// run that holds the mark. A workspace's shared job record is read by every
+/// clone, so it only names the clone that waits (see [`Opening`]); the mark
+/// says which window and task.
 fn opening_path(repo: &Repo, scope: Scope, name: &str) -> PathBuf {
     repo.tracking_dir()
         .join(format!("job-{}-{name}.opening", scope.label()))
@@ -909,8 +936,15 @@ pub fn fire_due(
                 record.fired_minute.as_ref() != Some(window)
                     && record.skipped_minute.as_ref() != Some(window)
             });
+        let me = repo.workspace_dispatcher();
         if waiting.is_none() {
             clear_opening(repo, job.scope, &job.name);
+            // Drop this clone's own claim with its mark; another clone's is
+            // left for that clone to end.
+            if record.opening.as_ref().is_some_and(|held| held.clone == me) {
+                record.opening = None;
+                *dirty = true;
+            }
         }
         let due = waiting
             .as_deref()
@@ -920,6 +954,14 @@ pub fn fire_due(
         let Some(due) = due else {
             continue;
         };
+        // Another clone's firing is waiting on its `open` hook, which only
+        // that clone can see: this window is taken until it settles, or the
+        // claim is too old to be a live dispatcher's.
+        if record.opening.as_ref().is_some_and(|held| {
+            held.clone != me && Local::now().timestamp().saturating_sub(held.at) < OPENING_HELD_SECS
+        }) {
+            continue;
+        }
         // The window's own minute, not the pass's: a job that fired late is
         // recorded — and deduplicated — against the minute it was due.
         let minute = due.format(MINUTE_FMT).to_string();
@@ -1015,6 +1057,13 @@ pub fn fire_due(
                     }
                     still_opening = true;
                     write_opening(repo, job.scope, &job.name, &minute, &pending.task);
+                    if shared && record.opening.as_ref().is_none_or(|held| held.clone != me) {
+                        record.opening = Some(Opening {
+                            clone: me.clone(),
+                            at: Local::now().timestamp(),
+                        });
+                        *dirty = true;
+                    }
                 }
             }
             Err(err) if err.downcast_ref::<crate::commands::StillQueued>().is_some() => {
@@ -1057,6 +1106,9 @@ pub fn fire_due(
         }
         if !still_opening {
             clear_opening(repo, job.scope, &job.name);
+            if record.opening.take().is_some() {
+                *dirty = true;
+            }
         }
     }
 
@@ -2933,6 +2985,134 @@ mod tests {
             second.queued_ids().is_empty(),
             "nothing queued in the other clone"
         );
+    }
+
+    /// Gives each clone of a workspace an `open` hook that appends to
+    /// `hook-starts`, takes a second to answer, and then names a ticket.
+    /// Returns that file.
+    fn slow_open_hook_in_each_clone(clones: &mut [&mut Repo]) -> PathBuf {
+        let starts = clones[0].root.join("hook-starts");
+        for repo in clones.iter_mut() {
+            // The hooks folder is where the workspace looks for them, and
+            // creating `.spoolway` in the checkout moves that setup.
+            let dir = crate::tracking::hooks_dir_in(&repo.checkout);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("open.sh");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho started >>'{}'\nsleep 1\necho ticket=T-1 >\"$SPOOLWAY_OUT\"\n",
+                    starts.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            repo.config.issue_tracking.hook = "open.sh".to_string();
+        }
+        std::fs::write(
+            clones[0].routines_dir().join("nightly").join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n\
+             group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        starts
+    }
+
+    /// While one clone's firing waits on its `open` hook, no other clone
+    /// fires the same job: the hook runs in the first clone's own tracking
+    /// directory, which the second never reads, so the second would start a
+    /// hook of its own and a second ticket would open. Once the first clone
+    /// has read the answer and queued the task, the second still has nothing
+    /// to fire for that window.
+    #[test]
+    fn a_clone_does_not_fire_while_another_waits_on_its_open_hook() {
+        let (mut first, mut second, _guards) = two_clones("jobs-ws-opening");
+        shared_job(&first);
+        let starts = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        settled_now();
+
+        let (actions, problems) = fire(&first);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        let record: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            record["nightly"]
+                .opening
+                .as_ref()
+                .map(|held| held.clone.as_deref()),
+            Some(Some("a")),
+            "the shared record names the clone that waits"
+        );
+
+        let (actions, problems) = fire(&second);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "{actions:?} {problems:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "one hook for the window"
+        );
+
+        // The hook answers; the first clone, and only it, queues the task.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let (actions, problems) = fire(&first);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(actions, ["job nightly · fired · queued audit-1"]);
+        let (actions, _) = fire(&second);
+        assert!(actions.is_empty(), "{actions:?}");
+        let record: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            record["nightly"].opening.is_none(),
+            "a settled firing ends the claim"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "still one hook"
+        );
+    }
+
+    /// A claim left by a clone whose dispatcher is gone does not keep the
+    /// job from firing in the others for ever.
+    #[test]
+    fn a_claim_older_than_the_hook_limit_does_not_hold_other_clones_off() {
+        let (mut first, mut second, _guards) = two_clones("jobs-ws-stale-opening");
+        shared_job(&first);
+        let starts = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        settled_now();
+        let shared = first.project_jobs_state_file();
+        let mut state = State::new();
+        state.insert(
+            "nightly".to_string(),
+            FireRecord {
+                opening: Some(Opening {
+                    clone: Some("a".to_string()),
+                    at: Local::now().timestamp() - OPENING_HELD_SECS - 5,
+                }),
+                ..Default::default()
+            },
+        );
+        std::fs::write(&shared, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let (actions, problems) = fire(&second);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
     }
 
     /// A clone that finds the shared record's lock held by a live process
