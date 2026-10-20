@@ -1688,6 +1688,9 @@ spoolway install claude --user
 | `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/`. Loaded once the project is trusted |
 
+`install` writes the skill folders of the checkout it runs in. Run inside a linked worktree, it
+writes that worktree's folders and leaves the main checkout's files as they were.
+
 `--user` installs into the agent's user folder instead — `~/.claude/skills/`,
 `~/.agents/skills/` or `~/.pi/agent/skills/` — which it loads in every project. It needs no
 project and writes nothing into any checkout. A home-mode project's plain `install` goes there
