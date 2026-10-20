@@ -398,7 +398,7 @@ pub fn report(
             pause_note
                 .as_deref()
                 .unwrap_or_default()
-                .replace("\n    ", " "),
+                .replace(PARK_NOTE_BREAK, " "),
             stop_choices(&id, &crate::mux::lane_name(&current, &task))
         ),
         // The routed destination was a cleanup terminal, and the worktree
@@ -458,6 +458,11 @@ pub struct Routed {
 /// failure, and it cuts off a command that no pass can repair at the cost of
 /// four unblocker turns in all rather than one per lap for ever.
 pub const UNBLOCK_LAP_LIMIT: u32 = 3;
+
+/// Where the lap-limit park's note breaks into the sentence and the way to
+/// resume, indented under it in the Status Log. The lane's printed line joins
+/// the two with a space, so both writers read this one constant.
+const PARK_NOTE_BREAK: &str = "\n    ";
 
 /// The routing decision, lifted out of [`report`] so a test can walk every
 /// outcome at every step through the same function `spoolway report` itself
@@ -684,12 +689,13 @@ pub fn route(
         // passes on the way back to the `build` that keeps failing. The
         // command is, in order:
         //
-        // - the command that failed back into `origin` (a `run:` step whose
-        //   `on_fail` names `origin`, with `rounds` holding that hop; it
-        //   keeps only the hops since the task last left `blocked`, so an old
-        //   failure does not count). A loop that ends on `origin`, such as a
-        //   `clean` between two runs of `build`, stops the task on `clean`
-        //   although `build` is the one failing;
+        // - when `origin` is a command, the command still failing behind it
+        //   (a `run:` step with a failure hop in `rounds` and no pass hop,
+        //   whose road the landing reaches; `rounds` keeps only the hops
+        //   since the task last left `blocked`, so an old failure does not
+        //   count). A loop that ends on `origin`, such as a `clean` between
+        //   two runs of `build`, stops the task on `clean` although `build` is
+        //   the one failing;
         // - `origin`, when it is a command and the landing's road reaches it
         //   again;
         // - the command a gate failed back from, when `origin` is the agent
@@ -710,42 +716,57 @@ pub fn route(
                 .step(id)
                 .is_some_and(|step| step.kind() == crate::pipeline::StepKind::Command)
         };
-        let failed_back_into_origin = || {
+        // A command that has failed since the task last left `blocked` and has
+        // not passed since: `rounds` holds its failure hop and no pass hop.
+        // The road from there back to `origin` can run through any number of
+        // other commands that pass, so this is not limited to a command whose
+        // `on_fail` names `origin`.
+        let still_failing = |command: &crate::pipeline::Step| {
+            let hop = |to: &Option<String>| {
+                to.as_deref().is_some_and(|to| {
+                    task.front
+                        .rounds
+                        .contains_key(&crate::task::route_key(&command.id, to))
+                })
+            };
+            command.kind() == crate::pipeline::StepKind::Command
+                && command.id != origin
+                && hop(&command.on_fail)
+                && !hop(&command.on_pass)
+        };
+        let failed_back_to_origin = || {
             pipeline
                 .steps
                 .iter()
-                .filter(|step| step.kind() == crate::pipeline::StepKind::Command)
-                .filter(|step| step.on_fail.as_deref() == Some(origin.as_str()))
+                .filter(|step| still_failing(step))
                 .map(|step| step.id.clone())
-                .find(|command| {
-                    task.front
-                        .rounds
-                        .contains_key(&crate::task::route_key(command, &origin))
-                })
+                .find(|command| road_reaches(pipeline, &landing.destination, command))
         };
-        let counted = failed_back_into_origin()
-            .filter(|command| command != &origin && is_command(&origin))
-            .filter(|command| road_reaches(pipeline, &landing.destination, command))
-            .or_else(|| {
-                Some(origin.clone())
-                    .filter(|origin| is_command(origin))
-                    .filter(|origin| road_reaches(pipeline, &landing.destination, origin))
-            })
-            .or_else(|| {
-                Some(cleared_block_target(task, pipeline, true))
-                    .filter(|gate| {
-                        is_command(gate)
-                            && pipeline.step(gate).is_some_and(|step| {
-                                step.on_fail.as_deref() == Some(origin.as_str())
-                            })
-                            && task
-                                .front
-                                .rounds
-                                .contains_key(&crate::task::route_key(gate, &origin))
-                    })
-                    .filter(|gate| road_reaches(pipeline, &landing.destination, gate))
-            })
-            .or_else(|| Some(landing.destination.clone()).filter(|step| is_command(step)));
+        let counted = if is_command(&origin) {
+            failed_back_to_origin()
+        } else {
+            None
+        }
+        .or_else(|| {
+            Some(origin.clone())
+                .filter(|origin| is_command(origin))
+                .filter(|origin| road_reaches(pipeline, &landing.destination, origin))
+        })
+        .or_else(|| {
+            Some(cleared_block_target(task, pipeline, true))
+                .filter(|gate| {
+                    is_command(gate)
+                        && pipeline
+                            .step(gate)
+                            .is_some_and(|step| step.on_fail.as_deref() == Some(origin.as_str()))
+                        && task
+                            .front
+                            .rounds
+                            .contains_key(&crate::task::route_key(gate, &origin))
+                })
+                .filter(|gate| road_reaches(pipeline, &landing.destination, gate))
+        })
+        .or_else(|| Some(landing.destination.clone()).filter(|step| is_command(step)));
         if let (true, Some(counted)) = (unattended, counted) {
             let laps = task.front.unblock_laps.get(&counted).copied().unwrap_or(0);
             if laps >= UNBLOCK_LAP_LIMIT {
@@ -761,7 +782,8 @@ pub fn route(
                     gated: false,
                     pause_note: Some(format!(
                         "`{step}` still fails after {laps} unblocker laps — parked on \
-                         `paused`.\n    Make `{step}` pass, then: spoolway resume {id}",
+                         `paused`.{PARK_NOTE_BREAK}Make `{step}` pass, then: spoolway \
+                         resume {id}",
                         step = counted,
                         id = task.id()
                     )),
@@ -4835,11 +4857,7 @@ mod tests {
         let routed = route(task, pipeline, "blocked", Outcome::Pass, true, None, 0).unwrap();
         task.set_stage(&routed.destination, None);
         if routed.destination != crate::pipeline::PAUSED {
-            for step in back {
-                task.set_stage(step, None);
-            }
-            task.set_stage(crate::pipeline::BLOCKED, None);
-            task.front.blocked_from = Some(origin.to_string());
+            walk_road_to_blocked(task, pipeline, origin, back);
         }
         routed
     }
@@ -5039,6 +5057,62 @@ mod tests {
             &["build", "clean"],
             &["build", "clean"],
         );
+    }
+
+    /// Road E: a failure that reaches the step the task stops at through a
+    /// command that passes. `build` fails into `clean`, `clean` and `prep`
+    /// pass on to `build`, and the task stops on `prep` when `build`'s `loop:`
+    /// is spent. `build` is the command that failed, though neither
+    /// command that passes between names it in an `on_fail`.
+    ///
+    /// Fails before the fix: the lap was counted on `prep`, whose pass ended
+    /// the count on every lap.
+    #[test]
+    fn a_failure_behind_two_passing_commands_is_parked_after_the_lap_limit() {
+        let yaml = "steps:\n  - id: build\n    run: 'false'\n    loop: 3\n    on_pass: done\n    \
+             on_fail: clean\n  - id: clean\n    run: 'true'\n    on_pass: prep\n  \
+             - id: prep\n    run: 'true'\n    on_pass: build\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        assert_parked_after_the_lap_limit(
+            yaml,
+            "prep",
+            None,
+            &["build", "clean", "prep"],
+            &["build", "clean", "prep"],
+        );
+    }
+
+    /// Two commands failed back during the lap, but the first in file order
+    /// has since passed. The count goes on the one still failing, or the
+    /// first one's pass would end it.
+    #[test]
+    fn a_command_that_failed_and_then_passed_does_not_take_the_lap() {
+        let yaml = "steps:\n  - id: lint\n    run: 'true'\n    loop: 2\n    on_pass: build\n    \
+             on_fail: fix\n  - id: build\n    run: 'false'\n    loop: 3\n    \
+             on_pass: done\n    on_fail: fix\n  \
+             - id: fix\n    run: 'true'\n    on_pass: lint\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(yaml, "fix");
+        // `lint` failed once and passed on the next run; `build` is failing.
+        for step in ["lint", "fix", "lint", "build", "fix"] {
+            task.set_stage(step, None);
+        }
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("fix".into());
+
+        route(
+            &mut task,
+            &pipeline,
+            "blocked",
+            Outcome::Pass,
+            true,
+            None,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(task.front.unblock_laps.get("build"), Some(&1));
+        assert!(!task.front.unblock_laps.contains_key("lint"));
     }
 
     /// A command that is fixed ends its own count, and only its own.

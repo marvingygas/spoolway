@@ -5600,6 +5600,9 @@ impl<'a> Dispatcher<'a> {
                 // keeps the log on disk on purpose whenever it does run, so
                 // the step, the code and that path are what the lane sent
                 // in to clear the block needs to see what actually broke.
+                // Once an unblocker lap is counted the line names the lap
+                // instead of the path, which that lane's brief gives it
+                // itself (`compose.rs`).
                 if code != 0 {
                     // A failure after an unblocker's pass sent the task back
                     // is that pass's lap, so the log says which one of the
