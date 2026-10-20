@@ -845,8 +845,8 @@ works "and it really did write where no lane could" test -f "$OUTSIDE"
 # With `dispatch.hide_commands` set to `false`, a command step with no
 # `hide:` runs in a pane of its own, under a real multiplexer. By default,
 # and with `hide: true`, it runs silent and detached. With
-# `hide_commands = true`, a step with `hide: false` still gets its pane. Neither half is
-# provable against the headless backend the rest of this suite runs on — a
+# `hide_commands = true`, a step with `hide: false` still gets its pane.
+# None of the three is provable against the headless backend the rest of this suite runs on — a
 # pane is the one thing only a real pane can be asked whether it opened — so
 # this switches to `herdr`, against `scripts/e2e/herdr-stub.sh`, for as long
 # as the case needs. Against the
@@ -1202,10 +1202,14 @@ if [ -n "$OVERRIDE_RECORDED" ]; then
 else
   bad "hide: false runs in a pane of its own while the project hides commands"
 fi
+# The pane file is written only after the pane exists, so a pane the next step
+# wrongly opened would show in the stub's own list first. Count it before and after.
+PANES_BEFORE=$(wc -l < "$HSTATE/panes")
 touch "$OVERRIDE_RELEASE"
 records "and the step after it follows the project, on the record" "follows-project-marker" \
   "$SPOOLWAY_PROJECT_HOME/commands/override · follows.log" override
-if [ -f "$SPOOLWAY_PROJECT_HOME/commands/override · follows.pane" ]; then
+if [ -f "$SPOOLWAY_PROJECT_HOME/commands/override · follows.pane" ] \
+  || [ "$(wc -l < "$HSTATE/panes")" -gt "$PANES_BEFORE" ]; then
   bad "a step with no hide: key opens no pane while the project hides commands"
 else
   ok "a step with no hide: key opens no pane while the project hides commands"
