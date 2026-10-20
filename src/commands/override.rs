@@ -1178,7 +1178,10 @@ mod tests {
             };
             let layer_before = snapshot(&layer);
             let local_before = snapshot(&lane.local_dir());
-            assert!(!layer_before.is_empty(), "the fixture holds a private layer");
+            assert!(
+                !layer_before.is_empty(),
+                "the fixture holds a private layer"
+            );
 
             let refusals: Vec<(&str, anyhow::Error)> = vec![
                 (
@@ -1221,7 +1224,11 @@ mod tests {
                 );
             }
             assert_eq!(snapshot(&layer), layer_before, "the layer was changed");
-            assert_eq!(snapshot(&lane.local_dir()), local_before, "local/ was changed");
+            assert_eq!(
+                snapshot(&lane.local_dir()),
+                local_before,
+                "local/ was changed"
+            );
         });
     }
 
