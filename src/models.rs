@@ -997,23 +997,22 @@ impl TierRow {
 }
 
 /// The rows [`matching_rows`] finds for `model`, each with the values it
-/// supplies. Empty unless two or more rows match, since one row supplying
-/// everything it sets says nothing the table above it does not. A row that
-/// supplies nothing, because more literal rows set all it does, is left out.
+/// supplies, least literal first: the order the rows lay over one another.
+///
+/// The prices and the tier are not listed. The table above the `rows:` line
+/// already shows them, so naming a row for them only adds a row that, beside
+/// the others, explains nothing the table does not. A row supplying nothing
+/// else, or nothing because more literal rows set all it does, is left out.
+/// Empty unless two or more rows remain, since a single row supplying
+/// everything says nothing the table does not.
 fn row_sources(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Vec<RowSource> {
     let keys = matching_rows(config_models, model);
-    if keys.len() < 2 {
-        return Vec::new();
-    }
     let mut taken: Vec<&'static str> = Vec::new();
     let mut sources = Vec::new();
     for key in keys {
         let row = config_models[key];
-        let rates = row.rates();
-        let fields: [(&'static str, bool); 7] = [
+        let fields: [(&'static str, bool); 5] = [
             ("window", row.context_window != 0),
-            ("price", rates != Rates::default()),
-            ("tier", row.tier.is_some()),
             ("slots", row.slots != 0),
             ("compact_ctx", row.compact_ctx != 0),
             ("prompt_cache_ttl", row.prompt_cache_ttl.is_some()),
@@ -1032,6 +1031,10 @@ fn row_sources(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Vec
             });
         }
     }
+    if sources.len() < 2 {
+        return Vec::new();
+    }
+    sources.reverse();
     sources
 }
 
@@ -1674,11 +1677,64 @@ mod tests {
             assert_eq!(
                 shown,
                 [
-                    ("claude-*", &["window", "prompt_cache_ttl"][..]),
                     ("*haiku*", &["slots", "compact_ctx"][..]),
+                    ("claude-*", &["window", "prompt_cache_ttl"][..]),
                 ]
             );
         });
+    }
+
+    /// The `rows:` line of `spoolway models` names the rows that supply
+    /// scalar values, least literal first, and leaves out a row that only
+    /// sets the tier or prices the table above it already shows.
+    #[test]
+    fn the_rows_line_leaves_out_a_row_that_only_sets_a_tier() {
+        let tier = crate::usage::PriceTier {
+            above_k: 100,
+            rates: crate::usage::Rates {
+                input: 0.6,
+                ..Default::default()
+            },
+        };
+        let config = BTreeMap::from([
+            (
+                "*haiku*".to_string(),
+                ModelPrice {
+                    context_window: 1_000_000,
+                    compact_ctx: 9,
+                    slots: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "claude-*".to_string(),
+                ModelPrice {
+                    prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    tier: Some(tier),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let shown: Vec<(String, Vec<&str>)> = row_sources(&config, "claude-haiku-5-5")
+            .into_iter()
+            .map(|source| (source.row, source.sets))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "*haiku*".to_string(),
+                    vec!["window", "slots", "compact_ctx"]
+                ),
+                ("claude-*".to_string(), vec!["prompt_cache_ttl"]),
+            ]
+        );
     }
 
     /// Setting one tier rate leaves the other four at the table's values, so a
