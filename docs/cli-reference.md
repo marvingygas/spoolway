@@ -1056,8 +1056,7 @@ pipeline `impl`  entry: implement
              pass -> document   fail -> e2e
 ```
 
-A step that sets `hide:` prints `hide=true` or `hide=false`, and a step written with `headless: true`
-prints `hide=true`. A step with neither prints nothing. A step marked `first: true` prints `first-of-chain` the same way, in place of
+A step that sets `hide:` prints `hide=true` or `hide=false`. A step without it prints nothing. A step marked `first: true` prints `first-of-chain` the same way, in place of
 `last-of-chain`. A pipeline loaded from `local/pipelines/` prints `private · <file>` after its
 `entry:` line, naming the file it came from. See [Private
 pipelines](pipelines.md#private-pipelines).
@@ -1068,7 +1067,7 @@ The same pipelines as JSON, each with its full list of steps.
 
 ```
 $ spoolway pipeline show --json
-{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": false, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "hide": null, "headless": false, "last": false, "first": false, "serial": false}, ...]}, ...]}
+{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": false, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "hide": null, "last": false, "first": false, "serial": false}, ...]}, ...]}
 ```
 
 `source` and `file` read the same as [`pipeline list
