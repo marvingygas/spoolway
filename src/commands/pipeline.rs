@@ -1033,8 +1033,17 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
 /// `done` is past every gate and is left out.
 ///
 /// A task whose `pipeline:` is absent is left to the dispatcher's own start
-/// refusal; only a name the project no longer defines is reported here.
-fn live_task_problems(tasks: &[crate::task::Task], pipelines: &Pipelines) -> Vec<String> {
+/// refusal; only a name `pipelines` lacks is reported here.
+///
+/// `on_branch` is set when `pipelines` came from a task's own worktree. A
+/// pipeline added on main after that branch was cut is then missing for a
+/// reason that is no fault of the project, so the message says the branch
+/// does not have it yet rather than that the project dropped it.
+fn live_task_problems(
+    tasks: &[crate::task::Task],
+    pipelines: &Pipelines,
+    on_branch: bool,
+) -> Vec<String> {
     let mut problems = Vec::new();
     for task in tasks {
         let Some(name) = task.front.pipeline.as_deref().map(str::trim) else {
@@ -1044,8 +1053,13 @@ fn live_task_problems(tasks: &[crate::task::Task], pipelines: &Pipelines) -> Vec
             continue;
         }
         let Ok(pipeline) = pipelines.get(name) else {
+            let lack = if on_branch {
+                "this branch does not have yet"
+            } else {
+                "this project no longer defines"
+            };
             problems.push(format!(
-                "live task `{}` names pipeline `{name}`, which this project no longer defines",
+                "live task `{}` names pipeline `{name}`, which {lack}",
                 task.id()
             ));
             continue;
@@ -1142,10 +1156,14 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
 
     let mut problems = step_problems(repo, pipelines, &repo.config);
 
-    problems.extend(live_task_problems(
-        &repo.tasks().unwrap_or_default(),
-        pipelines,
-    ));
+    // What the queue's other tasks say about these pipelines. Inside a task's
+    // worktree the pipelines are that branch's own, cut before whatever main
+    // has gained since, so a task naming a newer pipeline or step is the
+    // branch being behind, not a defect this branch can fix: it is a warning.
+    // Everywhere else the same finding is a real stranded task and fails.
+    let on_branch = repo.in_lane_worktree();
+    let mut queue_findings =
+        live_task_problems(&repo.tasks().unwrap_or_default(), pipelines, on_branch);
 
     // A queued task's own `skip:` names steps by hand — a replay's copy, or
     // one a person edited in — and a pipeline's steps can be renamed out from
@@ -1160,13 +1178,19 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
         };
         for step in &task.front.skip {
             if pipeline.step(step).is_none() {
-                problems.push(format!(
+                queue_findings.push(format!(
                     "task `{}` names `{step}` in `skip:`, and pipeline `{}` has no such step",
                     task.id(),
                     pipeline.name
                 ));
             }
         }
+    }
+
+    if on_branch {
+        gate_warnings.extend(queue_findings);
+    } else {
+        problems.extend(queue_findings);
     }
 
     // Read the prompts against the steps that run them: this rule is a fact,
@@ -2374,7 +2398,7 @@ mod tests {
             task("held", "default", "stage: blocked\nblocked_from: blocked\n"),
         ];
 
-        let problems = live_task_problems(&tasks, &pipelines);
+        let problems = live_task_problems(&tasks, &pipelines, false);
 
         assert!(
             problems
@@ -2398,6 +2422,33 @@ mod tests {
         assert_eq!(problems.len(), 5, "{problems:?}");
     }
 
+    /// Judged from a task's own branch, a task naming a pipeline the branch
+    /// lacks is "not yet" there, not dropped by the project. Fails before the
+    /// `on_branch` wording: both read "no longer defines".
+    #[test]
+    fn live_task_problems_word_a_missing_pipeline_by_where_they_are_asked() {
+        let (repo, _root_guard) = repo_for("live-task-on-branch");
+        let pipelines = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+        let tasks = vec![
+            crate::task::Task::parse(
+                std::path::PathBuf::from("l2.md"),
+                "---\nid: l2\npipeline: newp\nstage: implement\n---\n",
+            )
+            .unwrap(),
+        ];
+
+        let on_branch = live_task_problems(&tasks, &pipelines, true);
+        assert_eq!(
+            on_branch,
+            ["live task `l2` names pipeline `newp`, which this branch does not have yet"]
+        );
+        let elsewhere = live_task_problems(&tasks, &pipelines, false);
+        assert_eq!(
+            elsewhere,
+            ["live task `l2` names pipeline `newp`, which this project no longer defines"]
+        );
+    }
+
     /// A queued task whose `gate_at:` names a step its pipeline lacks is named
     /// by the check, with the gate and the way to fix it; a gate that matches
     /// a step is not. Fails without the `gate_at` read: no problem is listed.
@@ -2415,7 +2466,7 @@ mod tests {
         let entry = pipelines.get("default").unwrap().entry().to_string();
         let tasks = vec![task("stale", "review-renamed"), task("fine", &entry)];
 
-        let problems = live_task_problems(&tasks, &pipelines);
+        let problems = live_task_problems(&tasks, &pipelines, false);
 
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
@@ -2435,7 +2486,7 @@ mod tests {
             "---\nid: finished\npipeline: default\nstage: done\ngate_at: gone\n---\n",
         )
         .unwrap();
-        assert!(live_task_problems(&[finished], &pipelines).is_empty());
+        assert!(live_task_problems(&[finished], &pipelines, false).is_empty());
     }
 
     // -----------------------------------------------------------------
