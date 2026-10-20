@@ -1035,10 +1035,12 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
 /// A task whose `pipeline:` is absent is left to the dispatcher's own start
 /// refusal; only a name `pipelines` lacks is reported here.
 ///
-/// `on_branch` is set when `pipelines` came from a task's own worktree. A
-/// pipeline added on main after that branch was cut is then missing for a
-/// reason that is no fault of the project, so the message says the branch
-/// does not have it yet rather than that the project dropped it.
+/// `on_branch` is set when `pipelines` came from a task's own worktree, where
+/// the findings are shown as warnings. The usual cause there is a pipeline
+/// added on main after that branch was cut, so a missing pipeline is worded
+/// as one the branch does not have yet. A branch that itself deletes a
+/// pipeline gets the same wording, because the check cannot tell the two
+/// apart without reading the branch's base.
 fn live_task_problems(
     tasks: &[crate::task::Task],
     pipelines: &Pipelines,
@@ -1158,9 +1160,12 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
 
     // What the queue's other tasks say about these pipelines. Inside a task's
     // worktree the pipelines are that branch's own, cut before whatever main
-    // has gained since, so a task naming a newer pipeline or step is the
-    // branch being behind, not a defect this branch can fix: it is a warning.
-    // Everywhere else the same finding is a real stranded task and fails.
+    // has gained since, so a task naming a newer pipeline is most often the
+    // branch being behind, and failing every task in flight whenever main
+    // gains a pipeline is worse than the gap: these are warnings there. The
+    // gap is that a branch which itself deletes a pipeline or renames a step
+    // is only warned too. Everywhere else the same finding is a real
+    // stranded task and fails.
     let on_branch = repo.in_lane_worktree();
     let mut queue_findings =
         live_task_problems(&repo.tasks().unwrap_or_default(), pipelines, on_branch);
@@ -4638,6 +4643,64 @@ mod tests {
             pipeline_check(&repo, Ok(pipelines))
                 .expect("a skill spoolway cannot see is not a problem");
         });
+    }
+
+    /// Inside a task's worktree, another live task's missing pipeline and bad
+    /// `skip:` are warnings and the check passes; the same two findings fail
+    /// it in the main checkout (see the test above).
+    #[test]
+    fn pipeline_check_warns_about_other_tasks_inside_a_lane_worktree() {
+        let root = crate::scratch::root("commands-lane-check-warns");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let main = Repo {
+            borrowed: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let lane = main.worktree_root().join("task-demo");
+        std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+        let added = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["worktree", "add", "-b", "task/demo"])
+            .arg(&lane)
+            .output()
+            .unwrap();
+        assert!(added.status.success(), "{added:?}");
+        let repo = Repo {
+            checkout: lane,
+            ..main
+        };
+        assert!(repo.in_lane_worktree());
+
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    run: x\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+        };
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        for (id, front) in [
+            ("newer", "pipeline: newp"),
+            ("skipper", "pipeline: solo\nskip: [nosuch]"),
+        ] {
+            crate::task::Task::parse(
+                repo.queue_dir().join(format!("{id}.md")),
+                &format!("---\nid: {id}\nstage: queued\n{front}\n---\n## Goal\nx\n"),
+            )
+            .unwrap()
+            .save()
+            .unwrap();
+        }
+
+        pipeline_check(&repo, Ok(pipelines)).expect("other tasks' findings only warn in a lane");
     }
 
     /// A task's own `skip:` names steps by hand — a replay's copy, or one a
