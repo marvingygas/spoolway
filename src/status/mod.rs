@@ -6867,6 +6867,12 @@ mod tests {
         // `a-work` pushed a branch; `a-noop` never had one, which queueing
         // would refuse its dependent for if it started from it.
         crate::repo::run(&repo.root, "git", &["branch", "task/a-work"]).unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["update-ref", "refs/remotes/origin/task/a-work", "HEAD"],
+        )
+        .unwrap();
         add_to(&repo, "b-dep", &["a-noop"], None, Some("a-noop"));
         add_to(&repo, "b-work", &["a-work"], None, Some("a-work"));
 

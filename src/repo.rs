@@ -1099,24 +1099,94 @@ impl Repo {
     /// be cut from a branch nobody can fetch and, under `stack`, fail its
     /// handover on every resume.
     ///
-    /// "Closed with nothing to hand over" is read from the archive alone: the
-    /// task is there at `done` and its recorded patch is empty, so no pull
-    /// request could have been opened from it. A task still in the queue is
-    /// not handed over *yet*, and one archived with commits or with no patch
-    /// recorded (a borrowed checkout, or one archived before patches were
-    /// measured) may well have had a pull request, so it keeps its branch as
-    /// the base.
+    /// "Closed with nothing to hand over" means the task is in the archive at
+    /// `done` and no pull request was ever opened from its branch. A task
+    /// still in the queue is not handed over *yet*, so it never counts. Three
+    /// facts settle the rest, cheapest first:
+    ///
+    /// - An empty recorded patch means there was nothing to open one with.
+    /// - A branch `origin` has was pushed, so a pull request is likely and
+    ///   the branch stays the base. Without this a dependency that shipped
+    ///   would cost a `gh` call on every read.
+    /// - Otherwise `gh pr list --head <branch> --state all` says. A merged or
+    ///   closed pull request counts as one, since the branch is gone from
+    ///   `origin` after a merge. When `gh` cannot answer, the dependency is
+    ///   not treated as closed: guessing wrongly would send a shipped
+    ///   dependency's dependents to its base.
     pub fn closed_dependency_base(&self, dep_id: &str) -> Option<String> {
+        let gh = std::env::var("SPOOLWAY_GH").unwrap_or_else(|_| "gh".to_string());
+        self.closed_dependency_base_asking(dep_id, &gh)
+    }
+
+    /// [`Repo::closed_dependency_base`] asking `gh` for its pull requests, so
+    /// a test can stand a script in for it without touching the environment.
+    fn closed_dependency_base_asking(&self, dep_id: &str, gh: &str) -> Option<String> {
         let file = format!("{dep_id}.md");
         if self.queue_dir().join(&file).exists() || !self.archive_dir().join(&file).exists() {
             return None;
         }
         let dep = self.task(dep_id).ok()?;
-        let empty = dep.front.patch.is_some_and(|patch| patch.files == 0);
-        if dep.front.stage != crate::pipeline::DONE || !empty {
+        if dep.front.stage != crate::pipeline::DONE {
             return None;
         }
-        dep.front.base.clone()
+        let base = dep.front.base.clone()?;
+        if dep.front.patch.is_some_and(|patch| patch.files == 0) {
+            return Some(base);
+        }
+        let branch = dep
+            .front
+            .branch
+            .clone()
+            .unwrap_or_else(|| task::default_branch(dep_id));
+        let pushed = self
+            .git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/origin/{branch}"),
+            ])
+            .is_ok();
+        if pushed {
+            return None;
+        }
+        (self.has_pull_request(gh, &branch) == Some(false)).then_some(base)
+    }
+
+    /// Whether GitHub knows a pull request, in any state, with `branch` for
+    /// its head. `None` when `gh` could not be asked.
+    ///
+    /// The answer is kept for the life of the process: an archived task's
+    /// branch gains no pull request later, and the board asks on every
+    /// redraw. A failed ask is kept for a minute, so a missing or offline
+    /// `gh` costs one attempt a minute rather than one per redraw. The
+    /// program is the caller's (`SPOOLWAY_GH`, as for `spoolway stack`).
+    fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        type Asked = HashMap<String, (Option<bool>, Instant)>;
+        static ASKED: OnceLock<Mutex<Asked>> = OnceLock::new();
+        let key = format!("{gh}\0{}\0{branch}", self.root.display());
+        let asked = ASKED.get_or_init(Default::default);
+        if let Some((answer, at)) = asked.lock().ok()?.get(&key)
+            && (answer.is_some() || at.elapsed() < Duration::from_secs(60))
+        {
+            return *answer;
+        }
+        let answer = Command::new(gh)
+            .args([
+                "pr", "list", "--head", branch, "--state", "all", "--json", "number",
+            ])
+            .current_dir(&self.root)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).ok())
+            .map(|list| !list.is_empty());
+        if let Ok(mut asked) = asked.lock() {
+            asked.insert(key, (answer, Instant::now()));
+        }
+        answer
     }
 
     /// The branch this checkout is on.
@@ -5506,6 +5576,17 @@ mod tests {
         write(&repo.archive_dir(), "shipped", "done", full);
         write(&repo.archive_dir(), "unmeasured", "done", "");
         write(&repo.queue_dir(), "waiting", "implement", empty);
+        // Pushed, so `gh` is not asked about them.
+        for pushed in ["shipped", "unmeasured"] {
+            git(
+                &work,
+                &[
+                    "update-ref",
+                    &format!("refs/remotes/origin/task/{pushed}"),
+                    "HEAD",
+                ],
+            );
+        }
 
         assert_eq!(repo.closed_dependency_base("noop").as_deref(), Some("main"));
         assert_eq!(repo.dependency_branch("noop").unwrap(), "main");
@@ -5514,6 +5595,48 @@ mod tests {
             assert_eq!(repo.closed_dependency_base(keeps), None, "{keeps}");
         }
         assert_eq!(repo.dependency_branch("shipped").unwrap(), "task/shipped");
+    }
+
+    /// A task closed with commits is still closed without a pull request when
+    /// GitHub knows none for its branch, and a dependent is then given its
+    /// base. One with a pull request in any state, or a branch `origin` has,
+    /// keeps its branch; so does one `gh` cannot answer for.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_with_commits_hands_its_base_on_only_when_github_knows_no_pull_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_origin, work, _base_guard) = fixture("closed-dependency-gh");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let archive = |id: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\n\
+                 patch:\n  files: 2\n  insertions: 9\n  deletions: 1\n---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(repo.archive_dir()).unwrap();
+            std::fs::write(repo.archive_dir().join(format!("{id}.md")), doc).unwrap();
+        };
+        let gh = |name: &str, body: &str| {
+            let path = work.join(format!("gh-{name}"));
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        };
+        let none = gh("none", "echo '[]'");
+        let some = gh("some", "echo '[{\"number\": 7}]'");
+        let broken = gh("broken", "exit 1");
+        for id in ["unfiled", "filed", "unsure", "pushed"] {
+            archive(id);
+        }
+        git(
+            &work,
+            &["update-ref", "refs/remotes/origin/task/pushed", "HEAD"],
+        );
+
+        let base = |id: &str, gh: &str| repo.closed_dependency_base_asking(id, gh);
+        assert_eq!(base("unfiled", &none).as_deref(), Some("main"));
+        assert_eq!(base("filed", &some), None, "a pull request, merged or not");
+        assert_eq!(base("unsure", &broken), None, "gh could not say");
+        assert_eq!(base("pushed", &none), None, "origin has the branch");
     }
 
     /// `retain` sweeps the archive by age with no regard for a queued

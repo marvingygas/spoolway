@@ -7178,6 +7178,25 @@ fn ensure_checkout(
         || task.front.run.is_some()
         || task.front.base_commit.is_some();
 
+    // A dependent cut before its dependency was closed with nothing to hand
+    // over still records that dependency's branch as `starts_from`, which was
+    // never pushed. The pull request opens against `starts_from` (the shipped
+    // `create-pr` prompt says so), so it is pointed at the dependency's own
+    // base instead. Only the recorded name moves: the worktree, its branch
+    // and `base_commit` are left alone. A `starts_from` a person pointed
+    // elsewhere is not the dependency's branch and is kept.
+    if cut_before
+        && let (Some(dep), Some(from)) = (
+            task.front.depends_on.first().cloned(),
+            task.front.starts_from.clone(),
+        )
+        && let Some(base) = repo.closed_dependency_base(&dep)
+        && repo.dependency_own_branch(&dep).ok().as_deref() == Some(from.as_str())
+    {
+        task.front.starts_from = Some(base);
+        persist_task(repo, task, file_seen)?;
+    }
+
     // A task that is about to run a step is not in the middle of a removal. A
     // marker left from an earlier pass at `done` that was never finished, for
     // a task a person then sent back to a step, would make its next cleanup
@@ -23417,6 +23436,65 @@ mod tests {
         assert!(
             !mux.did("create_workspace").is_empty(),
             "the worktree is cut again, not reused"
+        );
+    }
+
+    /// A dependent cut before its dependency was closed with nothing to hand
+    /// over is pointed at that dependency's base the next time a step starts,
+    /// so the `create-pr` lane opens against a branch that exists. Its
+    /// worktree and `base_commit` are left alone.
+    #[test]
+    fn a_dependent_already_cut_is_pointed_at_a_closed_dependencys_base() {
+        let (repo, _root_guard) = fixture("cut-dependent-retargeted");
+        let worktree = crate::scratch::root("dispatch-cut-dependent-retargeted-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/b-dep",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        add_task_with(&repo, "a-noop", "implement", |f| {
+            f.branch = Some("task/a-noop".into());
+            f.base = Some("work".into());
+            f.patch = Some(crate::task::Patch::default());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let mut closed = repo.task("a-noop").unwrap();
+        closed.set_stage(crate::pipeline::DONE, None);
+        closed.save().unwrap();
+        std::fs::rename(
+            repo.queue_dir().join("a-noop.md"),
+            repo.archive_dir().join("a-noop.md"),
+        )
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "b-dep", "handover", |f| {
+            f.depends_on = vec!["a-noop".into()];
+            f.branch = Some("task/b-dep".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("task/a-noop".into());
+            f.base_commit = Some("abc".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+        }));
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(task.front.starts_from.as_deref(), Some("work"));
+        assert_eq!(task.front.base_commit.as_deref(), Some("abc"));
+        assert_eq!(
+            task.front.worktree_path.as_deref(),
+            Some(worktree.to_path_buf().as_path())
+        );
+        assert_eq!(
+            repo.task("b-dep").unwrap().front.starts_from.as_deref(),
+            Some("work"),
+            "the file says so too, since the create-pr lane reads it there"
         );
     }
 
