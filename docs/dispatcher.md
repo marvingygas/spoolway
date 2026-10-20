@@ -332,13 +332,13 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 |---|---|
 | TASK | The task id. For a copy of a routine, the routine's name. See [Routines](planning.md#routines). |
 | PIPELINE | The pipeline the task runs on. |
-| STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. For a paused row, or a blocked row no unblocker lane is working, the step the stop came from, and OUT, COST and TIME read that same step. For a `hook_failed` row, the stage the hook stopped the task on, `queued` or `done`. When the task file records no such step, the row shows `paused` or `blocked`. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
+| STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. For a paused row, or a blocked row no unblocker lane is working, the step the stop came from, and OUT, COST and TIME read that same step. For a `hook_failed` row, the stage the hook stopped the task on, `queued` or `done`. When the task file records no such step, the row shows `paused` or `blocked`. A task that cleanup held for a worktree off its branch reads `blocked`. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, which includes a task parked on a step the pipeline does not define, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -378,7 +378,7 @@ stateDiagram-v2
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
 | `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook  [k] skip hook`. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
-| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. |
+| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. Cleanup also parks a task here when its worktree is off its branch. See [A worktree that is off its branch](#a-worktree-that-is-off-its-branch). |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
@@ -1203,8 +1203,11 @@ When a task reaches `done`:
 1. A lane that is still mid-turn is waited for while its transcript keeps moving. Closing its
    pane ends the wait. A lane silent for two minutes is stopped. On the headless backend a busy
    lane is stopped at once.
-2. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on
-   `blocked` and keeps every pane open.
+2. The worktree is checked. When it is off the task's branch, the task is held on `blocked`
+   and keeps every pane open. See [A worktree that is off its
+   branch](#a-worktree-that-is-off-its-branch).
+   Otherwise leftover work is committed as `wip(<task>): <step>`. If that fails, the task is
+   held on `blocked` and keeps every pane open.
 3. Every lane of the task is stopped, its pane closes, and its spend is banked.
 4. The dispatcher writes the file `removing/<task>` in the project home. The file holds the
    task's run. Then the worktree is removed, unless it was borrowed.
@@ -1214,6 +1217,32 @@ When a task reaches `done`:
    step printed are copied into a `## Handover` section of the task file. The task file moves to
    `archive/`. The task's run files and every codex session home made for it are deleted.
 7. One line for the task is appended to `archive/index.jsonl`.
+
+### A worktree that is off its branch
+
+Cleanup commits and removes a worktree only while it is on the task's branch. It holds the task
+on `blocked` and commits and removes nothing when the worktree is in one of these states:
+
+| State | Reads |
+|---|---|
+| A rebase is under way | `rebase in progress in the worktree` |
+| A merge is under way | `merge in progress in the worktree` |
+| A revert is under way | `revert in progress in the worktree` |
+| A cherry-pick is under way | `cherry-pick in progress in the worktree` |
+| Another branch is checked out | ``worktree on `<branch>`, not `task/<id>` `` |
+| HEAD is detached | ``worktree on a detached HEAD, not `task/<id>` `` |
+
+A task that depends on the held one stays queued until the held task is archived. The board
+reads `blocked` in STEP and `[r]` with the reason in NEXT. The dispatcher prints the reason and
+the command that resumes the task:
+
+```
+! <task>: the worktree is on a detached HEAD, not `task/<task>` — held on `blocked`.
+    Nothing was committed or removed. Put the work back on `task/<task>` in <path>, then: spoolway resume <task>
+```
+
+Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
+runs again when the task reaches `done`. A borrowed checkout is not checked, because it is yours.
 
 ### A removal that was stopped or failed
 

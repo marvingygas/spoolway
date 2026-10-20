@@ -562,6 +562,12 @@ refuses the move and leaves the queue file in place. A copy of a routine is dele
 pending. If `--force` cannot remove the copy's worktree, the copy stays queued. Remove the worktree
 by hand, then run the command again.
 
+`--force` is refused when the task's worktree is on another branch than `task/<id>`, on a
+detached HEAD, or in the middle of a rebase, merge, cherry-pick or revert. The refusal names what
+it found and the worktree. Nothing is interrupted, committed or torn down. Put the work back on
+the task's branch, or finish or abort the operation, then run the command again. A borrowed
+checkout is not checked.
+
 ### `spoolway group list`
 
 Print one line per group with open tasks: the group, how many tasks are open, and their ids.
