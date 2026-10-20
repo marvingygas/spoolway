@@ -550,6 +550,20 @@ pub fn route(
         // stands in for, and so the step whose gate answers for it, never
         // `blocked`'s own. Both the `--stage` refusal and the gate hold
         // below need it.
+        // A pass from a lane that was already running when the pipeline lost
+        // the step the task stopped at has no origin to stand in for, and
+        // `resume_target` would answer with the entry: every step that already
+        // passed would run again. The dispatcher parks such a task before it
+        // starts an unblocker, so this is the lane that began earlier.
+        if let Some(missing) = stranded_step(task, pipeline) {
+            bail!(
+                "task `{}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
+                 pass has no step to carry it to. Report `--block` instead, and a person sends it \
+                 on with `spoolway resume {0} --stage <step>`.",
+                task.id(),
+                pipeline.name
+            );
+        }
         let origin = resume_target(task, pipeline);
 
         // `blocked` declares no `on_pass` of its own — where its pass goes is
@@ -867,10 +881,14 @@ pub fn route(
         // the person's resume starts a new run of them.
         task.reset_loop_counts();
         task.front.unblock_laps.clear();
+        // A step the pipeline dropped is named as it stands, so the parked
+        // task reads as stranded and its resume asks for a `--stage`, rather
+        // than `resume_target` quietly answering with the entry.
         let origin = task
             .front
             .blocked_from
             .clone()
+            .or_else(|| stranded_step(task, pipeline))
             .unwrap_or_else(|| resume_target(task, pipeline));
         task.front.paused_at = Some(origin);
         crate::pipeline::PAUSED.to_string()
@@ -1529,6 +1547,10 @@ fn lane_committed(started_at: &str, head_now: &str) -> bool {
 /// `blocked` again and every further pass loops there. The fallback is worth
 /// nothing in exactly the case it exists for, so it skips `blocked` and lets the
 /// entry have it.
+///
+/// That entry is still wrong for a task whose recorded steps are all gone:
+/// every step before it already passed. Callers that act unprompted or start
+/// a step over ask [`stranded_step`] first and stop for a person instead.
 pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
     // A task that never started — parked off `queued` by the board's `pause`
     // or `spoolway queue pause`, or stopped on `hook_failed` by its `queued`
@@ -1609,6 +1631,21 @@ fn missing_step_refusal(task: &Task, pipeline: &Pipeline, missing: &str) -> anyh
          --stage <step>`.",
         id = task.front.id,
         pipeline = pipeline.name
+    )
+}
+
+/// The line a task carries when it is parked on `paused` for a step its
+/// pipeline no longer defines: the status-log entry and the reason the board
+/// shows.
+///
+/// `--stage` is the way out, since a plain resume of such a task refuses
+/// ([`missing_step_refusal`]) rather than guess a step.
+pub fn missing_step_park_note(task: &Task, pipeline: &Pipeline, missing: &str) -> String {
+    format!(
+        "stopped at `{missing}`, which pipeline `{pipeline}` no longer defines — parked on \
+         `paused`.{PARK_NOTE_BREAK}Send it on with: spoolway resume {id} --stage <step>",
+        pipeline = pipeline.name,
+        id = task.front.id
     )
 }
 
@@ -3124,14 +3161,32 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
              forget the hook run."
         );
     }
+    // `resume_target` answers a stopped step the pipeline dropped with its
+    // entry, and starting the entry over would run every step that already
+    // passed again. A restart takes no `--stage`, so the refusal sends the
+    // person to the resume that does.
+    let stopped_step = || -> Result<String> {
+        if let Some(missing) = stranded_step(task, pipeline) {
+            bail!(
+                "task `{id}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
+                 restart has no step to start over. Send it to a step that exists: `spoolway \
+                 resume {id} --stage <step>`.",
+                pipeline.name
+            );
+        }
+        Ok(resume_target(task, pipeline))
+    };
     let step = match stage {
-        crate::pipeline::PAUSED => task
+        crate::pipeline::PAUSED => match task
             .front
             .parked_from
             .clone()
             .or_else(|| task.front.paused_at.clone())
-            .unwrap_or_else(|| resume_target(task, pipeline)),
-        crate::pipeline::BLOCKED => resume_target(task, pipeline),
+        {
+            Some(step) => step,
+            None => stopped_step()?,
+        },
+        crate::pipeline::BLOCKED => stopped_step()?,
         running => running.to_string(),
     };
     if step == crate::pipeline::QUEUED {
@@ -10595,6 +10650,62 @@ mod tests {
         blocked.front.blocked_from = Some("handover".into());
         blocked.set_stage_unbanked(crate::pipeline::BLOCKED, "blocked");
         assert_eq!(restart_step(&blocked, pipeline).unwrap(), "handover");
+    }
+
+    /// A blocked task whose stopped step the pipeline dropped is refused,
+    /// because `resume_target` would answer with the entry and the restart
+    /// would run every passed step again. The refusal names the resume that
+    /// takes a step.
+    #[test]
+    fn restarting_a_block_whose_step_is_gone_refuses_instead_of_taking_the_entry() {
+        let (repo, _root_guard) = fixture("restart-stranded-block");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.blocked_from = Some("renamed-away".into());
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "blocked");
+        let pipeline = pipelines.for_task(&task).unwrap();
+
+        let err = restart_step(&task, pipeline).unwrap_err().to_string();
+        assert!(err.contains("stopped at `renamed-away`"), "{err}");
+        assert!(err.contains("spoolway resume lost --stage <step>"), "{err}");
+    }
+
+    /// An unblocker lane that started before the pipeline lost the stopped
+    /// step cannot pass the task on to the entry: it is refused, and the task
+    /// stays on `blocked`.
+    #[test]
+    fn an_unblockers_pass_for_a_step_that_is_gone_is_refused() {
+        let (repo, _root_guard) = fixture("pass-stranded-block");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.blocked_from = Some("renamed-away".into());
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "blocked");
+        task.save().unwrap();
+
+        let err = report(
+            &repo,
+            &pipelines,
+            &crate::cli::ReportArgs {
+                task: Some("lost".into()),
+                stage: None,
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: None,
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`renamed-away`"), "{err}");
+        assert!(err.contains("--stage <step>"), "{err}");
+        assert_eq!(queued(&repo, "lost").stage(), crate::pipeline::BLOCKED);
     }
 
     /// Restarting a task whose command is running stops its whole process

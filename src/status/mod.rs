@@ -4360,6 +4360,25 @@ fn paused_next(
         .filter(|from| pipeline.step(from).is_some())
 }
 
+/// The step a paused task was held or parked on, when its pipeline no longer
+/// defines it: a plain resume refuses such a task, so its row names the loss
+/// in place of a destination.
+///
+/// Only `paused_at` and `parked_from` are read. [`crate::commands::
+/// stranded_step`] also weighs `last_report`, which a gate that is still
+/// defined does not need.
+fn paused_on_missing_step<'a>(
+    task: &'a crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+) -> Option<&'a str> {
+    let front = &task.front;
+    front
+        .paused_at
+        .as_deref()
+        .or(front.parked_from.as_deref())
+        .filter(|step| !crate::pipeline::RESERVED.contains(step) && pipeline.step(step).is_none())
+}
+
 /// The word this pause caught, prefixed onto the arrow the NEXT column draws
 /// in front of [`paused_next`]'s own target — `None` for a plain gated pass,
 /// which reads exactly as it always has, and for a pause raised from
@@ -4694,6 +4713,15 @@ fn build_rows(
                         None => "→".to_string(),
                     };
                     let next = match (target, resumable) {
+                        // The step it was held or parked on is gone, so there
+                        // is no destination to draw; the row says what was
+                        // lost, and a resume asks for a `--stage`.
+                        (None, _) if let Some(missing) = paused_on_missing_step(task, pipeline) => {
+                            format!(
+                                "stopped at `{missing}`, which `{}` no longer defines",
+                                pipeline.name
+                            )
+                        }
                         // A stop's own park: the next start resumes it on its
                         // own — see `resume_stop_parked` — so the row says
                         // that rather than offering a key. `r` still works.
@@ -13548,6 +13576,27 @@ mod tests {
         assert_eq!(
             paused_next(&task, pipeline, 0).as_deref(),
             Some("implement")
+        );
+    }
+
+    /// A paused row whose held or parked step the pipeline dropped says what
+    /// was lost, in place of "no step named" or a resume that would refuse.
+    #[test]
+    fn a_paused_row_names_the_step_its_pipeline_no_longer_defines() {
+        let (repo, _root_guard) = fixture("paused-missing-step-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+        task.front.paused_at = Some("old-name".into());
+        task.front.blocked_from = Some("old-name".into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "stopped");
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert_eq!(
+            rows[0].next,
+            "stopped at `old-name`, which `default` no longer defines"
         );
     }
 

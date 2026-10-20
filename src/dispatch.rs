@@ -2768,6 +2768,25 @@ impl<'a> Dispatcher<'a> {
         if stage == crate::pipeline::BLOCKED && !pipeline.blocked_is_staffed(self.unattended) {
             return Ok(Routed::NextTask);
         }
+        // A staffed `blocked` whose stopped step the pipeline no longer has
+        // would get an unblocker whose pass can only go to the entry, running
+        // every step that already passed again. It waits for a person, with
+        // the step named, instead.
+        if stage == crate::pipeline::BLOCKED
+            && let Some(missing) = crate::commands::stranded_step(task, pipeline)
+        {
+            let note = crate::commands::missing_step_park_note(task, pipeline, &missing);
+            task.reset_loop_counts();
+            task.front.unblock_laps.clear();
+            task.front.paused_at = Some(missing);
+            task.set_stage(crate::pipeline::PAUSED, Some(&note));
+            if self.persist(task)? {
+                report
+                    .actions
+                    .push(format!("{}: {}", task.id(), note.replace('\n', " ")));
+            }
+            return Ok(Routed::NextTask);
+        }
         // A staffed `blocked` is the one reserved stage left standing —
         // it settles like any other step, so it falls through to the
         // ordinary per-step handling below exactly as a non-reserved
@@ -24810,6 +24829,44 @@ mod tests {
             task.front.blocked_from.as_deref(),
             Some("document"),
             "the next unblocker is told the task stopped at `document`"
+        );
+    }
+
+    /// A blocked task whose stopped step the pipeline no longer defines is
+    /// parked on `paused` for a person, with the step named, rather than given
+    /// an unblocker whose pass could only go to the entry.
+    #[test]
+    fn a_block_on_a_step_the_pipeline_lost_parks_instead_of_starting_an_unblocker() {
+        let (repo, _root_guard) = unattended_fixture("blocked-step-gone");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.blocked_from = Some("document".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("document"));
+        assert!(
+            mux.did("start ").is_empty(),
+            "no unblocker lane starts for a task with nowhere to go"
+        );
+        assert!(
+            task.body
+                .contains("`document`, which pipeline `default` no longer defines")
+                && task.body.contains("spoolway resume demo --stage <step>"),
+            "{}",
+            task.body
         );
     }
 
