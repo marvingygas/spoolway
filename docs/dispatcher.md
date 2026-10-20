@@ -200,6 +200,27 @@ A later pass types the next message when the lane's turn has ended. It types not
 lane that is working or waiting on a permission prompt. A step with several skills therefore
 takes one pass per skill to open.
 
+## The spoolway a lane runs
+
+Every agent lane and every command step runs the same `spoolway` as the dispatcher. The
+dispatcher puts the folder that holds its own binary first on the `PATH` of each one it starts.
+A `spoolway report` or `spoolway` call inside a lane therefore never reaches an older install
+that comes earlier on the person's `PATH`. The `PATH` of the person's own shell is not changed.
+
+The dispatcher works out the folder once, when it starts. It uses the folder only when the
+`spoolway` file in it reports the dispatcher's own version. After `spoolway update` replaces the
+binary under a running dispatcher, that file reports another version or is gone. The dispatcher
+then leaves each lane's `PATH` as it is. The `settings` list on the warnings screen names the
+problem. The dispatch tab of bare `spoolway` shows the same note.
+
+```
+settings
+  lanes use the `spoolway` on PATH: /usr/local/bin/spoolway is version 0.14.0, not this
+    dispatcher's 0.13.0. Restart the dispatcher to pick up the new install
+```
+
+Restart the dispatcher to run lanes on the new install.
+
 ## Reading the state
 
 The dispatcher runs a pass every ten seconds. That rate is not configurable, and stays the floor
