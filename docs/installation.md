@@ -453,7 +453,7 @@ on Unix, whether or not its text changed.
 | A prompt, task skeleton, document skeleton or hook script | The shipped file, whole. |
 | A project skill file, such as `.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. |
 | A user-level skill file, such as `~/.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. The path may start with `~` or be absolute. |
-| A pipeline file | The shipped key block, and `hide:` in place of any step's `headless:`. Every other line stays. |
+| A pipeline file | The shipped key block, `hide: true` in place of any step's `headless: true`, and no `headless: false`. Every other line stays. |
 | `.spoolway/config.toml` | The file as `sync` rewrites it. Your values stay. |
 
 `spoolway doctor` reports files that are behind, and lists each refused file on its own line.
@@ -489,7 +489,7 @@ anything:
 
 A file `sync` refuses is listed first in the panel, with the reason and what to do about it.
 A pipeline file carrying a step shape this release no longer loads, such as `loop: 0` or a
-`background: true` step with `on_fail`, is refused too, naming the step and the edit. `sync` never edits a step for you, with one exception. A step's `headless:` key is the old name of `hide:`. `sync` renames it in the checkout's pipeline files, in the private override patches and in the private pipelines under `local/pipelines/`, and names each file it changed and the steps in it. A step carrying both `headless:` and `hide:` is refused, and its file is left as it is. A `headless:` that `sync` cannot rename, such as one in a flow-style step or with a quoted key, is refused with a note to write `hide:` by hand. See [Background and headless](pipelines.md#background-and-headless).
+`background: true` step with `on_fail`, is refused too, naming the step and the edit. `sync` never edits a step for you, with one exception. A step's `headless:` key is the old name of `hide:`. In the checkout's pipeline files, the private override patches and the private pipelines under `local/pipelines/`, `sync` renames `headless: true` to `hide: true` and deletes `headless: false`, and names each file it changed and the steps in it. A step carrying both `headless:` and `hide:` is refused, and its file is left as it is. A `headless:` that `sync` cannot fix, such as one in a flow-style step, with a quoted key or as its step's only key, is refused with a note to write `hide:` by hand or delete the key if it is `false`. See [Background and headless](pipelines.md#background-and-headless).
 
 Enter writes the files and prints the report `sync` always prints. Esc, ctrl-c, or the terminal
 going away mid-question writes nothing and prints "Nothing was changed." With no terminal to

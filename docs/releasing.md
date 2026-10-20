@@ -34,7 +34,9 @@ already happened.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
 
 `Cargo.toml` is the only version source. `CHANGELOG.md` holds one section per version and its
-contract is written at the top of the file.
+contract is written at the top of the file. Changes without a version yet collect in a
+`## Unreleased` section, which the binary skips. The release commit renames it to `## <version>`
+and fits it to the contract.
 
 ## Version rule
 
