@@ -1101,18 +1101,16 @@ impl Repo {
     ///
     /// "Closed with nothing to hand over" means the task is in the archive at
     /// `done` and no pull request was ever opened from its branch. A task
-    /// still in the queue is not handed over *yet*, so it never counts. Three
-    /// facts settle the rest, cheapest first:
+    /// still in the queue is not handed over *yet*, so it never counts. Two
+    /// facts settle the rest:
     ///
     /// - An empty recorded patch means there was nothing to open one with.
-    /// - A branch `origin` has was pushed, so a pull request is likely and
-    ///   the branch stays the base. Without this a dependency that shipped
-    ///   would cost a `gh` call on every read.
     /// - Otherwise `gh pr list --head <branch> --state all` says. A merged or
-    ///   closed pull request counts as one, since the branch is gone from
-    ///   `origin` after a merge. When `gh` cannot answer, the dependency is
-    ///   not treated as closed: guessing wrongly would send a shipped
-    ///   dependency's dependents to its base.
+    ///   closed pull request counts as one, since its branch is gone from
+    ///   `origin` after a merge. A branch pushed with no pull request counts
+    ///   as none: `origin` having it proves nothing. When `gh` cannot answer,
+    ///   the dependency is not treated as closed, because guessing wrongly
+    ///   would send a shipped dependency's dependents to its base.
     pub fn closed_dependency_base(&self, dep_id: &str) -> Option<String> {
         let gh = std::env::var("SPOOLWAY_GH").unwrap_or_else(|_| "gh".to_string());
         self.closed_dependency_base_asking(dep_id, &gh)
@@ -1138,17 +1136,6 @@ impl Repo {
             .branch
             .clone()
             .unwrap_or_else(|| task::default_branch(dep_id));
-        let pushed = self
-            .git(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/origin/{branch}"),
-            ])
-            .is_ok();
-        if pushed {
-            return None;
-        }
         (self.has_pull_request(gh, &branch) == Some(false)).then_some(base)
     }
 
@@ -5554,11 +5541,10 @@ mod tests {
         );
     }
 
-    /// A task closed with nothing to hand over never pushes its branch, so a
-    /// dependent is given the base that task was queued against. Anything
-    /// else keeps the dependency's own branch: a task still queued is not
-    /// handed over yet, and one archived with changes, or with no patch
-    /// recorded, may have had a pull request.
+    /// A task closed with an empty patch has nothing to open a pull request
+    /// with, so a dependent is given the base that task was queued against
+    /// without asking GitHub. A task still queued is not handed over yet, and
+    /// a missing one has no base to hand on.
     #[test]
     fn only_a_dependency_closed_with_an_empty_patch_hands_its_base_on() {
         let (_origin, work, _base_guard) = fixture("closed-dependency-base");
@@ -5571,36 +5557,21 @@ mod tests {
             std::fs::write(dir.join(format!("{id}.md")), doc).unwrap();
         };
         let empty = "patch:\n  files: 0\n  insertions: 0\n  deletions: 0\n";
-        let full = "patch:\n  files: 2\n  insertions: 9\n  deletions: 1\n";
         write(&repo.archive_dir(), "noop", "done", empty);
-        write(&repo.archive_dir(), "shipped", "done", full);
-        write(&repo.archive_dir(), "unmeasured", "done", "");
         write(&repo.queue_dir(), "waiting", "implement", empty);
-        // Pushed, so `gh` is not asked about them.
-        for pushed in ["shipped", "unmeasured"] {
-            git(
-                &work,
-                &[
-                    "update-ref",
-                    &format!("refs/remotes/origin/task/{pushed}"),
-                    "HEAD",
-                ],
-            );
-        }
 
         assert_eq!(repo.closed_dependency_base("noop").as_deref(), Some("main"));
         assert_eq!(repo.dependency_branch("noop").unwrap(), "main");
         assert_eq!(repo.dependency_own_branch("noop").unwrap(), "task/noop");
-        for keeps in ["shipped", "unmeasured", "waiting", "nobody"] {
+        for keeps in ["waiting", "nobody"] {
             assert_eq!(repo.closed_dependency_base(keeps), None, "{keeps}");
         }
-        assert_eq!(repo.dependency_branch("shipped").unwrap(), "task/shipped");
     }
 
     /// A task closed with commits is still closed without a pull request when
     /// GitHub knows none for its branch, and a dependent is then given its
-    /// base. One with a pull request in any state, or a branch `origin` has,
-    /// keeps its branch; so does one `gh` cannot answer for.
+    /// base, whether or not its branch was pushed. One with a pull request in
+    /// any state keeps its branch; so does one `gh` cannot answer for.
     #[cfg(unix)]
     #[test]
     fn a_dependency_with_commits_hands_its_base_on_only_when_github_knows_no_pull_request() {
@@ -5636,7 +5607,8 @@ mod tests {
         assert_eq!(base("unfiled", &none).as_deref(), Some("main"));
         assert_eq!(base("filed", &some), None, "a pull request, merged or not");
         assert_eq!(base("unsure", &broken), None, "gh could not say");
-        assert_eq!(base("pushed", &none), None, "origin has the branch");
+        assert_eq!(base("pushed", &none).as_deref(), Some("main"));
+        assert_eq!(base("pushed", &some), None, "pushed, and it has one");
     }
 
     /// `retain` sweeps the archive by age with no regard for a queued

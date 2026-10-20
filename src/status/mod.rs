@@ -6847,46 +6847,24 @@ mod tests {
 
     /// A dependency archived at `done` with an empty patch was closed with
     /// nothing to hand over, so the dependent's row says which base it is
-    /// cut from and why. One archived with a real patch keeps the ordinary
-    /// wait, since a pull request may have been opened from it.
+    /// cut from and why.
     #[test]
     fn a_queued_row_names_the_base_a_closed_dependency_handed_on() {
         let (repo, _root_guard) = fixture("closed-parent-note");
         let pipelines = Pipelines::builtin();
-        for (dep, files) in [("a-noop", 0), ("a-work", 3)] {
-            add_to(&repo, dep, &[], Some("implement"), Some(dep));
-            let mut task = repo.task(dep).unwrap();
-            task.front.patch = Some(crate::task::Patch {
-                files,
-                insertions: files,
-                deletions: 0,
-            });
-            task.save().unwrap();
-            archive_on(&repo, dep, crate::pipeline::DONE);
-        }
-        // `a-work` pushed a branch; `a-noop` never had one, which queueing
-        // would refuse its dependent for if it started from it.
-        crate::repo::run(&repo.root, "git", &["branch", "task/a-work"]).unwrap();
-        crate::repo::run(
-            &repo.root,
-            "git",
-            &["update-ref", "refs/remotes/origin/task/a-work", "HEAD"],
-        )
-        .unwrap();
+        add_to(&repo, "a-noop", &[], Some("implement"), Some("a-noop"));
+        let mut task = repo.task("a-noop").unwrap();
+        task.front.patch = Some(crate::task::Patch::default());
+        task.save().unwrap();
+        archive_on(&repo, "a-noop", crate::pipeline::DONE);
         add_to(&repo, "b-dep", &["a-noop"], None, Some("a-noop"));
-        add_to(&repo, "b-work", &["a-work"], None, Some("a-work"));
 
         let rows = rows(&repo, &pipelines).unwrap();
-        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        let row = rows.iter().find(|r| r.id == "b-dep").unwrap();
 
         assert_eq!(
-            row("b-dep").next,
+            row.next,
             "based on `group/demo`: `a-noop` closed without a pull request"
-        );
-        assert_eq!(
-            row("b-work").next,
-            "waiting for a worker slot to free up",
-            "a dependency closed with changes keeps its branch as the base"
         );
     }
 
