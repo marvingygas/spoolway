@@ -191,7 +191,8 @@ A model can carry one higher tier: the rates a request pays once its prompt pass
 threshold. The tier is a sub-table named `above_<N>k_tokens`, the way litellm names it, and
 holds the same five rate keys in USD per 1M tokens. A row that sets its own base prices keeps
 the price table's tier for the model. A row that wants other tier rates writes its own
-`above_<N>k_tokens` table:
+`above_<N>k_tokens` table. When that table names the same threshold as the price table's tier,
+each rate it leaves out keeps the price table's value:
 
 ```toml
 [models."claude-haiku-5-5".above_100k_tokens]
@@ -204,8 +205,8 @@ cache_write_1h = 1.00
 
 A sub-table whose name does not read as `above_<N>k_tokens` loads with a note and is left out,
 so the model is priced at its base rate. A second tier on the same model is refused when the
-config loads. A tier rate left out is unset, as on the base entry,
-and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
+config loads. A tier rate left out with no tier at the same threshold to fill it in is unset, as
+on the base entry, and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
 shows a tier's rates on an indented row under its model.
 
 ### How a lane is priced

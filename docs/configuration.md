@@ -111,8 +111,10 @@ A base rate set to `0` also prints a `warning:` line on stderr. `doctor` does no
 base rate means unset, so for a model that the price table or another `[models]` row prices, the
 line names the rate that stays in effect. For a model nothing prices, there is no line.
 
-A zero rate inside an `above_<N>k_tokens` tier is charged as zero, because a tier you write
-replaces the table's tier whole. The line says that part of a request is free above the threshold.
+A zero rate inside an `above_<N>k_tokens` tier means unset too, when the price table or another
+matching `[models]` row has a tier at the same threshold: the line names the rate that stays in
+effect. Where no tier at that threshold fills it in, the rate is charged as zero, and the line says
+that part of a request is free above the threshold.
 Setting a tier rate to `0` where the row has no tier writes no tier. The line names the tier the
 model keeps.
 
@@ -290,7 +292,8 @@ patch only ever applies to a tracked file — but is named as waiting on `spoolw
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
 itself is left alone, except for one case: `spoolway sync` deletes a key on the [Retired
 keys](#retired-keys) list from `overrides/config.toml`, the same way it drops that key from
-the tracked file. A config patch key merely unknown to the tracked config, such as a typo,
+the tracked file. Run in a lane, `spoolway sync` leaves the layer as it is and reports the
+retired keys it left there. A config patch key merely unknown to the tracked config, such as a typo,
 stays in the override file for you to fix yourself.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
@@ -345,6 +348,23 @@ pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
+
+### Commands in a lane
+
+A dispatcher lane does not write the layer. In a task's worktree, these commands exit 1 and
+write nothing:
+
+| Command | What it would write |
+|---|---|
+| `spoolway override drop` | Removes the layer, or one entry of it. |
+| `spoolway pipeline override` | `overrides/pipelines/<name>.yml` |
+| `spoolway prompt override` | `overrides/prompts/<name>/PROMPT.md` |
+| `spoolway config override` | `overrides/config.toml` |
+| `spoolway pipeline copy`, `spoolway prompt copy` | The private `local/` folder. In home mode, the workspace's own setup. |
+| `spoolway pipeline rename` | The private pipeline file, its task skeleton, and the tasks and jobs that name it. |
+
+The refusal tells the lane to write the change it wanted into its report, so a person makes it.
+`spoolway override promote` and `spoolway pipeline promote` refuse in a lane as well.
 
 ## `[dispatch]` — the run loop
 
@@ -831,8 +851,29 @@ slots = 3
 local = true
 ```
 
-Each row is keyed by a glob over the model name. The most literal match wins. A bare name
-also matches `vendor/name`. Leave a field out and it keeps the value from the built-in or
+Each row is keyed by a glob over the model name. Every row that matches a model applies, merged
+value by value: each value comes from the most literal row that sets it. A `claude-*` row that
+sets only `prompt_cache_ttl` therefore leaves a `*haiku*` row's `compact_ctx`, `slots` and
+`context_window` in force.
+
+A tier merges the same way when it names the same threshold as the tier below it, whether that
+tier comes from a less literal row or from the price table. Setting one tier rate leaves the other
+four at the values from below.
+
+`spoolway models` prints a `rows:` line under a model that two or more rows supply values for. It
+lists the rows least literal first, each with the values it supplies:
+
+```
+  rows: *haiku* (window, slots, compact_ctx) · claude-* (prompt_cache_ttl)
+```
+
+`spoolway models --json` carries the same list in a `rows` array on that model. Each entry has a
+`row` and the `sets` it supplies.
+
+A bare name also matches `vendor/name`, but only when no row matches the full name. Once one does,
+bare-name rows are not merged in.
+
+Leave a field out and it keeps the value from the built-in or
 refreshed price table, when that table has an entry for the model. Only a model with no
 entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets
 `cache_write_5m` and leaves `cache_write_1h` out prices hourly cache writes at its own

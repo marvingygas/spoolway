@@ -61,6 +61,10 @@ struct Written {
     /// in from config — kept as an undecoded value per name, so a reader
     /// decodes only the ones it routes on.
     pipelines: BTreeMap<String, serde_json::Value>,
+    /// Every name a private and a tracked pipeline both claimed. A snapshot
+    /// from before this existed has none, which reads as no clash.
+    #[serde(default)]
+    clashes: BTreeMap<String, crate::pipeline::Clash>,
     /// Every pipeline source file the load could have read, label to text.
     sources: BTreeMap<String, String>,
 }
@@ -88,6 +92,7 @@ pub fn write(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     let written = Written {
         lock,
         pipelines: encoded,
+        clashes: pipelines.clashes.clone(),
         sources: sources(&repo.root),
     };
     let path = path(repo);
@@ -210,6 +215,15 @@ impl LoadedPipelines {
         self.written.pipelines.keys().map(String::as_str).collect()
     }
 
+    /// Every pipeline name the dispatcher held out of its set because a
+    /// private file clashed with a tracked one, sorted. [`Self::names`] does
+    /// not list them: the dispatcher routes nothing on them, and the "it has"
+    /// list in [`Self::pipelines`]'s refusal would offer a name that cannot
+    /// run.
+    pub fn clash_names(&self) -> Vec<&str> {
+        self.written.clashes.keys().map(String::as_str).collect()
+    }
+
     /// A routing graph holding only the pipelines `names` asks for.
     ///
     /// Refuses a name the dispatcher never loaded, with the restart that
@@ -223,8 +237,15 @@ impl LoadedPipelines {
     /// and neither of those reads this.
     pub fn pipelines(&self, names: &[&str]) -> Result<Pipelines> {
         let mut pipelines = BTreeMap::new();
+        let mut clashes = BTreeMap::new();
         for &name in names {
             if pipelines.contains_key(name) {
+                continue;
+            }
+            // Carried over so the reader holds the task with the dispatcher's
+            // own line, rather than reporting a pipeline it never heard of.
+            if let Some(clash) = self.written.clashes.get(name) {
+                clashes.insert(name.to_string(), clash.clone());
                 continue;
             }
             let Some(value) = self.written.pipelines.get(name) else {
@@ -246,6 +267,7 @@ impl LoadedPipelines {
         Ok(Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes,
         })
     }
 
@@ -315,6 +337,7 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
     let mut routed = Pipelines {
         pipelines: BTreeMap::new(),
         ignored_overrides: Vec::new(),
+        clashes: Default::default(),
     };
     let mut refusals: BTreeMap<&str, String> = BTreeMap::new();
     let mut refused = BTreeMap::new();
@@ -324,7 +347,10 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
         };
         if !refusals.contains_key(name) && !routed.pipelines.contains_key(name) {
             match loaded.pipelines(&[name]) {
-                Ok(one) => routed.pipelines.extend(one.pipelines),
+                Ok(one) => {
+                    routed.pipelines.extend(one.pipelines);
+                    routed.clashes.extend(one.clashes);
+                }
                 // A name the dispatcher never loaded gets a sentence short
                 // enough for a table cell; anything else is an entry that
                 // will not decode, and says so in the error's own words.
@@ -532,6 +558,37 @@ mod tests {
         std::fs::write(config_record_path(&repo), broken).unwrap();
         let said = format!("{:#}", recorded_config(&repo).unwrap_err());
         assert!(said.contains("dispatch-config.toml"), "{said}");
+    }
+
+    /// A clash survives the dispatcher's snapshot: a reader routing on it
+    /// holds the task with the dispatcher's own line, rather than calling
+    /// the pipeline one the dispatcher never loaded.
+    #[test]
+    fn a_snapshot_carries_a_name_clash_to_the_readers() {
+        let (repo, _root, mut pipelines) = project("snapshot-clash");
+        pipelines.pipelines.remove("t").unwrap();
+        pipelines.clashes.insert(
+            "t".into(),
+            crate::pipeline::Clash {
+                tracked: "tracked/t.yml".into(),
+                private: "local/t.yml".into(),
+            },
+        );
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        write(&repo, &pipelines).unwrap();
+
+        let task = crate::task::Task::parse(
+            PathBuf::from("q.md"),
+            "---\nid: q\nstage: queued\npipeline: t\n---\n",
+        )
+        .unwrap();
+        let routed = for_tasks(&repo, std::slice::from_ref(&task)).unwrap();
+        assert!(routed.refused.is_empty(), "{:?}", routed.refused);
+        let held = routed.pipelines.for_task(&task).unwrap_err();
+        assert!(
+            format!("{held:#}").contains("spoolway pipeline rename t <new-name>"),
+            "{held:#}"
+        );
     }
 
     #[test]

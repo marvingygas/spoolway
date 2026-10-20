@@ -147,6 +147,7 @@ impl State {
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
             State::Waiting => "○ waiting",
+            State::Held => "○ held",
             State::Done => "● done",
         }
     }
@@ -185,6 +186,7 @@ impl State {
             State::Prompt => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
             State::Waiting => format!("{DIM}{word}{RESET}"),
+            State::Held => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }
@@ -938,14 +940,13 @@ pub(super) fn footer(
             // `slots`, one entry per pool — but two names that match the same
             // `[models."<row>"]` entry collapse to the one entry, since they
             // are the same pool being rationed and must draw only one line.
-            // `models::resolved_row` is the same lookup `resolve` itself
-            // answers through — full name first, a bare model's suffix only
-            // once that whole pass fails — so comparing the row *key* it
-            // returns is comparing pool identity exactly as `resolve` sees
-            // it: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+            // `models::row_setting` names the row `resolve` takes `slots` from,
+            // so comparing that row's *key* is comparing pool identity as
+            // `resolve` sees it, even when a more literal row sets other
+            // values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
             // `Ornith-1.5-35B-A3B` both key on `Ornith-1.5-35B-A3B` and
-            // collapse to one line, which a raw `best_match` pointer would
-            // miss since it never takes the suffix fallback.
+            // collapse to one line, which a raw glob match would miss since
+            // it never takes the suffix fallback.
             let mut pools: Vec<(&str, u32)> = Vec::new();
             let mut seen_rows: Vec<&str> = Vec::new();
             for model in agent_model.get(name.as_str()).into_iter().flatten() {
@@ -956,7 +957,9 @@ pub(super) fn footer(
                 else {
                     continue;
                 };
-                if let Some(row) = crate::models::resolved_row(&repo.config.models, model) {
+                if let Some(row) =
+                    crate::models::row_setting(&repo.config.models, model, |row| row.slots != 0)
+                {
                     if seen_rows.contains(&row) {
                         continue;
                     }
@@ -4732,7 +4735,7 @@ mod tests {
         let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
         assert_eq!(pi_lines.len(), 1, "{lines:#?}");
         // The alias never earns a pool entry of its own — if the dedupe on
-        // `resolved_row` broke, this line would carry a second, undeduped
+        // `row_setting` broke, this line would carry a second, undeduped
         // `0/3` figure for it.
         assert!(
             !pi_lines[0].contains("ornith/Ornith-1.5-35B-A3B-alias"),
@@ -4741,11 +4744,62 @@ mod tests {
         assert_eq!(pi_lines[0].matches("2/3").count(), 1, "{lines:#?}");
     }
 
+    /// Two models whose most literal row sets no `slots` still draw one pool
+    /// figure, keyed on the row that does. Fails keyed on the most literal row:
+    /// the tier-only `claude-haiku-5-5` row (what setting one tier rate
+    /// writes) and `*haiku*` would be two pools, and the cap would not hold.
+    #[test]
+    fn models_sharing_a_slots_row_draw_one_pool_figure_past_a_more_literal_row() {
+        let (mut repo, _root_guard) = fixture("footer-slots-row-behind-a-tier-row");
+        repo.config.models.insert(
+            "claude-haiku-5-5".to_string(),
+            crate::usage::ModelPrice {
+                tier: Some(crate::usage::PriceTier {
+                    above_k: 100,
+                    rates: Default::default(),
+                }),
+                ..Default::default()
+            },
+        );
+        repo.config.models.insert(
+            "*haiku*".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
+        model_used.insert("claude-haiku-5-5", 1);
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        agent_model.insert("pi", vec!["claude-haiku-5-5", "claude-haiku-4-5"]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &BTreeMap::new(),
+            &model_used,
+            &agent_model,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        assert_eq!(pi_lines[0].matches("1/1").count(), 1, "{lines:#?}");
+        // Keyed on the most literal row, `claude-haiku-4-5` would draw a pool
+        // of its own, `0/1`, beside `claude-haiku-5-5`'s.
+        assert!(!pi_lines[0].contains("claude-haiku-4-5"), "{lines:#?}");
+    }
+
     /// Two spellings of one model reached only through the suffix fallback —
     /// a step's own `vendor/Name` and pi's bare `Name` — draw one pool
-    /// figure too: the dedupe has to key on the row `models::resolved_row`
-    /// answers, not on a `best_match` pointer that never takes that second
-    /// pass.
+    /// figure too: the dedupe has to key on the row `models::row_setting`
+    /// answers for `slots`, not on a `best_match` pointer that never takes
+    /// that second pass.
     #[test]
     fn a_qualified_and_a_bare_name_sharing_a_plain_row_draw_one_pool_figure() {
         let (mut repo, _root_guard) = fixture("footer-shared-suffix-row");

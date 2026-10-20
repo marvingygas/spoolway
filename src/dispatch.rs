@@ -5737,7 +5737,7 @@ impl<'a> Dispatcher<'a> {
                         }
                     };
                 let (worktree, fresh_pane) = worktree;
-                let env = BTreeMap::from([
+                let mut env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
                     (
@@ -5753,6 +5753,9 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
+                // A command's `spoolway` is the dispatcher's own, for the
+                // reason a lane's is: see [`crate::release::dispatcher_bin_dir`].
+                crate::release::use_dispatcher_binary(&mut env);
                 // A command runs in a pane unless its step's `hide:`, else
                 // `dispatch.hide_commands`, hides it (`shown`, above).
                 // Otherwise it is detached, as the headless backend runs
@@ -7649,6 +7652,9 @@ struct Boot {
     /// the limit closes none after the split.
     replaced: Vec<String>,
     args: Vec<String>,
+    /// Put first on the lane's `PATH`, so it reports with the dispatcher's own
+    /// `spoolway` — see [`crate::release::dispatcher_bin_dir`].
+    path_prefix: Option<PathBuf>,
     env: BTreeMap<String, String>,
     /// The messages typed into the pane, in order. Only an opening can be
     /// more than one: a step's skills each go first as their own message.
@@ -7685,7 +7691,7 @@ impl Boot {
             pane_id: &self.pane_id,
             args: &self.args,
             env: &self.env,
-            path_prefix: None,
+            path_prefix: self.path_prefix.as_deref(),
         }
     }
 }
@@ -8349,7 +8355,7 @@ fn prepare_boot(
     // passes into a run. Each refusal carries the error text `doctor` fails
     // the same value with: `agent_checks`' for the mode, which is the row
     // `doctor` shows for a step's agent, and `hand_written_value_checks`' for
-    // the model row.
+    // each of the model's matching rows.
     let checkout_config = crate::config::Config::path_in(&repo.checkout);
     if crate::agent::adapter(&profile.kind).is_some()
         && let Err(err) = profile.permission_mode_status()
@@ -8362,7 +8368,7 @@ fn prepare_boot(
             checkout_config.display()
         );
     }
-    if let Some(glob) = crate::models::resolved_row(&repo.config.models, &model) {
+    for glob in crate::models::matching_rows(&repo.config.models, &model) {
         let scope = format!("models.\"{glob}\"");
         if let Some(problem) = crate::confkv::value_problems(&repo.config)
             .into_iter()
@@ -8681,6 +8687,7 @@ fn prepare_boot(
         pane_id,
         replaced,
         args,
+        path_prefix: crate::release::lane_path_prefix(),
         env,
         prompts,
         session,
@@ -8747,11 +8754,11 @@ struct Started {
 }
 
 /// The key a lane's model is counted under against its `slots` cap: the
-/// `[models]` row it resolves to, else the literal name. Two spellings of one
+/// `[models]` row that sets its `slots`, else the literal name. Two spellings of one
 /// row (`qwen3`, `local/qwen3`) must share a count, because the cap describes
 /// the one server behind the row, not the name a step happened to use.
 fn slot_key(config_models: &BTreeMap<String, crate::usage::ModelPrice>, model: &str) -> String {
-    crate::models::resolved_row(config_models, model)
+    crate::models::row_setting(config_models, model, |row| row.slots != 0)
         .unwrap_or(model)
         .to_string()
 }
@@ -9263,6 +9270,41 @@ mod tests {
     use crate::task::Frontmatter;
     use std::path::Path;
     use std::sync::Mutex;
+
+    /// A pool is keyed on the row that sets `slots`, not the most literal row
+    /// that matches. Fails keyed on the most literal: the tier-only
+    /// `claude-haiku-5-5` row would count its own lanes apart from
+    /// `claude-haiku-4-5`'s under `*haiku*`, and a one-slot cap would let two
+    /// lanes run.
+    #[test]
+    fn slot_key_names_the_row_that_sets_slots() {
+        let rows = BTreeMap::from([
+            (
+                "claude-haiku-5-5".to_string(),
+                crate::usage::ModelPrice {
+                    tier: Some(crate::usage::PriceTier {
+                        above_k: 100,
+                        rates: Default::default(),
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
+                "*haiku*".to_string(),
+                crate::usage::ModelPrice {
+                    slots: 1,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(slot_key(&rows, "claude-haiku-5-5"), "*haiku*");
+        assert_eq!(slot_key(&rows, "claude-haiku-4-5"), "*haiku*");
+        assert_eq!(
+            slot_key(&rows, "gpt-5"),
+            "gpt-5",
+            "no row: the model's name"
+        );
+    }
 
     /// Records what the dispatcher asked of the multiplexer, and answers from a
     /// scripted lane list.
@@ -10021,6 +10063,14 @@ mod tests {
             let mut names: Vec<&str> = spec.env.keys().map(String::as_str).collect();
             names.sort_unstable();
             self.log(format!("env {} {}", spec.name, names.join(" ")));
+            // The folder the lane's `PATH` is prefixed with, to check whose
+            // `spoolway` it reaches first.
+            self.log(format!(
+                "path_prefix {} {}",
+                spec.name,
+                spec.path_prefix
+                    .map_or("-".to_string(), |dir| dir.display().to_string())
+            ));
             // One value too, since a name alone cannot tell a threshold of 30
             // from one of 60.
             self.log(format!(
@@ -28816,6 +28866,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A lane reports with the dispatcher's own `spoolway`, not an older one
+    /// first on the person's `PATH`. The `PATH` prefix a lane is started with
+    /// is where that is decided, so it is read off the lane that is started.
+    #[test]
+    fn a_lane_is_started_with_the_dispatchers_folder_first_on_its_path() {
+        let (repo, _root_guard) = fixture("lane-dispatcher-path");
+        add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]);
+        crate::release::test_dir::pin(Path::new("/opt/dispatcher-bin"));
+
+        run_pass(&repo, &mux);
+
+        let started = mux.did("path_prefix");
+        let line = started.first().expect("no lane was started");
+        assert!(
+            line.ends_with(" /opt/dispatcher-bin"),
+            "the lane's PATH is not prefixed with the dispatcher's folder: {line}"
+        );
     }
 
     /// The prompt contract's environment table is what somebody writing a

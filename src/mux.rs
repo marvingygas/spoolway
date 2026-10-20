@@ -172,10 +172,11 @@ pub struct LaneSpec<'a> {
     /// Exported into the pane's shell before the agent starts, which is how a
     /// prompt's `spoolway report` knows which task it belongs to.
     pub env: &'a BTreeMap<String, String>,
-    /// Put in front of the pane's `PATH`, so whatever lives there is what the
-    /// multiplexer's `agent start` ends up running instead of the real agent
-    /// binary. Every production caller passes `None`; tests use it to stand
-    /// in a fake binary for the real one.
+    /// Put in front of the lane's own `PATH`, so a `spoolway` there is the one
+    /// the lane calls, and whatever lives there is what the multiplexer's
+    /// `agent start` ends up running before the real agent binary. The
+    /// dispatcher passes the folder holding its own binary; tests also use it
+    /// to stand in a fake agent.
     pub path_prefix: Option<&'a Path>,
 }
 
@@ -2231,8 +2232,8 @@ impl Mux for Herdr {
         //
         // A PATH prefix goes on first, because everything after it — including
         // the agent `agent start` is about to launch — is resolved through this
-        // PATH. Nothing sets it in a real run; the tests use it to put a
-        // stand-in agent in front of the real one.
+        // PATH. A real run puts the dispatcher's own folder here; the tests
+        // use it to put a stand-in agent in front of the real one.
         if let Some(prefix) = spec.path_prefix {
             let export = crate::platform::path_export(prefix);
             self.pane_run(spec.pane_id, &export)?;

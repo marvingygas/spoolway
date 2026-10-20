@@ -910,20 +910,27 @@ pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens
         .map(|entry| entry.apply(tokens))
 }
 
-/// The most specific pattern matching `model`, where specificity is how much of
-/// the pattern is literal. `claude-opus-5` beats `claude-*` for an exact model —
-/// the key rather than the price it holds, since `crate::models::resolved_row`
-/// (which every price and pool lookup now goes through) needs to say *which*
-/// row a name reaches, not only what that row is worth.
-pub(crate) fn best_match_key<'a>(
+/// Every pattern matching `model`, most literal first, where how literal a
+/// pattern is counts its characters that are not `*`. `claude-opus-5` comes
+/// before `claude-*` for an exact model. Equal counts keep the later key
+/// first, as the single best match always did.
+///
+/// Keys rather than prices, since `crate::models::matching_rows` needs to say
+/// *which* rows a name reaches, not only what they are worth.
+pub(crate) fn matching_keys<'a>(
     prices: &'a BTreeMap<String, ModelPrice>,
     model: &str,
-) -> Option<&'a str> {
-    prices
-        .iter()
-        .filter(|(pattern, _)| glob_match(pattern, model))
-        .max_by_key(|(pattern, _)| pattern.chars().filter(|c| *c != '*').count())
-        .map(|(key, _)| key.as_str())
+) -> Vec<&'a str> {
+    let literal = |pattern: &str| pattern.chars().filter(|c| *c != '*').count();
+    let mut keys: Vec<&str> = prices
+        .keys()
+        .map(String::as_str)
+        .filter(|pattern| glob_match(pattern, model))
+        .collect();
+    // Stable, and reversed first so the later of two equal keys leads.
+    keys.reverse();
+    keys.sort_by_key(|pattern| std::cmp::Reverse(literal(pattern)));
+    keys
 }
 
 /// `*` matches any run of characters; everything else is literal. Enough for

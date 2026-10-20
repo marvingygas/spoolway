@@ -94,7 +94,7 @@ steps:
 | `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
-| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. The older `headless:` key no longer loads; `spoolway sync` renames it to `hide:`. See [Background and headless](#background-and-headless). |
+| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. The older `headless:` key no longer loads; `spoolway sync` renames `headless: true` to `hide: true` and deletes `headless: false`. See [Background and headless](#background-and-headless). |
 | `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
@@ -418,24 +418,27 @@ detached while the project shows them. Without `hide:`, the step follows `dispat
 
 The older `headless:` key no longer loads. A step that still carries it, with any value, is refused
 by name, and the message says to run `spoolway sync` or to write `hide: true` in its place.
-`spoolway sync` renames the key to `hide:` on every step in three places: the checkout's pipeline
-files, the private patches under `overrides/pipelines/`, and the private pipelines under
-`local/pipelines/`. It prints a `wrote` line for each file with a note naming the pipeline and its
-steps. It changes no other line. This is the one edit `sync` makes to a step.
+`spoolway sync` fixes the key on every step in three places: the checkout's pipeline files, the
+private patches under `overrides/pipelines/`, and the private pipelines under `local/pipelines/`.
+It renames `headless: true` to `hide: true`. It deletes `headless: false` and writes no `hide:`,
+because `hide: false` forces a pane even while `dispatch.hide_commands` is true, and `headless: false`
+only followed that setting. `sync` prints a `wrote` line for each file with a note naming the
+pipeline and the steps it renamed or cleared. It changes no other line. This is the one edit `sync`
+makes to a step.
 
-A step that carries both `headless:` and `hide:` cannot be renamed without losing one of them. `sync`
+A step that carries both `headless:` and `hide:` cannot be fixed without losing one of them. `sync`
 refuses that file, names the step and leaves the file as it was. Keep only `hide:` there and run
 `sync` again.
 
-A file whose key block `sync` refuses as hand-edited is not renamed either. `spoolway sync --replace
-<file>`, which that refusal names, swaps the block and makes the rename together.
+A file whose key block `sync` refuses as hand-edited is not fixed either. `spoolway sync --replace
+<file>`, which that refusal names, swaps the block and fixes `headless:` together.
 
-`sync` cannot rename a `headless:` written in flow style, such as `- {id: a, headless: true}`, with
-a quoted key, or with a `-` on a line of its own. It refuses that file and tells you to write
-`hide:` by hand. The same holds for a patch or a private pipeline.
+`sync` cannot fix a `headless:` written in flow style, such as `- {id: a, headless: true}`, with
+a quoted key, with a `-` on a line of its own, or as the only key of its step. It refuses that file
+and tells you to write `hide:` by hand, or to delete the key if it is `false`. The same holds for a patch or a private pipeline.
 
 `spoolway pipeline override <name> --set <step>.headless=<value>` and `spoolway override promote`
-of a patch that sets `headless:` are refused. Use `--set <step>.hide=<value>` for the first. For the second, run `sync` to rename the key in the
+of a patch that sets `headless:` are refused. Use `--set <step>.hide=<value>` for the first. For the second, run `sync` to fix the key in the
 patch, then promote again.
 
 A shown command behaves the same whichever setting showed it. The pane stays open after the
@@ -744,7 +747,7 @@ because a home-mode project's whole setup is already private to the machine it r
   clashing file, since the main checkout and the dispatcher load those files even when the
   worktree's own checkout has never picked up the commit that added them. In home mode they
   write into the workspace's own `config/` instead, since there is no private layer to add
-  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
+  there. Both copy commands are refused in a dispatcher lane's worktree. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
   names and the skeleton its `task_template:` names (the pipeline's own name when it sets
   none) into `.spoolway/`, then
   deletes the private files. Run in a linked worktree on its own branch, it writes that
@@ -756,10 +759,14 @@ because a home-mode project's whole setup is already private to the machine it r
   outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
   [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
-- A private pipeline whose name matches a tracked one is refused, naming both files. Two
-  private files of the same name but different extensions — `foo.yml` beside `foo.yaml` — are
-  refused the same way, naming both private files; this is never reported as a clash with a
-  tracked file.
+- A private pipeline whose name matches a tracked one is a name clash. Neither file runs. A
+  task on that name is held and shows as `held` in `queue list` and on the board. Every other
+  pipeline loads and every other task runs. `spoolway pipeline rename <old> <new>` renames the
+  private pipeline and moves what names it onto the new name. `doctor` and `pipeline check`
+  report the clash, naming both files. See [`pipeline
+  rename`](cli-reference.md#spoolway-pipeline-rename-old-new). Two private files of the same
+  name but different extensions, `foo.yml` beside `foo.yaml`, are refused, naming both private
+  files. This is never reported as a clash with a tracked file.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step
   names a prompt that exists only privately is refused, because that pipeline would break the
   moment it ran on a machine with no copy of the private prompt. A prompt name holding `/` is

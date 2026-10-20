@@ -627,12 +627,16 @@ pub struct Resolved {
 }
 
 /// Resolve `model`: this project's own `[models]` table first — see
-/// [`resolved_row`] for the full-name-then-suffix order that table is tried
+/// [`matching_rows`] for the full-name-then-suffix order that table is tried
 /// in — then the refreshed and vendored tables by exact name, then nothing.
 ///
-/// A matching row does not replace the refreshed or vendored entry for the
-/// same name, it sits on top of it: every field the row leaves unset reads
-/// from that entry. Without this, a row written only to set `slots` or
+/// Matching rows do not replace one another: each value comes from the most
+/// literal row that sets it, so a `claude-*` row that sets only a lifetime
+/// leaves a `*haiku*` row's `slots` and `compact_ctx` in force.
+///
+/// Nor do they replace the refreshed or vendored entry for the same name,
+/// they sit on top of it: every field the rows leave unset reads from that
+/// entry. Without this, a row written only to set `slots` or
 /// `prompt_cache_ttl` zeroed the model's window and prices, so its cost read
 /// as $0 and `unattended.max_cost_usd` never stopped a run. A model with no
 /// entry in either table has nothing to fall back to, so its unset fields
@@ -640,8 +644,8 @@ pub struct Resolved {
 /// model a table knows it keeps that table as the source, and over a model no
 /// table knows it leaves the model unpriced, with just the lifetime in
 /// [`Resolved::lifetime`]. One field is an exception to "every unset field":
-/// `cache_write_1h`. See [`overlay`] for when it is carried over. A row's own
-/// higher price tier replaces the table's whole.
+/// `cache_write_1h`. See [`overlay`] for when it is carried over. A row's
+/// higher price tier is merged with the table's rate by rate.
 ///
 /// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
@@ -653,8 +657,7 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
         price,
         source,
     };
-    if let Some(key) = resolved_row(config_models, model) {
-        let row = config_models[key];
+    if let Some(row) = merged_row(config_models, model) {
         let refreshed = refreshed_price(model);
         let base = refreshed.or_else(|| builtin().get(model).copied());
         if sets_only_a_lifetime(&row) {
@@ -693,6 +696,20 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
     resolved(None, Source::Unknown)
 }
 
+/// The rows [`matching_rows`] finds for `model`, laid over one another: each
+/// value comes from the most literal row that sets it. `None` when no row
+/// matches.
+///
+/// The same fill [`overlay`] does against a price table, so a row's tier is
+/// merged rate by rate here too.
+fn merged_row(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Option<ModelPrice> {
+    let rows = matching_rows(config_models, model);
+    let (first, rest) = rows.split_first()?;
+    Some(rest.iter().fold(config_models[*first], |merged, key| {
+        overlay(merged, config_models[*key])
+    }))
+}
+
 /// Whether `row` sets nothing but `prompt_cache_ttl`, blank or valued. Also
 /// what `doctor` asks to leave such a row out of its unrouted-row notes.
 pub(crate) fn sets_only_a_lifetime(row: &ModelPrice) -> bool {
@@ -711,11 +728,15 @@ pub(crate) fn sets_only_a_lifetime(row: &ModelPrice) -> bool {
 /// cache-write rate keeps its own hourly rate even at zero: zero there means
 /// "price an hour cache like the five-minute one" (see `Rates::apply`), and
 /// filling it from the table would charge a config that predates the split
-/// at a rate it never wrote. The table's tier comes along unless the row
-/// writes its own: a row that sets only a base price still pays the table's
-/// rate for a large request, since dropping the tier banked a 150,000-token
-/// turn at the base rates. A row that wants other tier rates writes its own
-/// `above_<N>k_tokens` table.
+/// at a rate it never wrote. The table's tier comes along: a row that sets
+/// only a base price still pays the table's rate for a large request, since
+/// dropping the tier banked a 150,000-token turn at the base rates. A row
+/// that writes the same `above_<N>k_tokens` table as the base sets only the
+/// rates it names, and the rest stay the base's. A tier at another threshold
+/// is a different tier, and replaces the base's whole.
+///
+/// Also lays one `[models]` row over a less literal one, which is why
+/// `slots` and `compact_ctx` are filled too: no price table sets either.
 fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
     let or = |set: f64, fallback: f64| if set == 0.0 { fallback } else { set };
     ModelPrice {
@@ -734,35 +755,91 @@ fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
             or(row.cache_write_1h, base.cache_write_1h)
         },
         prompt_cache_ttl: row.prompt_cache_ttl.or(base.prompt_cache_ttl),
-        slots: row.slots,
+        slots: if row.slots == 0 {
+            base.slots
+        } else {
+            row.slots
+        },
+        compact_ctx: if row.compact_ctx == 0 {
+            base.compact_ctx
+        } else {
+            row.compact_ctx
+        },
         local: row.local || base.local,
-        tier: row.tier.or(base.tier),
+        tier: match (row.tier, base.tier) {
+            (Some(own), Some(table)) if own.above_k == table.above_k => Some(PriceTier {
+                above_k: own.above_k,
+                rates: Rates {
+                    input: or(own.rates.input, table.rates.input),
+                    output: or(own.rates.output, table.rates.output),
+                    cache_read: or(own.rates.cache_read, table.rates.cache_read),
+                    cache_write_5m: or(own.rates.cache_write_5m, table.rates.cache_write_5m),
+                    // Same exception as the base rates above.
+                    cache_write_1h: if own.rates.cache_write_5m != 0.0 {
+                        own.rates.cache_write_1h
+                    } else {
+                        or(own.rates.cache_write_1h, table.rates.cache_write_1h)
+                    },
+                },
+            }),
+            (own, table) => own.or(table),
+        },
         ..row
     }
 }
 
-/// Which `[models]` row, if any, answers `model` — the full name checked
-/// against the *whole* table before anything falls back to a suffix, so a
-/// hosted model whose full name (`vendor/name`) matches nothing never lands
-/// on a same-suffixed local row by way of the fallback below; only once the
-/// full-name pass has failed everywhere does the part after the last `/` get
-/// tried the same way. That second pass is what lets a row be spelled the way
-/// a person names the model — `[models."Ornith-1.5-35B-A3B"]` — and still
-/// answer both a step's `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+/// Every `[models]` row that answers `model`, most literal first — the full
+/// name checked against the *whole* table before anything falls back to a
+/// suffix, so a hosted model whose full name (`vendor/name`) matches nothing
+/// never lands on a same-suffixed local row by way of the fallback below; only
+/// once the full-name pass has failed everywhere does the part after the last
+/// `/` get tried the same way. That second pass is what lets a row be spelled
+/// the way a person names the model — `[models."Ornith-1.5-35B-A3B"]` — and
+/// still answer both a step's `ornith/Ornith-1.5-35B-A3B` and pi's own bare
 /// `Ornith-1.5-35B-A3B`, with no leading `*` required for either.
 ///
-/// Crate-visible so `crate::status::view` can tell whether two model names
-/// land on the same pool — the same reason [`resolve`] itself needs the key
-/// and not only the price it holds.
+/// All of the rows of the pass that matched, rather than one, because they
+/// add up: [`resolve`] takes each value from the first row here that sets
+/// it. The two passes do not add up with each other. Once a row matches the
+/// full name, a row that matches only the bare name is not consulted, since
+/// a hosted `vendor/name` must never pick up a local row's `slots` for having
+/// the same suffix. To give a `vendor/*` model a value from a bare-name row,
+/// write the value on a row the full name matches.
+pub(crate) fn matching_rows<'a>(
+    config_models: &'a BTreeMap<String, ModelPrice>,
+    model: &str,
+) -> Vec<&'a str> {
+    let full = crate::usage::matching_keys(config_models, model);
+    if !full.is_empty() {
+        return full;
+    }
+    match model.rsplit('/').next().filter(|suffix| *suffix != model) {
+        Some(suffix) => crate::usage::matching_keys(config_models, suffix),
+        None => Vec::new(),
+    }
+}
+
+/// The most literal of [`matching_rows`]: the row a person edits, which
+/// `doctor` names when a model has no `prompt_cache_ttl`. Pools are named by
+/// [`row_setting`] over `slots` instead, since a more literal row may set
+/// other values and not the cap.
 pub(crate) fn resolved_row<'a>(
     config_models: &'a BTreeMap<String, ModelPrice>,
     model: &str,
 ) -> Option<&'a str> {
-    if let Some(key) = crate::usage::best_match_key(config_models, model) {
-        return Some(key);
-    }
-    let suffix = model.rsplit('/').next().filter(|suffix| *suffix != model)?;
-    crate::usage::best_match_key(config_models, suffix)
+    matching_rows(config_models, model).first().copied()
+}
+
+/// The most literal row of [`matching_rows`] for which `sets` holds: the row a
+/// merged value actually came from, and so the one a person edits to change it.
+pub(crate) fn row_setting<'a>(
+    config_models: &'a BTreeMap<String, ModelPrice>,
+    model: &str,
+    sets: impl Fn(&ModelPrice) -> bool,
+) -> Option<&'a str> {
+    matching_rows(config_models, model)
+        .into_iter()
+        .find(|key| sets(&config_models[*key]))
 }
 
 /// Why a step's model cannot be handed a compaction threshold, if it cannot.
@@ -802,7 +879,7 @@ pub fn compaction_problem(
     // Named by the glob the project wrote when there is one, since that is the
     // key a person edits; a built-in row they cannot edit falls back to the
     // model's own name, which `config set models.<name>.…` creates a row for.
-    let key = resolved_row(config_models, model).unwrap_or(model);
+    let key = row_setting(config_models, model, |row| row.compact_ctx != 0).unwrap_or(model);
     let adapter = crate::agent::adapter(&profile.kind)?;
     let Some(row) = adapter.compaction.as_ref() else {
         return Some(format!(
@@ -870,7 +947,7 @@ pub fn unrouted<'a>(
         .filter(|key| {
             !named
                 .keys()
-                .any(|model| resolved_row(config_models, model) == Some(key.as_str()))
+                .any(|model| matching_rows(config_models, model).contains(&key.as_str()))
         })
         .map(|key| key.as_str())
         .collect()
@@ -891,6 +968,18 @@ struct Row<'a> {
     /// Left out for an untiered model, so its JSON reads as it always has.
     #[serde(skip_serializing_if = "Option::is_none")]
     tier: Option<TierRow>,
+    /// Which `[models]` rows the values came from, when more than one matches.
+    /// Left out otherwise, so the JSON of a model with one row reads as ever.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rows: Vec<RowSource>,
+}
+
+/// One `[models]` row that answers a model, and the values it supplies: those
+/// it sets that no more literal row does.
+#[derive(Serialize)]
+struct RowSource {
+    row: String,
+    sets: Vec<&'static str>,
 }
 
 /// A tiered model's higher rates, drawn on an indented row under it.
@@ -908,6 +997,48 @@ impl TierRow {
     fn label(&self) -> String {
         format!("  above {}k tokens", self.above_tokens / 1000)
     }
+}
+
+/// The rows [`matching_rows`] finds for `model`, each with the values it
+/// supplies, least literal first: the order the rows lay over one another.
+///
+/// The prices and the tier are not listed. The table above the `rows:` line
+/// already shows them, so naming a row for them only adds a row that, beside
+/// the others, explains nothing the table does not. A row supplying nothing
+/// else, or nothing because more literal rows set all it does, is left out.
+/// Empty unless two or more rows remain, since a single row supplying
+/// everything says nothing the table does not.
+fn row_sources(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Vec<RowSource> {
+    let keys = matching_rows(config_models, model);
+    let mut taken: Vec<&'static str> = Vec::new();
+    let mut sources = Vec::new();
+    for key in keys {
+        let row = config_models[key];
+        let fields: [(&'static str, bool); 5] = [
+            ("window", row.context_window != 0),
+            ("slots", row.slots != 0),
+            ("compact_ctx", row.compact_ctx != 0),
+            ("prompt_cache_ttl", row.prompt_cache_ttl.is_some()),
+            ("local", row.local),
+        ];
+        let sets: Vec<&'static str> = fields
+            .iter()
+            .filter(|(name, set)| *set && !taken.contains(name))
+            .map(|(name, _)| *name)
+            .collect();
+        taken.extend(&sets);
+        if !sets.is_empty() {
+            sources.push(RowSource {
+                row: key.to_string(),
+                sets,
+            });
+        }
+    }
+    if sources.len() < 2 {
+        return Vec::new();
+    }
+    sources.reverse();
+    sources
 }
 
 /// `spoolway models`: every model this project's pipelines name, with what it
@@ -932,6 +1063,7 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
                     .and_then(|p| (p.slots > 0).then_some(p.slots)),
                 source: resolved.source.label(),
                 steps,
+                rows: row_sources(&repo.config.models, model),
                 tier: resolved.price.and_then(|p| p.tier).map(|tier| TierRow {
                     above_tokens: tier.above_k * 1000,
                     input: tier.rates.input,
@@ -1003,6 +1135,14 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
                 crate::fmt::money(Some(tier.cache_write_1h)),
                 span = width + WINDOW_SPAN,
             );
+        }
+        if !row.rows.is_empty() {
+            let rows: Vec<String> = row
+                .rows
+                .iter()
+                .map(|source| format!("{} ({})", source.row, source.sets.join(", ")))
+                .collect();
+            println!("  rows: {}", rows.join(" · "));
         }
     }
 
@@ -1489,6 +1629,178 @@ mod tests {
         });
     }
 
+    /// A `claude-*` row that sets only a lifetime no longer hides a `*haiku*`
+    /// row's window, compaction and slots: each value comes from the most
+    /// literal row that sets it. Before, the longer `claude-` prefix won the
+    /// whole row and the three values read as unset.
+    #[test]
+    fn matching_rows_merge_value_by_value() {
+        let home = fixture_home("models-rows-merge");
+        crate::platform::test_home::with_home(&home, || {
+            let config = BTreeMap::from([
+                (
+                    "*haiku*".to_string(),
+                    ModelPrice {
+                        context_window: 500_000,
+                        compact_ctx: 9,
+                        slots: 1,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "claude-*".to_string(),
+                    ModelPrice {
+                        prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                        // The more literal row's window beats `*haiku*`'s.
+                        context_window: 200_000,
+                        ..Default::default()
+                    },
+                ),
+            ]);
+            assert_eq!(
+                matching_rows(&config, "claude-haiku-5-5"),
+                ["claude-*", "*haiku*"]
+            );
+            let resolved = resolve(&config, "claude-haiku-5-5");
+            let price = resolved.price.unwrap();
+            assert_eq!(price.compact_ctx, 9);
+            assert_eq!(price.slots, 1);
+            assert_eq!(price.context_window, 200_000);
+            assert_eq!(price.input, builtin()["claude-haiku-5-5"].input);
+            assert_eq!(
+                resolved.lifetime,
+                Some(std::time::Duration::from_secs(3600))
+            );
+            assert_eq!(resolved.source, Source::Config);
+            let sources = row_sources(&config, "claude-haiku-5-5");
+            let shown: Vec<(&str, &[&str])> = sources
+                .iter()
+                .map(|source| (source.row.as_str(), source.sets.as_slice()))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    ("*haiku*", &["slots", "compact_ctx"][..]),
+                    ("claude-*", &["window", "prompt_cache_ttl"][..]),
+                ]
+            );
+        });
+    }
+
+    /// A row matching the full `vendor/name` ends the search: a bare-name row
+    /// is not merged in beneath it. Keeps a hosted model from taking a local
+    /// row's `slots` for sharing its suffix. A name no row matches in full
+    /// still reaches the bare-name rows, all of them merged.
+    #[test]
+    fn the_suffix_pass_runs_only_when_no_row_matches_the_full_name() {
+        let slotted = ModelPrice {
+            slots: 2,
+            ..Default::default()
+        };
+        let config = BTreeMap::from([
+            (
+                "openrouter/*".to_string(),
+                ModelPrice {
+                    input: 1.0,
+                    ..Default::default()
+                },
+            ),
+            ("qwen3".to_string(), slotted),
+            ("qwen*".to_string(), ModelPrice::default()),
+        ]);
+        assert_eq!(matching_rows(&config, "openrouter/qwen3"), ["openrouter/*"]);
+        assert_eq!(matching_rows(&config, "local/qwen3"), ["qwen3", "qwen*"]);
+    }
+
+    /// The `rows:` line of `spoolway models` names the rows that supply
+    /// scalar values, least literal first, and leaves out a row that only
+    /// sets the tier or prices the table above it already shows.
+    #[test]
+    fn the_rows_line_leaves_out_a_row_that_only_sets_a_tier() {
+        let tier = crate::usage::PriceTier {
+            above_k: 100,
+            rates: crate::usage::Rates {
+                input: 0.6,
+                ..Default::default()
+            },
+        };
+        let config = BTreeMap::from([
+            (
+                "*haiku*".to_string(),
+                ModelPrice {
+                    context_window: 1_000_000,
+                    compact_ctx: 9,
+                    slots: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "claude-*".to_string(),
+                ModelPrice {
+                    prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    tier: Some(tier),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let shown: Vec<(String, Vec<&str>)> = row_sources(&config, "claude-haiku-5-5")
+            .into_iter()
+            .map(|source| (source.row, source.sets))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "*haiku*".to_string(),
+                    vec!["window", "slots", "compact_ctx"]
+                ),
+                ("claude-*".to_string(), vec!["prompt_cache_ttl"]),
+            ]
+        );
+    }
+
+    /// Setting one tier rate leaves the other four at the table's values, so a
+    /// cost total for a request above the threshold is not priced at $0 for
+    /// the rates the row never named.
+    #[test]
+    fn a_row_that_sets_one_tier_rate_keeps_the_tables_other_four() {
+        let home = fixture_home("models-row-merges-tier");
+        crate::platform::test_home::with_home(&home, || {
+            let table = builtin()["claude-haiku-5-5"].tier.unwrap();
+            let config = BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    tier: Some(crate::usage::PriceTier {
+                        above_k: table.above_k,
+                        rates: crate::usage::Rates {
+                            input: 0.6,
+                            ..Default::default()
+                        },
+                    }),
+                    ..Default::default()
+                },
+            )]);
+            let tier = resolve(&config, "claude-haiku-5-5")
+                .price
+                .unwrap()
+                .tier
+                .unwrap();
+            assert_eq!(tier.above_k, table.above_k);
+            assert_eq!(tier.rates.input, 0.6);
+            assert_eq!(tier.rates.output, table.rates.output);
+            assert_eq!(tier.rates.cache_read, table.rates.cache_read);
+            assert_eq!(tier.rates.cache_write_5m, table.rates.cache_write_5m);
+            assert_eq!(tier.rates.cache_write_1h, table.rates.cache_write_1h);
+            assert!(table.rates.output > 0.0, "the check is vacuous at zero");
+        });
+    }
+
     #[test]
     fn a_row_with_a_five_minute_write_rate_does_not_fill_the_hourly_one() {
         let home = fixture_home("models-row-keeps-hourly-zero");
@@ -1924,6 +2236,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         assert_eq!(unrouted(&pipelines, &config), vec!["Qwen3.6-35B-A3B"]);

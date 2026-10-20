@@ -2045,6 +2045,37 @@ counter "three laps were handed back to the command, not a fourth" \
 
 must "unattended off again, so nothing later in this file inherits it" \
   "$SPOOLWAY" config set unattended.enabled false
+
+# ------------------------------------------------- the dispatcher's own binary
+# A command step runs the `spoolway` its dispatcher is, even when an older one
+# comes first on the person's PATH. A lane reporting with an older binary could
+# not read the dispatcher's pipeline snapshot, and its task stayed `running`.
+# A suite case, because it needs a real dispatcher process starting a real
+# command, with a real PATH in front of it.
+forget gated-stage redstage
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+OLDBIN="$LIVE/oldbin"
+mkdir -p "$OLDBIN"
+printf '#!/bin/sh\necho "spoolway 0.0.1"\n' > "$OLDBIN/spoolway"
+chmod +x "$OLDBIN/spoolway"
+add_command_step default whichbin \
+  'command -v spoolway > which.txt' review implement
+task_doc "$LIVE/whichbin.md" whichbin "$BODY" "group: whichbin"
+must "a task queued behind a command step that asks which spoolway it has" \
+  "$SPOOLWAY" queue add --from "$LIVE/whichbin.md"
+dispatcher_stop
+saved_path=$PATH
+PATH="$OLDBIN:$PATH"; export PATH
+dispatcher_start
+PATH=$saved_path; export PATH
+if drive whichbin gone 180; then ok "the task runs through, with an older spoolway first on PATH"
+else bad "the task runs through, with an older spoolway first on PATH (at \`$(stage_of whichbin)\`)"; fi
+got=$(git -C "$FORGE/origin.git" show "task/whichbin:which.txt" 2>/dev/null)
+if [ "$got" = "$SPOOLWAY" ]; then
+  ok "the command's spoolway is the dispatcher's own binary, not the older one"
+else
+  bad "the command's spoolway is the dispatcher's own binary, not the older one (got \`$got\`, want \`$SPOOLWAY\`)"
+fi
 dispatcher_stop
 
 finish

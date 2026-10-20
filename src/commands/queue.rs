@@ -185,6 +185,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Prompt => "prompt",
         Queued => "queued",
         Waiting => "waiting",
+        Held => "held",
         Done => "done",
     }
 }
@@ -7306,7 +7307,7 @@ fn handle_gate_key(
 /// Shared by [`with_gate`], which never writes this back to disk, and
 /// [`write_back_ids`], which does — this only ever touches the text in
 /// memory; what happens to the result is each caller's own business.
-fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
+pub(super) fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     // `split_fence` accepts a leading byte order mark, so a routine saved
     // with one reaches here too. `trim` does not count it as whitespace, so
     // left on, the fence would not be found and the id would go unminted.
@@ -7976,11 +7977,15 @@ fn routine_folder_lines(
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
 /// pending task, minus the `Gate:` row a routine has no gate picker to set
 /// and the `Starts from:` and `Lands in:` rows, which this pane has never
-/// drawn. Comes back with
+/// drawn, plus a `Problem:` row under any task whose id another routine
+/// file also holds. That row is why this takes every folder and
+/// `routines_dir`, not only the highlighted one. Comes back with
 /// each task's start and the highlighted one's range, the same as
 /// [`tasks_pane_lines`].
 fn routine_task_lines(
     folder: Option<&RoutineFolder>,
+    routines: &[RoutineFolder],
+    routines_dir: &std::path::Path,
     _pipelines: &Pipelines,
     nav: &RoutineNav,
     width: usize,
@@ -7989,6 +7994,7 @@ fn routine_task_lines(
         return (Vec::new(), Vec::new(), (0, 0));
     };
 
+    let clashes = super::routines::id_clashes(routines);
     let mut lines = Vec::new();
     let mut starts = Vec::with_capacity(folder.tasks.len());
     let mut focus = (0, 0);
@@ -8020,6 +8026,12 @@ fn routine_task_lines(
             lines.extend(labeled_row("Description:", description, width));
         }
 
+        // A shared id makes these files one routine, so the pane says so
+        // beside the task rather than leaving it to `doctor`.
+        if let Some(clash) = clashes.iter().find(|clash| clash.id == task.id) {
+            lines.extend(labeled_row("Problem:", &clash.refusal(routines_dir), width));
+        }
+
         if i == nav.task_cursor {
             focus = (opened, lines.len().saturating_sub(1));
         }
@@ -8041,8 +8053,14 @@ fn render_routines(
     let layout = layout(footer);
     let (left, left_starts) = routine_folder_lines(routines_dir, routines, nav, layout.left);
     let highlighted = routines.get(nav.folder_cursor);
-    let (right, right_starts, focus) =
-        routine_task_lines(highlighted, pipelines, nav, layout.right);
+    let (right, right_starts, focus) = routine_task_lines(
+        highlighted,
+        routines,
+        routines_dir,
+        pipelines,
+        nav,
+        layout.right,
+    );
 
     let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
     two_pane_frame(
@@ -21126,6 +21144,36 @@ mod tests {
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(!last.contains("queued 1 task"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
+    }
+
+    /// Two routine files sharing a task id are one routine, so the pane
+    /// draws a problem beside the task naming both files.
+    #[test]
+    fn the_routines_pane_names_both_files_of_a_shared_task_id() {
+        let (repo, _root_guard) = fixture("routines-shared-id");
+        for dir in ["frontend", "backend"] {
+            write_routine(&repo, dir, "lint", &task_text("lint", "", BODY));
+        }
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+
+        let (lines, _, _) = routine_task_lines(
+            routines.first(),
+            &routines,
+            &repo.routines_dir(),
+            &route_pipelines(),
+            &RoutineNav::new(),
+            200,
+        );
+
+        let drawn = lines.join("\n");
+        assert!(
+            drawn.contains(".spoolway/routines/backend/lint.md"),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains(".spoolway/routines/frontend/lint.md"),
+            "{drawn}"
+        );
     }
 
     /// The one non-goal this feature draws a hard line at: the empty

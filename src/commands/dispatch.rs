@@ -181,6 +181,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // `SPOOLWAY_TEST_KILL_AT` name is refused here, before anything is spent.
     crate::fault::arm()?;
 
+    // Where lanes will find the dispatcher's own `spoolway` is settled here,
+    // while this process still runs the binary it started as. An update during
+    // a long run replaces the file in that folder, and a first look taken when
+    // the first lane starts would judge the new install and drop the folder
+    // from every lane's `PATH`. The warnings gate below reads this same answer.
+    let _ = crate::release::dispatcher_bin_dir();
+
     // The last two things a person sees before anything is spawned or
     // written: the overrides gate, since a layer changes what runs without
     // `git status` ever hinting that it is on; and doctor's own cheap
@@ -915,7 +922,12 @@ fn warnings_gate_with(
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
-    let (settings, files, problems) = cheap_sections(repo, pipelines, unattended);
+    let (settings, files, problems) = cheap_sections(
+        repo,
+        pipelines,
+        unattended,
+        crate::release::dispatcher_bin_dir(),
+    );
 
     if settings.is_empty() && files.is_empty() && problems.is_empty() {
         return Ok(true);
@@ -961,10 +973,17 @@ fn warnings_gate_with(
 
 /// Doctor's cheap findings, sorted under the warnings screen's three
 /// headings: settings, files and problems.
+///
+/// `bin_dir` is what the dispatcher finds for its own folder, see
+/// [`crate::release::dispatcher_bin_dir`]. A refusal is one more setting. The
+/// dispatcher's own gate passes the answer its lanes will use, and the board's
+/// popup judges afresh, since the board outlives installs and the dispatcher
+/// it starts judges when it starts.
 fn cheap_sections(
     repo: &Repo,
     pipelines: &Pipelines,
     unattended: bool,
+    bin_dir: &Result<Option<std::path::PathBuf>, String>,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     use crate::commands::doctor::Warning;
 
@@ -977,6 +996,9 @@ fn cheap_sections(
             Warning::File(text) => files.push(text),
             Warning::Problem(text) => problems.push(text),
         }
+    }
+    if let Err(why) = bin_dir {
+        settings.push(why.clone());
     }
     (settings, files, problems)
 }
@@ -1102,8 +1124,12 @@ const WARNINGS_POPUP_WRAP: usize = 70;
 /// The warnings popup, or `None` when [`warnings_gate`] would not ask:
 /// nothing to say, or the same findings already hidden.
 pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GatePopup> {
-    let (settings, files, problems) =
-        cheap_sections(repo, pipelines, repo.config.unattended.enabled);
+    let (settings, files, problems) = cheap_sections(
+        repo,
+        pipelines,
+        repo.config.unattended.enabled,
+        &crate::release::dispatcher_bin_dir_now(),
+    );
     if settings.is_empty() && files.is_empty() && problems.is_empty() {
         return None;
     }
@@ -1491,6 +1517,9 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
                  {choices}.\n\nNothing was dispatched.",
                 task.id()
             ),
+            // A name clash holds only the tasks on it, once the run is going;
+            // refusing the start here would stop every other task too.
+            Some(name) if pipelines.clashes.contains_key(name) => {}
             Some(name) if pipelines.get(name).is_err() => bail!(
                 "refusing to start: task `{}` names a pipeline that does not exist: `{name}`\n  \
                  Set `pipeline:` to one of: {choices}.\n\nNothing was dispatched.",
@@ -1813,6 +1842,28 @@ mod tests {
         assert!(check_task_routes(&pipelines, &[a, b]).is_ok());
     }
 
+    /// A task on a pipeline name a private and a tracked file both claim
+    /// does not stop the start: the pass holds that one task, and the rest
+    /// run. Before, the clash failed the load and every command refused.
+    #[test]
+    fn check_task_routes_lets_a_task_on_a_name_clash_through() {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.remove("bugfix");
+        pipelines.clashes.insert(
+            "bugfix".into(),
+            crate::pipeline::Clash {
+                tracked: "tracked/bugfix.yml".into(),
+                private: "local/bugfix.yml".into(),
+            },
+        );
+        let held = crate::task::Task::parse(
+            std::path::PathBuf::from("held.md"),
+            "---\nid: held\nstage: queued\npipeline: bugfix\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(check_task_routes(&pipelines, &[held]).is_ok());
+    }
+
     /// A dependent whose `base:` no longer agrees with its dependency's —
     /// one of them edited by hand after the batch was sent, since
     /// `validate_batch` already enforced this once — refuses the whole
@@ -1997,6 +2048,7 @@ mod tests {
         Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         }
     }
 
@@ -2040,6 +2092,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         assert_eq!(
             stack_steps(&pipelines),
@@ -2922,6 +2975,27 @@ mod tests {
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
+    /// A folder lanes cannot use is one more setting, whichever answer the
+    /// caller hands in, and a usable one adds nothing.
+    #[test]
+    fn the_warnings_sections_carry_the_dispatcher_folder_note() {
+        let (repo, _root_guard) = fixture("warnings-bin-dir");
+        let pipelines = Pipelines::builtin();
+
+        let refused = Err("lanes use the `spoolway` on PATH: gone".to_string());
+        let (settings, _, _) = cheap_sections(&repo, &pipelines, false, &refused);
+        assert!(
+            settings.contains(&"lanes use the `spoolway` on PATH: gone".to_string()),
+            "{settings:?}"
+        );
+
+        let (settings, _, _) = cheap_sections(&repo, &pipelines, false, &Ok(None));
+        assert!(
+            settings.iter().all(|s| !s.contains("lanes use")),
+            "{settings:?}"
+        );
+    }
+
     /// The warnings screen judges the `blocked` step for the mode the run
     /// settled on: a `--unattended` flag with `unattended.enabled` left off
     /// names the missing unblocker prompt, and an attended run does not.
@@ -2940,7 +3014,7 @@ mod tests {
         assert!(!repo.config.unattended.enabled);
 
         let named = |unattended| {
-            let (_, _, problems) = cheap_sections(&repo, &pipelines, unattended);
+            let (_, _, problems) = cheap_sections(&repo, &pipelines, unattended, &Ok(None));
             problems.iter().any(|p| p.contains("unblocker"))
         };
         assert!(named(true));
@@ -2978,13 +3052,13 @@ mod tests {
             body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
             "{body:#?}"
         );
-        let (_, _, problems) = cheap_sections(&repo, &pipelines, false);
+        let (_, _, problems) = cheap_sections(&repo, &pipelines, false, &Ok(None));
         let first = warnings_fingerprint(&[], &[], &problems);
         popup.hide(&repo).unwrap();
         assert!(warnings_popup(&repo, &pipelines).is_none());
 
         fail("second");
-        let (_, _, problems) = cheap_sections(&repo, &pipelines, false);
+        let (_, _, problems) = cheap_sections(&repo, &pipelines, false, &Ok(None));
         assert_ne!(warnings_fingerprint(&[], &[], &problems), first);
         assert!(
             warnings_popup(&repo, &pipelines).is_some(),

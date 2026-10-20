@@ -110,6 +110,97 @@ pub(crate) fn list_routines(repo: &Repo) -> Result<Vec<RoutineFolder>> {
     paths.iter().map(|path| read_folder(path)).collect()
 }
 
+/// A task `id:` held by more than one file under `.spoolway/routines/`.
+///
+/// A routine is identified by its id alone: [`super::queue::routine_names`]
+/// merges ids across folders and `claim_routines` counts any live copy of an
+/// id as that routine's. Two files sharing an id are therefore one routine,
+/// and whichever job fires second is skipped for as long as the first one's
+/// copy is queued, with nothing saying why.
+pub(crate) struct IdClash {
+    /// The id the files share.
+    pub(crate) id: String,
+    /// Every file holding it, in folder order. Always two or more.
+    pub(crate) files: Vec<PathBuf>,
+    /// An id to offer for the first file: its top-level folder's name and
+    /// the shared id, joined. `None` when that is not an id spoolway accepts
+    /// (a folder named `Web_UI` is allowed, a task id `Web_UI-lint` is not)
+    /// or another routine file already holds it, since the advice would
+    /// then walk the person into a second clash or a refused file.
+    pub(crate) suggestion: Option<String>,
+}
+
+impl IdClash {
+    /// The refusal, naming every file by its path from the project root
+    /// (`.spoolway/routines/<folder>/<file>`) and offering
+    /// [`Self::suggestion`] when there is one. That form needs
+    /// `routines_dir` to end in `.spoolway/routines`; a project joined to a
+    /// workspace keeps its routines elsewhere (`config/routines/`), where a
+    /// `.spoolway/...` path would name nothing, so the real paths are shown.
+    /// It carries no label of its own:
+    /// `doctor` prints it under the row name `routines`, `pipeline check`
+    /// puts `routines:` in front, and the routines tab shows it under its
+    /// `Problem:` row.
+    pub(crate) fn refusal(&self, routines_dir: &Path) -> String {
+        let root = routines_dir
+            .ancestors()
+            .nth(Path::new(crate::config::ROUTINES_DIR).components().count())
+            .filter(|_| routines_dir.ends_with(crate::config::ROUTINES_DIR));
+        let shown: Vec<String> = self
+            .files
+            .iter()
+            .map(|file| {
+                root.and_then(|root| file.strip_prefix(root).ok())
+                    .unwrap_or(file)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let (last, rest) = shown.split_last().expect("a clash holds two files");
+        let (count, give) = match shown.len() {
+            2 => ("two".to_string(), "one of them"),
+            n => (n.to_string(), "all but one of them"),
+        };
+        let advice = match &self.suggestion {
+            Some(id) => format!("Give {give} another id:, such as {id}."),
+            None => format!("Give {give} an `id:` of its own."),
+        };
+        format!(
+            "task id `{id}` is in {count} routines — {rest} and {last}. {advice}",
+            id = self.id,
+            rest = rest.join(", "),
+        )
+    }
+}
+
+/// Every id held by more than one task file in `routines`, in id order.
+pub(crate) fn id_clashes(routines: &[RoutineFolder]) -> Vec<IdClash> {
+    let mut by_id: std::collections::BTreeMap<&str, Vec<(&str, PathBuf)>> = Default::default();
+    for folder in routines {
+        for task in &folder.tasks {
+            by_id
+                .entry(&task.id)
+                .or_default()
+                .push((&folder.name, task.path.clone()));
+        }
+    }
+    let taken: std::collections::BTreeSet<&str> = by_id.keys().copied().collect();
+    by_id
+        .iter()
+        .filter(|(_, held)| held.len() > 1)
+        .map(|(id, held)| {
+            let suggestion = Some(format!("{}-{id}", held[0].0))
+                .filter(|candidate| crate::config::check_task_id(candidate).is_ok())
+                .filter(|candidate| !taken.contains(candidate.as_str()));
+            IdClash {
+                id: id.to_string(),
+                files: held.iter().map(|(_, path)| path.clone()).collect(),
+                suggestion,
+            }
+        })
+        .collect()
+}
+
 /// One folder at a known path, read the same recursive way [`list_routines`]
 /// reads a top-level one. For a caller that already has the folder it wants —
 /// a job pointing at `routines/nightly/` — rather than the whole tree. The
@@ -338,5 +429,60 @@ mod tests {
         let routines = list_routines(&repo).unwrap();
         assert_eq!(routines[0].tasks.len(), 1);
         assert_eq!(routines[0].tasks[0].id, "good");
+    }
+
+    /// The id the refusal offers is one `queue add` accepts and no routine
+    /// file holds already; a folder name that makes a bad id, or an id some
+    /// other file has, gets no example at all.
+    #[test]
+    fn the_suggested_id_is_only_offered_when_it_would_work() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-suggestion");
+        let root = repo.routines_dir();
+        write(&root.join("frontend"), "lint.md", "lint", "");
+        write(&root.join("backend"), "lint.md", "lint", "");
+        write(&root.join("Web_UI"), "fmt.md", "fmt", "");
+        write(&root.join("api"), "fmt.md", "fmt", "");
+        write(&root.join("api"), "taken.md", "api-spell", "");
+        write(&root.join("api"), "spell.md", "spell", "");
+        write(&root.join("web"), "spell.md", "spell", "");
+        let mut clashes = id_clashes(&list_routines(&repo).unwrap());
+        clashes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let by_id = |id: &str| clashes.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(by_id("lint").suggestion.as_deref(), Some("backend-lint"));
+        let bad = by_id("fmt").refusal(&root);
+        assert!(by_id("fmt").suggestion.is_none(), "`Web_UI-fmt` is no id");
+        assert!(
+            bad.ends_with("Give one of them an `id:` of its own."),
+            "{bad}"
+        );
+        assert!(by_id("spell").suggestion.is_none(), "`api-spell` is taken");
+    }
+
+    /// In an ordinary project the files are named from the project root; a
+    /// project joined to a workspace keeps its routines in `config/routines`,
+    /// where `.spoolway/...` would name a path that is not there.
+    #[test]
+    fn a_workspace_project_names_the_real_paths() {
+        let clash = |dir: &str| IdClash {
+            id: "lint".into(),
+            files: vec![
+                PathBuf::from(dir).join("a/lint.md"),
+                PathBuf::from(dir).join("b/lint.md"),
+            ],
+            suggestion: None,
+        };
+
+        let ordinary = clash("/p/.spoolway/routines").refusal(Path::new("/p/.spoolway/routines"));
+        assert!(
+            ordinary.contains(" .spoolway/routines/a/lint.md"),
+            "{ordinary}"
+        );
+        assert!(!ordinary.contains("/p/"), "{ordinary}");
+
+        let joined = clash("/ws/config/routines").refusal(Path::new("/ws/config/routines"));
+        assert!(joined.contains("/ws/config/routines/a/lint.md"), "{joined}");
+        assert!(joined.contains("/ws/config/routines/b/lint.md"), "{joined}");
+        assert!(!joined.contains(".spoolway"), "{joined}");
     }
 }

@@ -52,6 +52,7 @@ fn parse_target(target: &str) -> Result<Target> {
 /// actually running, same as [`prompt::show`] — and writes the project-wide
 /// layer, so the fork is there for a lane in any worktree on its next start.
 pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -101,6 +102,7 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
 /// project's home, so this refuses before doing anything else rather than
 /// silently guess.
 pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(err) = home_error {
         return Err(anyhow::anyhow!(
             "{err:#} — {}'s stamped home could not be resolved, so `config override` has \
@@ -542,6 +544,7 @@ fn promote_config(repo: &Repo, write_root: &Path) -> Result<()> {
 
 /// `spoolway override drop [<target>]`.
 pub fn override_drop(repo: &Repo, target: Option<&str>) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
     let Some(target) = target else {
         match std::fs::remove_dir_all(&dir) {
@@ -1146,6 +1149,89 @@ mod tests {
             );
             assert_eq!(tracked_demo(root), before);
             assert_eq!(tracked_demo(&lane.checkout), before);
+        });
+    }
+
+    /// A dispatcher lane never writes the person's private overrides layer.
+    /// Each command that does is refused with the lane wording, exits as an
+    /// error, and leaves the layer and the private `local/` copies as they
+    /// were.
+    #[test]
+    fn every_command_that_writes_the_overrides_layer_is_refused_in_a_lane() {
+        with_worktrees("layer-lane", |[main, _, _, lane], _| {
+            let layer = main.overrides_dir();
+            let snapshot = |dir: &Path| -> Vec<(std::path::PathBuf, Vec<u8>)> {
+                let mut files = Vec::new();
+                let mut stack = vec![dir.to_path_buf()];
+                while let Some(d) = stack.pop() {
+                    let Ok(entries) = std::fs::read_dir(&d) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            stack.push(path);
+                        } else {
+                            files.push((path.clone(), std::fs::read(&path).unwrap()));
+                        }
+                    }
+                }
+                files.sort();
+                files
+            };
+            let layer_before = snapshot(&layer);
+            let local_before = snapshot(&lane.local_dir());
+            assert!(
+                !layer_before.is_empty(),
+                "the fixture holds a private layer"
+            );
+
+            let refusals: Vec<(&str, anyhow::Error)> = vec![
+                (
+                    "override drop",
+                    override_drop(lane, None).expect_err("override drop"),
+                ),
+                (
+                    "override drop <target>",
+                    override_drop(lane, Some("demo")).expect_err("override drop demo"),
+                ),
+                (
+                    "pipeline override",
+                    super::pipeline::pipeline_override(lane, "demo", "implement.model=other")
+                        .expect_err("pipeline override"),
+                ),
+                (
+                    "prompt override",
+                    prompt_override(lane, "reviewer").expect_err("prompt override"),
+                ),
+                (
+                    "config override",
+                    config_override(lane, None).expect_err("config override"),
+                ),
+                (
+                    "pipeline copy",
+                    super::pipeline::pipeline_copy(lane, "demo", "demo-copy", false)
+                        .expect_err("pipeline copy"),
+                ),
+                (
+                    "prompt copy",
+                    super::pipeline::prompt_copy(lane, "reviewer", "reviewer-copy", false)
+                        .expect_err("prompt copy"),
+                ),
+            ];
+            for (command, err) in &refusals {
+                let message = format!("{err:#}");
+                assert!(
+                    message.contains("A lane does not change the project's setup"),
+                    "{command} was not refused as a lane: {message}"
+                );
+            }
+            assert_eq!(snapshot(&layer), layer_before, "the layer was changed");
+            assert_eq!(
+                snapshot(&lane.local_dir()),
+                local_before,
+                "local/ was changed"
+            );
         });
     }
 

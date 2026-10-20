@@ -35,9 +35,9 @@ object, written to stderr so that stdout stays one JSON value a script can parse
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
-`config show`, `config list`, `config get`, `config path`, `config override`, `doctor`, `jobs
-list` and `sync`.
+override`, `pipeline copy`, `pipeline rename`, `prompt contract`, `prompt list`, `prompt
+override`, `prompt copy`, `config show`, `config list`, `config get`, `config path`, `config
+override`, `doctor`, `jobs list` and `sync`.
 
 ## Commands with no JSON form
 
@@ -1103,6 +1103,9 @@ and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `park
 a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
 reported. Pending tasks and routines are not read.
 
+The check also fails when two routine files hold one task id. It prints `routines:` followed by the
+text of the `routines` row of `spoolway doctor`.
+
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
 ### `spoolway pipeline contract`
@@ -1144,10 +1147,16 @@ A pipeline with no `description:` carries `"description": null`. `source` is `"t
 pipeline from `.spoolway/pipelines/` or `"private"` for one from `local/pipelines/`. `file`
 names the private file a private pipeline came from, and is `null` for a tracked one.
 
+A name claimed by both a tracked and a private pipeline prints as `<name>  held`, with the held
+line indented under it. See [`pipeline rename`](#spoolway-pipeline-rename-old-new). In the JSON,
+each such name is an entry of a `clashes` array with `name`, `tracked`, `private` and `held`.
+
 ### `spoolway pipeline override <name> --set <step>.<key>=<value>`
 
 Patch one step's key in the [overrides layer](configuration.md#the-overrides-layer). The
 tracked file is not touched.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
 ```
 $ spoolway pipeline override impl --set implement.model=claude-opus-5
@@ -1192,6 +1201,8 @@ $ spoolway pipeline override strict --set implement.model=x
 
 Copy a pipeline into the private layer, along with a task skeleton to read from.
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 ```
 $ spoolway pipeline copy impl impl-strict
 wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
@@ -1214,6 +1225,66 @@ has never picked up the commit that added them. In home mode, where the whole se
 private, this writes into the workspace's own `config/` instead. `--json` prints
 `{"wrote": [<path>, ...]}`, with each path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
+
+### `spoolway pipeline rename <old> <new>`
+
+Rename a private pipeline, and move everything that names it onto the new name. This is how a
+name clash with a tracked pipeline is settled.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
+```
+$ spoolway pipeline rename hotfix hotfix-mine
+renamed local/pipelines/hotfix.yml → local/pipelines/hotfix-mine.yml
+moved 1 queued task onto `hotfix-mine`: q1
+```
+
+While a private `hotfix` and a tracked `hotfix` both exist, neither runs. Every other pipeline
+loads and every other task runs. A task on `hotfix` is held: `queue list` and the board show it
+as `held`, with this line:
+
+```
+private `hotfix` clashes with the tracked one: spoolway pipeline rename hotfix <new-name>
+```
+
+`doctor` and `pipeline check` still report the clash, naming both files. `pipeline list` shows
+the name as `held`.
+
+The rename rewrites these to name `<new>`, so each keeps the steps it was queued with:
+
+| What | Moved |
+|---|---|
+| Tasks in the queue | Those on `queued`, `paused`, `blocked`, `hook_failed` or `done`. |
+| Drafted tasks in `pending/` | All of them. |
+| Jobs in your own `jobs.toml` | All of them. |
+
+Jobs in the tracked `.spoolway/jobs.toml` are shared with the team. They stay on `<old>`, and
+the command names them in its output.
+
+The private task skeleton `<old>.md` moves with the pipeline, unless the pipeline names its own
+`task_template:`. The tracked pipeline keeps the old name. A running dispatcher loaded the old
+name, so the command prints a line saying to restart the dispatcher before the tasks run on
+`<new>`.
+
+Both names must be one plain name, as for `pipeline copy`. The command is refused when:
+
+- `<old>` names no private pipeline.
+- `<new>` already names a pipeline or a skeleton, tracked or private.
+- the project is in home mode, where the whole setup is already private and no name can clash.
+- a task naming `<old>` is on a step, since a lane may be working it.
+- a queue file or a drafted task that may name `<old>` cannot be read.
+- a job file cannot be read.
+
+A refusal changes nothing. If one task, draft or job cannot be moved, the command moves the rest
+and keeps the pipeline file under `<old>`. It names each one it left, with the line to set by
+hand. Run the command again to finish. Until the file is renamed, the clash holds `<old>`.
+
+`--json` prints:
+
+```
+{"renamed": {"from", "to"}, "moved": [<id>, ...], "moved_pending": [<path>, ...],
+ "moved_jobs": [<name>, ...], "shared_jobs_left": [<name>, ...]}
+```
 
 ### `spoolway pipeline promote <name>`
 
@@ -1319,6 +1390,8 @@ Print one prompt file.
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 `<name>` may also be a private prompt. The fork is written the same way, but it only starts
 applying once the pipeline that runs it is promoted. See [Private
 prompts](prompts.md#private-prompts).
@@ -1326,6 +1399,8 @@ prompts](prompts.md#private-prompts).
 ### `spoolway prompt copy <from> <to>`
 
 Copy a prompt into the private layer, along with any assets it uses.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
 ```
 $ spoolway prompt copy reviewer reviewer-strict
@@ -1458,6 +1533,8 @@ See [Configuration](configuration.md).
 Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vi`, creating it if needed. See the [overrides
 layer](configuration.md#the-overrides-layer).
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 ### `spoolway override contract`
 
 Print the merge rule, what a pipeline, config or prompt patch may carry, and the four
@@ -1486,7 +1563,7 @@ and why. `--json` carries the same list under `ignored`.
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
 | `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
-| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
+| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse. Refused in a dispatcher lane's worktree |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
@@ -1735,6 +1812,10 @@ the main checkout's, and the [`checkout:` line](#the-checkout-line) names which 
 linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
 the main checkout.
 
+In a lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
+layer alone. If `overrides/config.toml` holds a retired key, the report names the key and says
+to run `spoolway sync` in the main checkout.
+
 ```
 spoolway sync --dry-run
 spoolway sync
@@ -1835,6 +1916,13 @@ seconds, as below. The warnings screen shown before dispatching never runs it.
 A `FAIL` row labelled `queue ids are unique` names each queue file that holds an id another file
 holds. A `FAIL` row labelled `no queued task is named like a routine` names each queued task whose
 id is the name of a routine.
+
+A `FAIL` row labelled `routines` names each task id that two or more routine files hold, with
+every file and an id to give one of them:
+
+```
+  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. Give one of them another id:, such as backend-lint.
+```
 
 A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
 `task/<id>` branch that no queued task owns, with the commands that drop them and the rename

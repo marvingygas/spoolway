@@ -45,6 +45,11 @@
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
 //!
+//! The private override layer is the one file this command writes outside
+//! the checkout. A lane leaves it alone: a retired key stays there and the
+//! report says so, because the layer is the person's and sits in no git
+//! branch to revert from.
+//!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
 //! skeleton spoolway keeps current is one a project cannot restructure, and
@@ -1272,7 +1277,22 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     // was checked is a file changed that a failed check never mentions.
     if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
         let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && repo.in_lane_worktree() {
+            // The layer is the person's private file in the project home,
+            // outside git, and a lane's rewrite of it cannot be reviewed or
+            // undone. Sync still refreshes the lane's tracked files, so
+            // this only leaves the layer alone and says so.
+            let override_path = crate::overrides::config_patch_path(&overrides_dir);
+            outcomes.push(Outcome::blocked(
+                crate::platform::relative(&repo.checkout, &override_path),
+                format!(
+                    "a lane does not change the project's setup, so retired override key(s) \
+                     stay in the private layer: {} — a person runs `spoolway sync` in the \
+                     main checkout to drop them",
+                    dropped.join(", ")
+                ),
+            ));
+        } else if !dropped.is_empty() {
             // Read before the write removes it. A `worktree_root` set
             // only here is dropped just the same, and the folder it named
             // and the tasks still under it are said the same way.
@@ -1837,6 +1857,9 @@ enum Scope {
     /// The key block, and `headless:` renamed to `hide:` on the steps that
     /// had it. Every other line is kept.
     KeyBlockRenamed,
+    /// As [`Scope::KeyBlockRenamed`], and a `headless: false` line deleted on
+    /// at least one step. Every other line is kept.
+    KeyBlockRenamedDropped,
     /// `config.toml`, rewritten as `sync` does: values kept, the table and
     /// comments spoolway's.
     Config,
@@ -1847,7 +1870,10 @@ impl Scope {
     fn dry_run(self, discarded: usize) -> String {
         match self {
             Scope::Whole => format!("whole file, discarding {discarded} line(s)"),
-            Scope::KeyBlock | Scope::KeyBlockRenamed | Scope::Config => self.wrote().to_string(),
+            Scope::KeyBlock
+            | Scope::KeyBlockRenamed
+            | Scope::KeyBlockRenamedDropped
+            | Scope::Config => self.wrote().to_string(),
         }
     }
 
@@ -1858,6 +1884,10 @@ impl Scope {
             Scope::KeyBlock => "key block only, every other line kept",
             Scope::KeyBlockRenamed => {
                 "key block, and `headless:` renamed to `hide:`; every other line kept"
+            }
+            Scope::KeyBlockRenamedDropped => {
+                "key block, and `headless:` renamed to `hide:`, or removed where it was `false`; \
+                 every other line kept"
             }
             Scope::Config => "rewritten as sync does, your values kept",
         }
@@ -1923,7 +1953,13 @@ fn replacement_for(
         // makes the rename too, or the file would still not load after it.
         return match rename_headless(&swapped, Layout::Steps) {
             Renamed::Nothing => Ok((swapped, Scope::KeyBlock)),
-            Renamed::Done { text, .. } => Ok((text, Scope::KeyBlockRenamed)),
+            Renamed::Done { text, dropped, .. } => {
+                let scope = match dropped.is_empty() {
+                    true => Scope::KeyBlockRenamed,
+                    false => Scope::KeyBlockRenamedDropped,
+                };
+                Ok((text, scope))
+            }
             Renamed::Refused(ids) => Err(both_keys_refusal(&ids)),
         };
     }
@@ -2380,16 +2416,17 @@ fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
 ///   binary does, so nothing in it is a project's to have meant. One that
 ///   matches no shipped copy was written by a newer spoolway or edited by hand,
 ///   so it is refused, naming the file and `spoolway sync --replace <path>`,
-///   which swaps the block, renames `headless:` as below, and keeps every
-///   other line.
+///   which swaps the block, renames or removes `headless:` as below, and keeps
+///   every other line.
 /// - A file with no markers is never written, and is reported only by the
 ///   check below. Writing a block into a pipeline somebody wrote themselves
 ///   would be this command helping, which is the one thing it must never do.
 ///   Pasting the two markers in is how a pipeline opts in.
 ///
 /// Two checks read every file, markers or not. The first is the one edit this
-/// command makes to a step: a `headless:` key is renamed to `hide:`, which is
-/// the same setting under its new name — see [`rename_headless`]. The second
+/// command makes to a step: `headless: true` is renamed to `hide: true`, the
+/// same setting under its new name, and `headless: false` is deleted, since
+/// `hide: false` would force a pane — see [`rename_headless`]. The second
 /// is a step shape this release refuses to load — see
 /// [`crate::pipeline::Pipeline::retired_shape_problems`] — which refuses the
 /// file, naming the step and the edit. Nothing is written to it.
@@ -2465,15 +2502,15 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
                 outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
                 continue;
             }
-            Renamed::Done { text, ids } => {
+            Renamed::Done { text, ids, dropped } => {
                 on_disk = text;
-                renamed = Some(ids);
+                renamed = Some((ids, dropped));
             }
         }
 
         // A shape this release stopped loading — `loop: 0` is the one an
         // earlier release still ran — is refused by name, fenced or not, and
-        // the file is left as it is. Apart from the `headless:` rename above,
+        // the file is left as it is. Apart from the `headless:` edit above,
         // `sync` never edits a step, and without this it would report the
         // upgrade done over a pipeline the next command refuses to load.
         if let Ok(pipeline) =
@@ -2561,9 +2598,9 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
             },
         }
 
-        if let Some(ids) = renamed {
-            outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
-            outcomes.push(rename_note(&shown, &name, &ids));
+        if let Some((ids, dropped)) = renamed {
+            outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
+            outcomes.push(rename_note(&shown, &name, &ids, &dropped));
         }
         if changed {
             acts.push(Act::write(path, &shown, on_disk));
@@ -2676,7 +2713,7 @@ fn rename_outside_checkout(
             outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
             return;
         }
-        Renamed::Done { text, ids } => (text, Some(ids)),
+        Renamed::Done { text, ids, dropped } => (text, Some((ids, dropped))),
     };
     let stuck = headless_left(&text, layout);
     if !stuck.is_empty() {
@@ -2688,9 +2725,9 @@ fn rename_outside_checkout(
         outcomes.push(Outcome::blocked(&shown, format!("{consequence}: {why}")));
         return;
     }
-    if let Some(ids) = renamed {
-        outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
-        outcomes.push(rename_note(&shown, name, &ids));
+    if let Some((ids, dropped)) = renamed {
+        outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
+        outcomes.push(rename_note(&shown, name, &ids, &dropped));
         acts.push(Act::write(path, &shown, text));
     }
 }
@@ -2726,17 +2763,48 @@ fn headless_left(text: &str, layout: Layout) -> Vec<String> {
     }
 }
 
+/// The `wrote` line under a file [`rename_headless`] changed. A file whose
+/// every `headless:` was `false` only lost keys, so it names no rename.
+fn rename_wrote(ids: &[String], dropped: &[String]) -> &'static str {
+    match (dropped.is_empty(), dropped.len() == ids.len()) {
+        (true, _) => "`headless:` renamed to `hide:`",
+        (false, true) => "`headless: false` removed",
+        (false, false) => "`headless:` renamed to `hide:`, and `headless: false` removed",
+    }
+}
+
 /// The note under a file whose steps [`rename_headless`] changed.
-fn rename_note(shown: &str, pipeline: &str, ids: &[String]) -> Outcome {
-    let (word, listed) = (
-        if ids.len() == 1 { "step" } else { "steps" },
-        ids.join(", "),
-    );
-    Outcome::migrated(
-        shown,
-        format!("migrated: {pipeline}: `headless:` renamed to `hide:` on {word} {listed}"),
-        format!("migrated: headless renamed to hide on {word} {listed}"),
-    )
+///
+/// `ids` is every step it changed and `dropped` the ones among them that lost
+/// a `headless: false` instead of gaining a `hide:`.
+fn rename_note(shown: &str, pipeline: &str, ids: &[String], dropped: &[String]) -> Outcome {
+    let word = |ids: &[String]| if ids.len() == 1 { "step" } else { "steps" };
+    let renamed: Vec<String> = ids
+        .iter()
+        .filter(|id| !dropped.contains(id))
+        .cloned()
+        .collect();
+    let mut long = format!("migrated: {pipeline}:");
+    let mut short = String::from("migrated:");
+    if !renamed.is_empty() {
+        let (word, listed) = (word(&renamed), renamed.join(", "));
+        long.push_str(&format!(
+            " `headless:` renamed to `hide:` on {word} {listed}"
+        ));
+        short.push_str(&format!(" headless renamed to hide on {word} {listed}"));
+    }
+    if !dropped.is_empty() {
+        let (word, listed) = (word(dropped), dropped.join(", "));
+        let join = if renamed.is_empty() { "" } else { ";" };
+        long.push_str(&format!(
+            "{join} `headless: false` removed from {word} {listed}, where it only spelled \
+             out the default"
+        ));
+        short.push_str(&format!(
+            "{join} headless false removed from {word} {listed}"
+        ));
+    }
+    Outcome::migrated(shown, long, short)
 }
 
 /// Why `sync` still refuses a file whose `headless:` it could not rename:
@@ -2744,7 +2812,8 @@ fn rename_note(shown: &str, pipeline: &str, ids: &[String]) -> Outcome {
 fn unrenamed_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` declares `headless:` in a form `sync` cannot rename (flow style, a \
-         quoted key, or a `-` on a line of its own); write `hide:` in its place."
+         quoted key, a `-` on a line of its own, or the step's only key); write `hide:` in \
+         its place, or delete it if it is `false`."
     )
 }
 
@@ -2775,18 +2844,43 @@ enum Layout {
     Patch,
 }
 
+/// What [`rename_headless`] does to the line of one `headless:` key.
+enum Edit {
+    /// Rename the key to `hide:`.
+    Rename,
+    /// Delete a `headless: false` line.
+    Drop,
+    /// Delete a `- headless: false` that opens a list item, and move the dash
+    /// onto line `next`, the item's next key.
+    DropOpening { next: usize },
+}
+
 /// What [`rename_headless`] found.
 enum Renamed {
     /// No step carries `headless:`.
     Nothing,
     /// These steps carry both `headless:` and `hide:`.
     Refused(Vec<String>),
-    /// The text with the key renamed, and the ids of the steps it was on.
-    Done { text: String, ids: Vec<String> },
+    /// The text with the key renamed or dropped, the ids of the steps it was
+    /// on, and which of those had `headless: false` and lost the key instead.
+    Done {
+        text: String,
+        ids: Vec<String>,
+        dropped: Vec<String>,
+    },
 }
 
 /// Rename the `headless:` key of every step in a pipeline file or patch to
 /// `hide:`, and change nothing else, not one other byte.
+///
+/// The exception is `headless: false`, whose line is deleted. In 0.13.0 it
+/// only spelled out the default and still followed `dispatch.hide_commands`,
+/// while `hide: false` forces a pane. Renaming it would turn a step that
+/// followed the project setting into one that ignores it. A `headless: false`
+/// on the line that opens a list item (`- headless: false`) is deleted too, and
+/// the dash moves onto the item's next key. Only a step with no other key is
+/// left for [`unrenamed_message`]. Any spelling the loader reads as false
+/// counts, so `False` is dropped like `false`.
 ///
 /// A line edit, not a re-serialisation, so comments, ordering, quoting and
 /// line endings survive, and it touches a line only when its key is exactly
@@ -2880,8 +2974,9 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
         steps[pair].to = steps[pair + 1].from;
     }
 
-    let mut edits: Vec<usize> = Vec::new();
+    let mut edits: Vec<(usize, Edit)> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
     let mut both: Vec<String> = Vec::new();
     for step in &steps {
         let (mut headless, mut hide, mut id) = (None, false, step.id.clone());
@@ -2900,7 +2995,31 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
             }
             let rest = &line[column..];
             if is_key(rest, "headless") {
-                headless = Some(at);
+                // What the key is set to, less a trailing comment and the
+                // line ending. Whatever the loader reads as the boolean
+                // false is dropped, so `False` and `FALSE` go with `false`.
+                let value = rest["headless:".len()..]
+                    .split(" #")
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                let drop = matches!(serde_norway::from_str::<bool>(value), Ok(false));
+                let opens_item = at == step.from && matches!(layout, Layout::Steps);
+                let edit = match (drop, opens_item) {
+                    (false, _) => Edit::Rename,
+                    (true, false) => Edit::Drop,
+                    // The next key takes the dash. A step with no key after
+                    // this one has nothing to take it, so it is left for
+                    // [`unrenamed_message`].
+                    (true, true) => {
+                        let next = (at + 1..step.to).find(|&n| content(lines[n]));
+                        match next.filter(|&n| indent(lines[n]) == step.key_indent) {
+                            Some(next) => Edit::DropOpening { next },
+                            None => continue,
+                        }
+                    }
+                };
+                headless = Some((at, edit));
             } else if is_key(rest, "hide") {
                 hide = true;
             } else if is_key(rest, "id") && matches!(layout, Layout::Steps) {
@@ -2915,8 +3034,11 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
         }
         match (headless, hide) {
             (Some(_), true) => both.push(id),
-            (Some(at), false) => {
-                edits.push(at);
+            (Some((at, edit)), false) => {
+                if !matches!(edit, Edit::Rename) {
+                    dropped.push(id.clone());
+                }
+                edits.push((at, edit));
                 ids.push(id);
             }
             (None, _) => {}
@@ -2930,17 +3052,33 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
     }
     let mut out = String::with_capacity(text.len());
     for (at, line) in lines.iter().enumerate() {
-        match edits.contains(&at) {
-            true => {
+        // The line after a dropped `- headless: false` is the item's new
+        // first line, so the dash moves onto it, in the column it had.
+        let takes_dash = edits
+            .iter()
+            .any(|(_, edit)| matches!(edit, Edit::DropOpening { next } if *next == at));
+        if takes_dash {
+            out.push_str(&line[..top]);
+            out.push('-');
+            out.push_str(&line[top + 1..]);
+            continue;
+        }
+        match edits.iter().find(|(line, _)| *line == at) {
+            Some((_, Edit::Drop | Edit::DropOpening { .. })) => {}
+            Some((_, Edit::Rename)) => {
                 let key = line.find("headless").expect("an edited line names the key");
                 out.push_str(&line[..key]);
                 out.push_str("hide");
                 out.push_str(&line[key + "headless".len()..]);
             }
-            false => out.push_str(line),
+            None => out.push_str(line),
         }
     }
-    Renamed::Done { text: out, ids }
+    Renamed::Done {
+        text: out,
+        ids,
+        dropped,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3617,6 +3755,7 @@ mod tests {
         let pipelines = crate::pipeline::Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         let sentences = crate::commands::stack_deprecation(&pipelines).unwrap();
         assert_eq!(
@@ -4615,6 +4754,53 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// Run from a dispatcher lane's worktree, `sync` leaves the private
+    /// override layer alone, even when it holds a retired key, and says why.
+    /// The layer lives in the project home, so a lane that rewrote it would
+    /// change the person's own setup with nothing to review or revert.
+    #[test]
+    fn a_lane_leaves_a_retired_override_key_in_the_layer() {
+        let (mut repo, _root_guard) = fixture("config-override-lane");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-config-override-lane-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let lane = repo.worktree_root().join("task-lane");
+        std::fs::create_dir_all(&lane).unwrap();
+        repo.checkout = lane;
+        std::fs::create_dir_all(
+            crate::config::Config::path_in(&repo.checkout)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::config::Config::path_in(&repo.checkout),
+            "[dispatch]\nlane_quiet = \"15m\"\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.checkout).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            let override_path = crate::overrides::config_patch_path(&overrides);
+            let before = "[dispatch]\nworktree_root = \"/old/worktrees\"\n";
+            std::fs::write(&override_path, before).unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            assert_eq!(std::fs::read_to_string(&override_path).unwrap(), before);
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("a lane does not change the project's setup")),
+                "{lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// A mistake in a private override — a typo, not a key this binary
     /// retired — must never be deleted on the project's behalf: it is left
     /// in the layer, printing "override ignored" until the person who wrote
@@ -5216,14 +5402,14 @@ mod tests {
         let fresh = crate::pipeline::key_block();
         let fenced_now = std::fs::read_to_string(&fenced).unwrap();
         assert!(fenced_now.contains(fresh), "{fenced_now}");
+        // `headless: false` loses its line, since `hide: false` would force a
+        // pane where it only spelled out the default.
+        let renamed = steps("hide", "hide").replace("    hide: false # keep\n", "");
         assert!(
-            fenced_now.ends_with(&steps("hide", "hide")),
-            "only the two key names change: {fenced_now}"
+            fenced_now.ends_with(&renamed),
+            "only the key names change: {fenced_now}"
         );
-        assert_eq!(
-            std::fs::read_to_string(&unfenced).unwrap(),
-            steps("hide", "hide")
-        );
+        assert_eq!(std::fs::read_to_string(&unfenced).unwrap(), renamed);
         assert_eq!(std::fs::read(&clean).unwrap(), clean_before);
 
         let (wrote, _) = dedup_paths(&outcomes);
@@ -5233,7 +5419,8 @@ mod tests {
         assert!(
             lines.contains(
                 &"migrated .spoolway/pipelines/unfenced.yml (migrated: unfenced: `headless:` \
-                  renamed to `hide:` on steps check, merge)"
+                  renamed to `hide:` on step check; `headless: false` removed from step merge, \
+                  where it only spelled out the default)"
                     .to_string()
             ),
             "{lines:?}"
@@ -5307,7 +5494,7 @@ mod tests {
     fn rename_headless_reads_patches_late_ids_and_line_endings() {
         let patch = "# headless: true\nsteps:\n  check:\n    headless: true\n    \
                      timeout: 5m\n  merge:\n    run: echo headless: true\n    hide: false\n";
-        let Renamed::Done { text, ids } = rename_headless(patch, Layout::Patch) else {
+        let Renamed::Done { text, ids, .. } = rename_headless(patch, Layout::Patch) else {
             panic!("the patch names `headless:` on `check`");
         };
         assert_eq!(ids, ["check"]);
@@ -5318,7 +5505,7 @@ mod tests {
 
         let late = "\u{feff}steps:\r\n- run: x\r\n  headless: true\r\n  id: z\r\n  \
                     on_pass: done\r\n";
-        let Renamed::Done { text, ids } = rename_headless(late, Layout::Steps) else {
+        let Renamed::Done { text, ids, .. } = rename_headless(late, Layout::Steps) else {
             panic!("the list item names `headless:`");
         };
         assert_eq!(ids, ["z"]);
@@ -5329,6 +5516,93 @@ mod tests {
             rename_headless(none, Layout::Steps),
             Renamed::Nothing
         ));
+    }
+
+    /// `headless: false` only spelled out the default in 0.13.0, and
+    /// `hide: false` forces a pane, so the key is removed and never renamed.
+    /// `headless: true` is renamed as before, and the other lines stay.
+    #[test]
+    fn headless_false_is_removed_and_headless_true_is_renamed() {
+        let before = "steps:\n  - id: a\n    run: x\n    headless: false # default\n    \
+                      on_pass: b\n  - id: b\n    run: x\n    headless: true\n    \
+                      on_pass: done\n";
+        let Renamed::Done { text, ids, dropped } = rename_headless(before, Layout::Steps) else {
+            panic!("both steps name `headless:`");
+        };
+        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(dropped, ["a"]);
+        assert_eq!(
+            text,
+            "steps:\n  - id: a\n    run: x\n    on_pass: b\n  - id: b\n    run: x\n    \
+             hide: true\n    on_pass: done\n"
+        );
+
+        let patch = "steps:\n  check:\n    headless: false\n    timeout: 5m\n";
+        let Renamed::Done { text, dropped, .. } = rename_headless(patch, Layout::Patch) else {
+            panic!("the patch names `headless:` on `check`");
+        };
+        assert_eq!(dropped, ["check"]);
+        assert_eq!(text, "steps:\n  check:\n    timeout: 5m\n");
+
+        // Every spelling the loader reads as false is dropped, so none of
+        // them is renamed into a `hide: False` that forces a pane.
+        let spelt = "steps:\n  - id: a\n    headless: False\n  - id: b\n    headless: FALSE\n";
+        let Renamed::Done { text, dropped, .. } = rename_headless(spelt, Layout::Steps) else {
+            panic!("both steps name `headless:`");
+        };
+        assert_eq!(dropped, ["a", "b"]);
+        assert_eq!(text, "steps:\n  - id: a\n  - id: b\n");
+
+        // On the line that opens a list item the dash moves onto the next key.
+        let opens = "steps:\n  - headless: false\n    id: a\n    run: x\n";
+        let Renamed::Done { text, dropped, .. } = rename_headless(opens, Layout::Steps) else {
+            panic!("the item opens with `headless:`");
+        };
+        assert_eq!(dropped, ["a"]);
+        assert_eq!(text, "steps:\n  - id: a\n    run: x\n");
+
+        // A step with no other key has nothing to take the dash, so the key
+        // is left for `sync` to refuse by name.
+        let alone = "steps:\n  - headless: false\n  - id: b\n";
+        assert!(matches!(
+            rename_headless(alone, Layout::Steps),
+            Renamed::Nothing
+        ));
+    }
+
+    /// A file whose only `headless:` is `false` is written without the key,
+    /// and the note says the key was removed, not renamed.
+    #[test]
+    fn sync_drops_headless_false_from_a_pipeline_file() {
+        let (repo, _root_guard) = fixture("pipeline-headless-false");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.yml");
+        std::fs::write(
+            &path,
+            "steps:\n  - id: a\n    run: x\n    headless: false\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "steps:\n  - id: a\n    run: x\n    on_pass: done\n");
+        let notes = migration_notes(&outcomes);
+        assert_eq!(notes.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert!(
+            format!("{notes:?}").contains("removed from step a"),
+            "{notes:?}"
+        );
+        // Nothing was renamed, so the `wrote` line must not say so.
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with("(`headless: false` removed)")),
+            "{lines:?}"
+        );
     }
 
     /// `end: true` and `on_pass: blocked` no longer load. A sync names each
@@ -5730,6 +6004,25 @@ mod tests {
             "{:?}",
             outcome_lines(&again)
         );
+    }
+
+    /// `--replace` deletes a `headless: false` and says so, rather than
+    /// reporting a rename that did not happen.
+    #[test]
+    fn replace_removes_headless_false_and_says_it_removed_it() {
+        let (repo, _root_guard) = fixture("replace-pipeline-headless-false");
+        let edited = crate::pipeline::key_block().replace("Absent: 30m.", "Absent: forever.");
+        let path = pipeline_file(&repo, "default", &edited);
+        let before = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("    run: x\n", "    run: x\n    headless: false\n");
+        std::fs::write(&path, &before).unwrap();
+
+        let (shipped, scope) = replacement_for(&repo, &path, &before).unwrap();
+        assert!(matches!(scope, Scope::KeyBlockRenamedDropped));
+        assert!(!shipped.contains("headless: false"));
+        assert!(!shipped.contains("hide: false"));
+        assert!(scope.wrote().contains("removed"), "{}", scope.wrote());
     }
 
     /// `--replace` on a pipeline with `headless:` and `hide:` on one step

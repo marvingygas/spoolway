@@ -137,11 +137,12 @@ A model's `slots` caps lanes on that model, and a profile's `concurrency` caps l
 profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
-The `slots` cap belongs to a `[models]` row. Every model name that matches the same row shares
-its count. With `[models.qwen3] slots = 1`, a step on `qwen3` and a step on `local/qwen3` share
-one slot. A row keyed by a glob such as `qwen3-coder*` shares its slots across all the names it
-matches. A task that waits prints the row, as in `waiting for a qwen3 slot (1/1)`. A model with
-no `[models]` row that sets `slots` is not capped.
+The `slots` cap belongs to the most literal `[models]` row that sets `slots` for a model. Every
+model name that gets its `slots` from the same row shares its count. With
+`[models.qwen3] slots = 1`, a step on `qwen3` and a step on `local/qwen3` share one slot. A row
+keyed by a glob such as `qwen3-coder*` shares its slots across all the names it matches, even
+when another row also matches one of those names. A task that waits prints the row, as in
+`waiting for a qwen3 slot (1/1)`. A model with no `[models]` row that sets `slots` is not capped.
 
 Only the lane on a task's current step counts against those caps, from the pass that starts it.
 A lane whose task has moved to another step counts for nothing, even while it is `Working`, the
@@ -199,6 +200,27 @@ when the lane starts. The unsent ones are saved with the lane in `lanes.json`.
 A later pass types the next message when the lane's turn has ended. It types nothing into a
 lane that is working or waiting on a permission prompt. A step with several skills therefore
 takes one pass per skill to open.
+
+## The spoolway a lane runs
+
+Every agent lane and every command step runs the same `spoolway` as the dispatcher. The
+dispatcher puts the folder that holds its own binary first on the `PATH` of each one it starts.
+A `spoolway report` or `spoolway` call inside a lane therefore never reaches an older install
+that comes earlier on the person's `PATH`. The `PATH` of the person's own shell is not changed.
+
+The dispatcher works out the folder once, when it starts. It uses the folder only when the
+`spoolway` file in it reports the dispatcher's own version. After `spoolway update` replaces the
+binary under a running dispatcher, that file reports another version or is gone. The dispatcher
+then leaves each lane's `PATH` as it is. The `settings` list on the warnings screen names the
+problem. The dispatch tab of bare `spoolway` shows the same note.
+
+```
+settings
+  lanes use the `spoolway` on PATH: /usr/local/bin/spoolway is version 0.14.0, not this
+    dispatcher's 0.13.0. Restart the dispatcher to pick up the new install
+```
+
+Restart the dispatcher to run lanes on the new install.
 
 ## Reading the state
 
@@ -380,6 +402,7 @@ stateDiagram-v2
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
+| `held` | The task's pipeline name belongs to both a tracked and a private pipeline. The dispatcher starts nothing for the task. Drawn `○ held`. NEXT reads ``private `<name>` clashes with the tracked one: spoolway pipeline rename <name> <new-name>``. Other tasks run as usual. See [`pipeline rename`](cli-reference.md#spoolway-pipeline-rename-old-new). |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 

@@ -2290,8 +2290,15 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config, unattended: bool)
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
     // at it yet. `local` itself is never a failure, so this is a note.
+    // `local` is read through `resolve` on the row's own key, so a `qwen*` row
+    // that sets it quiets the note for a `qwen3` row that sets only `slots`:
+    // the two merge when a model matches both.
     for (glob, price) in &config.models {
-        if price.local || price.slots == 0 {
+        if price.slots == 0
+            || crate::models::resolve(&config.models, glob)
+                .price
+                .is_some_and(|merged| merged.local)
+        {
             continue;
         }
         findings.push(Finding::Note(format!(
@@ -2588,7 +2595,8 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// Queue ids that cannot work: a second queue file holding an id another file
-/// already holds, and a queued task whose id is a routine's name. Also the
+/// already holds, a queued task whose id is a routine's name, and one routine
+/// id held by two files under `.spoolway/routines/`. Also the
 /// worktree and branch of a task whose queue file is gone.
 ///
 /// The first is the Windows Explorer copy `dd1 - Copy.md` beside `dd1.md`.
@@ -2596,7 +2604,9 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 /// failure here tells a person before they start a run. The second is a task
 /// whose lanes would be named like the routine's, so the two would take over
 /// each other's panes. Queueing one is refused, but a routine added after
-/// the task was queued is only caught here.
+/// the task was queued is only caught here. The third is two files that are
+/// one routine as far as the dispatcher can tell, so one of their jobs is
+/// skipped each time it is due while the other's copy is queued.
 fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     let (tasks, problems) = repo.tasks_and_problems().unwrap_or_default();
 
@@ -2609,6 +2619,17 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
         Ok(None)
     } else {
         Err(anyhow::anyhow!("{}", duplicates.join("; ")))
+    };
+
+    let folders = super::routines::list_routines(repo).unwrap_or_default();
+    let twin_ids: Vec<String> = super::routines::id_clashes(&folders)
+        .iter()
+        .map(|clash| clash.refusal(&repo.routines_dir()))
+        .collect();
+    let routine_ids_unique = if twin_ids.is_empty() {
+        Ok(None)
+    } else {
+        Err(anyhow::anyhow!("{}", twin_ids.join("; ")))
     };
 
     let routines = super::queue::routine_names(repo);
@@ -2662,6 +2683,7 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     vec![
         Finding::Check("queue ids are unique".into(), unique),
         Finding::Check("no queued task is named like a routine".into(), unrouted),
+        Finding::Check("routines".into(), routine_ids_unique),
         Finding::Check("no deleted task left a worktree or branch".into(), stray),
     ]
 }
@@ -3732,6 +3754,37 @@ mod tests {
         );
     }
 
+    /// A row that sets `slots` is not noted for lacking `local` when a less
+    /// literal row it merges with sets it. Fails when each row is read alone:
+    /// `qwen3` would be told to set `local` though it resolves local.
+    #[test]
+    fn slots_without_local_reads_the_merged_rows() {
+        let pipelines = Pipelines::builtin();
+        let mut config = Config::default();
+        config.models.insert(
+            "qwen*".into(),
+            crate::usage::ModelPrice {
+                local: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "qwen3".into(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+        let notes: Vec<String> = model_health_checks(&pipelines, &config, false)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains("but not `local`") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.is_empty(), "{notes:#?}");
+    }
+
     /// `spoolway doctor` names a `[models]` row nothing routes to, and stays
     /// silent for one a step does reach — the check that would have caught
     /// `[models."*Qwen3.6-35B-A3B"]` sitting dead after `49a4221` renamed the
@@ -4208,6 +4261,7 @@ mod tests {
         Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         }
     }
 
@@ -4263,6 +4317,56 @@ mod tests {
         assert!(duplicate.contains("dd1 - Copy.md"), "{duplicate}");
         let routine = why("no queued task is named like a routine").expect("a failed row");
         assert!(routine.contains("routine `nite`"), "{routine}");
+    }
+
+    /// Two routine folders that each hold a task with the same `id:` fail a
+    /// row naming both files and the fix, because spoolway would count them
+    /// as one routine and one job would never fire. Routines whose ids
+    /// differ pass.
+    #[test]
+    fn a_task_id_held_by_two_routine_folders_fails_doctor_naming_both_files() {
+        let (repo, _scratch) = scratch_repo("routine-id-unique");
+        let doc = |id: &str| format!("---\nid: {id}\nstage: queued\n---\n## Goal\nok\n");
+        for (dir, id) in [("frontend", "lint"), ("backend", "lint"), ("docs", "spell")] {
+            let folder = repo.routines_dir().join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(format!("{id}.md")), doc(id)).unwrap();
+        }
+
+        let findings = queue_id_checks(&repo);
+
+        let failures: Vec<String> = findings
+            .iter()
+            .filter_map(|finding| match finding {
+                Finding::Check(_, Err(err)) => Some(format!("{err:#}")),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            findings.iter().any(|finding| matches!(
+                finding,
+                Finding::Check(label, Err(_)) if label == "routines"
+            )),
+            "the row is labelled `routines`, so the line reads `FAIL  routines: task id …`"
+        );
+        let clash = failures
+            .iter()
+            .find(|why| why.contains("frontend/lint.md") && why.contains("backend/lint.md"))
+            .unwrap_or_else(|| panic!("no failed row names both files: {failures:?}"));
+        assert!(
+            clash.starts_with("task id `lint` is in two routines"),
+            "{clash}"
+        );
+        assert!(
+            clash.contains(".spoolway/routines/frontend/lint.md"),
+            "{clash}"
+        );
+        assert!(
+            clash.contains(".spoolway/routines/backend/lint.md"),
+            "{clash}"
+        );
+        assert!(clash.contains("another id"), "{clash}");
+        assert!(!clash.contains("spell"), "{clash}");
     }
 
     /// A worktree on `task/<id>` that no queued task records fails its row

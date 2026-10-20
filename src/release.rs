@@ -44,6 +44,7 @@
 //! [`newer`] behind the same kind of cache, for the board's header, which
 //! says when a newer release is out.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -670,6 +671,136 @@ fn cached_reading(
     state.version.clone()
 }
 
+/// The folder a lane's or command step's `PATH` starts with, so the
+/// `spoolway` they call is the dispatcher's own.
+///
+/// A lane reports with whatever `spoolway` comes first on its `PATH`. One
+/// older than the dispatcher cannot read the pipeline snapshot the dispatcher
+/// wrote, so every `report` fails and the task stays `running` for ever.
+///
+/// Worked out once, at the first call. `spoolway update` can replace the file
+/// in this folder under a running dispatcher, and the answer is cached so the
+/// folder stays first on the `PATH` of every later lane. Asked afresh, a
+/// folder whose binary was replaced would be dropped and a lane would fall
+/// back to whatever `spoolway` the person's own `PATH` holds, which may be
+/// older. The lanes then run the folder's new install, which is the one the
+/// person asked for. The answer is:
+///
+/// - `Ok(Some(dir))`: `dir/spoolway` reports this build's version.
+/// - `Ok(None)`: this process is not a binary named `spoolway`, as under
+///   `cargo test`, so there is no folder to claim.
+/// - `Err(why)`: the folder's `spoolway` is gone or is another version.
+///   `PATH` is left alone, and `why` is shown among the startup settings.
+pub fn dispatcher_bin_dir() -> &'static Result<Option<PathBuf>, String> {
+    #[cfg(test)]
+    if let Some(answer) = test_dir::current() {
+        return answer;
+    }
+    static DIR: std::sync::OnceLock<Result<Option<PathBuf>, String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(dispatcher_bin_dir_now)
+}
+
+/// [`dispatcher_bin_dir`]'s question asked afresh, for the process that is
+/// about to start a dispatcher and has to say what that dispatcher will find.
+///
+/// The board's dispatch tab is such a process. It starts a child from its own
+/// binary and lives across installs, so its cached answer may be from before
+/// an update. The child judges the binary at startup, and the board's own
+/// executable is the one the child runs, so a fresh look here is the child's
+/// answer.
+pub fn dispatcher_bin_dir_now() -> Result<Option<PathBuf>, String> {
+    #[cfg(test)]
+    if let Some(answer) = test_dir::current() {
+        return answer.clone();
+    }
+    match std::env::current_exe() {
+        Ok(exe) => resolve_bin_dir(&exe, current()),
+        Err(_) => Ok(None),
+    }
+}
+
+/// [`dispatcher_bin_dir`]'s answer for one executable path and version.
+///
+/// `current_exe` on Linux names a replaced binary `…/spoolway (deleted)`, so
+/// that suffix is dropped before the name is judged. The folder is still the
+/// right one to look in, because the install writes the new file beside the
+/// old name. Whatever is there is then asked its version, since a file at the
+/// name is no proof it is this build.
+fn resolve_bin_dir(exe: &Path, version: &str) -> Result<Option<PathBuf>, String> {
+    let name = exe
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(dir) = exe.parent() else {
+        return Ok(None);
+    };
+    if name.trim_end_matches(" (deleted)") != PACKAGE {
+        return Ok(None);
+    }
+    let program = dir.join(PACKAGE);
+    // Bounded, because the board asks this synchronously on every dispatch
+    // start, and a binary that hangs on `--version` must not freeze it.
+    let reported = {
+        let program = program.clone();
+        bounded(move || reported_version_of(&program), LOOKUP_DEADLINE)
+    };
+    match reported {
+        Some(found) if found == version => Ok(Some(dir.to_path_buf())),
+        Some(found) => Err(format!(
+            "lanes use the `{PACKAGE}` on PATH: {} is version {found}, not this \
+             dispatcher's {version}. Restart the dispatcher to pick up the new install",
+            program.display()
+        )),
+        None => Err(format!(
+            "lanes use the `{PACKAGE}` on PATH: {} is gone or does not answer `--version`. \
+             Restart the dispatcher to pick up the new install",
+            program.display()
+        )),
+    }
+}
+
+/// Put `dir` first on the `PATH` in `env`, ahead of `path`.
+///
+/// Without a `dir` the map is left alone, so the lane inherits whatever
+/// `PATH` its shell already has.
+pub fn put_first_on_path(
+    env: &mut BTreeMap<String, String>,
+    dir: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) {
+    let Some(dir) = dir else { return };
+    let mut dirs = vec![dir.to_path_buf()];
+    dirs.extend(
+        path.map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+    }
+}
+
+/// The folder a lane is started with first on its `PATH`, if there is one.
+///
+/// A lane gets it as a prefix on the `PATH` its own shell has, which is how a
+/// herdr pane keeps the shell's `PATH` and a headless turn keeps the
+/// dispatcher's.
+pub fn lane_path_prefix() -> Option<PathBuf> {
+    dispatcher_bin_dir().as_ref().ok().cloned().flatten()
+}
+
+/// Make the `spoolway` a command step calls the dispatcher's own.
+///
+/// A command step's environment is a map of values rather than a shell to
+/// prefix, and a shown one already replays the dispatcher's whole
+/// environment, so `PATH` is written out in full.
+pub fn use_dispatcher_binary(env: &mut BTreeMap<String, String>) {
+    let dir = dispatcher_bin_dir()
+        .as_ref()
+        .ok()
+        .and_then(Option::as_deref);
+    put_first_on_path(env, dir, std::env::var_os("PATH").as_deref());
+}
+
 /// Ask the `spoolway` on `PATH` what version it is.
 ///
 /// Resolved through `PATH` rather than `current_exe` for the reason
@@ -679,7 +810,13 @@ fn cached_reading(
 fn path_reported_version() -> Option<String> {
     let program =
         std::env::var_os("PATH").and_then(|path| crate::platform::which(PACKAGE, &path))?;
-    let out = Command::new(&program)
+    reported_version_of(&program)
+}
+
+/// What `program --version` says its version is, or `None` when it does not
+/// run, exits non-zero or prints nothing.
+fn reported_version_of(program: &Path) -> Option<String> {
+    let out = Command::new(program)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -765,9 +902,111 @@ fn upgraded_command(program: &Path, args: &[String]) -> Command {
     command
 }
 
+/// A test's stand-in for [`dispatcher_bin_dir`], since the real answer is
+/// worked out once per process from the test binary, which claims nothing.
+#[cfg(test)]
+pub(crate) mod test_dir {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static DIR: RefCell<Option<&'static Result<Option<PathBuf>, String>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<&'static Result<Option<PathBuf>, String>> {
+        DIR.with(|dir| *dir.borrow())
+    }
+
+    /// Make this thread's dispatcher run from `dir` until the thread ends.
+    pub(crate) fn pin(dir: &Path) {
+        pin_answer(Ok(Some(dir.to_path_buf())));
+    }
+
+    /// Make this thread's dispatcher get `answer` until the thread ends.
+    /// The answer is leaked, which a test process can afford.
+    pub(crate) fn pin_answer(answer: Result<Option<PathBuf>, String>) {
+        let answer: &'static _ = Box::leak(Box::new(answer));
+        DIR.with(|slot| *slot.borrow_mut() = Some(answer));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder holding an executable `spoolway` that prints `version`.
+    fn fake_install(name: &str, version: &str) -> crate::scratch::ScratchRoot {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::scratch::root(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join(PACKAGE);
+        std::fs::write(&program, format!("#!/bin/sh\necho 'spoolway {version}'\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    /// The dispatcher's folder goes ahead of every entry of the `PATH` it is
+    /// put on, so an older `spoolway` further along is never reached first.
+    #[test]
+    fn the_folder_goes_ahead_of_every_entry_on_the_path_it_is_given() {
+        let mut env = BTreeMap::new();
+        put_first_on_path(
+            &mut env,
+            Some(Path::new("/opt/new")),
+            Some(std::ffi::OsStr::new("/usr/old:/usr/bin")),
+        );
+        assert_eq!(env["PATH"], "/opt/new:/usr/old:/usr/bin");
+    }
+
+    /// With no folder to claim, the lane keeps the `PATH` it would inherit.
+    #[test]
+    fn no_dispatcher_folder_leaves_path_alone() {
+        let mut env = BTreeMap::new();
+        put_first_on_path(&mut env, None, Some(std::ffi::OsStr::new("/usr/bin")));
+        assert!(!env.contains_key("PATH"));
+    }
+
+    /// A binary of this version, named `spoolway`, is the folder to claim —
+    /// also when Linux reports it as replaced.
+    #[test]
+    fn the_folder_of_a_matching_binary_is_claimed() {
+        let dir = fake_install("bin-dir-match", "1.2.3");
+        let exe = dir.join(PACKAGE);
+        assert_eq!(resolve_bin_dir(&exe, "1.2.3"), Ok(Some(dir.to_path_buf())));
+        let replaced = dir.join("spoolway (deleted)");
+        assert_eq!(
+            resolve_bin_dir(&replaced, "1.2.3"),
+            Ok(Some(dir.to_path_buf()))
+        );
+    }
+
+    /// An update that swapped in another version, or removed the file, leaves
+    /// `PATH` alone and says why.
+    #[test]
+    fn a_replaced_or_missing_binary_is_reported_not_claimed() {
+        let dir = fake_install("bin-dir-other", "2.0.0");
+        let other = resolve_bin_dir(&dir.join(PACKAGE), "1.2.3").unwrap_err();
+        assert!(
+            other.contains("2.0.0") && other.contains("1.2.3"),
+            "{other}"
+        );
+
+        let empty = crate::scratch::root("bin-dir-gone");
+        let gone = resolve_bin_dir(&empty.join(PACKAGE), "1.2.3").unwrap_err();
+        assert!(gone.contains("gone"), "{gone}");
+    }
+
+    /// A process that is not a binary named `spoolway`, such as a test
+    /// binary, claims nothing.
+    #[test]
+    fn a_binary_with_another_name_claims_nothing() {
+        let dir = fake_install("bin-dir-name", "1.2.3");
+        assert_eq!(
+            resolve_bin_dir(&dir.join("spoolway-3f9a"), "1.2.3"),
+            Ok(None)
+        );
+    }
 
     /// Which installs `update` may touch: only an npm global one, never a
     /// Nix store, a hand-placed binary, a project-local install or an `npx`

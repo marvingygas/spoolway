@@ -4,10 +4,13 @@
 //!
 //! A private file is never merged onto a tracked one the way
 //! [`crate::overrides`] merges a patch: it is a whole extra entry, and a
-//! private pipeline or prompt whose name already belongs to a tracked one is
-//! refused outright, at [`crate::pipeline::Pipelines::load_impl`] and
+//! private prompt whose name already belongs to a tracked one is refused
+//! outright, at [`crate::pipeline::Pipelines::load_impl`] and
 //! [`crate::prompt::path_for`]'s own callers — so nothing private can ever
-//! silently stand in for something tracked. A tracked pipeline naming a
+//! silently stand in for something tracked. A private pipeline of a tracked
+//! one's name is held instead of refused: it and the tracked one both leave
+//! the loaded set, only tasks naming it wait, and `spoolway pipeline rename`
+//! settles it. A tracked pipeline naming a
 //! prompt that exists only here is refused the same way, for the opposite
 //! reason: that pipeline would break the moment it ran on a machine with no
 //! copy of this private prompt.

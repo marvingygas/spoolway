@@ -149,6 +149,14 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
         }
         println!();
     }
+    // A clashed name is in neither file's pipeline: it left the set, and a
+    // list without it would hide the very name the refusals above point the
+    // person at.
+    for (name, clash) in &pipelines.clashes {
+        println!("{name}  held");
+        println!("    {}", clash.held_line(name));
+        println!();
+    }
     Ok(())
 }
 
@@ -157,9 +165,10 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
 /// `pipeline show` both print after a private pipeline's name, factored out
 /// so it is one sentence to get right and one place a test can check it
 /// against, rather than two copies that could read differently. Never a
-/// stand-in for a tracked pipeline of the same name — names cannot clash,
-/// see `crate::pipeline::merge_private` — only a mark so nobody mistakes
-/// this pipeline for the tracked one it may have started life as a copy of.
+/// stand-in for a tracked pipeline of the same name — a private file of a
+/// tracked name is held out of the set, see `crate::pipeline::merge_private`
+/// — only a mark so nobody mistakes this pipeline for the tracked one it may
+/// have started life as a copy of.
 fn private_marker(pipeline: &Pipeline) -> String {
     match &pipeline.private_file {
         Some(file) => format!("  private · {}", file.display()),
@@ -182,9 +191,21 @@ struct PipelineListEntry {
     file: Option<String>,
 }
 
+/// A name both a tracked and a private file claim, held out of
+/// `pipelines` until `pipeline rename` settles it.
+#[derive(Debug, serde::Serialize)]
+struct PipelineClashEntry {
+    name: String,
+    tracked: String,
+    private: String,
+    /// The line a task on this name is held with.
+    held: String,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct PipelineListJson {
     pipelines: Vec<PipelineListEntry>,
+    clashes: Vec<PipelineClashEntry>,
 }
 
 fn build_list(pipelines: &Pipelines) -> PipelineListJson {
@@ -204,6 +225,16 @@ fn build_list(pipelines: &Pipelines) -> PipelineListJson {
                     .private_file
                     .as_ref()
                     .map(|path| path.display().to_string()),
+            })
+            .collect(),
+        clashes: pipelines
+            .clashes
+            .iter()
+            .map(|(name, clash)| PipelineClashEntry {
+                name: name.clone(),
+                tracked: clash.tracked.display().to_string(),
+                private: clash.private.display().to_string(),
+                held: clash.held_line(name),
             })
             .collect(),
     }
@@ -1158,6 +1189,14 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
         }
     }
 
+    // Two routine files with one id are one routine to the dispatcher, so
+    // one job is skipped while the other's copy is queued, and nothing says
+    // the copy came from another folder. Doctor refuses it too.
+    let routines = super::routines::list_routines(repo).unwrap_or_default();
+    for clash in super::routines::id_clashes(&routines) {
+        problems.push(format!("routines: {}", clash.refusal(&repo.routines_dir())));
+    }
+
     // Read the prompts against the steps that run them: this rule is a fact,
     // not an opinion — a prompt naming a `spoolway …` command this binary
     // does not have, checked against clap's own command tree. Nothing
@@ -1223,6 +1262,7 @@ fn report_gate_warnings(warnings: &[String]) {
 /// project-wide (`repo.overrides_dir()`), so a lane in any worktree sees the
 /// same fork on its next pass.
 pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -1342,13 +1382,15 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// `pipeline copy`, `prompt copy` and `pipeline promote` — the private
-// layer's own write commands, see `crate::local` and the plan's
-// `d-private-pipelines` decision. `copy` starts a private pipeline or
-// prompt from one that already exists, tracked or private; `promote` is its
-// reverse, moving a private pipeline — the private prompts it names and its
-// own private skeleton — into the tracked control plane. Both refuse a
-// clash rather than silently shadow or overwrite a file.
+// `pipeline copy`, `prompt copy`, `pipeline rename` and `pipeline promote` —
+// the private layer's own write commands, see `crate::local`. `copy` starts a
+// private pipeline or prompt from one that already exists, tracked or
+// private; `promote` is its reverse, moving a private pipeline — the private
+// prompts it names and its own private skeleton — into the tracked control
+// plane. `copy` and `promote` refuse a clash rather than silently shadow or
+// overwrite a file. `rename` is what settles one that already exists: a
+// private pipeline whose name a tracked file also holds is renamed, and the
+// tasks and jobs naming it follow.
 // ---------------------------------------------------------------------------
 
 /// Extensions [`crate::pipeline::Pipelines::dir_in`]'s own directory accepts
@@ -1385,6 +1427,19 @@ fn copy_target_dirs(repo: &Repo) -> (PathBuf, PathBuf) {
     }
 }
 
+/// Refuses `pipeline copy`, `prompt copy` and `pipeline rename` in a lane,
+/// naming what each would have written or changed: `local/` in repo mode,
+/// the workspace's own setup folders in home mode, the same split
+/// [`copy_target_dirs`] draws.
+fn refuse_copy_in_lane(repo: &Repo) -> Result<()> {
+    let owner = if crate::local::is_repo_mode(&repo.checkout) {
+        "the private `local/` folder"
+    } else {
+        "this workspace's setup"
+    };
+    repo.refuse_in_lane(owner)
+}
+
 /// Where `prompt copy <from> <to>` writes: `local/prompts/<to>/PROMPT.md`
 /// in repo mode, or the tracked directory shape itself in home mode —
 /// [`crate::prompt::directory_form`], never `repo.prompts_dir().join(…)`
@@ -1401,9 +1456,11 @@ fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
     }
 }
 
-/// Refuse `name` as a `<to>` that already names a pipeline — tracked in
+/// Refuse `name` as a destination that already names a pipeline — tracked in
 /// either the checkout a lane runs from or the main checkout, or private,
-/// `.yml` or `.yaml`.
+/// `.yml` or `.yaml`. `arg` is the argument the person typed it as, `<to>`
+/// for `pipeline copy` and `<new>` for `pipeline rename`, so the advice to
+/// choose another names an argument that command has.
 ///
 /// A linked worktree reads the same private `local/` as the main checkout,
 /// but its own tracked `.spoolway/` can sit on an older or newer branch.
@@ -1413,13 +1470,13 @@ fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
 /// files and may not have the clashing commit at all. For example: `extra`
 /// committed to `.spoolway/pipelines/` on `main`, then `pipeline copy
 /// default extra` run from a worktree that has never fetched that commit.
-fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
+fn refuse_pipeline_clash(repo: &Repo, name: &str, arg: &str) -> Result<()> {
     if let Some(path) = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), name)
         .or_else(|| pipeline_file_in(&Pipelines::dir_in(&repo.root), name))
     {
         bail!(
             "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
-             different `<to>`",
+             different `{arg}`",
             path.display()
         );
     }
@@ -1428,7 +1485,7 @@ fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
     {
         bail!(
             "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
-             different `<to>`",
+             different `{arg}`",
             path.display()
         );
     }
@@ -1447,7 +1504,7 @@ fn tracked_skeleton_path_in(root: &Path, name: &str) -> PathBuf {
     .join(format!("{name}.md"))
 }
 
-/// Refuse `name` as a `<to>` whose skeleton already exists — tracked
+/// Refuse `name` as a destination whose skeleton already exists — tracked
 /// `<name>.md`, checked in both the checkout a lane runs from and the main
 /// checkout (see [`refuse_pipeline_clash`] for why), or, in repo mode, a
 /// private `local/templates/tasks/<name>.md` — the clash
@@ -1455,8 +1512,9 @@ fn tracked_skeleton_path_in(root: &Path, name: &str) -> PathBuf {
 /// that can exist with no pipeline of that name at all (the task's own
 /// repro: `echo MINE > local/templates/tasks/foo.md` with no `foo` pipeline
 /// anywhere). Checked before `pipeline_copy` writes anything, so a person's
-/// skeleton is never silently replaced.
-fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
+/// skeleton is never silently replaced. `arg` is as for
+/// [`refuse_pipeline_clash`].
+fn refuse_skeleton_clash(repo: &Repo, name: &str, arg: &str) -> Result<()> {
     let tracked = repo.task_templates_dir().join(format!("{name}.md"));
     let tracked = if tracked.is_file() {
         Some(tracked)
@@ -1466,7 +1524,7 @@ fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
     };
     if let Some(tracked) = tracked {
         bail!(
-            "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+            "a skeleton for `{name}` already exists — {} — choose a different `{arg}`",
             tracked.display()
         );
     }
@@ -1475,7 +1533,7 @@ fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
             crate::local::task_templates_dir(&repo.local_dir()).join(format!("{name}.md"));
         if private.is_file() {
             bail!(
-                "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+                "a skeleton for `{name}` already exists — {} — choose a different `{arg}`",
                 private.display()
             );
         }
@@ -1574,6 +1632,7 @@ fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
 /// `<to>.md` would be a file neither reads, and rewriting the shared file
 /// would change what `from` reads too.
 pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    refuse_copy_in_lane(repo)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -1603,9 +1662,9 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
     // comment above.
     let shares_skeleton = from_pipeline.task_template.is_some();
 
-    refuse_pipeline_clash(repo, to)?;
+    refuse_pipeline_clash(repo, to, "<to>")?;
     if !shares_skeleton {
-        refuse_skeleton_clash(repo, to)?;
+        refuse_skeleton_clash(repo, to, "<to>")?;
     }
 
     let (pipelines_dir, templates_dir) = copy_target_dirs(repo);
@@ -1622,6 +1681,314 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
     print_wrote(json, &[&pipeline_dest, &skeleton_dest])
 }
 
+/// The stages a task can sit on while its pipeline's file is renamed under
+/// it: waiting in the queue, stopped for a person, or finished. Any other
+/// stage is a step, and a lane or a command run is working it.
+///
+/// `paused` and `blocked` do not mean nothing is alive: a lane parked
+/// mid-turn can still report. The move is safe all the same, because it is
+/// made under the task's lock and a report rereads the task under that lock,
+/// so it finds the same steps under the new name. `done` is here because the
+/// dispatcher archives a finished task only after it has routed it, so a task
+/// that finished just before a clash appeared still sits in the queue naming
+/// the pipeline, and nothing will run for it again.
+const STILL_STAGES: &[&str] = &[
+    crate::pipeline::QUEUED,
+    crate::pipeline::PAUSED,
+    crate::pipeline::BLOCKED,
+    crate::pipeline::HOOK_FAILED,
+    crate::pipeline::DONE,
+];
+
+/// `spoolway pipeline rename <old> <new>`.
+///
+/// Renames the private file `local/pipelines/<old>.yml` and moves everything
+/// naming `<old>` onto `<new>`: the tasks in the queue, the tasks drafted in
+/// `pending/`, and the jobs in the user's own `jobs.toml`. This is how a name
+/// clash with a tracked pipeline is settled: the tracked pipeline keeps the
+/// name, and whatever was queued on the private one follows its pipeline, so
+/// each keeps the steps it was queued with. Left behind, a task or a job
+/// would silently run the tracked pipeline's steps under the old name.
+///
+/// Only a private pipeline can be renamed. A tracked one is shared with the
+/// whole team, and renaming it here would break every other checkout. For the
+/// same reason a job in the tracked `.spoolway/jobs.toml` is named in the
+/// output but left alone.
+///
+/// A task on a step may have a lane or a command run working it, and its file
+/// is rewritten by that run's own report. So nothing is changed while one
+/// task naming `<old>` is on a step. A queue or pending file that will not
+/// parse, and might name `<old>`, stops the rename the same way, since it
+/// can be neither moved nor skipped safely.
+///
+/// The tasks, drafts and jobs are moved before the pipeline file. Until the
+/// file is renamed the clash holds `<old>`, so a rename that stops half way
+/// leaves the moved ones on a name nothing runs and the rest held, never on
+/// the tracked pipeline's steps. If anything cannot be moved, the file stays
+/// where it is, the error names each one with the line that moves it by
+/// hand, and running the command again picks up from there. The task's
+/// skeleton, `<old>.md` under `local/templates/tasks/`, is the file a
+/// pipeline with no `task_template:` of its own resolves by name, so it moves
+/// with the pipeline.
+pub fn pipeline_rename(repo: &Repo, old: &str, new: &str, json: bool) -> Result<()> {
+    refuse_copy_in_lane(repo)?;
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+    crate::local::refuse_unless_plain_name("pipeline", old)?;
+    crate::local::refuse_unless_plain_name("pipeline", new)?;
+
+    if !crate::local::is_repo_mode(&repo.checkout) {
+        bail!(
+            "`pipeline rename` renames a private pipeline under `local/pipelines/`, and this \
+             workspace keeps its whole setup private, so no pipeline name here can clash with a \
+             tracked one. Rename the file in {} by hand if you want another name.",
+            Pipelines::dir_in(&repo.checkout).display()
+        );
+    }
+
+    let local_pipelines = crate::local::pipelines_dir(&repo.local_dir());
+    let source = pipeline_file_in(&local_pipelines, old).with_context(|| {
+        format!(
+            "no private pipeline named `{old}` in {} — only a private pipeline can be renamed; \
+             see `spoolway pipeline list`",
+            local_pipelines.display()
+        )
+    })?;
+    refuse_pipeline_clash(repo, new, "<new>")?;
+
+    let raw = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+    let pipeline = crate::pipeline::parse_unchecked(old, &raw)
+        .with_context(|| format!("parsing {}", source.display()))?;
+
+    let skeleton_from =
+        crate::local::task_templates_dir(&repo.local_dir()).join(format!("{old}.md"));
+    let moves_skeleton = pipeline.task_template.is_none() && skeleton_from.is_file();
+    if moves_skeleton {
+        refuse_skeleton_clash(repo, new, "<new>")?;
+    }
+
+    // Everything that names `old` is found, and everything that blocks the
+    // rename is refused, before the first file is touched.
+    let (tasks, problems) = repo.tasks_and_problems()?;
+    let pending = super::pending::files_naming_pipeline(&repo.pending_dir(), old)?;
+    let unreadable: Vec<&Path> = problems
+        .iter()
+        .map(|problem| problem.path.as_path())
+        .filter(|path| super::pending::unparsed_file_may_name_pipeline(path, old))
+        .chain(pending.unparsed.iter().map(PathBuf::as_path))
+        .collect();
+    if !unreadable.is_empty() {
+        let files: Vec<String> = unreadable
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        bail!(
+            "did not rename `{old}`: {} cannot be read as a task and may name it, so it would \
+             keep the old name and run the tracked pipeline's steps. Mend or remove it, then \
+             run this again. Nothing was changed.",
+            files.join(", ")
+        );
+    }
+    let on_it: Vec<&crate::task::Task> = tasks
+        .iter()
+        .filter(|task| task.front.pipeline.as_deref().map(str::trim) == Some(old))
+        .collect();
+    let running: Vec<String> = on_it
+        .iter()
+        .filter(|task| !STILL_STAGES.contains(&task.stage()))
+        .map(|task| format!("`{}` (at `{}`)", task.id(), task.stage()))
+        .collect();
+    if !running.is_empty() {
+        bail!(
+            "did not rename `{old}`: task {} is on a step of it, and a lane may be working it \
+             now. Let it finish, or stop it, then run this again. Nothing was changed.",
+            running.join(", ")
+        );
+    }
+    let jobs = crate::jobs::load(repo).with_context(|| {
+        format!(
+            "did not rename `{old}`: a job store cannot be read, so the jobs naming it cannot be \
+             found. Mend it (see `spoolway doctor`), then run this again. Nothing was changed"
+        )
+    })?;
+    let (own_jobs, shared_jobs): (Vec<&crate::jobs::Job>, Vec<&crate::jobs::Job>) = jobs
+        .iter()
+        .filter(|job| job.spec.pipeline.trim() == old)
+        .partition(|job| job.scope == crate::jobs::Scope::User);
+
+    // Reread under each task's own lock: a task that moved onto a step since
+    // the check above is left alone and named, not rewritten under a lane.
+    let mut moved = Vec::new();
+    let mut moved_pending = Vec::new();
+    let mut moved_jobs = Vec::new();
+    let mut stuck = Vec::new();
+    for listed in &on_it {
+        let id = listed.id();
+        let lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+        let moved_one = lock.and_then(|_lock| {
+            let mut task = repo.task(id)?;
+            if task.front.pipeline.as_deref().map(str::trim) != Some(old) {
+                return Ok(false);
+            }
+            if !STILL_STAGES.contains(&task.stage()) {
+                bail!("moved onto the step `{}` meanwhile", task.stage());
+            }
+            task.front.pipeline = Some(new.to_string());
+            task.save()?;
+            Ok(true)
+        });
+        match moved_one {
+            Ok(true) => moved.push(id.to_string()),
+            Ok(false) => {}
+            Err(err) => stuck.push(format!(
+                "task `{id}` ({err:#}) — set `pipeline: {new}` in its file when it can be \
+                 changed"
+            )),
+        }
+    }
+    for path in &pending.parsed {
+        let name = path.display().to_string();
+        let rewritten = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {name}"))
+            .map(|doc| super::queue::with_frontmatter_field(&doc, "pipeline", new))
+            .and_then(|doc| crate::task::write_atomic(path, doc));
+        match rewritten {
+            Ok(()) => moved_pending.push(name),
+            Err(err) => stuck.push(format!(
+                "drafted task {name} ({err:#}) — set `pipeline: {new}` in it"
+            )),
+        }
+    }
+    for job in &own_jobs {
+        let spec = crate::jobs::JobSpec {
+            pipeline: new.to_string(),
+            ..job.spec.clone()
+        };
+        match crate::jobs::write(repo, job.scope, &job.name, &spec) {
+            Ok(()) => moved_jobs.push(job.name.clone()),
+            Err(err) => stuck.push(format!(
+                "job `{}` ({err:#}) — set `pipeline = \"{new}\"` in {}",
+                job.name,
+                job.source.display()
+            )),
+        }
+    }
+    if !stuck.is_empty() {
+        bail!(
+            "did not finish renaming `{old}`: {}. The private file keeps the name `{old}`, so \
+             what was left on it still means the private pipeline, or stays held while the \
+             clash lasts; none of it runs the tracked pipeline's steps. What already moved ({} in \
+             all) stays on `{new}`. Run this again once these are settled.",
+            stuck.join("; "),
+            moved.len() + moved_pending.len() + moved_jobs.len()
+        );
+    }
+
+    let ext = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("yml");
+    let dest = local_pipelines.join(format!("{new}.{ext}"));
+    std::fs::rename(&source, &dest).with_context(|| {
+        format!(
+            "renaming {} to {} — what named `{old}` is already on `{new}`; rename the file by \
+             hand",
+            source.display(),
+            dest.display()
+        )
+    })?;
+    if moves_skeleton {
+        let skeleton_to =
+            crate::local::task_templates_dir(&repo.local_dir()).join(format!("{new}.md"));
+        std::fs::rename(&skeleton_from, &skeleton_to).with_context(|| {
+            format!(
+                "renaming {} to {} — the pipeline file is already renamed; move the skeleton by \
+                 hand",
+                skeleton_from.display(),
+                skeleton_to.display()
+            )
+        })?;
+    }
+
+    let dispatching = crate::lock::Lock::holder(&repo.lock_file())?;
+    let shared: Vec<&str> = shared_jobs.iter().map(|job| job.name.as_str()).collect();
+    if json {
+        let payload = rename_json(&source, &dest, &moved, &moved_pending, &moved_jobs, &shared);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        let name = |path: &Path| {
+            format!(
+                "local/pipelines/{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        };
+        println!("renamed {} → {}", name(&source), name(&dest));
+        match moved.len() {
+            0 => println!("moved no task: none was queued on `{old}`"),
+            1 => println!("moved 1 queued task onto `{new}`: {}", moved[0]),
+            n => println!("moved {n} queued tasks onto `{new}`: {}", moved.join(", ")),
+        }
+        if !moved_pending.is_empty() {
+            println!(
+                "moved {} drafted task{} onto `{new}`: {}",
+                moved_pending.len(),
+                if moved_pending.len() == 1 { "" } else { "s" },
+                moved_pending.join(", ")
+            );
+        }
+        if !moved_jobs.is_empty() {
+            println!(
+                "moved {} job{} onto `{new}`: {}",
+                moved_jobs.len(),
+                if moved_jobs.len() == 1 { "" } else { "s" },
+                moved_jobs.join(", ")
+            );
+        }
+        if !shared.is_empty() {
+            println!(
+                "left the tracked job{} {} on `{old}`: the file is shared with the team, so \
+                 change `pipeline` in it yourself if {} meant the private one",
+                if shared.len() == 1 { "" } else { "s" },
+                shared.join(", "),
+                if shared.len() == 1 { "it" } else { "they" }
+            );
+        }
+        if let Some(pid) = dispatching {
+            println!(
+                "the running dispatcher (pid {pid}) loaded the old name; restart it to run \
+                 `{new}`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The `--json` payload of `pipeline rename`: the two paths, then what moved
+/// onto the new name, by kind, and the tracked jobs left alone because their
+/// file is shared. Scripts read these keys, so a new kind of thing that
+/// follows the rename gets a key of its own.
+fn rename_json(
+    from: &Path,
+    to: &Path,
+    moved: &[String],
+    moved_pending: &[String],
+    moved_jobs: &[String],
+    shared_jobs_left: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "renamed": {
+            "from": from.display().to_string(),
+            "to": to.display().to_string(),
+        },
+        "moved": moved,
+        "moved_pending": moved_pending,
+        "moved_jobs": moved_jobs,
+        "shared_jobs_left": shared_jobs_left,
+    })
+}
+
 /// `spoolway prompt copy <from> <to>`.
 ///
 /// Locates the tracked or already-private source the same way
@@ -1634,6 +2001,7 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
 /// whole; the legacy flat `<name>.md` shape has no folder of its own, so it
 /// is copied as the single file it is.
 pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    refuse_copy_in_lane(repo)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -1961,7 +2329,7 @@ fn applying_note(path: &str, branch: Option<&str>) -> String {
 /// committed and opened as a pull request; the dispatcher keeps reading the
 /// main checkout, which runs without the pipeline until the branch merges.
 /// Names are checked against the main checkout's tracked files too, since a
-/// private pipeline clashing with one of those is refused at load. A borrowed
+/// private pipeline clashing with one of those holds its tasks at load. A borrowed
 /// or lane worktree is refused by that function. Home mode is refused
 /// outright, where [`crate::local::is_repo_mode`] is false because the whole
 /// setup is already private and there is nothing to promote into.
@@ -2476,6 +2844,10 @@ mod tests {
 
         let err = pipeline_copy(&repo, "default", "default", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("choose a different `<to>`"),
+            "{err:#}"
+        );
 
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
         let err = pipeline_copy(&repo, "default", "default-strict", false).unwrap_err();
@@ -3662,6 +4034,458 @@ mod tests {
         );
     }
 
+    /// Writes a queue file for the rename tests: a task on `pipeline`,
+    /// standing at `stage`.
+    fn queue_task(repo: &Repo, id: &str, pipeline: &str, stage: &str) {
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        crate::task::Task::parse(
+            repo.queue_dir().join(format!("{id}.md")),
+            &format!("---\nid: {id}\nstage: {stage}\npipeline: {pipeline}\n---\n## Goal\nx\n"),
+        )
+        .unwrap()
+        .save()
+        .unwrap();
+    }
+
+    /// The pipeline a queued task names right now.
+    fn pipeline_of(repo: &Repo, id: &str) -> String {
+        repo.task(id).unwrap().front.pipeline.unwrap()
+    }
+
+    /// The whole settling of a clash: a private `default` beside the tracked
+    /// one holds only its own tasks, `pipeline rename` moves them onto the
+    /// new name, and that task then routes on the private pipeline's steps,
+    /// not the tracked pipeline's. Fails before the change at the first
+    /// `load`, which refused the whole set.
+    #[test]
+    fn pipeline_rename_settles_a_clash_and_the_task_keeps_its_private_steps() {
+        let (repo, home, _root_guard) = repo_for_home_aware("rename-clash");
+        crate::platform::test_home::with_home(&home, || {
+            let dir = crate::local::pipelines_dir(&repo.local_dir());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("default.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: m\n    on_pass: done\n",
+            )
+            .unwrap();
+            pipeline_copy(&repo, "default", "other", false).unwrap();
+            queue_task(&repo, "mine", "default", "queued");
+            queue_task(&repo, "theirs", "other", "queued");
+
+            let set = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+            assert!(set.clashes.contains_key("default"));
+            let held = set.for_task(&repo.task("mine").unwrap()).unwrap_err();
+            assert!(
+                format!("{held:#}").contains("spoolway pipeline rename default <new-name>"),
+                "{held:#}"
+            );
+            assert!(set.for_task(&repo.task("theirs").unwrap()).is_ok());
+
+            pipeline_rename(&repo, "default", "default-mine", false).unwrap();
+
+            assert!(!dir.join("default.yml").exists());
+            assert!(dir.join("default-mine.yml").is_file());
+            assert_eq!(pipeline_of(&repo, "mine"), "default-mine");
+            assert_eq!(pipeline_of(&repo, "theirs"), "other");
+            let set = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+            assert!(set.clashes.is_empty());
+            let steps = &set.for_task(&repo.task("mine").unwrap()).unwrap().steps;
+            assert_eq!(
+                steps.len(),
+                2,
+                "the private pipeline's steps, solo and blocked"
+            );
+            assert_eq!(steps[0].id, "solo");
+        });
+    }
+
+    /// A paused task follows its pipeline too, and the private skeleton
+    /// moves with it, so `queue add` on the new name finds it.
+    #[test]
+    fn pipeline_rename_moves_a_stopped_task_and_the_private_skeleton() {
+        let (repo, _root_guard) = repo_for("rename-moves");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        queue_task(&repo, "waiting", "mine", "paused");
+        let templates = crate::local::task_templates_dir(&repo.local_dir());
+
+        pipeline_rename(&repo, "mine", "mine-2", false).unwrap();
+
+        assert_eq!(pipeline_of(&repo, "waiting"), "mine-2");
+        assert!(templates.join("mine-2.md").is_file());
+        assert!(!templates.join("mine.md").exists());
+    }
+
+    /// A new name that is already taken, tracked or private, is refused and
+    /// nothing is touched.
+    #[test]
+    fn pipeline_rename_refuses_a_taken_new_name() {
+        let (repo, _root_guard) = repo_for("rename-taken");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        pipeline_copy(&repo, "default", "yours", false).unwrap();
+        queue_task(&repo, "t", "mine", "queued");
+
+        for taken in ["default", "yours"] {
+            let err = pipeline_rename(&repo, "mine", taken, false).unwrap_err();
+            let said = format!("{err:#}");
+            assert!(said.contains("already exists"), "{said}");
+            assert!(
+                said.contains("choose a different `<new>`") && !said.contains("<to>"),
+                "rename has no `<to>` argument: {said}"
+            );
+        }
+
+        let templates = crate::local::task_templates_dir(&repo.local_dir());
+        std::fs::write(templates.join("fresh.md"), "MINE\n").unwrap();
+        let said = format!(
+            "{:#}",
+            pipeline_rename(&repo, "mine", "fresh", false).unwrap_err()
+        );
+        assert!(
+            said.contains("choose a different `<new>`") && !said.contains("<to>"),
+            "{said}"
+        );
+
+        assert!(
+            crate::local::pipelines_dir(&repo.local_dir())
+                .join("mine.yml")
+                .is_file()
+        );
+        assert_eq!(pipeline_of(&repo, "t"), "mine");
+    }
+
+    /// A task on a step may have a lane working it, so the rename waits for
+    /// it and changes nothing — not the file, not the tasks beside it.
+    #[test]
+    fn pipeline_rename_refuses_while_a_task_on_it_is_on_a_step() {
+        let (repo, _root_guard) = repo_for("rename-running");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        queue_task(&repo, "idle", "mine", "queued");
+        queue_task(&repo, "busy", "mine", "implement");
+
+        let err = pipeline_rename(&repo, "mine", "mine-2", false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("`busy` (at `implement`)"),
+            "{err:#}"
+        );
+
+        assert!(
+            crate::local::pipelines_dir(&repo.local_dir())
+                .join("mine.yml")
+                .is_file()
+        );
+        assert_eq!(pipeline_of(&repo, "idle"), "mine");
+        assert_eq!(pipeline_of(&repo, "busy"), "mine");
+    }
+
+    /// A task that finished just before the clash appeared still sits in the
+    /// queue at `done`, and nothing runs for it again, so it is moved like a
+    /// queued one. Before the change `done` counted as a step and the rename
+    /// refused, leaving the person to edit files by hand.
+    #[test]
+    fn pipeline_rename_moves_a_task_that_is_done() {
+        let (repo, _root_guard) = repo_for("rename-done");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        queue_task(&repo, "finished", "mine", "done");
+
+        pipeline_rename(&repo, "mine", "mine-2", false).unwrap();
+
+        assert_eq!(pipeline_of(&repo, "finished"), "mine-2");
+    }
+
+    /// A task drafted in `pending/` and a job in the user's own `jobs.toml`
+    /// name the pipeline the same way a queued task does, and would run the
+    /// tracked pipeline's steps once queued or fired. Both follow the rename;
+    /// a job in the tracked store is shared, so it stays and is named. Fails
+    /// before the change: neither was looked at.
+    #[test]
+    fn pipeline_rename_moves_drafted_tasks_and_user_jobs_and_names_tracked_ones() {
+        let (repo, _root_guard) = repo_for("rename-pending-jobs");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        let pending = repo.pending_dir();
+        std::fs::write(
+            pending.join("draft.md"),
+            "---\nid: draft\ngroup: g\npipeline: mine\n---\n## Goal\nx\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pending.join("other.md"),
+            "---\nid: other\ngroup: g\npipeline: default\n---\n## Goal\nx\n",
+        )
+        .unwrap();
+        let job = |pipeline: &str| {
+            format!(
+                "[jobs.nightly]\nschedule = \"0 3 * * *\"\npipeline = \"{pipeline}\"\n\
+                 routine = \"nightly\"\n"
+            )
+        };
+        std::fs::write(repo.user_jobs_file(), job("mine")).unwrap();
+        std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
+        std::fs::write(
+            repo.jobs_file(),
+            job("mine")
+                .replace("nightly]", "shared]")
+                .replace("\"nightly\"", "\"shared\""),
+        )
+        .unwrap();
+
+        pipeline_rename(&repo, "mine", "mine-2", false).unwrap();
+
+        let draft = std::fs::read_to_string(pending.join("draft.md")).unwrap();
+        assert!(draft.contains("pipeline: mine-2\n"), "{draft}");
+        assert!(draft.contains("## Goal\nx\n"), "{draft}");
+        let other = std::fs::read_to_string(pending.join("other.md")).unwrap();
+        assert!(other.contains("pipeline: default\n"), "{other}");
+        let jobs = crate::jobs::load(&repo).unwrap();
+        let pipeline_of_job = |name: &str| {
+            jobs.iter()
+                .find(|job| job.name == name)
+                .map(|job| job.spec.pipeline.clone())
+        };
+        assert_eq!(pipeline_of_job("nightly").as_deref(), Some("mine-2"));
+        assert_eq!(pipeline_of_job("shared").as_deref(), Some("mine"));
+    }
+
+    /// A queue or pending file that will not parse and may name the pipeline
+    /// stops the rename before anything changes: left alone, it would keep
+    /// the old name and run the tracked pipeline's steps once mended. A broken
+    /// file that names another pipeline is none of its business. Fails before
+    /// the change: such files were skipped without a word.
+    #[test]
+    fn pipeline_rename_refuses_an_unreadable_file_that_may_name_it() {
+        let (repo, _root_guard) = repo_for("rename-unreadable");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        queue_task(&repo, "fine", "mine", "queued");
+        let broken_queue = repo.queue_dir().join("broken.md");
+        std::fs::write(
+            &broken_queue,
+            "---\nid: broken\nstage: [\npipeline: mine\n---\n",
+        )
+        .unwrap();
+        let unrelated = repo.queue_dir().join("unrelated.md");
+        std::fs::write(
+            &unrelated,
+            "---\nid: unrelated\nstage: [\npipeline: other\n---\n",
+        )
+        .unwrap();
+
+        let said = format!(
+            "{:#}",
+            pipeline_rename(&repo, "mine", "mine-2", false).unwrap_err()
+        );
+        assert!(said.contains(&broken_queue.display().to_string()), "{said}");
+        assert!(!said.contains("unrelated.md"), "{said}");
+        assert!(said.contains("Nothing was changed"), "{said}");
+        assert_eq!(pipeline_of(&repo, "fine"), "mine");
+
+        std::fs::remove_file(&broken_queue).unwrap();
+        let broken_draft = repo.pending_dir().join("draft.md");
+        std::fs::write(
+            &broken_draft,
+            "---\nid: draft\ngroup: [\npipeline: \"mine\"\n---\n",
+        )
+        .unwrap();
+        let said = format!(
+            "{:#}",
+            pipeline_rename(&repo, "mine", "mine-2", false).unwrap_err()
+        );
+        assert!(said.contains(&broken_draft.display().to_string()), "{said}");
+
+        std::fs::remove_file(&broken_draft).unwrap();
+        pipeline_rename(&repo, "mine", "mine-2", false).unwrap();
+        assert_eq!(pipeline_of(&repo, "fine"), "mine-2");
+    }
+
+    /// When a task cannot be moved, the private file keeps its name, so the
+    /// tasks still on it stay with the private pipeline instead of falling
+    /// onto the tracked one, the error names the one left, and running the
+    /// command again finishes the job. Fails before the change: the file was
+    /// renamed first and the loop aborted part way, stranding the rest on the
+    /// old name with no way to run the command again.
+    #[test]
+    fn pipeline_rename_keeps_the_file_when_a_task_cannot_be_moved() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = repo_for("rename-stuck");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        queue_task(&repo, "t", "mine", "queued");
+        let queue = repo.queue_dir();
+        std::fs::set_permissions(&queue, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let restore = || std::fs::set_permissions(&queue, std::fs::Permissions::from_mode(0o755));
+        if std::fs::write(queue.join(".probe"), "").is_ok() {
+            // Running as a user the mode does not bind: nothing can fail.
+            std::fs::remove_file(queue.join(".probe")).unwrap();
+            restore().unwrap();
+            return;
+        }
+
+        let outcome = pipeline_rename(&repo, "mine", "mine-2", false);
+        restore().unwrap();
+
+        let said = format!("{:#}", outcome.unwrap_err());
+        assert!(said.contains("task `t`"), "{said}");
+        assert!(said.contains("pipeline: mine-2"), "{said}");
+        let pipelines = crate::local::pipelines_dir(&repo.local_dir());
+        assert!(pipelines.join("mine.yml").is_file());
+        assert!(!pipelines.join("mine-2.yml").exists());
+        assert_eq!(pipeline_of(&repo, "t"), "mine");
+
+        pipeline_rename(&repo, "mine", "mine-2", false).unwrap();
+        assert_eq!(pipeline_of(&repo, "t"), "mine-2");
+        assert!(pipelines.join("mine-2.yml").is_file());
+    }
+
+    /// Home mode keeps the whole setup private, so no name there can clash
+    /// with a tracked one and there is no `local/pipelines/` to rename in.
+    /// The refusal says so and points at the file to rename by hand.
+    #[test]
+    fn pipeline_rename_is_refused_in_home_mode() {
+        let root = crate::scratch::root("pipeline-cmd-rename-home-mode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        let fake_home = root.parent().unwrap().join(format!(
+            "{}-realhome",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let clone = crate::repo::create_workspace(&root).unwrap();
+            let pipelines_dir = clone.config_dir().join("pipelines");
+            std::fs::create_dir_all(&pipelines_dir).unwrap();
+            std::fs::write(
+                pipelines_dir.join("mine.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: m\n    on_pass: done\n",
+            )
+            .unwrap();
+            let repo = Repo {
+                borrowed: false,
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config: Config::default(),
+                home: crate::mux::project_home(&root).unwrap(),
+            };
+
+            let said = format!(
+                "{:#}",
+                pipeline_rename(&repo, "mine", "mine-2", false).unwrap_err()
+            );
+            assert!(said.contains("keeps its whole setup private"), "{said}");
+            assert!(
+                said.contains(&pipelines_dir.display().to_string()),
+                "{said}"
+            );
+            assert!(pipelines_dir.join("mine.yml").is_file());
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&fake_home).ok();
+    }
+
+    /// `--json pipeline rename` carries the two paths and what moved, by kind
+    /// — scripts read these keys. Fails before the change: the payload was
+    /// built inline in the command and could not be checked.
+    #[test]
+    fn pipeline_rename_json_names_the_files_and_the_moved_tasks() {
+        let value = rename_json(
+            Path::new("/p/mine.yml"),
+            Path::new("/p/mine-2.yml"),
+            &["a".to_string(), "b".to_string()],
+            &["/pending/draft.md".to_string()],
+            &["nightly".to_string()],
+            &["shared"],
+        );
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "renamed": {"from": "/p/mine.yml", "to": "/p/mine-2.yml"},
+                "moved": ["a", "b"],
+                "moved_pending": ["/pending/draft.md"],
+                "moved_jobs": ["nightly"],
+                "shared_jobs_left": ["shared"],
+            })
+        );
+    }
+
+    /// `pipeline list` shows a clashed name, held, with the line that settles
+    /// it: the name leaves the loaded set, and a list without it would hide
+    /// the name the rename refusals send the person to look up. Fails before
+    /// the change: `build_list` had no `clashes`.
+    #[test]
+    fn build_list_carries_a_name_clash() {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.clashes.insert(
+            "hotfix".to_string(),
+            crate::pipeline::Clash {
+                tracked: PathBuf::from("/r/.spoolway/pipelines/hotfix.yml"),
+                private: PathBuf::from("/h/local/pipelines/hotfix.yml"),
+            },
+        );
+
+        let value = serde_json::to_value(build_list(&pipelines)).unwrap();
+
+        let clashes = value["clashes"].as_array().expect("a clashes array");
+        assert_eq!(clashes.len(), 1, "{value}");
+        assert_eq!(clashes[0]["name"], "hotfix");
+        assert_eq!(clashes[0]["tracked"], "/r/.spoolway/pipelines/hotfix.yml");
+        assert_eq!(clashes[0]["private"], "/h/local/pipelines/hotfix.yml");
+        assert!(
+            clashes[0]["held"]
+                .as_str()
+                .unwrap()
+                .contains("spoolway pipeline rename hotfix <new-name>"),
+            "{value}"
+        );
+    }
+
+    /// Only a private pipeline is renamed: a tracked one is shared with the
+    /// team, and an unknown name has nothing to rename.
+    #[test]
+    fn pipeline_rename_refuses_a_tracked_or_unknown_old_name() {
+        let (repo, _root_guard) = repo_for("rename-old");
+        for old in ["default", "nosuch"] {
+            let err = pipeline_rename(&repo, old, "x", false).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("no private pipeline named"),
+                "{err:#}"
+            );
+        }
+    }
+
+    /// A lane does not change the person's setup, so it cannot rename a
+    /// private pipeline either.
+    #[test]
+    fn pipeline_rename_refuses_in_a_lane() {
+        let (repo, _root_guard) = repo_for("rename-lane");
+        pipeline_copy(&repo, "default", "mine", false).unwrap();
+        let lane_dir = repo.worktree_root().join("lane");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/lane",
+                lane_dir.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut lane = repo.clone();
+        lane.checkout = lane_dir;
+
+        let err = pipeline_rename(&lane, "mine", "mine-2", false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("A lane does not change the project's setup"),
+            "{err:#}"
+        );
+        assert!(
+            crate::local::pipelines_dir(&repo.local_dir())
+                .join("mine.yml")
+                .is_file()
+        );
+    }
+
     /// A borrowed worktree and a lane worktree are refused with the shared
     /// function's messages, and nothing moves.
     #[test]
@@ -3866,6 +4690,7 @@ mod tests {
             .into_iter()
             .collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let value: serde_json::Value =
@@ -4008,6 +4833,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         let problems = step_problems(&repo, &pipelines, &repo.config);
         assert!(
@@ -4060,6 +4886,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         // Two: the profile's own unknown kind, and the step's `session:` that no
@@ -4095,9 +4922,53 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         pipeline_check(&repo, Ok(pipelines)).expect("pi resumes, so this should pass");
+    }
+
+    /// Two routine files holding one task id are one routine to the
+    /// dispatcher, so `pipeline check` refuses them like `doctor` does.
+    #[test]
+    fn pipeline_check_refuses_one_task_id_in_two_routine_folders() {
+        let root = crate::scratch::root("commands-pipeline-check-routine-id");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let repo = Repo {
+            borrowed: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let solo = || {
+            let pipeline =
+                Pipeline::parse("solo", "steps:\n  - id: z\n    run: x\n    on_pass: done\n")
+                    .unwrap();
+            Pipelines {
+                pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+                ignored_overrides: Vec::new(),
+                clashes: Default::default(),
+            }
+        };
+        pipeline_check(&repo, Ok(solo())).expect("no routines, no clash");
+
+        for dir in ["frontend", "backend"] {
+            let folder = repo.routines_dir().join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("lint.md"),
+                "---\nid: lint\nstage: queued\n---\n## Goal\nok\n",
+            )
+            .unwrap();
+        }
+
+        let err = pipeline_check(&repo, Ok(solo()))
+            .expect_err("one id in two routine folders is a problem");
+        assert!(err.to_string().contains("1 problem(s) found"), "{err}");
     }
 
     /// `pipeline check` is the command you run to find out which pipeline
@@ -4228,6 +5099,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         pipeline_check(&repo, Ok(pipelines))
@@ -4250,6 +5122,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         let config: Config = toml::from_str("[agents.typo]\nkind = \"Claude\"\n").unwrap();
 
@@ -4289,6 +5162,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         pipeline_check(&repo, Ok(pipelines))
@@ -4334,6 +5208,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("impl".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
@@ -4369,6 +5244,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         pipeline_check(&repo, Ok(pipelines))
@@ -4410,6 +5286,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         pipeline_check(&repo, Ok(pipelines))
@@ -4446,6 +5323,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
@@ -4486,6 +5364,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         // Two: the profile's own unknown kind, and the step's `skills:` that no
@@ -4526,6 +5405,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let home = crate::scratch::root("commands-skills-check-accepts-unfound-skill-home");
@@ -4568,6 +5448,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let task = crate::task::Task::parse(
