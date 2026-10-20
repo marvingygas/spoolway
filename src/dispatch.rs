@@ -25713,6 +25713,35 @@ mod tests {
         );
     }
 
+    /// A command that passes ends only the unblocker laps counted against that
+    /// command. The laps counted against another command that has been
+    /// failing stay, so the bound of three laps holds whatever command passes
+    /// on the road back to the one that keeps failing.
+    #[test]
+    fn a_command_step_that_passes_keeps_the_laps_counted_against_another_command() {
+        let (repo, _root_guard) = fixture("command-pass-keeps-other-laps");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.unblock_laps.insert("implement".into(), 2);
+        task.front.unblock_laps.insert("build".into(), 2);
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let laps = reload(&path).front.unblock_laps;
+        assert_eq!(
+            laps.get("build"),
+            Some(&2),
+            "a pass of `implement` wiped the laps counted against `build`: {laps:?}"
+        );
+        assert!(
+            !laps.contains_key("implement"),
+            "the passing command's own laps must end: {laps:?}"
+        );
+    }
+
     /// A command step banks a launch the same way an agent lane's own
     /// `finish_launch_bookkeeping` does — see the `Ok(_)` arm of `run_command`'s `Fresh`
     /// case. Without this a task that only ever ran command steps had an

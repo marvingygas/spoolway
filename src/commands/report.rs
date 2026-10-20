@@ -4828,6 +4828,46 @@ mod tests {
         assert!(task.front.unblock_laps.is_empty(), "paused ends the count");
     }
 
+    /// A pipeline whose `build` command fails after a `prep` command that
+    /// passes, with an unblocker that answers `--pass --stage prep`.
+    const EARLIER_COMMAND_LAPS: &str = "steps:\n  - id: prep\n    run: 'true'\n    on_pass: build\n  \
+         - id: build\n    run: 'false'\n    on_pass: done\n  \
+         - id: blocked\n    agent: pi\n    session: true\n";
+
+    /// The unblocker lap is counted against the command that failed, not the
+    /// earlier command the unblocker sent the task back to. A pass with
+    /// `--stage prep` after `build` failed leaves its lap on `build`, where
+    /// the passing of `prep` on the way back cannot end it.
+    #[test]
+    fn a_stage_back_to_an_earlier_command_counts_the_lap_on_the_command_that_failed() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(EARLIER_COMMAND_LAPS, "build");
+        task.front.steps.insert("queued->prep".into(), 1);
+
+        let routed = route(
+            &mut task,
+            &pipeline,
+            "blocked",
+            Outcome::Pass,
+            true,
+            Some("prep"),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(routed.destination, "prep");
+        assert_eq!(
+            task.front.unblock_laps.get("build"),
+            Some(&1),
+            "the lap must sit on `build`, the command that failed: {:?}",
+            task.front.unblock_laps
+        );
+        assert!(
+            !task.front.unblock_laps.contains_key("prep"),
+            "the lap must not sit on the earlier command: {:?}",
+            task.front.unblock_laps
+        );
+    }
+
     /// The same cycle through a gate that fails back to the agent step behind
     /// it. The task stops on `build`, so the pass is carried past it onto
     /// `gate`, and `gate`'s failure runs through `build` before the task is
