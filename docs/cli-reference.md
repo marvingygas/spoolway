@@ -1982,6 +1982,8 @@ Deprecated. Commits what is left in the task's worktree, squashes the branch to 
 
 `stack` runs only in the task's own worktree. That is a linked worktree on the task's `branch:`, or on `task/<task>` when the task has no `branch:`. A step's worktree comes from `$SPOOLWAY_WORKTREE`. Run by hand, `stack` uses the current directory.
 
+When the task's first dependency was [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), `stack` opens the pull request against the branch that dependency started from and stacks it on nothing.
+
 From any other directory, `stack` exits 1 before it commits, squashes or pushes. The main checkout, your own worktree and another task's worktree are all refused. A worktree on a detached HEAD is refused with a message that says to check out the task's branch.
 
 ```
