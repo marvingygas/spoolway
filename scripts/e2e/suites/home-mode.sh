@@ -287,8 +287,12 @@ shared_copies() {
 shared_fired_minute() {
   jq -r '."shared-audit".fired_minute // empty' "$WS2/jobs.state.json" 2>/dev/null
 }
-# The job runs every minute, so the first window is at most a minute off.
-poll_until 90 test "$(shared_copies)" -ge 1 \
+# The job runs every minute, so the first window is at most a minute off. The
+# count is taken inside the poll: written as `test "$(shared_copies)" -ge 1`,
+# it was counted once, when the poll began, and a dispatcher whose first pass
+# had not fired yet failed the whole wait however soon the copy appeared.
+shared_fired() { [ "$(shared_copies)" -ge 1 ]; }
+poll_until 90 shared_fired \
   && ok "the shared project job fired" || bad "the shared project job never fired"
 # Let both dispatchers pass over the same minute again before counting: each
 # prints "next pass in" when a pass ends idle, so two of those from each is
