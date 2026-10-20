@@ -1094,10 +1094,10 @@ impl Repo {
     /// itself was queued against. `None` for every other dependency.
     ///
     /// `resume --stage done` closes a task that has nothing to hand over, and
-    /// its dependents go on. Its branch was never pushed and no pull request
-    /// will ever open from it, so a dependent that kept it as a base would
-    /// be cut from a branch nobody can fetch and, under `stack`, fail its
-    /// handover on every resume.
+    /// its dependents go on. No pull request will ever open from its branch,
+    /// which may never have been pushed, so a dependent that kept it as a
+    /// base would be cut from a branch nobody can fetch or, under `stack`,
+    /// fail its handover on every resume.
     ///
     /// "Closed with nothing to hand over" means the task is in the archive at
     /// `done` and no pull request was ever opened from its branch. A task
