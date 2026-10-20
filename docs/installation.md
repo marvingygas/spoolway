@@ -288,6 +288,9 @@ Each skill is one directory holding a `SKILL.md`. All three providers read that 
 | `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/`. pi loads them once the project is trusted, so answer its trust prompt or start it with `--approve`. |
 
+`install` writes the skill folders of the checkout it runs in. Run inside a linked worktree, it
+writes that worktree's folders and leaves the main checkout's files as they were.
+
 Start a fresh agent session after installing so it picks the skills up.
 
 `spoolway install <provider> --user` installs into the agent's user folder instead, which it
