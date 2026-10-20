@@ -20,6 +20,13 @@
 //! the task at `done` and is named on the run's problem list, rather than
 //! archiving a task whose worktree is still registered or on disk.
 //!
+//! Nothing is committed or removed while the worktree is off its task's
+//! branch — a detached HEAD or another branch checked out — or midway through
+//! a rebase, merge, cherry-pick or revert. [`Dispatcher::clean_up`] holds the
+//! task on `blocked` instead. A commit made on a detached HEAD or another
+//! branch lands where a dependent is not cut from, and one made mid-merge
+//! concludes it with its conflict markers on the task's own branch.
+//!
 //! The other is [`discard_trial`], called from `spoolway eval --discard` for
 //! a trial arm that has not finished and never will: a person has seen
 //! enough and wants it gone now. [`Dispatcher::discard_arm`] shares
@@ -60,6 +67,92 @@ const CLEANUP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 /// task starts a step, since a task running one is not mid-removal.
 pub(crate) fn removal_marker(repo: &crate::repo::Repo, task_id: &str) -> PathBuf {
     repo.home().join("removing").join(task_id)
+}
+
+/// What teardown found when a worktree is off its task's branch.
+pub(crate) struct OffBranch {
+    /// The clause for the dispatcher's problem line and the status log.
+    pub(crate) found: String,
+    /// The hold's own reason, which the board's NEXT column shows.
+    pub(crate) reason: String,
+}
+
+/// The branch `task`'s worktree is meant to be on.
+fn task_branch(task: &Task) -> String {
+    task.front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(task.id()))
+}
+
+/// What is wrong with `worktree`'s git state, or `None` when it is on the
+/// task's branch with no rebase, merge, cherry-pick or revert under way.
+/// Shared by teardown and `spoolway queue unqueue --force`, the two roads that
+/// commit a worktree's leftovers and then remove it. An operation is named
+/// before the branch: a rebase also leaves HEAD detached, and "rebase in
+/// progress" is the more useful half.
+///
+/// A conflicted merge, cherry-pick or revert is refused even on the right
+/// branch, because the sweep's `git add -A` and `git commit` would conclude it
+/// with its conflict markers committed onto `task/<id>`, which a dependent is
+/// then cut from.
+///
+/// A borrowed checkout is never refused: it is a person's own, so what it has
+/// out is theirs to choose, and it is never removed here anyway.
+///
+/// A git failure reads as `None`. A worktree git cannot read has nothing to
+/// commit on any branch, and refusing here would hold a task whose checkout is
+/// already gone for a reason nobody can act on.
+pub(crate) fn off_branch(task: &Task, worktree: &Path) -> Option<OffBranch> {
+    if task.front.borrowed {
+        return None;
+    }
+    let git_dir = crate::repo::worktree_git_dir(worktree).ok()?;
+    let off = |found: &str, reason: &str| {
+        Some(OffBranch {
+            found: found.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        return off(
+            "a rebase is in progress in the worktree",
+            "rebase in progress in the worktree",
+        );
+    }
+    if git_dir.join("MERGE_HEAD").exists() {
+        return off(
+            "a merge is in progress in the worktree",
+            "merge in progress in the worktree",
+        );
+    }
+    // Before `sequencer/`: a conflicted multi-commit revert leaves both
+    // `REVERT_HEAD` and `sequencer/`, and the first would read as a cherry-pick.
+    if git_dir.join("REVERT_HEAD").exists() {
+        return off(
+            "a revert is in progress in the worktree",
+            "revert in progress in the worktree",
+        );
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() || git_dir.join("sequencer").exists() {
+        return off(
+            "a cherry-pick is in progress in the worktree",
+            "cherry-pick in progress in the worktree",
+        );
+    }
+    let expected = task_branch(task);
+    let on = crate::repo::current_branch_at(worktree).ok()?;
+    match on {
+        Some(branch) if branch == expected => None,
+        Some(branch) => off(
+            &format!("the worktree is on `{branch}`, not `{expected}`"),
+            &format!("worktree on `{branch}`, not `{expected}`"),
+        ),
+        None => off(
+            &format!("the worktree is on a detached HEAD, not `{expected}`"),
+            &format!("worktree on a detached HEAD, not `{expected}`"),
+        ),
+    }
 }
 
 impl<'a> Dispatcher<'a> {
@@ -187,31 +280,52 @@ impl<'a> Dispatcher<'a> {
                 .as_ref()
                 .map(|r| r.step.clone())
                 .unwrap_or_else(|| task.stage().to_string());
+            // Before anything is committed: `auto_commit` runs `git add -A` and
+            // `git commit` wherever HEAD is. Off `task/<id>` that commit lands
+            // where the branch a dependent is cut from never sees it, and the
+            // removal below then deletes the only checkout that shows it. The
+            // check sits here and not inside `auto_commit` because `spoolway
+            // report` shares that, and a step may legitimately report mid-way.
+            if let Some(off) = off_branch(task, Path::new(&worktree)) {
+                let found = &off.found;
+                self.hold_before_cleanup(
+                    task,
+                    &format!(
+                        "reached `{}` but {found} in {} — held at `{}` rather than \
+                         committing or removing anything",
+                        task.stage(),
+                        worktree.display(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                    &off.reason,
+                )?;
+                report.problems.push(format!(
+                    "{id}: {found} — held on `{blocked}`.\n    Nothing was committed or \
+                     removed. Put the work back on `{branch}` in {worktree}, then: \
+                     spoolway resume {id}",
+                    id = task.id(),
+                    blocked = crate::pipeline::BLOCKED,
+                    branch = task_branch(task),
+                    worktree = worktree.display(),
+                ));
+                return Ok(false);
+            }
             let outcome =
                 crate::commands::auto_commit(self.repo, Path::new(&worktree), "", task.id(), &step);
             if let Some(note) = outcome.note() {
                 task.log_status(note);
             }
             if outcome.is_unrecorded() {
-                let back = self
-                    .pipelines
-                    .for_task(task)
-                    .ok()
-                    .map(|pipeline| crate::commands::resume_target(task, pipeline))
-                    .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
-                    .unwrap_or_else(|| task.stage().to_string());
-                crate::commands::set_blocked_from(task, &back);
-                task.log_status(&format!(
-                    "reached `{}` with work that could not be committed — held at `{}` \
-                     rather than tearing the worktree down",
-                    task.stage(),
-                    crate::pipeline::BLOCKED,
-                ));
-                task.set_stage(
-                    crate::pipeline::BLOCKED,
-                    Some("uncommitted work could not be recorded before cleanup"),
-                );
-                task.save()?;
+                self.hold_before_cleanup(
+                    task,
+                    &format!(
+                        "reached `{}` with work that could not be committed — held at `{}` \
+                         rather than tearing the worktree down",
+                        task.stage(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                    "uncommitted work could not be recorded before cleanup",
+                )?;
                 // The reason travels with the line: a commit stopped by a
                 // hung git hook is otherwise named only in the task's
                 // `## Status Log`, and the dispatcher printed no cause.
@@ -505,8 +619,10 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Give back everything a task's checkout is holding: its workspace, the
-    /// worktree under it, and — if every commit on it has reached a remote —
-    /// the local branch it was cut on.
+    /// worktree under it, and — if its work is safe elsewhere — the local branch
+    /// it was cut on. Safe is every commit on a remote, or with no remote at
+    /// all, the task's base branch containing it; see
+    /// [`Dispatcher::branch_keep_reason`].
     ///
     /// Called from [`Dispatcher::clean_up`], once a task has actually
     /// finished, and from `discard_arm` and `unqueue --force`, which tear a
@@ -514,8 +630,8 @@ impl<'a> Dispatcher<'a> {
     /// any more, since [`Dispatcher::sweep_on_stop`] leaves an interrupted
     /// task's checkout exactly where it stood.
     ///
-    /// `report` is where a branch kept because it is not fully pushed gets
-    /// named — see the comment on the delete itself, below. It is also where a
+    /// `report` is where a branch kept because it is not fully pushed (or,
+    /// with no remote, not yet in its base) gets named — see the comment on the delete itself, below. It is also where a
     /// worktree that could not be removed is named, in which case this returns
     /// `false` and leaves the branch alone, since git will not delete a branch
     /// that is still checked out.
@@ -692,11 +808,13 @@ impl<'a> Dispatcher<'a> {
             // the deal that mode signs. That same squash-merge is why git's own
             // "is this merged" check cannot stand in for the question asked
             // here either: the branch is asked directly whether every commit
-            // on it is reachable from some remote-tracking ref. A `handover`
-            // that never ran, or a push that failed silently, is otherwise the
-            // last thing that happens to a finished task being the deletion of
-            // the only copy of its work — which is exactly how one task lost
-            // twelve commits to this path.
+            // on it is reachable from some remote-tracking ref. With no
+            // remote the question is ancestry in the task's base branch, so a
+            // squash-merged branch reads as unmerged there and is kept, on the
+            // safe side. A `handover` that never ran, or a push that failed
+            // silently, is otherwise the last thing that happens to a
+            // finished task being the deletion of the only copy of its work —
+            // which is exactly how one task lost twelve commits to this path.
             //
             // A trial arm is exempt from that protection: its comparison is
             // already banked in the usage ledger by the time it reaches here
@@ -711,7 +829,7 @@ impl<'a> Dispatcher<'a> {
             // a branch that is not there. Any ref git cannot resolve counts
             // as absent, since git could neither keep nor delete it; a branch
             // that resolves but whose push state cannot be read still takes
-            // the keep path in `branch_fully_pushed`.
+            // the keep path in `branch_keep_reason`.
             if self
                 .repo
                 .git(&[
@@ -723,16 +841,37 @@ impl<'a> Dispatcher<'a> {
                 .is_err()
             {
                 // Nothing to delete and nothing to keep.
-            } else if task.front.trial.is_some() || self.branch_fully_pushed(&branch) {
+            } else if task.front.trial.is_some() {
                 let _ = self.repo.git(&["branch", "-D", &branch]);
+            } else if let Some(why) = self.branch_keep_reason(&branch, task.front.base.as_deref()) {
+                report
+                    .problems
+                    .push(format!("{}: kept branch `{branch}` — {why}", task.id()));
             } else {
-                report.problems.push(format!(
-                    "{}: kept branch `{branch}` — it has commits no remote has",
-                    task.id()
-                ));
+                let _ = self.repo.git(&["branch", "-D", &branch]);
             }
         }
         true
+    }
+
+    /// Park the task on `blocked`, resumable at [`crate::commands::resume_target`]'s
+    /// answer, because cleanup found something it must not tear down over.
+    /// That is the step the task last reported from, or the pipeline's entry
+    /// when the steps that carried it to `done` were commands, which report
+    /// nothing. The log line goes in the status log and `reason` is the stage
+    /// change's own.
+    fn hold_before_cleanup(&self, task: &mut Task, log: &str, reason: &str) -> Result<()> {
+        let back = self
+            .pipelines
+            .for_task(task)
+            .ok()
+            .map(|pipeline| crate::commands::resume_target(task, pipeline))
+            .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
+            .unwrap_or_else(|| task.stage().to_string());
+        crate::commands::set_blocked_from(task, &back);
+        task.log_status(log);
+        task.set_stage(crate::pipeline::BLOCKED, Some(reason));
+        task.save()
     }
 
     /// Whether an earlier pass of this task's life began removing its checkout.
@@ -765,31 +904,72 @@ impl<'a> Dispatcher<'a> {
         })
     }
 
-    /// Whether every commit reachable from `branch` is also reachable from
-    /// some remote-tracking ref — not necessarily the same-named upstream,
-    /// just some `refs/remotes/*` ref, the way `sweep_orphaned_branches`
-    /// below reads the same question for a branch this check already kept.
+    /// Why `branch` must be kept, or `None` when it may be deleted. The answer
+    /// is the tail of the problem line, so a person reads what to do about it.
     ///
-    /// A repository with no remote at all is the one case the question does
-    /// not apply to: `--remotes` matches nothing there, so every commit would
-    /// read as unpushed, a local-only project would keep one `task/…` branch
-    /// per finished task forever, and the advice on the problem line — push
-    /// it — is one nobody can follow. With nowhere to push to, "pushed" is
-    /// not a state the branch can ever reach; 0.1.0 deleted it after
-    /// archiving, and so does this, without a problem line, since there is
-    /// nothing for anyone to do about it (lifecycle review finding 7).
+    /// With a remote, a branch may go once every commit reachable from it is
+    /// also reachable from some remote-tracking ref — not necessarily the
+    /// same-named upstream, just some `refs/remotes/*` ref, the way
+    /// `sweep_orphaned_branches` below reads the same question for a branch
+    /// this check already kept.
+    ///
+    /// Without one, `--remotes` matches nothing, so every commit would read as
+    /// unpushed and the advice to push it could not be followed. The question
+    /// becomes whether `base`, the branch the task was meant to land on,
+    /// already contains the branch. Deleting an unmerged branch there would
+    /// destroy the only copy of the work. A merge into `base` is the one way
+    /// such a project ever has a second copy, and once it has happened the
+    /// branch is debris, so a local-only project keeps only unmerged branches.
+    /// That is plain ancestry, so a branch squash-merged into `base` reads as
+    /// unmerged and is kept, on the safe side. A task with no recorded `base`,
+    /// or one that no longer resolves, cannot be shown merged anywhere and is
+    /// kept, with a line of its own for each.
     ///
     /// A git failure otherwise — no such branch, a corrupt ref — reads as
-    /// "not pushed" rather than propagating: this gates whether the only
-    /// copy of a task's work gets deleted, so the safe side of any doubt is
-    /// to keep it.
-    fn branch_fully_pushed(&self, branch: &str) -> bool {
+    /// "not safe" rather than propagating: this gates whether the only copy of
+    /// a task's work gets deleted, so the safe side of any doubt is to keep it.
+    fn branch_keep_reason(&self, branch: &str, base: Option<&str>) -> Option<String> {
         if !self.repo.has_remote() {
-            return true;
+            return match base {
+                // A base that is gone makes `merge-base` fail the same way an
+                // unmerged branch does, and "`<base>` does not contain it"
+                // would send a person to merge into a branch that is not there.
+                Some(base)
+                    if self
+                        .repo
+                        .git(&[
+                            "rev-parse",
+                            "--verify",
+                            "--quiet",
+                            &format!("{base}^{{commit}}"),
+                        ])
+                        .is_err() =>
+                {
+                    Some(format!(
+                        "this repo has no remote, and its base `{base}` no longer exists"
+                    ))
+                }
+                Some(base)
+                    if self
+                        .repo
+                        .git(&["merge-base", "--is-ancestor", branch, base])
+                        .is_ok() =>
+                {
+                    None
+                }
+                Some(base) => Some(format!(
+                    "this repo has no remote, and `{base}` does not contain it yet"
+                )),
+                None => Some(
+                    "this repo has no remote, and the task names no base branch to have \
+                     merged it"
+                        .to_string(),
+                ),
+            };
         }
         match self.repo.git(&["rev-list", branch, "--not", "--remotes"]) {
-            Ok(unpushed) => unpushed.trim().is_empty(),
-            Err(_) => false,
+            Ok(unpushed) if unpushed.trim().is_empty() => None,
+            _ => Some("it has commits no remote has".to_string()),
         }
     }
 
@@ -819,11 +999,12 @@ impl<'a> Dispatcher<'a> {
     /// rather than tracked separately: one `for-each-ref` and a scan of the
     /// tasks already in hand.
     ///
-    /// The same push check `tear_down_checkout` used to spare this branch in
-    /// the first place is asked again here, for the same reason: nothing
-    /// about becoming orphaned makes an unpushed commit any less the only
-    /// copy of the work it holds. Once it is pushed, this is what frees it —
-    /// nothing re-visits an archived task's own cleanup to do it there.
+    /// The same check `tear_down_checkout` used to spare this branch in the
+    /// first place is asked again here, for the same reason: nothing about
+    /// becoming orphaned makes an unpushed commit any less the only copy of
+    /// the work it holds. Once it is pushed — or, with no remote, once its
+    /// base branch contains it — this is what frees it; nothing re-visits an
+    /// archived task's own cleanup to do it there.
     fn sweep_orphaned_branches(&mut self, tasks: &[Task]) {
         let Ok(listing) = self.repo.git(&[
             "for-each-ref",
@@ -865,7 +1046,11 @@ impl<'a> Dispatcher<'a> {
             // of anything, whether it is freed the moment its own task
             // archives or, as here, only once a dependent still queued at
             // that moment has finished with it too.
-            if owner.front.trial.is_none() && !self.branch_fully_pushed(branch) {
+            if owner.front.trial.is_none()
+                && self
+                    .branch_keep_reason(branch, owner.front.base.as_deref())
+                    .is_some()
+            {
                 continue;
             }
             let _ = self.repo.git(&["branch", "-D", branch]);

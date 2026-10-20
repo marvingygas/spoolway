@@ -88,6 +88,19 @@ says "the task file records the remote-only branch as starts_from" \
 
 works "no local branch was made for the remote-only base by the cut" no_local_copy
 
+# A pull request recorded in the sandbox forge for a dependency's branch. A
+# finished dependency that GitHub knows no pull request for was closed with
+# nothing to hand over, and its dependents start from its own base instead
+# (`Repo::closed_dependency_base`). These two dependencies did open one, so
+# the forge has to say so, or the dependent never looks for the deleted
+# branch at all. Numbered well past anything `pr create` assigns here.
+record_pr() {
+  local n=$1 head=$2 state=$3
+  printf 'number=%s\nbase=plan/live\nhead=%s\ntitle=%s\nstate=%s\n' \
+    "$n" "$head" "$head" "$state" > "$FORGE/prs/$n"
+  echo "a pull request recorded for the sandbox forge" > "$FORGE/prs/$n.body"
+}
+
 # A finished dependency whose pull request is still open: its task file is
 # archived and names `task/gh-413-merged`, which `origin` still has. The
 # dispatcher is stopped first, so nothing cuts the dependent's worktree
@@ -95,6 +108,7 @@ works "no local branch was made for the remote-only base by the cut" no_local_co
 dispatcher_stop
 must "the dependency's branch, on origin while its pull request is open" \
   git -C "$FORGE/origin.git" branch task/gh-413-merged main
+record_pr 9413 task/gh-413-merged OPEN
 mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 cat > "$SPOOLWAY_PROJECT_HOME/archive/merged.md" <<'DOC'
 ---
@@ -117,6 +131,7 @@ must "a dependent of a finished task queues" \
 # over it.
 must "the dependency's branch is deleted on origin" \
   git -C "$FORGE/origin.git" branch -D task/gh-413-merged
+sed -i 's/^state=OPEN$/state=MERGED/' "$FORGE/prs/9413"
 
 if drive late paused 60; then
   ok "a queued task whose start branch was deleted pauses instead of failing to start"
@@ -154,6 +169,7 @@ must "the finished dependency's branch, on origin while its pull request is open
   git -C "$FORGE/origin.git" branch task/gh-414-shipped main
 must "its pull request merges, and the branch is deleted on origin" \
   git -C "$FORGE/origin.git" branch -D task/gh-414-shipped
+record_pr 9414 task/gh-414-shipped MERGED
 works "this checkout has no copy of it either" \
   test -z "$(git branch --list task/gh-414-shipped)"
 cat > "$SPOOLWAY_PROJECT_HOME/archive/shipped.md" <<'DOC'

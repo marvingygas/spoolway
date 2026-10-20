@@ -63,7 +63,7 @@ as JSON.
 | `stage` | the pipeline | The step the task is on. |
 | `routine` | the routines tab, or a job | The `id:` of the routine file this task is a queued copy of. The board and the `queued` popup show it in place of the numbered id. See [Routines](planning.md#routines). |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. A group whose every task in the batch sets `tracking: off` keeps `task/<id>`. |
-| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. Set it yourself before the task starts to cut from another branch. The pull request opens against it. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
+| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. A dependency [closed without a pull request](#a-dependency-closed-without-a-pull-request) hands on the branch it started from instead. Set it yourself before the task starts to cut from another branch. The pull request opens against it. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
 | `base_commit` | the dispatcher | The commit `starts_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
@@ -442,10 +442,37 @@ line, with `-m` as its Note:
 A lane still working on the task is stopped first. The task is then torn down and archived like
 any task that reaches `done`, and the tasks that depend on it go on.
 
+A task closed this way with no pull request has no branch worth building on. Its dependents start
+from, and open their pull requests against, the branch that task itself started from. See
+[A dependency closed without a pull request](#a-dependency-closed-without-a-pull-request).
+
 Only a person closes a task. `spoolway report --pass --stage done` from an unblocker lane exits 1
 and says so. The close is refused while a task in `depends_on` has not finished, and while the
 dispatcher is starting a lane for the task. In the second case, run the command again in a
 moment.
+
+### A dependency closed without a pull request
+
+A dependency counts as closed without a pull request when it is in the archive at `done` and one
+of these holds:
+
+- its recorded patch has no files
+- GitHub lists no pull request, in any state, with its branch as the head
+
+Its dependents are then cut from, and open their pull requests against, the branch that
+dependency started from. That is its own `starts_from:`, else its first dependency's branch,
+else its `base:`. A dependency whose pull request exists, or whose pull request GitHub cannot be
+asked about, keeps its own branch as the start.
+
+A dependent whose own `starts_from:` you set is left alone. A dependent already cut from the
+closed branch has its `starts_from:` moved to the new branch before its next step. Its worktree
+stays as it is.
+
+`spoolway queue list` names the branch in the NEXT column of such a queued dependent:
+
+```
+based on `main`: `a-noop` closed without a pull request
+```
 
 ### A start branch that does not exist
 
@@ -459,7 +486,8 @@ one line:
 ```
 
 This applies to a task that sets `starts_from:` or names a `depends_on`. The start branch is its
-own `starts_from:`, else its first dependency's branch once that dependency has finished. A branch
+own `starts_from:`, else its first dependency's branch once that dependency has finished, or the
+branch a dependency closed without a pull request started from. A branch
 counts as existing when it is a local branch, a remote-tracking branch or a branch on `origin`.
 When `origin` cannot be reached, the task is not paused.
 
@@ -491,7 +519,8 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 --force` removes that value, so a task sent again is cut again from its start branch. A
 `starts_from:` you set before the cut stays.
 
-`unqueue --force` keeps the task's branch when it has commits no remote has. Sending the task
+`unqueue --force` keeps the task's branch when it has commits no remote has. In a repo with no
+remote, it keeps the branch when the task's base branch does not contain it. Sending the task
 again with that branch in place is refused by `queue add`, because its first cut never uses a
 branch that already exists. Nothing is queued. Rename the branch with `git branch -m task/<id>
 <name>` and set `starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop
@@ -501,7 +530,8 @@ disk](dispatcher.md#where-work-happens-on-disk).
 A started copy of a routine is handled differently. `unqueue --force` tears its checkout down, then
 deletes the copy, because the routine is still under `.spoolway/routines/` to queue again. It
 writes nothing to the pending directory and names the routine file. If the copy's branch has
-commits no remote has, the branch is kept and the command prints its name. Nothing sends that
+commits no remote has, the branch is kept and the command prints its name. In a repo with no
+remote, the branch is kept when the copy's base branch does not contain it. Nothing sends that
 branch back to a draft, so merge or push it, or run `git branch -D` on it. A copy whose routine
 file is gone is carried to pending as any other task.
 

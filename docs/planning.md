@@ -328,7 +328,7 @@ Running the trial queues one full copy of the whole group per ticked pipeline. E
 its own group, named `<group>-<pipeline>`, or `<group>-<pipeline>-2` (then `-3`, and so on) when
 that name is already in the queue or the archive. Copies are minted in the order the pipeline
 list ticks them, and each task keeps its own id across copies: a task `alpha` becomes `alpha-1`
-in the first ticked pipeline's copy, `alpha-2` in the second's, and so on. A number whose id is held by a queue file, an archive file, a `task/<id>` branch or a routine name is passed over. A copy keeps the
+in the first ticked pipeline's copy, `alpha-2` in the second's, and so on. A number whose id is held by a queue file, an archive file, a `task/<id>` branch, a fetched remote-tracking `task/<id>` branch or a routine name is passed over. A copy keeps the
 source chain: a task's `depends_on` on another task in the group points at that task's own
 minted id in the same copy. All arms, across every copy, share one trial id. A step ticked to
 skip on the second screen is skipped by every arm of that pipeline's own copy. The source tasks
@@ -337,7 +337,8 @@ fails validation, a task still holding its skeleton's `[[…]]` placeholder text
 `gate_at:` names a step that a ticked pipeline lacks. The `gate_at:` refusal names the task and
 tells you to untick that pipeline or to change `gate_at:` in the task.
 
-An arm never pushes a branch or opens a pull request. Compare the arms with
+An arm runs every step you leave in. A step that pushes or opens a pull request,
+such as `create-pr`, does so for the arm too: tick it to skip it. Compare the arms with
 `spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.
 Only the source group and the ledger rows remain. `spoolway eval --discard <id>` removes a
 trial early. See [Trial arms](dispatcher.md#trial-arms).

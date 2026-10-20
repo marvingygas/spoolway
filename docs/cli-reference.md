@@ -532,7 +532,8 @@ A copy of a routine is deleted instead, when a routine file under `.spoolway/rou
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
 the routine file's path, and the routine stays there to queue again. `--force` does the same for a
 copy that has started, after it tears the checkout down. A branch with commits no remote has is
-kept, and the command prints its name.
+kept, and the command prints its name. In a repo with no remote, a branch the task's base branch
+does not contain is kept.
 
 ```
 $ spoolway queue unqueue prune-1
@@ -561,6 +562,12 @@ refused too, with or without `--force`, naming that sibling. Unqueue the sibling
 refuses the move and leaves the queue file in place. A copy of a routine is deleted whatever sits in
 pending. If `--force` cannot remove the copy's worktree, the copy stays queued. Remove the worktree
 by hand, then run the command again.
+
+`--force` is refused when the task's worktree is on another branch than `task/<id>`, on a
+detached HEAD, or in the middle of a rebase, merge, cherry-pick or revert. The refusal names what
+it found and the worktree. Nothing is interrupted, committed or torn down. Put the work back on
+the task's branch, or finish or abort the operation, then run the command again. A borrowed
+checkout is not checked.
 
 ### `spoolway group list`
 
@@ -2056,3 +2063,19 @@ While a dispatcher runs, the route comes from the pipelines it loaded at start. 
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 See [Gates](pipelines.md#gates).
+
+### `spoolway stack [<task>]`
+
+Deprecated. Commits what is left in the task's worktree, squashes the branch to one commit and force-pushes it for the task's pull request. The task defaults to `$SPOOLWAY_TASK`.
+
+`stack` runs only in the task's own worktree. That is a linked worktree on the task's `branch:`, or on `task/<task>` when the task has no `branch:`. A step's worktree comes from `$SPOOLWAY_WORKTREE`. Run by hand, `stack` uses the current directory.
+
+When the task's first dependency was [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), `stack` opens the pull request against the branch that dependency started from and stacks it on nothing.
+
+From any other directory, `stack` exits 1 before it commits, squashes or pushes. The main checkout, your own worktree and another task's worktree are all refused. A worktree on a detached HEAD is refused with a message that says to check out the task's branch.
+
+```
+`stack` hands a task over from the task's own worktree, and this is not one.
+  Nothing was committed or pushed. Run it in r1's worktree,
+  or let r1's handover step run it.
+```

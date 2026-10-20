@@ -7007,7 +7007,9 @@ pub(crate) fn base_problem_when_unasked(
 pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 
 /// The branch an uncut `task` is cut from: its own `starts_from:`, else its
-/// first dependency's branch, else `base`.
+/// first dependency's branch, else `base`. A dependency closed with nothing to
+/// hand over counts as where it stood here, not its branch — see
+/// [`Repo::closed_dependency_base`].
 ///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in
@@ -7178,6 +7180,21 @@ fn ensure_checkout(
     let cut_before = task.front.worktree_path.is_some()
         || task.front.run.is_some()
         || task.front.base_commit.is_some();
+
+    // A dependent cut before its dependency was closed with nothing to hand
+    // over still records that dependency's branch as `starts_from`, which was
+    // never pushed. The pull request opens against `starts_from` (the shipped
+    // `create-pr` prompt says so), so it is pointed at where the dependency
+    // stood instead. Only the recorded name moves: the worktree, its branch
+    // and `base_commit` are left alone. A `starts_from` a person pointed
+    // elsewhere is not the dependency's branch and is kept.
+    if cut_before
+        && let Some(from) = task.front.starts_from.clone()
+        && let Some(base) = repo.retarget_cut_start(task, &from)
+    {
+        task.front.starts_from = Some(base);
+        persist_task(repo, task, file_seen)?;
+    }
 
     // A task that is about to run a step is not in the middle of a removal. A
     // marker left from an earlier pass at `done` that was never finished, for
@@ -10276,6 +10293,39 @@ mod tests {
         assert!(!prompt.contains("auth"), "{prompt}");
     }
 
+    /// A dependency closed with nothing to hand over has no branch of its own
+    /// to sit on, so the brief names the branch the worktree is cut from and
+    /// says why, instead of calling it the dependency's branch. An empty patch
+    /// settles it with no `gh` asked.
+    #[test]
+    fn what_you_have_says_a_closed_dependency_handed_its_base_on() {
+        let (repo, _root_guard) = fixture("what-you-have-closed");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+        let archived = add_task_with(&repo, "a-noop", "done", |f| {
+            f.branch = Some("task/a-noop".into());
+            f.base = Some("work".into());
+            f.patch = Some(crate::task::Patch::default());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("a-noop.md")).unwrap();
+        let dependent = Task::load(&add_task_with(&repo, "b-dep", "implement", |front| {
+            front.depends_on = vec!["a-noop".into()];
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+
+        let prompt = sent(&repo, &dependent, pipeline, step);
+
+        assert!(prompt.contains("`git diff work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("you sit on    `work`, where `a-noop` closed without a pull request"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("branch `work`"), "{prompt}");
+    }
+
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
     /// with no dependency, and the dependency's own recorded `branch:` —
     /// never `task.front.base` — when there is one. Pinned here rather than
@@ -10971,8 +11021,10 @@ mod tests {
     }
 
     /// Stand in for a real `git push`: a remote-tracking ref pointing at
-    /// `branch`'s own tip, which is all `Dispatcher::branch_fully_pushed`
-    /// ever reads. No actual remote is needed for that check to answer yes.
+    /// `branch`'s own tip, which is all `Dispatcher::branch_keep_reason`
+    /// reads once the repo has a remote. A test using this must first
+    /// `git remote add`, since with none configured the check ignores
+    /// `refs/remotes` and asks the task's base branch instead.
     fn mark_pushed(repo: &Repo, branch: &str) {
         let sha = crate::repo::run(&repo.root, "git", &["rev-parse", branch]).unwrap();
         crate::repo::run(
@@ -11076,6 +11128,8 @@ mod tests {
     #[test]
     fn a_finished_task_takes_its_branch_with_it() {
         let (repo, _root_guard) = fixture("cleanup-branch");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         mark_pushed(&repo, "task/demo");
         let path = add_task(&repo, "demo", "implement");
@@ -11476,16 +11530,13 @@ mod tests {
         );
     }
 
-    /// The one repository the check above does not apply to: with no remote
-    /// at all, `--remotes` matches nothing, so every commit would read as
-    /// unpushed and a local-only project would keep one `task/…` branch per
-    /// finished task forever, each with a problem line advising a push there
-    /// is nowhere to make. 0.1.0 deleted the branch after archiving; so does
-    /// this, and nothing lands on the problem list (lifecycle review
-    /// finding 7).
+    /// With no remote at all, `--remotes` matches nothing, so the push check
+    /// cannot apply. The question becomes whether the task's base branch
+    /// contains the branch. One it does not contain is the only copy of the
+    /// work, so it is kept and the line names the base.
     #[test]
-    fn with_no_remote_a_finished_tasks_branch_goes_with_its_archive() {
-        let (repo, _root_guard) = fixture("cleanup-branch-no-remote");
+    fn with_no_remote_an_unmerged_branch_is_kept_and_named() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote-unmerged");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
@@ -11495,6 +11546,45 @@ mod tests {
         let mut task = reload(&path);
         task.front.workspace_id = Some("w1".into());
         task.front.branch = Some("task/demo".into());
+        task.front.base = Some("work".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/demo"),
+            "no remote and not merged, so this is the only copy"
+        );
+        assert!(
+            report.problems.iter().any(|p| p.contains("`task/demo`")
+                && p.contains("no remote")
+                && p.contains("`work` does not contain it yet")),
+            "the line names the branch and the base: {:?}",
+            report.problems
+        );
+    }
+
+    /// Once the base branch contains the task's branch, a local-only project
+    /// has no reason to keep it: it goes with the archive and says nothing.
+    #[test]
+    fn with_no_remote_a_merged_branch_goes_with_its_archive() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["merge", "-q", "--ff-only", "task/demo"])
+            .unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.base = Some("work".into());
         task.save().unwrap();
 
         let mux = FakeMux::new(vec![]);
@@ -11505,7 +11595,7 @@ mod tests {
 
         assert!(
             !has_branch(&repo, "task/demo"),
-            "nowhere to push to, so nothing to keep the branch for"
+            "the base has the work, so the branch is debris"
         );
         assert!(
             !report
@@ -11519,18 +11609,21 @@ mod tests {
 
     /// The orphan sweep asks the same question and gets the same answer: a
     /// branch retained for a queued dependent is freed by the next cleanup
-    /// once nothing names it, without a push ever having been possible.
+    /// once nothing names it and its base contains it.
     #[test]
-    fn with_no_remote_the_orphan_sweep_frees_a_retained_branch() {
+    fn with_no_remote_the_orphan_sweep_frees_a_merged_retained_branch() {
         let (repo, _root_guard) = fixture("branch-freed-no-remote");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["merge", "-q", "--ff-only", "task/first"])
+            .unwrap();
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
+            f.base = Some("work".into());
         });
         let second = add_task_with(&repo, "second", "done", |f| {
             f.branch = Some("task/second".into());
@@ -11555,13 +11648,84 @@ mod tests {
             .unwrap();
         assert!(
             !has_branch(&repo, "task/first"),
-            "nothing queued needs it, and there is no remote to have pushed it to"
+            "nothing queued needs it, and its base contains it"
         );
         assert!(
             !report
                 .problems
                 .iter()
-                .any(|p| p.contains("branch") || p.contains("remote")),
+                .any(|p| p.contains("task/first") || p.contains("remote")),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    /// The twin of the test above: a retained branch its base does not
+    /// contain is the only copy of the work, so the orphan sweep leaves it
+    /// alone once the dependent has finished.
+    #[test]
+    fn with_no_remote_the_orphan_sweep_keeps_an_unmerged_retained_branch() {
+        let (repo, _root_guard) = fixture("branch-kept-no-remote-sweep");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "done", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "nothing queued needs it, but `work` does not contain it"
+        );
+    }
+
+    /// A base that no longer exists cannot be told to merge anything, so the
+    /// line names the missing base rather than asking for a merge into it.
+    #[test]
+    fn with_no_remote_a_missing_base_is_named_as_missing() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote-no-base");
+        repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.base = Some("gone".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(has_branch(&repo, "task/demo"), "nothing shows it merged");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("its base `gone` no longer exists")),
             "{:?}",
             report.problems
         );
@@ -11696,7 +11860,7 @@ mod tests {
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.worktree_path = Some(repo.root.join("never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11710,7 +11874,10 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"],
+            [format!(
+                "remove_checkout {}",
+                repo.root.join("never-cut-worktree").display()
+            )],
             "the worktree goes with git when the multiplexer will not take it"
         );
         assert_eq!(
@@ -11732,7 +11899,7 @@ mod tests {
         let (repo, _root_guard) = fixture("stop-no-workspace");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.worktree_path = Some(repo.root.join("never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11745,7 +11912,10 @@ mod tests {
         assert!(archived);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
+            [format!(
+                "remove_checkout {}",
+                repo.root.join("never-cut-worktree").display()
+            )]
         );
     }
 
@@ -13010,7 +13180,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.worktree_path = Some(repo.root.join("never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -13057,7 +13227,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.worktree_path = Some(repo.root.join("never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -23348,6 +23518,65 @@ mod tests {
         );
     }
 
+    /// A dependent cut before its dependency was closed with nothing to hand
+    /// over is pointed at that dependency's base the next time a step starts,
+    /// so the `create-pr` lane opens against a branch that exists. Its
+    /// worktree and `base_commit` are left alone.
+    #[test]
+    fn a_dependent_already_cut_is_pointed_at_a_closed_dependencys_base() {
+        let (repo, _root_guard) = fixture("cut-dependent-retargeted");
+        let worktree = crate::scratch::root("dispatch-cut-dependent-retargeted-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/b-dep",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        add_task_with(&repo, "a-noop", "implement", |f| {
+            f.branch = Some("task/a-noop".into());
+            f.base = Some("work".into());
+            f.patch = Some(crate::task::Patch::default());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let mut closed = repo.task("a-noop").unwrap();
+        closed.set_stage(crate::pipeline::DONE, None);
+        closed.save().unwrap();
+        std::fs::rename(
+            repo.queue_dir().join("a-noop.md"),
+            repo.archive_dir().join("a-noop.md"),
+        )
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "b-dep", "handover", |f| {
+            f.depends_on = vec!["a-noop".into()];
+            f.branch = Some("task/b-dep".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("task/a-noop".into());
+            f.base_commit = Some("abc".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+        }));
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(task.front.starts_from.as_deref(), Some("work"));
+        assert_eq!(task.front.base_commit.as_deref(), Some("abc"));
+        assert_eq!(
+            task.front.worktree_path.as_deref(),
+            Some(worktree.to_path_buf().as_path())
+        );
+        assert_eq!(
+            repo.task("b-dep").unwrap().front.starts_from.as_deref(),
+            Some("work"),
+            "the file says so too, since the create-pr lane reads it there"
+        );
+    }
+
     /// A re-cut that reuses the task's own branch checks out that branch's
     /// tip, not the head of `starts_from`, which may have moved on. The
     /// commit recorded at the first cut stays, so `base_commit` never names a
@@ -24489,6 +24718,8 @@ mod tests {
     #[test]
     fn a_finished_tasks_branch_survives_while_a_queued_dependent_still_names_it() {
         let (repo, _root_guard) = fixture("branch-survives-dependent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -24529,6 +24760,8 @@ mod tests {
     #[test]
     fn an_orphaned_branch_is_freed_by_the_next_cleanup_that_finds_it() {
         let (repo, _root_guard) = fixture("branch-freed-later");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -24587,9 +24820,9 @@ mod tests {
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
-        // Never pushed, unlike the ordinary-task version of this test — a
-        // trial arm's branch is never pushed at all, so this is the shape
-        // that actually occurs.
+        // Never pushed, unlike the ordinary-task version of this test — an arm
+        // whose picker ticked its publishing steps to skip never pushes its
+        // branch, and this is that shape.
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
@@ -24631,6 +24864,8 @@ mod tests {
     #[test]
     fn an_orphaned_prefixed_branch_is_recovered_and_freed() {
         let (repo, _root_guard) = fixture("prefixed-branch-freed");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/proj-12-auth-01"])
             .unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
@@ -24678,6 +24913,8 @@ mod tests {
     #[test]
     fn a_prefixed_branch_is_not_mis_attributed_to_a_task_its_slug_contains() {
         let (repo, _root_guard) = fixture("prefixed-branch-ambiguous");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         for branch in ["task/proj-old-x", "task/old-x"] {
             repo.git(&["checkout", "-q", "-b", branch]).unwrap();
             repo.git(&["commit", "-q", "--allow-empty", "-m", branch])
@@ -24773,6 +25010,160 @@ mod tests {
                 .contains("could not be committed"),
             "the record must say why"
         );
+    }
+
+    /// Cleanup of a task whose worktree is off `task/demo`, with `spoil` run
+    /// first to put it there. Returns what the task and the record look like
+    /// afterwards, so each case asserts the same hold.
+    fn off_branch_cleanup(name: &str, spoil: impl Fn(&std::path::Path)) -> Task {
+        let (repo, _root_guard) = fixture(name);
+        let worktree = crate::scratch::root(&format!("dispatch-{name}-wt"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| crate::repo::run(&worktree, "git", args).unwrap();
+        git(&["init", "-q", "-b", "task/demo"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(worktree.join("a.txt"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        spoil(&worktree);
+        std::fs::write(worktree.join("left.txt"), "work nobody recorded").unwrap();
+        let head_before = git(&["rev-parse", "HEAD"]);
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                ..crate::task::LastReport::neutral()
+            });
+        });
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(path.exists(), "the task must stay queued, not be archived");
+        assert!(!repo.archive_dir().join("demo.md").exists());
+        assert!(
+            mux.did("remove_workspace").is_empty(),
+            "the worktree must not be torn down"
+        );
+        assert!(worktree.join("left.txt").exists());
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            head_before,
+            "nothing may be committed while off the branch"
+        );
+        reload(&path)
+    }
+
+    fn assert_held_for(task: &Task, clause: &str) {
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains(clause),
+            "the record must name `{clause}`: {log}"
+        );
+    }
+
+    // covers: teardown holds a task on a detached HEAD instead of committing there
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_on_a_detached_head() {
+        let task = off_branch_cleanup("cleanup-detached", |wt| {
+            crate::repo::run(wt, "git", &["checkout", "-q", "--detach"]).unwrap();
+        });
+        assert_held_for(&task, "the worktree is on a detached HEAD, not `task/demo`");
+    }
+
+    // covers: teardown holds a task with a rebase in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_rebase() {
+        for dir in ["rebase-merge", "rebase-apply"] {
+            let task = off_branch_cleanup(&format!("cleanup-{dir}"), |wt| {
+                let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+                std::fs::create_dir_all(git_dir.join(dir)).unwrap();
+            });
+            assert_held_for(&task, "a rebase is in progress");
+        }
+    }
+
+    // covers: teardown holds a task with a merge in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_merge() {
+        let task = off_branch_cleanup("cleanup-merge", |wt| {
+            let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+            std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40)).unwrap();
+        });
+        assert_held_for(&task, "a merge is in progress");
+    }
+
+    // covers: teardown holds a task with a cherry-pick or revert in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_cherry_pick_or_revert() {
+        for (name, markers, clause) in [
+            (
+                "pick",
+                &["CHERRY_PICK_HEAD"][..],
+                "a cherry-pick is in progress",
+            ),
+            (
+                "sequence",
+                &["sequencer"][..],
+                "a cherry-pick is in progress",
+            ),
+            ("revert", &["REVERT_HEAD"][..], "a revert is in progress"),
+            // A conflicted `git revert A B` leaves both.
+            (
+                "revert-sequence",
+                &["REVERT_HEAD", "sequencer"][..],
+                "a revert is in progress",
+            ),
+        ] {
+            let task = off_branch_cleanup(&format!("cleanup-{name}"), |wt| {
+                let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+                for marker in markers {
+                    match *marker {
+                        "sequencer" => std::fs::create_dir_all(git_dir.join(marker)).unwrap(),
+                        _ => std::fs::write(git_dir.join(marker), "0".repeat(40)).unwrap(),
+                    }
+                }
+            });
+            assert_held_for(&task, clause);
+        }
+    }
+
+    // covers: a borrowed checkout is never held for being off the task's branch
+    #[test]
+    fn a_cleanup_terminal_does_not_hold_a_borrowed_checkout_on_another_branch() {
+        let (repo, _root_guard) = fixture("cleanup-borrowed-off-branch");
+        let worktree = crate::scratch::root("dispatch-cleanup-borrowed-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "somebody-elses"]).unwrap();
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.borrowed = true;
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(!path.exists(), "a borrowed checkout must not hold the task");
+        assert!(repo.archive_dir().join("demo.md").exists());
+        assert!(worktree.exists(), "a borrowed checkout is never removed");
+    }
+
+    // covers: teardown holds a task whose worktree is on another branch
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_switched_to_another_branch() {
+        let task = off_branch_cleanup("cleanup-other-branch", |wt| {
+            crate::repo::run(wt, "git", &["checkout", "-q", "-b", "elsewhere"]).unwrap();
+        });
+        assert_held_for(&task, "the worktree is on `elsewhere`, not `task/demo`");
     }
 
     // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
@@ -25378,6 +25769,15 @@ mod tests {
     fn add_task_with_worktree(repo: &Repo, id: &str, stage: &str) -> PathBuf {
         let worktree = repo.root.join(format!("wt-{id}"));
         std::fs::create_dir_all(&worktree).unwrap();
+        // Its own repository on the task's branch. A bare directory inside
+        // the fixture would answer for the fixture's branch, and cleanup holds
+        // a task whose worktree is off its own.
+        crate::repo::run(
+            &worktree,
+            "git",
+            &["init", "-q", "-b", &format!("task/{id}")],
+        )
+        .unwrap();
         add_task_with(repo, id, stage, |front| {
             front.branch = Some(format!("task/{id}"));
             front.base = Some("work".into());
@@ -28044,17 +28444,23 @@ mod tests {
     #[test]
     fn cleanup_stops_a_background_command_still_running() {
         let (repo, _root_guard) = fixture("command-cleanup");
+        // On the task's own branch, as a real worktree is: cleanup holds a
+        // task whose worktree is anywhere else.
+        let worktree = crate::scratch::root("dispatch-command-cleanup-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
         let path = add_task_with(&repo, "demo", "done", |front| {
             front.branch = Some("task/demo".into());
             front.workspace_id = Some("w1".into());
-            front.worktree_path = Some(repo.root.clone());
+            front.worktree_path = Some(worktree.to_path_buf());
         });
         let mux = FakeMux::new(vec![]);
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("bench", "demo");
         let pid = runs
-            .start(&key, "sleep 60", &repo.root, &BTreeMap::new())
+            .start(&key, "sleep 60", &worktree, &BTreeMap::new())
             .unwrap();
 
         run_pass(&repo, &mux);

@@ -443,7 +443,8 @@ pub struct Frontmatter {
     /// The branch this task's worktree starts from: its own value when a
     /// person set one before the cut, else the first dependency's own branch
     /// when `depends_on` names one — read from that task's `branch:` field,
-    /// see [`crate::repo::Repo::dependency_branch`] — and `base` otherwise.
+    /// see [`crate::repo::Repo::dependency_branch`], or the branch that task
+    /// started from when it was closed with nothing to hand over — and `base` otherwise.
     /// Recorded separately from `base`, which keeps its own meaning — the
     /// branch the plan lands in — whether or not the two agree.
     ///
@@ -481,7 +482,8 @@ pub struct Frontmatter {
     /// is kept only so an old task file written under it still parses and
     /// round-trips. Its one writer now is the queue screen's trial picker,
     /// which stamps a trial arm's own ticked steps here so a throwaway run
-    /// never pushes a branch or opens a pull request — see
+    /// can keep a publishing step from pushing a branch or opening a pull
+    /// request — see
     /// `commands::queue::build_trial_arm`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<String>,

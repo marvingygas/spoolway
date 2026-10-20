@@ -241,8 +241,8 @@ A trial answers one question: which pipeline fits this group best? On the queue 
 `o` on a group and pick `trial`, tick any number of pipelines to compare, and tick any steps to
 skip. Each ticked pipeline gets one full copy of the whole group, and all arms share one trial
 id. Compare them with `spoolway eval --by task --trial <id>`, or open the trial from the eval tab's trials
-table. An arm never pushes a branch or opens a pull request. When the last arm finishes, every
-arm's copy is removed. The source group and the ledger rows stay.
+table. An arm runs every step you leave in, so tick a step such as `create-pr` to skip it. When the last
+arm finishes, every arm's copy is removed. The source group and the ledger rows stay.
 
 ## Issue tracker
 

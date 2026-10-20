@@ -530,7 +530,7 @@ here, and an agent step that shares the id is never held. `serial:` is allowed o
 A task's own `skip:` field walks the named steps to their `on_pass` without starting a lane.
 The step it lands on spends its `loop:` budget, and so does each named step that carries a
 `loop:`. A task over a limit lands on `blocked`.
-The queue screen's `trial` menu item writes it, so a trial arm never opens a pull request. See
+The queue screen's `trial` menu item writes it for the steps you tick to skip in a trial. See
 [Runs](eval.md#runs).
 
 ## Gates

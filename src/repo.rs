@@ -1031,7 +1031,21 @@ impl Repo {
     /// on to a cut that then fails over a ref nobody can place. A file that
     /// is *gone* is different: the branch may well still be there, and it is
     /// asked for by its default name before this gives up — see the body.
+    ///
+    /// A dependency closed with nothing to hand over hands its own base on
+    /// instead — see [`Repo::closed_dependency_base`].
     pub fn dependency_branch(&self, dep_id: &str) -> Result<String> {
+        match self.closed_dependency_base(dep_id) {
+            Some(base) => Ok(base),
+            None => self.dependency_own_branch(dep_id),
+        }
+    }
+
+    /// The branch `dep_id`'s own work lives on, whether or not it was ever
+    /// pushed. [`Repo::dependency_branch`] without the carve-out for a
+    /// dependency closed with nothing to hand over; see its docs for the
+    /// failures.
+    pub fn dependency_own_branch(&self, dep_id: &str) -> Result<String> {
         let file = format!("{dep_id}.md");
         let on_disk = [self.queue_dir(), self.archive_dir()]
             .iter()
@@ -1073,6 +1087,140 @@ impl Repo {
             .branch
             .clone()
             .unwrap_or_else(|| task::default_branch(dep_id)))
+    }
+
+    /// The branch to start from and open against in place of `dep_id`'s own,
+    /// when `dep_id` was closed with nothing to hand over: the branch that
+    /// task itself started from. `None` for every other dependency.
+    ///
+    /// `resume --stage done` closes a task that has nothing to hand over, and
+    /// its dependents go on. No pull request will ever open from its branch,
+    /// which may never have been pushed, so a dependent that kept it as a
+    /// base would be cut from a branch nobody can fetch or, under `stack`,
+    /// fail its handover on every resume.
+    ///
+    /// What is handed on is where the closed task itself stood: its
+    /// `starts_from`, else its own first dependency's branch, else its
+    /// `base`. Not `base` alone: in a chain `a -> b -> c` where `b` closes,
+    /// `c` has to keep `a`'s work, and `base` is only the branch the plan
+    /// lands in.
+    ///
+    /// "Closed with nothing to hand over" means the task is in the archive at
+    /// `done` and no pull request was ever opened from its branch. A task
+    /// still in the queue is not handed over *yet*, so it never counts. Two
+    /// facts settle the rest:
+    ///
+    /// - An empty recorded patch means there was nothing to open one with.
+    /// - Otherwise `gh pr list --head <branch> --state all` says. A merged or
+    ///   closed pull request counts as one, since its branch is gone from
+    ///   `origin` after a merge. A branch pushed with no pull request counts
+    ///   as none: `origin` having it proves nothing. When `gh` cannot answer,
+    ///   or the project has no `origin` to ask about, the dependency is not
+    ///   treated as closed, because guessing wrongly would send a shipped
+    ///   dependency's dependents to its base.
+    ///
+    /// Read from the archive file, so a file `retain` swept hands on nothing.
+    /// That sweep spares a file a task in `queue/` depends on, so it can only
+    /// reach a dependent that was not queued at the time.
+    pub fn closed_dependency_base(&self, dep_id: &str) -> Option<String> {
+        self.closed_dependency_base_asking(dep_id, &gh_program(), 0)
+    }
+
+    /// [`Repo::closed_dependency_base`] asking `gh` for its pull requests, so
+    /// a test can stand a script in for it without touching the environment.
+    /// `depth` stops a cycle among hand-edited archived `depends_on` lists
+    /// from recursing for ever; past 16 the dependency counts as not closed.
+    fn closed_dependency_base_asking(
+        &self,
+        dep_id: &str,
+        gh: &str,
+        depth: usize,
+    ) -> Option<String> {
+        let file = format!("{dep_id}.md");
+        if depth > 16
+            || self.queue_dir().join(&file).exists()
+            || !self.archive_dir().join(&file).exists()
+        {
+            return None;
+        }
+        let dep = self.task(dep_id).ok()?;
+        if dep.front.stage != crate::pipeline::DONE {
+            return None;
+        }
+        let closed = match dep.front.patch.is_some_and(|patch| patch.files == 0) {
+            true => true,
+            false => {
+                let branch = dep
+                    .front
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| task::default_branch(dep_id));
+                self.has_pull_request(gh, &branch) == Some(false)
+            }
+        };
+        if !closed {
+            return None;
+        }
+        if let Some(from) = dep.front.starts_from.clone() {
+            return Some(from);
+        }
+        if let Some(first) = dep.front.depends_on.first() {
+            return match self.closed_dependency_base_asking(first, gh, depth + 1) {
+                Some(base) => Some(base),
+                None => self.dependency_own_branch(first).ok(),
+            };
+        }
+        dep.front.base.clone()
+    }
+
+    /// Where a task already cut from `from` is pointed instead, when `from`
+    /// is the branch of its first dependency and that dependency was closed
+    /// with nothing to hand over — see [`Repo::closed_dependency_base`]. `None`
+    /// for any other `from`: a person who pointed `starts_from` somewhere else
+    /// keeps their choice.
+    ///
+    /// The one rule behind both places that move an already-cut dependent: the
+    /// dispatcher, before a step starts, and `spoolway stack` at handover.
+    pub fn retarget_cut_start(&self, task: &Task, from: &str) -> Option<String> {
+        let dep = task.front.depends_on.first()?;
+        let base = self.closed_dependency_base(dep)?;
+        (self.dependency_own_branch(dep).ok().as_deref() == Some(from)).then_some(base)
+    }
+
+    /// Whether GitHub knows a pull request, in any state, with `branch` for
+    /// its head. `None` when `gh` could not be asked, or when the project has
+    /// no `origin` for it to ask about.
+    ///
+    /// A pull request, once opened, stays in the list, so a `true` is kept for
+    /// the life of the process. A `false` is only right until a person opens
+    /// one by hand, and a dispatcher can run for weeks, so a `false` and a
+    /// failed ask are both kept for a minute: the board asks on every redraw,
+    /// and this bounds that to one ask a minute per branch.
+    fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        type Asked = HashMap<String, (Option<bool>, Instant)>;
+        static ASKED: OnceLock<Mutex<Asked>> = OnceLock::new();
+        let key = format!("{gh}\0{}\0{branch}", self.root.display());
+        let asked = ASKED.get_or_init(Default::default);
+        if let Some((answer, at)) = asked.lock().ok()?.get(&key)
+            && (*answer == Some(true) || at.elapsed() < Duration::from_secs(60))
+        {
+            return *answer;
+        }
+        // No forge to ask: `gh` would fail in such a repository anyway, or,
+        // given a stub, answer for a project that has no pull requests at all.
+        let answer = self
+            .git(&["remote", "get-url", "origin"])
+            .ok()
+            .and_then(|_| head_pull_requests(gh, &self.root, branch).ok().flatten())
+            .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out).ok())
+            .map(|list| !list.is_empty());
+        if let Ok(mut asked) = asked.lock() {
+            asked.insert(key, (answer, Instant::now()));
+        }
+        answer
     }
 
     /// The branch this checkout is on.
@@ -4102,6 +4250,40 @@ fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, boo
     checkout_of(start, root, main)
 }
 
+/// `gh`'s program name. Overridable so a local end-to-end suite — which has
+/// no forge to talk to — can point this at a stub and still drive everything
+/// around it for real.
+pub(crate) fn gh_program() -> String {
+    std::env::var("SPOOLWAY_GH").unwrap_or_else(|_| "gh".to_string())
+}
+
+/// What `gh pr list --head <branch> --state all` printed, as JSON bytes with
+/// `number`, `state` and `baseRefName` for each pull request, whatever
+/// state it is in. Asked by name rather than by ref, since a deleted branch
+/// still names the pull request GitHub opened for it.
+///
+/// `Ok(None)` when `gh` ran and refused, `Err` when it could not be run at
+/// all. The one lookup behind `spoolway stack`'s question of what became of a
+/// branch and [`Repo::closed_dependency_base`]'s of whether it ever had a
+/// pull request.
+pub(crate) fn head_pull_requests(gh: &str, dir: &Path, branch: &str) -> Result<Option<Vec<u8>>> {
+    let list = Command::new(gh)
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number,state,baseRefName",
+        ])
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("running `{gh} pr list --head {branch}`"))?;
+    Ok(list.status.success().then_some(list.stdout))
+}
+
 /// The branch checked out in `dir`.
 ///
 /// This is asked of a worktree, not only of the main checkout: a task is based
@@ -4124,7 +4306,7 @@ pub fn branch_at(dir: &Path) -> Result<String> {
 /// The branch `dir` has out, `None` on a detached HEAD, and an error when git
 /// cannot say. A caller that treats a detached HEAD as its own case reads
 /// this, so a git that failed to run is not reported as one.
-fn current_branch_at(dir: &Path) -> Result<Option<String>> {
+pub(crate) fn current_branch_at(dir: &Path) -> Result<Option<String>> {
     let branch = run(dir, "git", &["branch", "--show-current"])?;
     let branch = branch.trim();
     Ok((!branch.is_empty()).then(|| branch.to_string()))
@@ -5461,6 +5643,172 @@ mod tests {
             &work,
             &["worktree", "remove", "--force", plan_y.to_str().unwrap()],
         );
+    }
+
+    /// A task closed with an empty patch has nothing to open a pull request
+    /// with, so a dependent is given the base that task was queued against
+    /// without asking GitHub. A task still queued is not handed over yet, and
+    /// a missing one has no base to hand on.
+    #[test]
+    fn only_a_dependency_closed_with_an_empty_patch_hands_its_base_on() {
+        let (_origin, work, _base_guard) = fixture("closed-dependency-base");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let write = |dir: &Path, id: &str, stage: &str, patch: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: {stage}\nbranch: task/{id}\nbase: main\n{patch}---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{id}.md")), doc).unwrap();
+        };
+        let empty = "patch:\n  files: 0\n  insertions: 0\n  deletions: 0\n";
+        write(&repo.archive_dir(), "noop", "done", empty);
+        write(&repo.queue_dir(), "waiting", "implement", empty);
+
+        assert_eq!(repo.closed_dependency_base("noop").as_deref(), Some("main"));
+        assert_eq!(repo.dependency_branch("noop").unwrap(), "main");
+        assert_eq!(repo.dependency_own_branch("noop").unwrap(), "task/noop");
+        for keeps in ["waiting", "nobody"] {
+            assert_eq!(repo.closed_dependency_base(keeps), None, "{keeps}");
+        }
+    }
+
+    /// A task closed with commits is still closed without a pull request when
+    /// GitHub knows none for its branch, and a dependent is then given its
+    /// base, whether or not its branch was pushed. One with a pull request in
+    /// any state keeps its branch; so does one `gh` cannot answer for.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_with_commits_hands_its_base_on_only_when_github_knows_no_pull_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_origin, work, _base_guard) = fixture("closed-dependency-gh");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let archive = |id: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\n\
+                 patch:\n  files: 2\n  insertions: 9\n  deletions: 1\n---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(repo.archive_dir()).unwrap();
+            std::fs::write(repo.archive_dir().join(format!("{id}.md")), doc).unwrap();
+        };
+        let gh = |name: &str, body: &str| {
+            let path = work.join(format!("gh-{name}"));
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        };
+        let none = gh("none", "echo '[]'");
+        let some = gh("some", "echo '[{\"number\": 7}]'");
+        let broken = gh("broken", "exit 1");
+        for id in ["unfiled", "filed", "unsure", "pushed"] {
+            archive(id);
+        }
+        git(
+            &work,
+            &["update-ref", "refs/remotes/origin/task/pushed", "HEAD"],
+        );
+
+        let base = |id: &str, gh: &str| repo.closed_dependency_base_asking(id, gh, 0);
+        assert_eq!(base("unfiled", &none).as_deref(), Some("main"));
+        assert_eq!(base("filed", &some), None, "a pull request, merged or not");
+        assert_eq!(base("unsure", &broken), None, "gh could not say");
+        assert_eq!(base("pushed", &none).as_deref(), Some("main"));
+        assert_eq!(base("pushed", &some), None, "pushed, and it has one");
+    }
+
+    /// In a chain `a -> b -> c` where `b` closes with nothing to hand over,
+    /// `c` is given where `b` stood, which is `a`'s branch, not the plan's
+    /// landing branch: `a`'s work is not on `main` yet. A dependent already
+    /// cut from `b`'s dead branch is retargeted the same way, and one a person
+    /// pointed elsewhere is not.
+    #[test]
+    fn a_closed_dependency_in_a_chain_hands_on_where_it_stood() {
+        let (_origin, work, _base_guard) = fixture("closed-dependency-chain");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let archive = |id: &str, extra: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\n{extra}\
+                 ---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(repo.archive_dir()).unwrap();
+            std::fs::write(repo.archive_dir().join(format!("{id}.md")), doc).unwrap();
+        };
+        let patch =
+            |files: u32| format!("patch:\n  files: {files}\n  insertions: 0\n  deletions: 0\n");
+        archive("a", &patch(2));
+        archive(
+            "b",
+            &format!("depends_on: [a]\nstarts_from: task/a\n{}", patch(0)),
+        );
+        archive("b-uncut", &format!("depends_on: [a]\n{}", patch(0)));
+        let gh = work.join("gh-by-branch");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\ncase \"$4\" in task/a) echo '[{\"number\": 1}]';; *) echo '[]';; esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let gh = gh.display().to_string();
+
+        assert_eq!(repo.closed_dependency_base_asking("a", &gh, 0), None);
+        assert_eq!(
+            repo.closed_dependency_base_asking("b", &gh, 0).as_deref(),
+            Some("task/a")
+        );
+        assert_eq!(
+            repo.closed_dependency_base_asking("b-uncut", &gh, 0)
+                .as_deref(),
+            Some("task/a"),
+            "never cut: where its own dependency's branch stands"
+        );
+
+        let mut c = Task::parse(
+            PathBuf::from("c.md"),
+            "---\nid: c\nstage: handover\ndepends_on: [b]\nstarts_from: task/b\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.retarget_cut_start(&c, "task/b").as_deref(),
+            Some("task/a")
+        );
+        assert_eq!(repo.retarget_cut_start(&c, "somewhere-else"), None);
+        c.front.depends_on.clear();
+        assert_eq!(repo.retarget_cut_start(&c, "task/b"), None);
+    }
+
+    /// A project with no `origin` has no forge to ask, so a dependency with
+    /// commits is not taken for closed without a pull request, whatever a
+    /// `gh` that prints an empty list says.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_with_no_origin_never_takes_a_dependency_with_commits_for_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::scratch::root("repo-closed-dependency-no-origin");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        crate::scratch::git_init(&base, &["-b", "main"]);
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config: Config::default(),
+            home: base.join(".home"),
+        };
+        let doc = "---\nid: a\nstage: done\nbranch: task/a\nbase: main\n\
+                   patch:\n  files: 2\n  insertions: 1\n  deletions: 0\n---\n## Goal\nok\n";
+        std::fs::write(repo.archive_dir().join("a.md"), doc).unwrap();
+        let gh = base.join("gh-empty");
+        std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            repo.closed_dependency_base_asking("a", &gh.display().to_string(), 0),
+            None
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// `retain` sweeps the archive by age with no regard for a queued

@@ -216,7 +216,7 @@ pub struct Row {
     /// STATE already says the row is paused or blocked, so this repeats it
     /// only where nothing records the step the stop came from: a task
     /// paused from the board before it started, or an old or hand-edited
-    /// file.
+    /// file. A task teardown held on its way out of `done` reads `blocked`.
     pub stage: String,
     /// How many times this task has arrived at the step [`Self::stage`] names —
     /// [`crate::task::Frontmatter::arrivals`]'s own entry for it,
@@ -4175,6 +4175,22 @@ fn spool_turns(holder: Option<u32>, finishing: Option<usize>) -> bool {
     holder.is_some() || finishing.is_some_and(|n| n > 0)
 }
 
+/// The NEXT-column line for a queued task whose first dependency was closed
+/// with nothing to hand over: it is cut from, and opens against, that
+/// dependency's own base, and the row says so. `None` for any other task,
+/// including one whose `starts_from:` a person set, since that is the branch
+/// it uses whatever its dependency did.
+fn closed_dependency_note(repo: &Repo, task: &crate::task::Task) -> Option<String> {
+    if task.front.starts_from.is_some() {
+        return None;
+    }
+    let dep = task.front.depends_on.first()?;
+    let base = repo.closed_dependency_base(dep)?;
+    Some(format!(
+        "based on `{base}`: `{dep}` closed without a pull request"
+    ))
+}
+
 /// Where `task` goes once `step_id` passes, for the NEXT column of a row
 /// working that step — a running one, or a starting one whose boot mark
 /// names it.
@@ -4261,6 +4277,26 @@ fn landed(
     crate::dispatch::land_past_hidden(pipeline, task, destination, dependents).destination
 }
 
+/// Why teardown held `task` on `blocked` rather than archive it, when it did:
+/// the task moved there from `done`, which nothing but teardown's hold does,
+/// so the latest `→ `blocked`` line in its status log carries the reason.
+fn teardown_hold(task: &crate::task::Task) -> Option<String> {
+    if task.stage() != crate::pipeline::BLOCKED
+        || task.front.arrived_from.as_deref() != Some(crate::pipeline::DONE)
+    {
+        return None;
+    }
+    let marker = format!("→ `{}`: ", crate::pipeline::BLOCKED);
+    task.section("## Status Log")?
+        .lines()
+        .rev()
+        .find_map(|line| {
+            line.split_once(&marker)
+                .map(|(_, reason)| reason.trim().to_string())
+        })
+        .filter(|reason| !reason.is_empty())
+}
+
 /// The NEXT column of a blocked row parked for a person, prefixed for the
 /// column. Normally `resume_target`, the step `spoolway resume` sends the task
 /// back to, and the only way off a parked block — so the row names one step
@@ -4279,12 +4315,22 @@ fn landed(
 ///
 /// The step named is where the resume lands, past any step the task walks
 /// past — see [`landed`].
+///
+/// A task teardown held on its way out of `done` names the hold's reason
+/// instead, such as `worktree on a detached HEAD, not `task/t3``. Its
+/// remedy is in the worktree, not in picking a step.
 fn blocked_next(
     task: &crate::task::Task,
     pipeline: &crate::pipeline::Pipeline,
     resumable: bool,
     dependents: usize,
 ) -> String {
+    if let Some(reason) = teardown_hold(task) {
+        return match resumable {
+            true => format!("[r] {reason}"),
+            false => reason,
+        };
+    }
     if let Some(missing) = crate::commands::stranded_step(task, pipeline) {
         let note = format!("pick a step — `{missing}` is gone");
         return match resumable {
@@ -4638,9 +4684,13 @@ fn build_rows(
                 match (hook, dependency) {
                     (Some(hook), _) => (State::Queued, hook, false),
                     (None, Some(d)) => (State::Queued, d, false),
+                    // Said once nothing else holds the task, which is when
+                    // its dependency has finished: the base it is cut from
+                    // and opens against is not the dependency's branch.
                     (None, None) => (
                         State::Queued,
-                        "waiting for a worker slot to free up".to_string(),
+                        closed_dependency_note(repo, task)
+                            .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
                         false,
                     ),
                 }
@@ -4835,14 +4885,27 @@ fn build_rows(
                 .map(|launched| (chrono::Utc::now().timestamp() - launched).max(0)),
             false => None,
         };
+        let held_by_teardown = parked_on_blocked && teardown_hold(task).is_some();
+        let row_stage = match held_by_teardown {
+            true => crate::pipeline::BLOCKED,
+            false => shown_stage,
+        };
         rows.push(Row {
             id: task.id().to_string(),
             routine: task.routine().map(str::to_string),
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
             after: stacked_after(repo, tasks, task),
-            stage: shown_stage.to_string(),
-            arrivals,
+            // A task teardown held reads `blocked`, since the step it came
+            // from is not where the work stands: it is in the worktree. The
+            // arrival count follows the stage drawn beside it, as
+            // [`Row::arrivals`] promises; the ledger figures stay with the
+            // step that spent them.
+            stage: row_stage.to_string(),
+            arrivals: match held_by_teardown {
+                true => task.rounds_at(row_stage),
+                false => arrivals,
+            },
             pipeline: pipeline.name.clone(),
             state,
             depth: graph.depth(task.id()),
@@ -6793,6 +6856,29 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "release-publishing").unwrap();
         assert!(matches!(row.state, State::Paused));
         assert_eq!(row.next, "[r] → review");
+    }
+
+    /// A dependency archived at `done` with an empty patch was closed with
+    /// nothing to hand over, so the dependent's row says which base it is
+    /// cut from and why.
+    #[test]
+    fn a_queued_row_names_the_base_a_closed_dependency_handed_on() {
+        let (repo, _root_guard) = fixture("closed-parent-note");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "a-noop", &[], Some("implement"), Some("a-noop"));
+        let mut task = repo.task("a-noop").unwrap();
+        task.front.patch = Some(crate::task::Patch::default());
+        task.save().unwrap();
+        archive_on(&repo, "a-noop", crate::pipeline::DONE);
+        add_to(&repo, "b-dep", &["a-noop"], None, Some("a-noop"));
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "b-dep").unwrap();
+
+        assert_eq!(
+            row.next,
+            "based on `group/demo`: `a-noop` closed without a pull request"
+        );
     }
 
     /// A task the gate has ranked behind another group is not held by the
@@ -13550,6 +13636,68 @@ mod tests {
         assert_eq!(
             picker_header(&task, &pipeline, Some("deploy")),
             format!("{} at deploy — it passed", task.stage())
+        );
+    }
+
+    /// A task teardown held on its way out of `done` names the hold's reason
+    /// where a block names its resume step, the way the plan's morning draws
+    /// it. A block reached any other way still names the step.
+    #[test]
+    fn the_next_column_names_why_teardown_held_a_task() {
+        let (repo, _root_guard) = fixture("teardown-held-next-column");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        add(&repo, "t3", &[], Some("done"));
+        let mut task = repo.task("t3").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-never-cut-worktree".into());
+        task.front.blocked_from = Some("handover".into());
+        task.set_stage(
+            crate::pipeline::BLOCKED,
+            Some("worktree on a detached HEAD, not `task/t3`"),
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] worktree on a detached HEAD, not `task/t3`"
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, false, 0),
+            "worktree on a detached HEAD, not `task/t3`"
+        );
+
+        task.front.arrived_from = Some("handover".into());
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] → handover",
+            "a block from a step is not teardown's hold"
+        );
+    }
+
+    /// The STEP column of a task teardown held reads `blocked`, as the plan's
+    /// morning draws it, while a block reached from a step still names it.
+    #[test]
+    fn the_step_column_reads_blocked_for_a_teardown_hold() {
+        let (repo, _root_guard) = fixture("teardown-held-step-column");
+        let pipelines = Pipelines::builtin();
+        for (id, from) in [("t3", "done"), ("t5", "handover")] {
+            add_to(&repo, id, &[], Some(from), Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.front.blocked_from = Some("handover".into());
+            task.front.arrivals.insert("handover".into(), 4);
+            task.set_stage(
+                crate::pipeline::BLOCKED,
+                Some("worktree on a detached HEAD, not `task/t3`"),
+            );
+            task.save().unwrap();
+        }
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row("t3").stage, "blocked");
+        assert_eq!(row("t5").stage, "handover");
+        assert_eq!(row("t5").arrivals, 4);
+        assert_ne!(
+            row("t3").arrivals,
+            4,
+            "the count belongs to the stage drawn beside it, not the step it came from"
         );
     }
 

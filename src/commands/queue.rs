@@ -868,8 +868,14 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
 /// the task to pending — all or nothing, so a teardown this stops
 /// partway through leaves the task queued and its task untouched. A copy of a
 /// routine that still exists is deleted instead of carried. The branch the
-/// teardown keeps for unpushed commits is named by the teardown's own line
+/// teardown keeps for unpushed commits (or, with no remote, one its base does
+/// not contain) is named by the teardown's own line
 /// on standard error, which is all this road says about it.
+///
+/// Refused too while the worktree is off its task's branch or midway through
+/// a rebase, merge, cherry-pick or revert — see [`crate::teardown::off_branch`]
+/// — before anything is interrupted, since the sweep commit would land where
+/// the work cannot be found.
 ///
 /// Refused while a live dispatcher holds the run lock: it re-reads the
 /// queue every pass, and a checkout this tears down out from under it is
@@ -926,6 +932,23 @@ fn queue_unqueue_forced(
         .iter()
         .position(|t| t.id() == id)
         .with_context(|| format!("no queued task `{id}` — it left the queue while this ran"))?;
+
+    // Before the lane is interrupted or anything is committed: the sweep below
+    // runs `git add -A` and `git commit` wherever HEAD is, so on a detached
+    // HEAD, another branch or mid-operation the commit would land off
+    // `task/<id>` and the worktree removal would then delete the only
+    // checkout that shows it. Teardown holds a task for the same reason.
+    if let Some(worktree) = checkout
+        && let Some(off) = crate::teardown::off_branch(&tasks[idx], worktree)
+    {
+        bail!(
+            "did not unqueue `{id}`: {} ({}) — committing and removing it would lose the \
+             work. Put it back on the task's branch, or finish or abort the operation, \
+             then run this again. Nothing was interrupted, committed or torn down.",
+            off.found,
+            worktree.display()
+        );
+    }
 
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
@@ -1991,15 +2014,18 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
 }
 
 /// The lowest-numbered `<id>-N` held by no queue file, archive file,
-/// `task/<id>` branch or routine name — see [`existing_task_path`] — and not
-/// already claimed earlier in the same trial, since a batch of arms is minted
-/// before any of them is saved and so cannot see each other on disk yet.
+/// `task/<id>` branch, local or remote-tracking, or routine name — see
+/// [`existing_task_path`] — and not already claimed earlier in the same trial,
+/// since a batch of arms is minted before any of them is saved and so cannot
+/// see each other on disk yet.
 ///
 /// The branch is checked because archive retention deletes an old task's
 /// file but not its branch. Minting the freed id again would hand dispatch a
 /// task whose first cut refuses the branch it finds already there, and the
-/// copy would sit blocked on every later window. Each candidate costs one
-/// `git show-ref`, the same lookup the first-cut guard makes.
+/// copy would sit blocked on every later window. Each candidate costs a
+/// `git show-ref`, plus a `git for-each-ref` when no local branch holds it.
+/// The remote check is mint's own; the first-cut guard looks only at local
+/// branches.
 ///
 /// Starts at 1: an ordinary submission already reaches the queue under the
 /// task's own bare id (see [`parse_submission`]), so the first minted
@@ -2048,9 +2074,20 @@ fn task_branch(task: &Task) -> String {
         .unwrap_or_else(|| crate::task::default_branch(task.id()))
 }
 
-/// Whether `task/<id>` is a local branch.
+/// Whether `task/<id>` is a local branch, or a remote-tracking branch of any
+/// remote, whose name may itself hold a slash. A trial arm runs `create-pr` unless the person ticked it off, so an
+/// earlier arm's branch can sit on `origin` after the local one is cleaned up.
+/// An id minted over it would block on that branch and its pull request.
 fn branch_exists(repo: &Repo, id: &str) -> bool {
-    ref_exists(repo, &crate::task::default_branch(id))
+    let branch = crate::task::default_branch(id);
+    ref_exists(repo, &branch)
+        || repo
+            .git(&[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/remotes/**/{branch}"),
+            ])
+            .is_ok_and(|refs| !refs.trim().is_empty())
 }
 
 /// Whether `branch` is a local branch.
@@ -12756,6 +12793,47 @@ mod tests {
         assert!(said.contains("Unqueue `child` first"), "{said}");
     }
 
+    /// A forced unqueue sweeps the worktree's leftovers into a commit before it
+    /// removes the checkout, so on a detached HEAD that commit would land on
+    /// no branch. It refuses, touching nothing, and names what it found.
+    #[test]
+    fn a_forced_unqueue_refuses_a_worktree_on_a_detached_head() {
+        let (repo, _root_guard) = fixture("unqueue-forced-detached");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let worktree = crate::scratch::root("unqueue-forced-detached-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| crate::repo::run(&worktree, "git", args).unwrap();
+        git(&["init", "-q", "-b", "task/solo"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(worktree.join("a.txt"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        git(&["checkout", "-q", "--detach"]);
+        std::fs::write(worktree.join("left.txt"), "unrecorded").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.front.branch = Some("task/solo".into());
+        task.save().unwrap();
+
+        let err = queue_unqueue_forced(&repo, &pipelines, "solo", "implement", Some(&worktree))
+            .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("detached HEAD, not `task/solo`"), "{said}");
+        assert!(said.contains("Nothing was interrupted, committed or torn down"));
+        assert!(worktree.join("left.txt").exists());
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            head,
+            "nothing may be committed"
+        );
+        assert!(repo.task("solo").is_ok(), "the task must stay queued");
+    }
+
     /// A forced unqueue brings the worktree down, so a process a finished
     /// command step backgrounded — recorded only in a `.group` file — has to
     /// be stopped first, or it keeps its cwd in a directory that is gone.
@@ -19478,6 +19556,23 @@ mod tests {
         );
         // The id the routine's own copies are minted under is still free.
         assert_eq!(mint_id(&repo, "nite", &Default::default()), "nite-1");
+    }
+
+    /// An earlier trial arm pushed `task/ping-1` and its local branch has
+    /// since been cleaned up, so only `origin/task/ping-1` is left. Minting
+    /// `ping-1` again blocked the new arm on that branch and its pull request.
+    #[test]
+    fn a_minted_id_skips_one_whose_branch_is_only_on_a_remote() {
+        let (repo, _root_guard) = fixture("mint-id-remote-branch");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["update-ref", "refs/remotes/origin/task/ping-1", "HEAD"]);
+        // A remote name may hold a slash, which a single `*` does not cross.
+        git(&["update-ref", "refs/remotes/up/stream/task/ping-2", "HEAD"]);
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-3");
     }
 
     /// Archive retention removes `archive/ping-1.md` and keeps the branch

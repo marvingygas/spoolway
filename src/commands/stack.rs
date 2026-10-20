@@ -19,17 +19,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::*;
+use crate::repo::gh_program;
 
 /// The pull request body's hard ceiling. GitHub's own API refuses a body past
 /// this outright rather than truncating it, so `spoolway stack` has to.
 const MAX_BODY: usize = 65_536;
-
-/// `gh`'s program name. Overridable so a local end-to-end suite — which has
-/// no forge to talk to — can point this at a stub and still drive everything
-/// around it for real.
-fn gh_program() -> String {
-    std::env::var("SPOOLWAY_GH").unwrap_or_else(|_| "gh".to_string())
-}
 
 /// One labeled line of `spoolway stack`'s own report — `<label>` padded to a
 /// fixed column so a run's whole report reads as a table, the way the plan's
@@ -71,7 +65,6 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     if task.front.title.trim().is_empty() {
         bail!("task `{id}` has no `title:` to make the squashed commit's subject from");
     }
-    println!("{id}\n");
 
     // The worktree a command step runs in — see docs/pipelines.md — falls
     // back to the current directory so a person can run this by hand from
@@ -80,6 +73,47 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         Ok(path) => PathBuf::from(path),
         Err(_) => std::env::current_dir().context("resolving the current directory")?,
     };
+    // Everything below commits, squashes and force-pushes whatever checkout
+    // this is, so it must be this task's own: a linked worktree on the
+    // task's branch. Anything else — the main checkout, a person's side
+    // worktree, or another task's — would have its branch rewritten and
+    // pushed over the task's pull request branch. The same check holds
+    // whether the worktree came from `SPOOLWAY_WORKTREE` or from the current
+    // directory, because every agent lane exports that variable: a
+    // `spoolway stack <other-task>` typed in one lane's pane must not squash
+    // that lane's branch onto another task. A task's own handover lane sits
+    // on its branch, so it passes. A task file with no `branch:` is held to
+    // the default branch name, the one the dispatcher cuts its worktree on.
+    // The refusal comes before the task's header line is printed so it
+    // stands alone.
+    let not_own = || {
+        anyhow::anyhow!(
+            "`stack` hands a task over from the task's own worktree, and this is not \
+             one.\n  Nothing was committed or pushed. Run it in {id}'s worktree,\n  or let \
+             {id}'s handover step run it."
+        )
+    };
+    if !crate::repo::is_linked_worktree(&worktree) {
+        return Err(not_own());
+    }
+    let own_branch = task
+        .front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(&id));
+    match crate::repo::current_branch_at(&worktree)? {
+        Some(current) if current == own_branch => {}
+        // A detached HEAD here may well be the task's own worktree, so "run
+        // it in the task's worktree" would point back at this very
+        // directory; say what is actually wrong instead.
+        None => bail!(
+            "`stack` hands a task over from the task's own worktree on `{own_branch}`, and \
+             this worktree is on a detached HEAD.\n  Nothing was committed or pushed. \
+             Check out `{own_branch}` here first,\n  or let {id}'s handover step run it."
+        ),
+        Some(_) => return Err(not_own()),
+    }
+    println!("{id}\n");
     let step = std::env::var(crate::dispatch::ENV_STEP).unwrap_or_else(|_| "stack".to_string());
     // Empty, always: `SPOOLWAY_HEAD` is where a branch stood when an *agent*
     // lane's turn began, and a command step's env carries no such thing —
@@ -118,6 +152,15 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
                  request against"
             )
         })?;
+
+    // A dependent cut before its dependency was closed with nothing to hand
+    // over still records that dependency's branch, which was never pushed
+    // and never will be. Its pull request opens against where that
+    // dependency stood instead, the base a dependent cut afterwards is given
+    // at the cut.
+    let starts_from = repo
+        .retarget_cut_start(&task, &starts_from)
+        .unwrap_or(starts_from);
 
     // A dependency's branch was published by its own handover, and this
     // checkout may predate that, so a fetch runs before anything looks at
@@ -853,24 +896,10 @@ enum HeadPr {
 /// head — the shape of a branch whose first attempt was closed and a later
 /// one landed.
 fn head_pr(gh: &str, worktree: &Path, branch: &str) -> Result<Option<HeadPr>> {
-    let list = Command::new(gh)
-        .args([
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "number,state,baseRefName",
-        ])
-        .current_dir(worktree)
-        .output()
-        .with_context(|| format!("running `{gh} pr list --head {branch}`"))?;
-    if !list.status.success() {
-        return Ok(None);
+    match crate::repo::head_pull_requests(gh, worktree, branch)? {
+        Some(list) => parse_head_pr(&list),
+        None => Ok(None),
     }
-    parse_head_pr(&list.stdout)
 }
 
 /// The parsing half of `head_pr`, split out so it can be tested without `gh`.
@@ -944,6 +973,15 @@ fn register_stack(
     let Some(dep_id) = depends_on.first() else {
         return Ok("none — foot of stack".to_string());
     };
+    // A dependency closed with nothing to hand over has no pull request and
+    // never will, so there is nothing to stack onto. This pull request opens
+    // against that dependency's own base, and stands alone.
+    if let Some(base) = repo.closed_dependency_base(dep_id) {
+        return Ok(format!(
+            "none — dependency `{dep_id}` closed without a pull request, so `{id}` stands on \
+             `{base}`"
+        ));
+    }
     let gh = gh_program();
     let (owner, repo_name) = owner_repo(worktree)?;
 
@@ -1150,6 +1188,32 @@ mod tests {
         assert!(!is_bare_ticket_key(""));
         assert!(!is_bare_ticket_key("https://github.com/acme/app/issues/43"));
         assert!(!is_bare_ticket_key("http://example.com/browse/KAN-11"));
+    }
+
+    /// The change that fixes a dependent's handover under `stack` when its
+    /// dependency was closed with nothing to hand over: there is no pull
+    /// request to stack onto, so `register_stack` says so and returns before
+    /// it asks `gh` anything. An archived dependency with an empty patch
+    /// reaches it with no `gh` at all.
+    #[test]
+    fn register_stack_stands_alone_on_a_dependency_closed_without_a_pull_request() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-closed-dependency");
+        let doc = "---\nid: a-noop\nstage: done\nbranch: task/a-noop\nbase: main\n\
+                   patch:\n  files: 0\n  insertions: 0\n  deletions: 0\n---\n## Goal\nok\n";
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.archive_dir().join("a-noop.md"), doc).unwrap();
+        // Not a git worktree: anything past the early return would fail
+        // reading its remote.
+        let not_a_worktree = crate::scratch::root("stack-closed-dependency-worktree");
+        std::fs::create_dir_all(&not_a_worktree).unwrap();
+
+        let said =
+            register_stack(&repo, &not_a_worktree, "b-dep", &["a-noop".to_string()], 7).unwrap();
+
+        assert!(
+            said.contains("closed without a pull request") && said.contains("`main`"),
+            "{said}"
+        );
     }
 
     /// Taken by every test in this module that sets `SPOOLWAY_WORKTREE` —
