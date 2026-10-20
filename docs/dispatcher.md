@@ -774,8 +774,8 @@ They are `unattended.enabled`, the `unattended.blocked_*` keys and `dispatch.bac
 ## Gates: when the pipeline waits for you
 
 A step with `gate: true` stops the task on `paused` after the step reports. The pane stays open
-for you to read. A command step has no pane. The dispatcher stops the task on `paused` when the
-command exits with a pass.
+for you to read. A shown command's pane stays open after the command exits, and a hidden command
+has no pane. The dispatcher stops the task on `paused` when the command exits with a pass.
 
 Press `r` on the paused row to open the [resume picker](#resume-picker). The natural next step
 is preselected, so `enter` lets the task past the gate. Move the cursor to another step and press
