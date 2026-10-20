@@ -2996,10 +2996,14 @@ mod tests {
     }
 
     /// Gives each clone of a workspace an `open` hook that appends to
-    /// `hook-starts`, takes a second to answer, and then names a ticket.
-    /// Returns that file.
-    fn slow_open_hook_in_each_clone(clones: &mut [&mut Repo]) -> PathBuf {
+    /// `hook-starts`, waits for a `hook-release` file, and then names a
+    /// ticket. Returns both paths. The wait is bounded at ten seconds, so a
+    /// test that fails before it releases the hook does not leave one
+    /// running; a wait for the file, not a sleep, so a loaded machine cannot
+    /// let the hook answer before the test has looked at it running.
+    fn slow_open_hook_in_each_clone(clones: &mut [&mut Repo]) -> (PathBuf, PathBuf) {
         let starts = clones[0].root.join("hook-starts");
+        let release = clones[0].root.join("hook-release");
         for repo in clones.iter_mut() {
             // The hooks folder is where the workspace looks for them, and
             // creating `.spoolway` in the checkout moves that setup.
@@ -3009,8 +3013,11 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\necho started >>'{}'\nsleep 1\necho ticket=T-1 >\"$SPOOLWAY_OUT\"\n",
-                    starts.display()
+                    "#!/bin/sh\necho started >>'{}'\ni=0\n\
+                     while [ ! -f '{}' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\n\
+                     echo ticket=T-1 >\"$SPOOLWAY_OUT\"\n",
+                    starts.display(),
+                    release.display()
                 ),
             )
             .unwrap();
@@ -3024,7 +3031,7 @@ mod tests {
              group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
         )
         .unwrap();
-        starts
+        (starts, release)
     }
 
     /// While one clone's firing waits on its `open` hook, no other clone
@@ -3037,7 +3044,7 @@ mod tests {
     fn a_clone_does_not_fire_while_another_waits_on_its_open_hook() {
         let (mut first, mut second, _guards) = two_clones("jobs-ws-opening");
         shared_job(&first);
-        let starts = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        let (starts, release) = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
         settled_now();
 
         let (actions, problems) = fire(&first);
@@ -3072,8 +3079,9 @@ mod tests {
 
         // Every pass that finds the hook still running renews the claim, so
         // an old one is not read as a dispatcher that stopped asking. The
-        // claim is made old by hand, and the first clone asks again until the
-        // hook answers and it, and only it, queues the task.
+        // claim is made old by hand, and the first clone asks again until it
+        // has seen the claim renewed. Only then is the hook released, and the
+        // first clone, and only it, queues the task.
         let shared = first.project_jobs_state_file();
         let mut state: State =
             serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
@@ -3099,6 +3107,9 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
             let held = state["nightly"].opening.as_ref().unwrap();
             renewed |= Local::now().timestamp() - held.at < 30;
+            if renewed {
+                std::fs::write(&release, "").unwrap();
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(queued, "the answer was never queued");
@@ -3129,7 +3140,7 @@ mod tests {
     fn a_claim_older_than_the_hook_limit_does_not_hold_other_clones_off() {
         let (mut first, mut second, _guards) = two_clones("jobs-ws-stale-opening");
         shared_job(&first);
-        let starts = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        let (starts, release) = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
         settled_now();
         let shared = first.project_jobs_state_file();
         let mut state = State::new();
@@ -3152,6 +3163,7 @@ mod tests {
             ["job nightly · fired · opening ticket for audit-1"]
         );
         assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        std::fs::write(&release, "").unwrap();
     }
 
     /// A clone that finds the shared record's lock held by a live process
