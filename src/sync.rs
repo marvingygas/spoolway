@@ -2562,7 +2562,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         }
 
         if let Some((ids, dropped)) = renamed {
-            outcomes.push(Outcome::wrote(&shown, rename_wrote(&dropped)));
+            outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
             outcomes.push(rename_note(&shown, &name, &ids, &dropped));
         }
         if changed {
@@ -2689,7 +2689,7 @@ fn rename_outside_checkout(
         return;
     }
     if let Some((ids, dropped)) = renamed {
-        outcomes.push(Outcome::wrote(&shown, rename_wrote(&dropped)));
+        outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
         outcomes.push(rename_note(&shown, name, &ids, &dropped));
         acts.push(Act::write(path, &shown, text));
     }
@@ -2728,10 +2728,11 @@ fn headless_left(text: &str, layout: Layout) -> Vec<String> {
 
 /// The `wrote` line under a file [`rename_headless`] changed. A file whose
 /// every `headless:` was `false` only lost keys, so it names no rename.
-fn rename_wrote(dropped: &[String]) -> &'static str {
-    match dropped.is_empty() {
-        true => "`headless:` renamed to `hide:`",
-        false => "`headless:` renamed to `hide:`, and `headless: false` removed",
+fn rename_wrote(ids: &[String], dropped: &[String]) -> &'static str {
+    match (dropped.is_empty(), dropped.len() == ids.len()) {
+        (true, _) => "`headless:` renamed to `hide:`",
+        (false, true) => "`headless: false` removed",
+        (false, false) => "`headless:` renamed to `hide:`, and `headless: false` removed",
     }
 }
 
@@ -2774,8 +2775,8 @@ fn rename_note(shown: &str, pipeline: &str, ids: &[String], dropped: &[String]) 
 fn unrenamed_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` declares `headless:` in a form `sync` cannot rename (flow style, a \
-         quoted key, or a `-` on a line of its own); write `hide:` in its place, or delete \
-         it if it is `false`."
+         quoted key, a `-` on a line of its own, or the step's only key); write `hide:` in \
+         its place, or delete it if it is `false`."
     )
 }
 
@@ -2806,6 +2807,17 @@ enum Layout {
     Patch,
 }
 
+/// What [`rename_headless`] does to the line of one `headless:` key.
+enum Edit {
+    /// Rename the key to `hide:`.
+    Rename,
+    /// Delete a `headless: false` line.
+    Drop,
+    /// Delete a `- headless: false` that opens a list item, and move the dash
+    /// onto line `next`, the item's next key.
+    DropOpening { next: usize },
+}
+
 /// What [`rename_headless`] found.
 enum Renamed {
     /// No step carries `headless:`.
@@ -2828,8 +2840,10 @@ enum Renamed {
 /// only spelled out the default and still followed `dispatch.hide_commands`,
 /// while `hide: false` forces a pane. Renaming it would turn a step that
 /// followed the project setting into one that ignores it. A `headless: false`
-/// on the line that opens a list item (`- headless: false`) cannot be deleted
-/// without moving the dash, so it is left for [`unrenamed_message`].
+/// on the line that opens a list item (`- headless: false`) is deleted too, and
+/// the dash moves onto the item's next key. Only a step with no other key is
+/// left for [`unrenamed_message`]. Any spelling the loader reads as false
+/// counts, so `False` is dropped like `false`.
 ///
 /// A line edit, not a re-serialisation, so comments, ordering, quoting and
 /// line endings survive, and it touches a line only when its key is exactly
@@ -2923,7 +2937,7 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
         steps[pair].to = steps[pair + 1].from;
     }
 
-    let mut edits: Vec<(usize, bool)> = Vec::new();
+    let mut edits: Vec<(usize, Edit)> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
     let mut both: Vec<String> = Vec::new();
@@ -2945,17 +2959,30 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
             let rest = &line[column..];
             if is_key(rest, "headless") {
                 // What the key is set to, less a trailing comment and the
-                // line ending. Only the plain word `false` is dropped.
+                // line ending. Whatever the loader reads as the boolean
+                // false is dropped, so `False` and `FALSE` go with `false`.
                 let value = rest["headless:".len()..]
                     .split(" #")
                     .next()
                     .unwrap_or_default()
                     .trim();
+                let drop = matches!(serde_norway::from_str::<bool>(value), Ok(false));
                 let opens_item = at == step.from && matches!(layout, Layout::Steps);
-                let drop = value == "false";
-                if !(drop && opens_item) {
-                    headless = Some((at, drop));
-                }
+                let edit = match (drop, opens_item) {
+                    (false, _) => Edit::Rename,
+                    (true, false) => Edit::Drop,
+                    // The next key takes the dash. A step with no key after
+                    // this one has nothing to take it, so it is left for
+                    // [`unrenamed_message`].
+                    (true, true) => {
+                        let next = (at + 1..step.to).find(|&n| content(lines[n]));
+                        match next.filter(|&n| indent(lines[n]) == step.key_indent) {
+                            Some(next) => Edit::DropOpening { next },
+                            None => continue,
+                        }
+                    }
+                };
+                headless = Some((at, edit));
             } else if is_key(rest, "hide") {
                 hide = true;
             } else if is_key(rest, "id") && matches!(layout, Layout::Steps) {
@@ -2970,11 +2997,11 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
         }
         match (headless, hide) {
             (Some(_), true) => both.push(id),
-            (Some((at, drop)), false) => {
-                edits.push((at, drop));
-                if drop {
+            (Some((at, edit)), false) => {
+                if !matches!(edit, Edit::Rename) {
                     dropped.push(id.clone());
                 }
+                edits.push((at, edit));
                 ids.push(id);
             }
             (None, _) => {}
@@ -2988,9 +3015,20 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
     }
     let mut out = String::with_capacity(text.len());
     for (at, line) in lines.iter().enumerate() {
+        // The line after a dropped `- headless: false` is the item's new
+        // first line, so the dash moves onto it, in the column it had.
+        let takes_dash = edits
+            .iter()
+            .any(|(_, edit)| matches!(edit, Edit::DropOpening { next } if *next == at));
+        if takes_dash {
+            out.push_str(&line[..top]);
+            out.push('-');
+            out.push_str(&line[top + 1..]);
+            continue;
+        }
         match edits.iter().find(|(edit, _)| *edit == at) {
-            Some((_, true)) => {}
-            Some((_, false)) => {
+            Some((_, Edit::Drop | Edit::DropOpening { .. })) => {}
+            Some((_, Edit::Rename)) => {
                 let key = line.find("headless").expect("an edited line names the key");
                 out.push_str(&line[..key]);
                 out.push_str("hide");
@@ -5421,11 +5459,28 @@ mod tests {
         assert_eq!(dropped, ["check"]);
         assert_eq!(text, "steps:\n  check:\n    timeout: 5m\n");
 
-        // On the line that opens a list item the dash would have to move, so
-        // the key is left for `sync` to refuse by name.
+        // Every spelling the loader reads as false is dropped, so none of
+        // them is renamed into a `hide: False` that forces a pane.
+        let spelt = "steps:\n  - id: a\n    headless: False\n  - id: b\n    headless: FALSE\n";
+        let Renamed::Done { text, dropped, .. } = rename_headless(spelt, Layout::Steps) else {
+            panic!("both steps name `headless:`");
+        };
+        assert_eq!(dropped, ["a", "b"]);
+        assert_eq!(text, "steps:\n  - id: a\n  - id: b\n");
+
+        // On the line that opens a list item the dash moves onto the next key.
         let opens = "steps:\n  - headless: false\n    id: a\n    run: x\n";
+        let Renamed::Done { text, dropped, .. } = rename_headless(opens, Layout::Steps) else {
+            panic!("the item opens with `headless:`");
+        };
+        assert_eq!(dropped, ["a"]);
+        assert_eq!(text, "steps:\n  - id: a\n    run: x\n");
+
+        // A step with no other key has nothing to take the dash, so the key
+        // is left for `sync` to refuse by name.
+        let alone = "steps:\n  - headless: false\n  - id: b\n";
         assert!(matches!(
-            rename_headless(opens, Layout::Steps),
+            rename_headless(alone, Layout::Steps),
             Renamed::Nothing
         ));
     }

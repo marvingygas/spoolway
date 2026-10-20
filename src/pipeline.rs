@@ -2035,8 +2035,8 @@ fn refuse_retired_step_keys(pipeline: &Pipeline) -> Result<()> {
         if step.on_loop_max.is_some() {
             bail!("{}: {}", pipeline.name, on_loop_max_message(&step.id));
         }
-        // Any value: `headless: false` was the same key, and `sync` renames
-        // it to `hide: false`.
+        // Any value: `headless: false` was the same key. `sync` renames
+        // `headless: true` to `hide: true` and deletes `headless: false`.
         if step.headless.is_some() {
             bail!("{}: {}", pipeline.name, headless_message(&step.id));
         }
