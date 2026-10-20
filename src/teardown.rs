@@ -126,16 +126,18 @@ pub(crate) fn off_branch(task: &Task, worktree: &Path) -> Option<OffBranch> {
             "merge in progress in the worktree",
         );
     }
-    if git_dir.join("CHERRY_PICK_HEAD").exists() || git_dir.join("sequencer").exists() {
-        return off(
-            "a cherry-pick is in progress in the worktree",
-            "cherry-pick in progress in the worktree",
-        );
-    }
+    // Before `sequencer/`: a conflicted multi-commit revert leaves both
+    // `REVERT_HEAD` and `sequencer/`, and the first would read as a cherry-pick.
     if git_dir.join("REVERT_HEAD").exists() {
         return off(
             "a revert is in progress in the worktree",
             "revert in progress in the worktree",
+        );
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() || git_dir.join("sequencer").exists() {
+        return off(
+            "a cherry-pick is in progress in the worktree",
+            "cherry-pick in progress in the worktree",
         );
     }
     let expected = task_branch(task);

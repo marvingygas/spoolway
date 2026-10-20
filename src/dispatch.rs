@@ -24821,16 +24821,32 @@ mod tests {
     // covers: teardown holds a task with a cherry-pick or revert in progress
     #[test]
     fn a_cleanup_terminal_holds_a_task_mid_cherry_pick_or_revert() {
-        for (marker, clause) in [
-            ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
-            ("sequencer", "a cherry-pick is in progress"),
-            ("REVERT_HEAD", "a revert is in progress"),
+        for (name, markers, clause) in [
+            (
+                "pick",
+                &["CHERRY_PICK_HEAD"][..],
+                "a cherry-pick is in progress",
+            ),
+            (
+                "sequence",
+                &["sequencer"][..],
+                "a cherry-pick is in progress",
+            ),
+            ("revert", &["REVERT_HEAD"][..], "a revert is in progress"),
+            // A conflicted `git revert A B` leaves both.
+            (
+                "revert-sequence",
+                &["REVERT_HEAD", "sequencer"][..],
+                "a revert is in progress",
+            ),
         ] {
-            let task = off_branch_cleanup(&format!("cleanup-{marker}"), |wt| {
+            let task = off_branch_cleanup(&format!("cleanup-{name}"), |wt| {
                 let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
-                match marker {
-                    "sequencer" => std::fs::create_dir_all(git_dir.join(marker)).unwrap(),
-                    _ => std::fs::write(git_dir.join(marker), "0".repeat(40)).unwrap(),
+                for marker in markers {
+                    match *marker {
+                        "sequencer" => std::fs::create_dir_all(git_dir.join(marker)).unwrap(),
+                        _ => std::fs::write(git_dir.join(marker), "0".repeat(40)).unwrap(),
+                    }
                 }
             });
             assert_held_for(&task, clause);
