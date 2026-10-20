@@ -5,12 +5,12 @@
 //! already put a `run:` step on, since none of them is a step a pipeline may
 //! declare. `hook_failed` fires no event of its own, because the hook that
 //! would report it is the one that just failed. The other three are not task
-//! stages at all: `open`, which [`open_ticket`] runs
-//! synchronously from `queue add` itself, before any of the four could ever
-//! fire; `fetch`, which [`fetch_issue`] runs synchronously from `spoolway
-//! issue show`, before any task tied to the issue it names even exists; and
-//! `started`, which [`fire`] runs once a task actually leaves `queued` for
-//! its entry step — see `crate::pipeline::STARTED` for why this is not a
+//! stages at all: `open`, which [`open_ticket`] runs from `queue add` itself
+//! (waiting for it) and from a job firing a routine (not waiting), before any
+//! of the four could ever fire; `fetch`, which [`fetch_issue`] runs
+//! synchronously from `spoolway issue show`, before any task tied to the
+//! issue it names even exists; and `started`, which [`fire`] runs once a task
+//! actually leaves `queued` for its entry step — see `crate::pipeline::STARTED` for why this is not a
 //! reserved stage, only ever fired and gated from inside the `queued`
 //! arm of `crate::dispatch::Dispatcher::route_reserved_stage`. A hook proves
 //! itself on these real events alone — there is no `check` event asking it
@@ -25,6 +25,12 @@
 //! pass — a hook run is the same shape as a `run:` step's. It gets its own
 //! directory, `tracking/` rather than `commands/`, so a project checking on a
 //! stuck ticket integration never has to sift through build logs to find it.
+//!
+//! An `open` run belongs to the task id it opens a ticket for, and any caller
+//! that finds one already going adopts it rather than starting a second: a
+//! `queue add` stopped while its hook ran, or a dispatcher killed during a
+//! firing, leaves the hook running, and the next caller waits on that run
+//! and reads its answer. Two tickets can no longer open for one task.
 //!
 //! Firing is idempotent for a run's whole lifetime: [`fire`] starts a run
 //! only while [`RunState::Fresh`] holds. `queued`, `paused` and `blocked`
@@ -63,9 +69,10 @@ fn runs(repo: &Repo) -> Runs {
     Runs::new(&repo.tracking_dir())
 }
 
-/// How long an `open` or `fetch` hook may run. Both are waited on inside a
-/// command that has a person or the dispatcher's pass behind it, and they
-/// ask one tracker one question, so a minute is far past a healthy answer.
+/// How long an `open` or `fetch` hook may run. A person waits on `fetch` and
+/// on a `queue add`'s `open`, and a job firing's `open` holds up its own
+/// routine, and they ask one tracker one question, so a minute is far past a
+/// healthy answer.
 /// Fixed, like [`LOGIN_TIMEOUT`], and with no setting: a limit a project
 /// could raise is a limit a project would raise until the hang came back.
 pub const OPEN_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -241,7 +248,7 @@ pub(crate) fn not_bare_filename_problem(hook: &str) -> Option<String> {
     })
 }
 
-/// What one synchronous `open` hook call came back with.
+/// What one `open` hook call came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenResult {
     /// No hook is configured at all — `queue add` runs no process, and
@@ -275,20 +282,73 @@ pub enum OpenResult {
     /// killed. `queue add` fails the whole add, as it does for any failing
     /// `open` hook, and a job firing fails that minute's firing.
     TimedOut,
+    /// The hook is still running inside its limit and the caller asked not
+    /// to wait ([`OpenWait::Poll`]). `started` is whether this call started
+    /// it, as against finding it already going.
+    Pending { started: bool },
 }
 
-/// Run the `open` hook for one task, synchronously, and return what it said.
+/// Whether [`open_ticket`] waits for a running hook to settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenWait {
+    /// Block until the hook settles or its limit passes — `queue add`, which
+    /// has nothing else to do and reports the ticket before it exits.
+    Block,
+    /// Return [`OpenResult::Pending`] while the hook runs — the dispatcher's
+    /// pass, which has every other task to move and asks again on its next
+    /// pass. The settled run's files are left in place, so a batch of
+    /// several tasks answered across passes finds the earlier answers again
+    /// instead of running their hooks a second time; see [`settle_opens`].
+    Poll,
+}
+
+/// The error a job firing stops with while an `open` hook is still running:
+/// not a failure, only "ask again on a later pass". Its own type so
+/// `crate::jobs::fire_due` can tell it from one.
+#[derive(Debug)]
+pub struct OpenPending {
+    /// The task id the hook is opening a ticket for.
+    pub task: String,
+    /// Whether this call started the hook; a later pass finding it still
+    /// going says nothing again.
+    pub started: bool,
+}
+
+impl std::fmt::Display for OpenPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the open hook for `{}` is still running — it is asked again on the next pass",
+            self.task
+        )
+    }
+}
+
+impl std::error::Error for OpenPending {}
+
+/// Run the `open` hook for one task and return what it said, or that it is
+/// still running.
 ///
-/// Unlike [`fire`] this never checks [`RunState::Fresh`] first and never
-/// leaves a process running past this call: its callers are `queue add` and a
-/// job firing a routine, each means "run this now", and it needs the answer
-/// before it can decide whether to queue anything at all — so this starts the
-/// run and blocks on it, for at most [`OPEN_FETCH_TIMEOUT`], rather than
-/// firing detached and leaving a later pass to notice. `group_size` and
-/// `group_epic` become `SPOOLWAY_GROUP_SIZE` and `SPOOLWAY_EPIC`;
-/// `depends_tickets` becomes `SPOOLWAY_DEPENDS_TICKETS`, already resolved by
-/// the caller — see `queue::open_tickets`, which is what walks a submission
-/// in the order that makes that possible at all.
+/// Unlike [`fire`] this does not stop at a finished run's exit code: its
+/// callers are `queue add` and a job firing a routine, and each means "open
+/// the ticket now". What it does look at first is a run of this task's `open`
+/// already on disk, and adopts it:
+///
+/// - Running: wait for it ([`OpenWait::Block`]) or answer
+///   [`OpenResult::Pending`] ([`OpenWait::Poll`]), against the limit counted
+///   from when that run started, not from this call.
+/// - Exited or interrupted: read its answer. Left by a caller that was
+///   stopped before it could.
+/// - Nothing there: start one.
+///
+/// A settled run is forgotten once read under [`OpenWait::Block`]; under
+/// [`OpenWait::Poll`] the caller does it with [`settle_opens`], once the
+/// whole batch has been answered. `group_size` and `group_epic` become
+/// `SPOOLWAY_GROUP_SIZE` and `SPOOLWAY_EPIC`; `depends_tickets` becomes
+/// `SPOOLWAY_DEPENDS_TICKETS`, already resolved by the caller — see
+/// `queue::open_tickets`, which is what walks a submission in the order that
+/// makes that possible at all.
+#[allow(clippy::too_many_arguments)]
 pub fn open_ticket(
     repo: &Repo,
     task: &Task,
@@ -297,6 +357,7 @@ pub fn open_ticket(
     depends_tickets: &str,
     group_description: &str,
     task_file: &str,
+    wait: OpenWait,
 ) -> Result<OpenResult> {
     let Some(hook) = hook_path(repo) else {
         return Ok(OpenResult::NoHook);
@@ -306,34 +367,51 @@ pub fn open_ticket(
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let key = Runs::key("open", task.id());
     let out_path = dir.join(format!("{key}.out"));
-    let _ = std::fs::remove_file(&out_path);
-
-    let mut env = open_env(
-        repo,
-        task,
-        group_size,
-        group_epic,
-        depends_tickets,
-        group_description,
-        task_file,
-    );
-    env.insert("SPOOLWAY_OUT".to_string(), out_path.display().to_string());
-
-    let run_line = crate::platform::quote(&hook.display().to_string());
     let runs = runs(repo);
-    runs.start(&key, &run_line, &repo.root, &env)?;
 
-    // `queue add` is a one-shot command, not a dispatch pass — there is no
-    // later turn to come back and check this on, so this blocks until the
-    // hook is actually done rather than answering `Fresh`/`Running` back to
-    // a caller with nothing useful to do with either. A job firing calls
-    // this from inside the dispatcher's pass, so the wait has a deadline: a
-    // hook that never exits would otherwise freeze the dispatcher with it.
-    let Some(state) = wait_settled(&runs, &key, OPEN_FETCH_TIMEOUT) else {
-        return Ok(OpenResult::TimedOut);
+    let mut started = false;
+    if runs.state(&key) == RunState::Fresh {
+        let _ = std::fs::remove_file(&out_path);
+        let mut env = open_env(
+            repo,
+            task,
+            group_size,
+            group_epic,
+            depends_tickets,
+            group_description,
+            task_file,
+        );
+        env.insert("SPOOLWAY_OUT".to_string(), out_path.display().to_string());
+        let run_line = crate::platform::quote(&hook.display().to_string());
+        runs.start(&key, &run_line, &repo.root, &env)?;
+        started = true;
+    }
+
+    let state = match runs.state(&key) {
+        RunState::Fresh | RunState::Running => {
+            let left = OPEN_FETCH_TIMEOUT.saturating_sub(runs.elapsed(&key).unwrap_or_default());
+            // A run past its limit is stopped here for either caller, so a
+            // pass that finds an adopted hook overdue ends it the same way
+            // a blocked `queue add` does.
+            let overdue = left.is_zero();
+            if wait == OpenWait::Poll && !overdue {
+                return Ok(OpenResult::Pending { started });
+            }
+            let settled = if overdue {
+                runs.stop(&key);
+                None
+            } else {
+                wait_settled(&runs, &key, left)
+            };
+            match settled {
+                Some(state) => state,
+                None => return Ok(OpenResult::TimedOut),
+            }
+        }
+        settled => settled,
     };
 
-    Ok(match state {
+    let result = match state {
         RunState::Exited(0) => {
             let Answer {
                 epic,
@@ -352,8 +430,43 @@ pub fn open_ticket(
             exit_code: Some(code),
         },
         RunState::Interrupted => OpenResult::Failed { exit_code: None },
-        RunState::Fresh | RunState::Running => unreachable!("the loop above only exits settled"),
-    })
+        RunState::Fresh | RunState::Running => unreachable!("the match above only settles"),
+    };
+    if wait == OpenWait::Block {
+        let _ = runs.forget(&key);
+    }
+    Ok(result)
+}
+
+/// Forget the `open` runs of `tasks` once a batch polled with
+/// [`OpenWait::Poll`] has been answered or has failed, so the next firing of
+/// the same ids opens fresh tickets instead of reading these answers again.
+/// Not called while the batch is still pending: the answers already in are
+/// what the next pass needs to skip those hooks.
+pub fn settle_opens(repo: &Repo, tasks: &[Task]) {
+    let runs = runs(repo);
+    for task in tasks {
+        let _ = runs.forget(&Runs::key("open", task.id()));
+    }
+}
+
+/// The `open` hooks running right now for task ids that are not in the queue
+/// yet — a routine's firing that is waiting on its ticket — with how long
+/// each has run. For the queue row that names them.
+pub fn opening(repo: &Repo, queued: &[Task]) -> Vec<(String, Duration)> {
+    let runs = runs(repo);
+    let mut found: Vec<(String, Duration)> = runs
+        .keys_by_task()
+        .into_iter()
+        .filter(|(id, _)| !queued.iter().any(|task| task.id() == id))
+        .filter_map(|(id, _)| {
+            let key = Runs::key("open", &id);
+            (runs.state(&key) == RunState::Running)
+                .then(|| (id, runs.elapsed(&key).unwrap_or_default()))
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// Every variable every event carries — `spoolway hook contract` prints this
@@ -1979,8 +2092,119 @@ mod tests {
         let (repo, _root_guard) = fixture("open-no-hook");
         let t = task("demo", |_| {});
         assert_eq!(
-            open_ticket(&repo, &t, 1, "", "", "", "demo.md").unwrap(),
+            open_ticket(&repo, &t, 1, "", "", "", "demo.md", OpenWait::Block).unwrap(),
             OpenResult::NoHook
+        );
+    }
+
+    /// An `open` hook polled rather than waited on is started once and
+    /// left running: the first call starts it, the next finds it going, and
+    /// the call after it has finished reads its answer. A hook started a
+    /// second time would open a second ticket.
+    #[test]
+    fn a_polled_open_hook_is_started_once_and_adopted_until_it_answers() {
+        let (mut repo, _root_guard) = fixture("open-poll");
+        let starts = repo.root.join("starts");
+        with_hook(
+            &mut repo,
+            "open.sh",
+            &format!(
+                "echo started >>'{}'; sleep 1; echo ticket=T-1 >\"$SPOOLWAY_OUT\"",
+                starts.display()
+            ),
+        );
+        let t = task("demo", |_| {});
+        let poll = || open_ticket(&repo, &t, 1, "", "", "", "", OpenWait::Poll).unwrap();
+
+        assert_eq!(poll(), OpenResult::Pending { started: true });
+        assert_eq!(poll(), OpenResult::Pending { started: false });
+        let answer = loop {
+            match poll() {
+                OpenResult::Pending { .. } => std::thread::sleep(Duration::from_millis(50)),
+                settled => break settled,
+            }
+        };
+        let OpenResult::Answered { ticket, .. } = answer else {
+            panic!("expected an answer: {answer:?}");
+        };
+        assert_eq!(ticket, "T-1");
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+
+        // Left in place for a batch's next pass, until the caller settles it.
+        assert!(matches!(poll(), OpenResult::Answered { .. }));
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        settle_opens(&repo, std::slice::from_ref(&t));
+        assert_eq!(poll(), OpenResult::Pending { started: true });
+        stop_and_reclaim(&repo, t.id());
+    }
+
+    /// A `queue add` that waits adopts a hook an earlier, stopped caller left
+    /// running — it waits on that run and reads its answer rather than
+    /// starting a second.
+    #[test]
+    fn a_waiting_open_adopts_a_hook_left_running() {
+        let (mut repo, _root_guard) = fixture("open-adopt-block");
+        let starts = repo.root.join("starts");
+        with_hook(
+            &mut repo,
+            "open.sh",
+            &format!(
+                "echo started >>'{}'; sleep 1; echo ticket=T-2 >\"$SPOOLWAY_OUT\"",
+                starts.display()
+            ),
+        );
+        let t = task("demo", |_| {});
+        let open = |wait| open_ticket(&repo, &t, 1, "", "", "", "", wait).unwrap();
+
+        assert_eq!(open(OpenWait::Poll), OpenResult::Pending { started: true });
+        let OpenResult::Answered { ticket, .. } = open(OpenWait::Block) else {
+            panic!("expected an answer");
+        };
+        assert_eq!(ticket, "T-2");
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        // Read by a waiting caller, so nothing is left to be read twice.
+        assert_eq!(
+            runs(&repo).state(&Runs::key("open", t.id())),
+            RunState::Fresh
+        );
+    }
+
+    /// An adopted hook that is already past its limit is stopped with
+    /// everything it started, for a polling caller as for a waiting one.
+    #[test]
+    fn an_adopted_open_hook_past_its_limit_is_stopped_with_its_children() {
+        let (mut repo, _root_guard) = fixture("open-adopt-overdue");
+        let child_pid = repo.root.join("child.pid");
+        with_hook(
+            &mut repo,
+            "open.sh",
+            &format!("sleep 300 & echo $! >'{}'; wait", child_pid.display()),
+        );
+        let t = task("demo", |_| {});
+        assert_eq!(
+            open_ticket(&repo, &t, 1, "", "", "", "", OpenWait::Poll).unwrap(),
+            OpenResult::Pending { started: true }
+        );
+        let key = Runs::key("open", t.id());
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(120))
+            .unwrap();
+
+        assert_eq!(
+            open_ticket(&repo, &t, 1, "", "", "", "", OpenWait::Poll).unwrap(),
+            OpenResult::TimedOut
+        );
+        let child: u32 = std::fs::read_to_string(&child_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !crate::headless::alive(child),
+            "the child outlived the stop"
         );
     }
 
@@ -2019,6 +2243,7 @@ mod tests {
             "acme/app#42",
             "Mirrors a group of scans.",
             &source_doc.display().to_string(),
+            OpenWait::Block,
         )
         .unwrap();
         assert_eq!(
@@ -2060,7 +2285,7 @@ mod tests {
         let t = task("split-fields", |_| {});
 
         assert_eq!(
-            open_ticket(&repo, &t, 1, "", "", "", "split-fields.md").unwrap(),
+            open_ticket(&repo, &t, 1, "", "", "", "split-fields.md", OpenWait::Block).unwrap(),
             OpenResult::Failed { exit_code: Some(7) }
         );
     }
@@ -2431,7 +2656,17 @@ exit 0
             f.labels = vec!["bug".to_string(), "needs-triage".to_string()];
         });
 
-        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        let result = open_ticket(
+            &repo,
+            &t,
+            1,
+            "",
+            "",
+            "a group needing labels",
+            "",
+            OpenWait::Block,
+        )
+        .unwrap();
         let OpenResult::Answered { epic, ticket, .. } = result else {
             panic!("expected an answered open: {result:?}");
         };
@@ -2489,7 +2724,17 @@ exit 0
             f.labels = vec!["bug".to_string()];
         });
 
-        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        let result = open_ticket(
+            &repo,
+            &t,
+            1,
+            "",
+            "",
+            "a group needing labels",
+            "",
+            OpenWait::Block,
+        )
+        .unwrap();
         assert!(matches!(result, OpenResult::Answered { .. }), "{result:?}");
 
         assert!(
@@ -2526,6 +2771,7 @@ exit 0
             "",
             "a group needing labels",
             "",
+            OpenWait::Block,
         )
         .unwrap();
         let OpenResult::Answered { epic, .. } = result else {

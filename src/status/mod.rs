@@ -3113,7 +3113,43 @@ pub fn rows_of(
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
     // see `Board::arrived`.
-    build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)
+    let mut rows = build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)?;
+    rows.extend(opening_rows(repo, tasks));
+    Ok(rows)
+}
+
+/// One row per routine firing that is waiting on its `open` hook. The firing
+/// has minted its task ids but saved nothing, so no task file backs the row;
+/// it is drawn from the hook's own run files, and goes the moment the hook
+/// settles and the task takes its place in the queue.
+fn opening_rows(repo: &Repo, tasks: &[crate::task::Task]) -> Vec<Row> {
+    crate::tracking::opening(repo, tasks)
+        .into_iter()
+        .map(|(id, ran)| Row {
+            id,
+            routine: None,
+            group: None,
+            issue_url: None,
+            after: None,
+            stage: crate::pipeline::QUEUED.to_string(),
+            arrivals: 0,
+            pipeline: String::new(),
+            state: State::Queued,
+            depth: 0,
+            steps_left: 0,
+            dependents: 0,
+            ctx: None,
+            out: None,
+            cost: None,
+            lane_time: None,
+            next: format!(
+                "opening ticket {} (stopped at {})",
+                crate::tracking::minutes(ran),
+                crate::tracking::minutes(crate::tracking::OPEN_FETCH_TIMEOUT),
+            ),
+            resumable: false,
+        })
+        .collect()
 }
 
 /// Everything [`build`] read and computed once, for [`paint`] to draw from
@@ -3290,6 +3326,7 @@ fn build(
         &ledger,
         Some(&memory.arrived),
     )?;
+    active_rows.extend(opening_rows(repo, &tasks));
     // How many steps are still working with no dispatcher up to move them on
     // — `None` while one holds the lock, whose rows read exactly as they
     // always have. See `finish_settled`.
@@ -7795,6 +7832,44 @@ mod tests {
         assert_eq!(
             header_cells(running, None, "v1".to_string()).join(" · "),
             "dispatcher running · pid 1234 · v1"
+        );
+    }
+
+    /// A routine firing waiting on its `open` hook has no task file yet, but
+    /// the queue shows it: one `opening ticket` row, for as long as the hook
+    /// runs, and none for an id that is already a queued task.
+    #[test]
+    fn a_routine_waiting_on_its_open_hook_reads_opening_ticket() {
+        let (repo, _root_guard) = fixture("opening-row");
+        add(&repo, "queued-one", &[], Some(crate::pipeline::QUEUED));
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        for id in ["nite-1", "queued-one"] {
+            let key = crate::command_step::Runs::key("open", id);
+            runs.start(&key, "sleep 60", &repo.root, &Default::default())
+                .unwrap();
+        }
+
+        let rows = rows(&repo, &Pipelines::builtin()).unwrap();
+        for id in ["nite-1", "queued-one"] {
+            runs.stop(&crate::command_step::Runs::key("open", id));
+        }
+
+        let opening: Vec<_> = rows
+            .iter()
+            .filter(|row| row.next.contains("opening ticket"))
+            .collect();
+        assert_eq!(
+            opening.len(),
+            1,
+            "{:?}",
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(opening[0].id, "nite-1");
+        assert!(matches!(opening[0].state, State::Queued));
+        assert!(
+            opening[0].next.contains("(stopped at 1m)"),
+            "{}",
+            opening[0].next
         );
     }
 
