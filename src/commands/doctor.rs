@@ -2683,7 +2683,7 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     vec![
         Finding::Check("queue ids are unique".into(), unique),
         Finding::Check("no queued task is named like a routine".into(), unrouted),
-        Finding::Check("routine ids are unique".into(), routine_ids_unique),
+        Finding::Check("routines".into(), routine_ids_unique),
         Finding::Check("no deleted task left a worktree or branch".into(), stray),
     ]
 }
@@ -4342,11 +4342,29 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(
+            findings.iter().any(|finding| matches!(
+                finding,
+                Finding::Check(label, Err(_)) if label == "routines"
+            )),
+            "the row is labelled `routines`, so the line reads `FAIL  routines: task id …`"
+        );
         let clash = failures
             .iter()
             .find(|why| why.contains("frontend/lint.md") && why.contains("backend/lint.md"))
             .unwrap_or_else(|| panic!("no failed row names both files: {failures:?}"));
-        assert!(clash.contains("`lint`"), "{clash}");
+        assert!(
+            clash.starts_with("task id `lint` is in two routines"),
+            "{clash}"
+        );
+        assert!(
+            clash.contains(".spoolway/routines/frontend/lint.md"),
+            "{clash}"
+        );
+        assert!(
+            clash.contains(".spoolway/routines/backend/lint.md"),
+            "{clash}"
+        );
         assert!(clash.contains("another id"), "{clash}");
         assert!(!clash.contains("spell"), "{clash}");
     }

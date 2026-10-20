@@ -21164,8 +21164,14 @@ mod tests {
         );
 
         let drawn = lines.join("\n");
-        assert!(drawn.contains("backend/lint.md"), "{drawn}");
-        assert!(drawn.contains("frontend/lint.md"), "{drawn}");
+        assert!(
+            drawn.contains(".spoolway/routines/backend/lint.md"),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains(".spoolway/routines/frontend/lint.md"),
+            "{drawn}"
+        );
     }
 
     /// The one non-goal this feature draws a hard line at: the empty

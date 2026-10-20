@@ -1193,7 +1193,7 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
     // skips one job's minute without a word. Doctor refuses it too.
     let routines = super::routines::list_routines(repo).unwrap_or_default();
     for clash in super::routines::id_clashes(&routines) {
-        problems.push(clash.refusal(&repo.routines_dir()));
+        problems.push(format!("routines: {}", clash.refusal(&repo.routines_dir())));
     }
 
     // Read the prompts against the steps that run them: this rule is a fact,

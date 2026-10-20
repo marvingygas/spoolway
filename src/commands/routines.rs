@@ -125,17 +125,18 @@ pub(crate) struct IdClash {
 }
 
 impl IdClash {
-    /// The refusal, naming every file by its path under `routines_dir` and
-    /// suggesting an id built from the first file's folder.
+    /// The refusal, naming every file by its path from the project root
+    /// (`.spoolway/routines/<folder>/<file>`) and suggesting an id built from
+    /// the first file's folder. It carries no label of its own: `doctor`
+    /// prints it under the row name `routines`, and the other readers put
+    /// `routines:` in front.
     pub(crate) fn refusal(&self, routines_dir: &Path) -> String {
         let shown: Vec<String> = self
             .files
             .iter()
             .map(|file| {
-                file.strip_prefix(routines_dir)
-                    .unwrap_or(file)
-                    .display()
-                    .to_string()
+                let rel = file.strip_prefix(routines_dir).unwrap_or(file);
+                format!("{}/{}", crate::config::ROUTINES_DIR, rel.display())
             })
             .collect();
         let folder = self
@@ -151,7 +152,7 @@ impl IdClash {
             n => (n.to_string(), "all but one of them"),
         };
         format!(
-            "routines: task id `{id}` is in {count} routines — {rest} and {last}. \
+            "task id `{id}` is in {count} routines — {rest} and {last}. \
              Give {give} another id:, such as {folder}-{id}.",
             id = self.id,
             rest = rest.join(", "),
