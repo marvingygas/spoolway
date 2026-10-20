@@ -2017,11 +2017,16 @@ impl<'a> Dispatcher<'a> {
                         continue;
                     };
                     // A command that passes ends the cycle that
-                    // `Frontmatter::unblock_laps` counts: whatever the
-                    // unblocker did, it worked, so a later failure starts the
-                    // count over rather than inheriting this one.
+                    // `Frontmatter::unblock_laps` counts for that command:
+                    // whatever the unblocker did, it worked, so a later
+                    // failure starts the count over rather than inheriting
+                    // this one. Only its own entry goes. Another command
+                    // that is still failing keeps its laps, or a passing
+                    // command on the road back to it (`prep` before `build`)
+                    // would reset the bound on every lap and the unblocker
+                    // would run for ever.
                     if outcome == crate::pipeline::Outcome::Pass {
-                        tasks[index].front.unblock_laps.clear();
+                        tasks[index].front.end_unblock_laps(&step.id);
                     }
                     // Still on disk if `run_command` just read this
                     // destination off an `Exited` run — that arm leaves its
@@ -5596,11 +5601,18 @@ impl<'a> Dispatcher<'a> {
                 // the step, the code and that path are what the lane sent
                 // in to clear the block needs to see what actually broke.
                 if code != 0 {
-                    task.log_status(&format!(
-                        "`{}` exited {code} — see {}",
-                        step.id,
-                        runs.log_path(&key).display()
-                    ));
+                    // A failure after an unblocker's pass sent the task back
+                    // is that pass's lap, so the log says which one of the
+                    // bound it is (`UNBLOCK_LAP_LIMIT`).
+                    let lap = match task.front.unblock_laps.get(&step.id) {
+                        Some(laps) => format!(
+                            " — unblocker lap {laps} of {} on `{}`",
+                            crate::commands::UNBLOCK_LAP_LIMIT,
+                            step.id
+                        ),
+                        None => format!(" — see {}", runs.log_path(&key).display()),
+                    };
+                    task.log_status(&format!("`{}` exited {code}{lap}", step.id));
                 }
                 report.actions.push(format!(
                     "{id}: `{}` exited {code} — {}",
@@ -26766,6 +26778,31 @@ mod tests {
         assert!(
             log.contains("demo · implement.log"),
             "names the log a person or lane would read: {log}"
+        );
+    }
+
+    /// A command that fails again after an unblocker's pass says which lap of
+    /// the bound that failure is, on the command that is failing.
+    ///
+    /// Fails if the line keeps only the code and the log path, as it did
+    /// before the lap was named.
+    #[test]
+    fn a_failing_command_names_the_unblocker_lap_it_is() {
+        let (repo, _root_guard) = fixture("command-fail-names-lap");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.unblock_laps.insert("implement".into(), 2);
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 1", false);
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+
+        let task = reload(&path);
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains("`implement` exited 1 — unblocker lap 2 of 3 on `implement`"),
+            "names the lap: {log}"
         );
     }
 

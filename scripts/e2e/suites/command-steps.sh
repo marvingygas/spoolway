@@ -1951,7 +1951,7 @@ else
 (at \`$(stage_of redgate)\`)"
 fi
 has "the Status Log names the step and the laps" \
-  "\`redgate\` failed again after 3 unblocker passes had sent the task back to it" \
+  "\`redgate\` still fails after 3 unblocker laps — parked on \`paused\`" \
   $SPOOLWAY_PROJECT_HOME/queue/redgate.md
 has "and the task keeps the step to hand back to" "paused_at: redgate" \
   $SPOOLWAY_PROJECT_HOME/queue/redgate.md
@@ -1992,7 +1992,7 @@ else
 (at \`$(stage_of gated-unattended)\`)"
 fi
 has "the Status Log names the gate and the laps" \
-  "\`gate\` failed again after 3 unblocker passes had sent the task back to it" \
+  "\`gate\` still fails after 3 unblocker laps — parked on \`paused\`" \
   $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
 has "and the task keeps the agent step it stopped at to hand back to" "paused_at: e2e" \
   $SPOOLWAY_PROJECT_HOME/queue/gated-unattended.md
@@ -2018,7 +2018,7 @@ else
 (at \`$(stage_of gated-stage)\`)"
 fi
 has "the Status Log names the gate and the laps" \
-  "\`gate\` failed again after 3 unblocker passes had sent the task back to it" \
+  "\`gate\` still fails after 3 unblocker laps — parked on \`paused\`" \
   $SPOOLWAY_PROJECT_HOME/queue/gated-stage.md
 counter "three laps were handed back towards the gate, not a fourth" \
   steps "blocked->gate" 3 $SPOOLWAY_PROJECT_HOME/queue/gated-stage.md
@@ -2038,7 +2038,7 @@ else
 (at \`$(stage_of redstage)\`)"
 fi
 has "the Status Log names the command and the laps" \
-  "\`redgate\` failed again after 3 unblocker passes had sent the task back to it" \
+  "\`redgate\` still fails after 3 unblocker laps — parked on \`paused\`" \
   $SPOOLWAY_PROJECT_HOME/queue/redstage.md
 counter "three laps were handed back to the command, not a fourth" \
   steps "blocked->redgate" 3 $SPOOLWAY_PROJECT_HOME/queue/redstage.md

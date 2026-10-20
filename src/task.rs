@@ -809,9 +809,10 @@ pub struct Frontmatter {
     /// Nothing here is dropped on a move: the cycle can run through an agent
     /// step on its way back to `blocked` (a gate that fails back to the agent
     /// behind it), and the count has to survive that. It ends instead where
-    /// the cycle does. A command step that passes clears it (the dispatcher,
-    /// after `run_command`), and so does an unblocker pass whose road does
-    /// not lead back to a failing command, or that parks the task. A
+    /// the cycle does. A command step that passes clears its own entry and no
+    /// other (the dispatcher, after `run_command`), and an unblocker pass whose
+    /// road does not lead back to a failing command, or that parks the task,
+    /// clears them all. A
     /// `--stage` does not end it by being a `--stage`: the count watches the
     /// command, whichever road the unblocker takes. A person stepping in ends
     /// it too: an unblocker that gives up parks the task, and
@@ -834,6 +835,16 @@ pub struct Frontmatter {
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_norway::Value>,
+}
+
+impl Frontmatter {
+    /// Ends the unblocker laps counted against `command`, which has just
+    /// passed. The laps counted against any other command stay: the dispatcher
+    /// calls this, and the tests that walk its road call it too, so both end
+    /// the count the same way.
+    pub fn end_unblock_laps(&mut self, command: &str) {
+        self.unblock_laps.remove(command);
+    }
 }
 
 fn is_zero_i64(n: &i64) -> bool {

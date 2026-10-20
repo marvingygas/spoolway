@@ -660,50 +660,77 @@ pub fn route(
         // unblocker lane that makes that last pass has already run; the bound
         // spares the lane after it.
         //
-        // The count watches the command, not the unblocker's route, so a
-        // `--stage` is a lap like a plain `--pass` whenever the road from the
-        // step it lands on leads back to a command that failed. That command
-        // is, in order:
+        // The count watches the command that failed, not the unblocker's
+        // route, so a `--stage` is a lap like a plain `--pass` whenever the
+        // road from the step it lands on leads back to that command. The
+        // count has to sit on that command and not on a step the unblocker
+        // names, because the dispatcher ends a command's count when that
+        // command passes: a count left on `prep` is gone the moment `prep`
+        // passes on the way back to the `build` that keeps failing. The
+        // command is, in order:
         //
-        // - the landing, when it is a command;
-        // - `origin`, when it is a command and the landing's road reaches it
-        //   again, as with an agent step run before the command;
-        // - the command a gate failed back from, when `origin` is the agent
-        //   step that gate's `on_fail` names, `rounds` holds that hop (it
+        // - the command that failed back into `origin` (a `run:` step whose
+        //   `on_fail` names `origin`, with `rounds` holding that hop; it
         //   keeps only the hops since the task last left `blocked`, so an old
-        //   failure of the gate does not count), and the landing's road
-        //   reaches the gate. A plain pass from that agent step is carried
-        //   past it onto the gate, so the gate is what `cleared_block_target`
-        //   answers.
+        //   failure does not count). A loop that ends on `origin`, such as a
+        //   `clean` between two runs of `build`, stops the task on `clean`
+        //   although `build` is the one failing;
+        // - `origin`, when it is a command and the landing's road reaches it
+        //   again;
+        // - the command a gate failed back from, when `origin` is the agent
+        //   step that gate's `on_fail` names, `rounds` holds that hop, and
+        //   the landing's road reaches the gate. A plain pass from that agent
+        //   step is carried past it onto the gate, so the gate is what
+        //   `cleared_block_target` answers;
+        // - the landing, when it is a command.
         //
         // Any other pass is not the cycle and ends every count: an agent step
         // that blocked on its own, or a `--stage` to a step whose road never
         // returns to the command, so the entry would otherwise outlive its
         // cycle. The count also ends when the command passes (the dispatcher
-        // clears it) and when a person resumes. Unattended runs only: with a
-        // person at the board, they are the bound.
+        // clears that command's entry) and when a person resumes. Unattended
+        // runs only: with a person at the board, they are the bound.
         let is_command = |id: &str| {
             pipeline
                 .step(id)
                 .is_some_and(|step| step.kind() == crate::pipeline::StepKind::Command)
         };
-        let counted = if is_command(&landing.destination) {
-            Some(landing.destination.clone())
-        } else if is_command(&origin) {
-            Some(origin.clone())
-        } else {
-            Some(cleared_block_target(task, pipeline, true)).filter(|gate| {
-                is_command(gate)
-                    && pipeline
-                        .step(gate)
-                        .is_some_and(|step| step.on_fail.as_deref() == Some(origin.as_str()))
-                    && task
-                        .front
+        let failed_back_into_origin = || {
+            pipeline
+                .steps
+                .iter()
+                .filter(|step| step.kind() == crate::pipeline::StepKind::Command)
+                .filter(|step| step.on_fail.as_deref() == Some(origin.as_str()))
+                .map(|step| step.id.clone())
+                .find(|command| {
+                    task.front
                         .rounds
-                        .contains_key(&crate::task::route_key(gate, &origin))
+                        .contains_key(&crate::task::route_key(command, &origin))
+                })
+        };
+        let counted = failed_back_into_origin()
+            .filter(|command| command != &origin && is_command(&origin))
+            .filter(|command| road_reaches(pipeline, &landing.destination, command))
+            .or_else(|| {
+                Some(origin.clone())
+                    .filter(|origin| is_command(origin))
+                    .filter(|origin| road_reaches(pipeline, &landing.destination, origin))
             })
-        }
-        .filter(|command| road_reaches(pipeline, &landing.destination, command));
+            .or_else(|| {
+                Some(cleared_block_target(task, pipeline, true))
+                    .filter(|gate| {
+                        is_command(gate)
+                            && pipeline.step(gate).is_some_and(|step| {
+                                step.on_fail.as_deref() == Some(origin.as_str())
+                            })
+                            && task
+                                .front
+                                .rounds
+                                .contains_key(&crate::task::route_key(gate, &origin))
+                    })
+                    .filter(|gate| road_reaches(pipeline, &landing.destination, gate))
+            })
+            .or_else(|| Some(landing.destination.clone()).filter(|step| is_command(step)));
         if let (true, Some(counted)) = (unattended, counted) {
             let laps = task.front.unblock_laps.get(&counted).copied().unwrap_or(0);
             if laps >= UNBLOCK_LAP_LIMIT {
@@ -718,11 +745,10 @@ pub fn route(
                     destination: crate::pipeline::PAUSED.to_string(),
                     gated: false,
                     pause_note: Some(format!(
-                        "`{step}` failed again after {laps} unblocker passes had sent the \
-                         task back to it; an unattended run stops at this pass rather than \
-                         send it back once more. Resume it once the cause of the failure is \
-                         dealt with",
-                        step = counted
+                        "`{step}` still fails after {laps} unblocker laps — parked on \
+                         `paused`. Make `{step}` pass, then: spoolway resume {id}",
+                        step = counted,
+                        id = task.id()
                     )),
                     resumed: None,
                     paused_from_blocked: false,
@@ -4865,6 +4891,179 @@ mod tests {
             !task.front.unblock_laps.contains_key("prep"),
             "the lap must not sit on the earlier command: {:?}",
             task.front.unblock_laps
+        );
+    }
+
+    /// Writes the road a lap takes after the unblocker's pass, the way the
+    /// dispatcher does: the task takes each step in `road`, a command that
+    /// passes on to its `on_pass` ends its own laps through
+    /// [`crate::task::Frontmatter::end_unblock_laps`], and the task rests on
+    /// `blocked` with `origin` as the step it stopped at. `route` alone never
+    /// runs that clear, which is how a bound this crate called tested went
+    /// unmet.
+    fn walk_road_to_blocked(task: &mut Task, pipeline: &Pipeline, origin: &str, road: &[&str]) {
+        for step in road {
+            let before = task.stage().to_string();
+            task.set_stage(step, None);
+            let passed = pipeline
+                .step(&before)
+                .is_some_and(|s| s.run.is_some() && s.on_pass.as_deref() == Some(*step));
+            if passed {
+                task.front.end_unblock_laps(&before);
+            }
+        }
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some(origin.to_string());
+    }
+
+    /// Drives an unattended unblocker that answers `stage` every time. The
+    /// task first fails along `first_failure` and rests on `blocked`. Each of
+    /// the `UNBLOCK_LAP_LIMIT` passes sends it back, and the pass after them
+    /// parks it, so four unblocker lanes run in all.
+    fn assert_parked_after_the_lap_limit(
+        yaml: &str,
+        origin: &str,
+        stage: Option<&str>,
+        first_failure: &[&str],
+        road: &[&str],
+    ) {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(yaml, origin);
+        // A `--stage` may only name a step the task has run.
+        if let Some(stage) = stage {
+            task.front.steps.insert(format!("queued->{stage}"), 1);
+        }
+        walk_road_to_blocked(&mut task, &pipeline, origin, first_failure);
+        let mut lanes = 0;
+        loop {
+            lanes += 1;
+            let routed = route(
+                &mut task,
+                &pipeline,
+                "blocked",
+                Outcome::Pass,
+                true,
+                stage,
+                0,
+            )
+            .unwrap();
+            if routed.destination == crate::pipeline::PAUSED {
+                assert!(routed.lap_limited, "{:?}", routed.pause_note);
+                break;
+            }
+            assert!(
+                lanes <= UNBLOCK_LAP_LIMIT + 1,
+                "lane {lanes} still started: {:?}",
+                task.front.unblock_laps
+            );
+            task.set_stage(&routed.destination, None);
+            // The landing is the first step of the road, so it is not taken
+            // twice.
+            walk_road_to_blocked(&mut task, &pipeline, origin, road);
+        }
+        assert_eq!(lanes, UNBLOCK_LAP_LIMIT + 1, "four unblocker lanes in all");
+        assert!(task.front.unblock_laps.is_empty(), "paused ends the count");
+    }
+
+    /// Road A: the unblocker names an earlier command, and that command
+    /// passes on the way back to the one that keeps failing.
+    ///
+    /// Fails before the fix: the lap was counted on `prep`, which the
+    /// dispatcher's clear then ended, so no lane count was ever reached.
+    #[test]
+    fn a_stage_to_an_earlier_command_is_parked_after_the_lap_limit() {
+        assert_parked_after_the_lap_limit(
+            EARLIER_COMMAND_LAPS,
+            "build",
+            Some("prep"),
+            &[],
+            &["build"],
+        );
+    }
+
+    /// Road B: the unblocker names an earlier agent step, and a command that
+    /// passes sits between it and the one that keeps failing.
+    ///
+    /// Fails before the fix: `fmt` passing cleared the whole count.
+    #[test]
+    fn a_stage_past_a_passing_command_is_parked_after_the_lap_limit() {
+        let yaml = "steps:\n  - id: implement\n    agent: pi\n    on_pass: fmt\n  \
+             - id: fmt\n    run: 'true'\n    on_pass: test\n  \
+             - id: test\n    run: 'false'\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        assert_parked_after_the_lap_limit(yaml, "test", Some("implement"), &[], &["fmt", "test"]);
+    }
+
+    /// Road C: a plain pass, with two gates failing back to one agent step,
+    /// the first of which passes on every lap (the tail of `impl.yml`).
+    ///
+    /// Fails before the fix: `test` passing cleared the whole count.
+    #[test]
+    fn a_plain_pass_past_a_passing_gate_is_parked_after_the_lap_limit() {
+        let yaml = "steps:\n  - id: e2e\n    agent: pi\n    loop: 2\n    on_pass: test\n  \
+             - id: test\n    run: 'true'\n    on_pass: suite\n    on_fail: e2e\n  \
+             - id: suite\n    run: 'false'\n    on_pass: done\n    on_fail: e2e\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        assert_parked_after_the_lap_limit(yaml, "suite", None, &[], &["e2e", "test", "suite"]);
+    }
+
+    /// Road D: commands only. `build` fails into `clean`, whose pass goes
+    /// back to `build`, and the task stops on `clean` because `build`'s
+    /// `loop:` is spent. The count has to sit on `build`; on `clean` it ends
+    /// the moment `clean` passes.
+    ///
+    /// Fails before the fix: the lap was counted on `clean`.
+    #[test]
+    fn a_command_only_cycle_is_parked_after_the_lap_limit() {
+        let yaml = "steps:\n  - id: build\n    run: 'false'\n    loop: 3\n    on_pass: done\n    \
+             on_fail: clean\n  - id: clean\n    run: 'true'\n    on_pass: build\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        assert_parked_after_the_lap_limit(
+            yaml,
+            "clean",
+            None,
+            &["build", "clean"],
+            &["build", "clean"],
+        );
+    }
+
+    /// A command that is fixed ends its own count, and only its own.
+    #[test]
+    fn a_passing_command_ends_only_its_own_laps() {
+        let mut front = Task::parse(
+            std::path::PathBuf::new(),
+            "---\nid: laps\nstage: queued\nunblock_laps:\n  build: 2\n  prep: 1\n---\n",
+        )
+        .unwrap()
+        .front;
+        front.end_unblock_laps("prep");
+        assert_eq!(front.unblock_laps.get("build"), Some(&2));
+        assert!(!front.unblock_laps.contains_key("prep"));
+    }
+
+    /// The park is worded the way the Status Log shows it: the command, the
+    /// laps, where the task went and the command to resume it with.
+    #[test]
+    fn the_park_note_names_the_command_the_laps_and_the_resume() {
+        let (mut task, pipeline) = blocked_task_for_unblock_laps(DIRECT_LAPS, "work");
+        task.front
+            .unblock_laps
+            .insert("work".into(), UNBLOCK_LAP_LIMIT);
+        let routed = route(
+            &mut task,
+            &pipeline,
+            "blocked",
+            Outcome::Pass,
+            true,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            routed.pause_note.as_deref(),
+            Some(
+                "`work` still fails after 3 unblocker laps — parked on `paused`. \
+                 Make `work` pass, then: spoolway resume laps"
+            )
         );
     }
 
