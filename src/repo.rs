@@ -1150,15 +1150,17 @@ impl Repo {
         })
     }
 
-    /// Refuses, in a dispatcher lane's worktree, a command that writes a
-    /// person's private files: the overrides layer or `local/`. `owner`
-    /// names what the command would have written, as the first line of the
-    /// refusal reads it.
+    /// Refuses, in a dispatcher lane's worktree, a command that writes the
+    /// project's setup outside [`tracked_write_root`](Repo::tracked_write_root)'s
+    /// reach: the overrides layer, or the files `pipeline copy` and `prompt
+    /// copy` create. `owner` names what the command would have written, as
+    /// the first line of the refusal reads it.
     ///
-    /// [`tracked_write_root`](Repo::tracked_write_root) guards the tracked
-    /// files. These private ones live in the project home, outside git, so a
+    /// The overrides layer lives in the project home, outside git, so a
     /// lane's write there reaches the person's own setup and nothing can
-    /// restore it. Like that refusal, this one prints no `-C` line.
+    /// restore it. The copy commands write `local/` in repo mode, which is
+    /// private too, and the workspace's setup folders in home mode. Like
+    /// the tracked refusal, this one prints no `-C` line.
     pub fn refuse_in_lane(&self, owner: &str) -> Result<()> {
         if self.in_lane_worktree() {
             bail!(
@@ -1172,7 +1174,7 @@ impl Repo {
     }
 
     /// Whether `checkout` sits under [`Repo::worktree_root`].
-    fn in_lane_worktree(&self) -> bool {
+    pub(crate) fn in_lane_worktree(&self) -> bool {
         crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
 

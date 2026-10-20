@@ -1386,6 +1386,18 @@ fn copy_target_dirs(repo: &Repo) -> (PathBuf, PathBuf) {
     }
 }
 
+/// Refuses `pipeline copy` and `prompt copy` in a lane, naming what each
+/// would have written: `local/` in repo mode, the workspace's own setup
+/// folders in home mode, the same split [`copy_target_dirs`] draws.
+fn refuse_copy_in_lane(repo: &Repo) -> Result<()> {
+    let owner = if crate::local::is_repo_mode(&repo.checkout) {
+        "the private `local/` folder"
+    } else {
+        "this workspace's setup"
+    };
+    repo.refuse_in_lane(owner)
+}
+
 /// Where `prompt copy <from> <to>` writes: `local/prompts/<to>/PROMPT.md`
 /// in repo mode, or the tracked directory shape itself in home mode —
 /// [`crate::prompt::directory_form`], never `repo.prompts_dir().join(…)`
@@ -1575,7 +1587,7 @@ fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
 /// `<to>.md` would be a file neither reads, and rewriting the shared file
 /// would change what `from` reads too.
 pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
-    repo.refuse_in_lane("the private `local/` folder")?;
+    refuse_copy_in_lane(repo)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -1636,7 +1648,7 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
 /// whole; the legacy flat `<name>.md` shape has no folder of its own, so it
 /// is copied as the single file it is.
 pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
-    repo.refuse_in_lane("the private `local/` folder")?;
+    refuse_copy_in_lane(repo)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }

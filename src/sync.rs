@@ -45,6 +45,11 @@
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
 //!
+//! The private override layer is the one file this command writes outside
+//! the checkout. A lane leaves it alone: a retired key stays there and the
+//! report says so, because the layer is the person's and sits in no git
+//! branch to revert from.
+//!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
 //! skeleton spoolway keeps current is one a project cannot restructure, and
@@ -1272,7 +1277,22 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     // was checked is a file changed that a failed check never mentions.
     if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
         let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && repo.in_lane_worktree() {
+            // The layer is the person's private file in the project home,
+            // outside git, and a lane's rewrite of it cannot be reviewed or
+            // undone. Sync still refreshes the lane's tracked files, so
+            // this only leaves the layer alone and says so.
+            let override_path = crate::overrides::config_patch_path(&overrides_dir);
+            outcomes.push(Outcome::blocked(
+                crate::platform::relative(&repo.checkout, &override_path),
+                format!(
+                    "a lane does not change the project's setup, so retired override key(s) \
+                     stay in the private layer: {} — a person runs `spoolway sync` in the \
+                     main checkout to drop them",
+                    dropped.join(", ")
+                ),
+            ));
+        } else if !dropped.is_empty() {
             // Read before the write removes it. A `worktree_root` set
             // only here is dropped just the same, and the folder it named
             // and the tasks still under it are said the same way.
@@ -4727,6 +4747,53 @@ mod tests {
                     .any(|line| line.contains("retired override key")
                         && line.contains("dispatch.worktree_root")),
                 "a dry run must still say what it would drop: {lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Run from a dispatcher lane's worktree, `sync` leaves the private
+    /// override layer alone, even when it holds a retired key, and says why.
+    /// The layer lives in the project home, so a lane that rewrote it would
+    /// change the person's own setup with nothing to review or revert.
+    #[test]
+    fn a_lane_leaves_a_retired_override_key_in_the_layer() {
+        let (mut repo, _root_guard) = fixture("config-override-lane");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-config-override-lane-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let lane = repo.worktree_root().join("task-lane");
+        std::fs::create_dir_all(&lane).unwrap();
+        repo.checkout = lane;
+        std::fs::create_dir_all(
+            crate::config::Config::path_in(&repo.checkout)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::config::Config::path_in(&repo.checkout),
+            "[dispatch]\nlane_quiet = \"15m\"\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.checkout).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            let override_path = crate::overrides::config_patch_path(&overrides);
+            let before = "[dispatch]\nworktree_root = \"/old/worktrees\"\n";
+            std::fs::write(&override_path, before).unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            assert_eq!(std::fs::read_to_string(&override_path).unwrap(), before);
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("a lane does not change the project's setup")),
+                "{lines:?}"
             );
         });
 
