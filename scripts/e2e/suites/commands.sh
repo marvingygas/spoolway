@@ -24,7 +24,7 @@
 # their own (gh-253, once this file passed 2500 lines and 159 seconds): a
 # `run:` step's own mechanics are `command-steps.sh`, and `[issue_tracking]`'s
 # hook is `issue-tracking.sh`. Every `# covers:` claim either of them proves
-# moved there whole; the two left below were never theirs.
+# moved there whole; the one left below was never theirs.
 #
 # covers: housekeeping.retention_days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
 set -uo pipefail
