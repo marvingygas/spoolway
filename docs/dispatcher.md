@@ -137,11 +137,12 @@ A model's `slots` caps lanes on that model, and a profile's `concurrency` caps l
 profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
-The `slots` cap belongs to a `[models]` row. Every model name that matches the same row shares
-its count. With `[models.qwen3] slots = 1`, a step on `qwen3` and a step on `local/qwen3` share
-one slot. A row keyed by a glob such as `qwen3-coder*` shares its slots across all the names it
-matches. A task that waits prints the row, as in `waiting for a qwen3 slot (1/1)`. A model with
-no `[models]` row that sets `slots` is not capped.
+The `slots` cap belongs to the most literal `[models]` row that sets `slots` for a model. Every
+model name that gets its `slots` from the same row shares its count. With
+`[models.qwen3] slots = 1`, a step on `qwen3` and a step on `local/qwen3` share one slot. A row
+keyed by a glob such as `qwen3-coder*` shares its slots across all the names it matches, even
+when another row also matches one of those names. A task that waits prints the row, as in
+`waiting for a qwen3 slot (1/1)`. A model with no `[models]` row that sets `slots` is not capped.
 
 Only the lane on a task's current step counts against those caps, from the pass that starts it.
 A lane whose task has moved to another step counts for nothing, even while it is `Working`, the
