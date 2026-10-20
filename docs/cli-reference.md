@@ -1167,7 +1167,8 @@ waits up to ten seconds for the one before it. After that it exits 1 and writes 
 again.
 
 The command exits 1 and writes nothing when the pipeline has no such step, when the key is
-one the merge refuses, or when `id:` is set. Every pipeline has a `blocked` step, so
+one the merge refuses, when `id:` is set, or when the key is `headless`. Use `--set <step>.hide=<value>`
+in place of `headless`. Every pipeline has a `blocked` step, so
 `blocked.<key>` is accepted even when the pipeline file does not declare one. The command also refuses
 `blocked.description`, and `blocked.session=false` while `unattended.blocked_session` is `true`. See [Staffing
 `blocked`](pipelines.md#staffing-blocked) and [`spoolway
@@ -1484,7 +1485,7 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none |
+| `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,

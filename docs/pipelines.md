@@ -418,15 +418,25 @@ detached while the project shows them. Without `hide:`, the step follows `dispat
 
 The older `headless:` key no longer loads. A step that still carries it, with any value, is refused
 by name, and the message says to run `spoolway sync` or to write `hide: true` in its place.
-`spoolway sync` renames the key to `hide:` on every step in the checkout's pipeline files and in
-the private patches under `overrides/pipelines/`, and prints a `wrote` line for each file with a
-note naming the pipeline and its steps. It changes no other line. This is the one edit `sync` makes
-to a step. A step that carries both `headless:` and `hide:` cannot be renamed without losing one
-of them, so `sync` refuses that file, names the step and leaves the file as it was. Keep only
-`hide:` there and run `sync` again. A file whose key block `sync` refuses as hand-edited is not
-renamed either; `spoolway sync --replace <file>`, which that refusal names, swaps the block and
-makes the rename together. A step written in flow style, such as `- {id: a, headless: true}`, is
-not renamed, and `sync` refuses its file with a note to write `hide:` there by hand.
+`spoolway sync` renames the key to `hide:` on every step in three places: the checkout's pipeline
+files, the private patches under `overrides/pipelines/`, and the private pipelines under
+`local/pipelines/`. It prints a `wrote` line for each file with a note naming the pipeline and its
+steps. It changes no other line. This is the one edit `sync` makes to a step.
+
+A step that carries both `headless:` and `hide:` cannot be renamed without losing one of them. `sync`
+refuses that file, names the step and leaves the file as it was. Keep only `hide:` there and run
+`sync` again.
+
+A file whose key block `sync` refuses as hand-edited is not renamed either. `spoolway sync --replace
+<file>`, which that refusal names, swaps the block and makes the rename together.
+
+`sync` cannot rename a `headless:` written in flow style, such as `- {id: a, headless: true}`, with
+a quoted key, or with a `-` on a line of its own. It refuses that file and tells you to write
+`hide:` by hand. The same holds for a patch or a private pipeline.
+
+`spoolway pipeline override <name> --set <step>.headless=<value>` and `spoolway override promote`
+of a patch that sets `headless:` are refused. Use `--set <step>.hide=<value>` for the first. For the second, run `sync` to rename the key in the
+patch, then promote again.
 
 A shown command behaves the same whichever setting showed it. The pane stays open after the
 command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit

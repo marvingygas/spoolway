@@ -486,7 +486,7 @@ anything:
 
 A file `sync` refuses is listed first in the panel, with the reason and what to do about it.
 A pipeline file carrying a step shape this release no longer loads, such as `loop: 0` or a
-`background: true` step with `on_fail`, is refused too, naming the step and the edit. `sync` never edits a step for you, with one exception: a step's `headless:` key is the old name of `hide:`, so `sync` renames it in the checkout's pipeline files and in the private override patches, and names each file it changed and the steps in it. A step carrying both `headless:` and `hide:` is refused, and its file is left as it is.
+`background: true` step with `on_fail`, is refused too, naming the step and the edit. `sync` never edits a step for you, with one exception. A step's `headless:` key is the old name of `hide:`. `sync` renames it in the checkout's pipeline files, in the private override patches and in the private pipelines under `local/pipelines/`, and names each file it changed and the steps in it. A step carrying both `headless:` and `hide:` is refused, and its file is left as it is. A `headless:` that `sync` cannot rename, such as one in a flow-style step or with a quoted key, is refused with a note to write `hide:` by hand. See [Background and headless](pipelines.md#background-and-headless).
 
 Enter writes the files and prints the report `sync` always prints. Esc, ctrl-c, or the terminal
 going away mid-question writes nothing and prints "Nothing was changed." With no terminal to
