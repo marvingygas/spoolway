@@ -942,8 +942,8 @@ impl Backend {
 /// every one of them.
 ///
 /// The limit counts all of a task's lanes, kept and running, in whichever tab
-/// they stand. A command's pane is a lane while commands are shown, see
-/// [`DispatchConfig::hide_commands`]. Only a finished lane ever closes for
+/// they stand. A command's pane is a lane when its step shows its command,
+/// by `hide: false` or by [`DispatchConfig::hide_commands`] being off. Only a finished lane ever closes for
 /// it. A lane that is still running, and a pane held for a person on
 /// `blocked` or `paused`, stay whatever the count says, so a tab can sit over
 /// its limit until they end.
