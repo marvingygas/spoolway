@@ -241,7 +241,7 @@ fi
 must "the fourth step reports" report_as every fourth
 if drive every gone 60; then ok "the task with every lane kept is done and archived"
 else bad "the task with every lane kept is done and archived"; fi
-must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 5
+must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 3
 
 # ------------------------------------------------------ command steps
 # A command step opens no pane by default, and opens one with

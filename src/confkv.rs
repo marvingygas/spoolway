@@ -86,7 +86,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.visible_lanes",
         values: "<count>, all",
-        default: "5",
+        default: "3",
         sentence: "How many of a task's most recent lanes stay open; each new agent step \
                     or shown command closes the oldest finished ones. Older versions kept \
                     every lane.",
@@ -1462,24 +1462,20 @@ mod tests {
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 
-    /// `visible_lanes` is a count or `all`, written even while it is 5, and
+    /// `visible_lanes` is a count or `all`, written even while it is 3, and
     /// `0` is refused with the wording a person is told to act on.
     #[test]
     fn visible_lanes_is_readable_and_writable_at_its_default() {
         use crate::config::VisibleLanes;
         let config = Config::default();
-        assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "5");
+        assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "3");
 
-        let three = set(&config, "dispatch.visible_lanes", "3").unwrap();
-        assert_eq!(three.dispatch.visible_lanes, VisibleLanes::Count(3));
-        assert_eq!(get(&three, "dispatch.visible_lanes").unwrap(), "3");
-        assert!(
-            toml::to_string(&three)
-                .unwrap()
-                .contains("visible_lanes = 3")
-        );
+        let two = set(&config, "dispatch.visible_lanes", "2").unwrap();
+        assert_eq!(two.dispatch.visible_lanes, VisibleLanes::Count(2));
+        assert_eq!(get(&two, "dispatch.visible_lanes").unwrap(), "2");
+        assert!(toml::to_string(&two).unwrap().contains("visible_lanes = 2"));
 
-        let all = set(&three, "dispatch.visible_lanes", "all").unwrap();
+        let all = set(&two, "dispatch.visible_lanes", "all").unwrap();
         assert_eq!(all.dispatch.visible_lanes, VisibleLanes::All);
         assert_eq!(get(&all, "dispatch.visible_lanes").unwrap(), "all");
         assert!(
@@ -1488,12 +1484,12 @@ mod tests {
                 .contains("visible_lanes = \"all\"")
         );
 
-        let back = set(&all, "dispatch.visible_lanes", "5").unwrap();
+        let back = set(&all, "dispatch.visible_lanes", "3").unwrap();
         assert_eq!(back.dispatch.visible_lanes, VisibleLanes::default());
         assert!(
             toml::to_string(&back)
                 .unwrap()
-                .contains("visible_lanes = 5")
+                .contains("visible_lanes = 3")
         );
 
         let err = format!(

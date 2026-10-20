@@ -4006,7 +4006,7 @@ mod tests {
         );
     }
 
-    /// `visible_lanes = 5` is written whatever the file held, so a retired
+    /// `visible_lanes = 3` is written whatever the file held, so a retired
     /// `keep_finished_lanes` has to be converted and dropped in the same
     /// rewrite: left beside a default-valued `visible_lanes` it would be read
     /// as the old choice again, or survive as an unknown key.

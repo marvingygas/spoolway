@@ -621,7 +621,7 @@ pub struct DispatchConfig {
     #[serde(with = "human_duration")]
     pub lane_child_ceiling: Duration,
 
-    /// How many of a task's lanes stay open in its tab, or `all`. Five by
+    /// How many of a task's lanes stay open in its tab, or `all`. Three by
     /// default. Each new agent step closes the task's oldest finished lanes
     /// until the tab, with the new lane in it, holds this many. It closes them
     /// before placing the new pane by the spiral split, so the oldest lane
@@ -957,7 +957,7 @@ pub enum VisibleLanes {
 
 impl VisibleLanes {
     /// The count a key that is never set holds.
-    pub const DEFAULT_COUNT: u32 = 5;
+    pub const DEFAULT_COUNT: u32 = 3;
 
     /// Whether this is the default. [`Config::migrate`] and the
     /// `keep_finished_lanes` load note read it: a `visible_lanes` at its
@@ -2402,9 +2402,9 @@ impl Config {
         // A person who sets `visible_lanes` has made the choice the retired
         // `keep_finished_lanes` stood in for. Left in the file it would load
         // back over a value that holds the default — `migrate` cannot tell a
-        // `visible_lanes` of 5 from an absent key — and `agrees_with` would
+        // `visible_lanes` of 3 from an absent key — and `agrees_with` would
         // refuse the edit for it, so a project an older release set up could
-        // never choose 5.
+        // never choose 3.
         if key == "dispatch.visible_lanes" {
             edited = crate::confdoc::remove(&edited, &["dispatch", "keep_finished_lanes"])
                 .with_context(|| format!("editing {}", path.display()))?;
@@ -4029,9 +4029,9 @@ mod tests {
     #[test]
     fn visible_lanes_is_written_in_a_defaulted_config() {
         let config = Config::default();
-        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(5));
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(3));
         let rendered = toml::to_string(&config).unwrap();
-        assert!(rendered.contains("visible_lanes = 5"), "{rendered}");
+        assert!(rendered.contains("visible_lanes = 3"), "{rendered}");
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
         assert_eq!(absent.dispatch.visible_lanes, VisibleLanes::default());
@@ -4118,15 +4118,15 @@ mod tests {
         std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
         std::fs::write(
             Config::path_in(&dir),
-            "[dispatch]\nkeep_finished_lanes = false\nvisible_lanes = 3\n",
+            "[dispatch]\nkeep_finished_lanes = false\nvisible_lanes = 2\n",
         )
         .unwrap();
         let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
-        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(3));
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(2));
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(
             notices[0].contains(
-                "is no longer read — the dispatch.visible_lanes = 3 beside it is the limit \
+                "is no longer read — the dispatch.visible_lanes = 2 beside it is the limit \
                  that loads. Run `spoolway sync` to drop the key."
             ),
             "{notices:?}"
@@ -4178,7 +4178,7 @@ mod tests {
         for line in [
             "priority = \"group\"",
             "lane_child_ceiling = \"1h\"",
-            "visible_lanes = 5",
+            "visible_lanes = 3",
             "hide_commands = true",
             "lane_layout = \"panes\"",
         ] {
@@ -4189,13 +4189,13 @@ mod tests {
         let back: Config = toml::from_str(&rendered).unwrap();
         assert_eq!(back.dispatch.priority, Priority::Group);
         assert_eq!(back.dispatch.lane_child_ceiling, Duration::from_secs(3600));
-        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(5));
+        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(3));
         assert!(back.dispatch.hide_commands);
         assert_eq!(back.dispatch.lane_layout, LaneLayout::Panes);
         config.agrees_with(&rendered).unwrap();
     }
 
-    /// Now that `visible_lanes = 5` is always written, the retired
+    /// Now that `visible_lanes = 3` is always written, the retired
     /// `keep_finished_lanes` must still lose its place in the same rewrite:
     /// a file holding only the old key renders `visible_lanes = "all"` and no
     /// longer names it.

@@ -1005,7 +1005,7 @@ splits the old review pane, and then closes it. The new pane takes the old one's
 the tab looks the same. The old run's transcript stays on disk under its session id, and its
 report stays in the task file. If the old lane is still mid-turn, its spend is banked first.
 
-A task's tab holds at most `dispatch.visible_lanes` lanes, five by default. Set it to a whole
+A task's tab holds at most `dispatch.visible_lanes` lanes, three by default. Set it to a whole
 number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 3`. A `0` is
 refused.
 
@@ -1021,7 +1021,7 @@ Some lanes are never closed by the limit. A lane that is still running stays, an
 held for you on `paused` or on a `blocked` step. A tab can therefore sit over its limit until they
 end. A step that comes back still replaces its own pane in place.
 
-Five is a new default, so a task that kept every pane keeps its five newest. To keep every pane
+Three is a new default, so a task that kept every pane keeps its three newest. To keep every pane
 until the task is done, set `visible_lanes = "all"`. The `keep_finished_lanes` key is retired.
 `true` loads as `all` and `false` as `1`.
 

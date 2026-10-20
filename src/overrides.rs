@@ -1865,7 +1865,7 @@ agent: pi
     /// A private layer written for an older release may still hold
     /// `dispatch.keep_finished_lanes`. It applies as the limit it stood for —
     /// `true` is `all`, `false` is 1 — and is not reported as ignored, or
-    /// `false` would quietly become the default 5. A `visible_lanes` in the
+    /// `false` would quietly become the default 3. A `visible_lanes` in the
     /// same layer wins, as it does in the tracked file.
     #[test]
     fn a_layer_keep_finished_lanes_applies_as_a_visible_lanes_limit() {
@@ -1876,8 +1876,8 @@ agent: pi
             ("keep_finished_lanes = true\n", VisibleLanes::All),
             ("keep_finished_lanes = false\n", VisibleLanes::Count(1)),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
-                VisibleLanes::Count(3),
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
+                VisibleLanes::Count(2),
             ),
         ] {
             std::fs::write(
@@ -1910,9 +1910,9 @@ agent: pi
                 Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
             ),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
                 Some(
-                    "the dispatch.visible_lanes = 3 beside it is the limit that loads. Run `spoolway sync` to drop",
+                    "the dispatch.visible_lanes = 2 beside it is the limit that loads. Run `spoolway sync` to drop",
                 ),
             ),
             (
@@ -1957,8 +1957,8 @@ agent: pi
             ),
             ("keep_finished_lanes = false\n", Some("visible_lanes = 1")),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
-                Some("visible_lanes = 3"),
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
+                Some("visible_lanes = 2"),
             ),
             // Not a boolean, so it stood for no limit: it is only dropped,
             // and named once, though it is both refused and on the layer.
