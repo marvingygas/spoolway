@@ -2799,6 +2799,11 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
     if !not_started(&task) {
         return Ok(Unqueued::Untouched);
     }
+    // A task still on `queued` may have its worktree being cut. Ended before
+    // the task leaves: afterwards the dispatcher's sweep no longer reaches
+    // it, and a cut that finished on its own would leave a checkout and a
+    // branch for the next queue of this task to trip over.
+    crate::cut::stop_and_reclaim(repo, id, "unqueue it again")?;
     if let Some(routine_file) = deleted_on_unqueue(repo, &task, drafted) {
         std::fs::remove_file(&task.path)
             .with_context(|| format!("removing {}", task.path.display()))?;
@@ -3119,7 +3124,43 @@ pub fn rows_of(
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
     // see `Board::arrived`.
-    build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)
+    let mut rows = build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)?;
+    rows.extend(opening_rows(repo, tasks));
+    Ok(rows)
+}
+
+/// One row per routine firing that is waiting on its `open` hook. The firing
+/// has minted its task ids but saved nothing, so no task file backs the row;
+/// it is drawn from the hook's own run files, and goes the moment the hook
+/// settles and the task takes its place in the queue.
+fn opening_rows(repo: &Repo, tasks: &[crate::task::Task]) -> Vec<Row> {
+    crate::tracking::opening(repo, tasks)
+        .into_iter()
+        .map(|(id, ran)| Row {
+            id,
+            routine: None,
+            group: None,
+            issue_url: None,
+            after: None,
+            stage: crate::pipeline::QUEUED.to_string(),
+            arrivals: 0,
+            pipeline: String::new(),
+            state: State::Queued,
+            depth: 0,
+            steps_left: 0,
+            dependents: 0,
+            ctx: None,
+            out: None,
+            cost: None,
+            lane_time: None,
+            next: format!(
+                "opening ticket {} (stopped at {})",
+                crate::tracking::minutes(ran),
+                crate::tracking::minutes(crate::tracking::OPEN_FETCH_TIMEOUT),
+            ),
+            resumable: false,
+        })
+        .collect()
 }
 
 /// Everything [`build`] read and computed once, for [`paint`] to draw from
@@ -3296,6 +3337,7 @@ fn build(
         &ledger,
         Some(&memory.arrived),
     )?;
+    active_rows.extend(opening_rows(repo, &tasks));
     // How many steps are still working with no dispatcher up to move them on
     // — `None` while one holds the lock, whose rows read exactly as they
     // always have. See `finish_settled`.
@@ -4495,6 +4537,16 @@ fn origin_step(task: &crate::task::Task, parked_on_blocked: bool) -> &str {
     origin.unwrap_or_else(|| task.stage())
 }
 
+/// What the next column says for a task whose worktree is being cut, and for
+/// how long that has gone on.
+fn cutting_line(ran: Duration) -> String {
+    format!(
+        "cutting worktree {} (stopped at {})",
+        crate::tracking::minutes(ran),
+        crate::tracking::minutes(crate::repo::GIT_HOOK_TIMEOUT),
+    )
+}
+
 /// The rows themselves, from state already read. Split out so the board can
 /// read the queue and the lane list once per frame and share both.
 ///
@@ -4654,6 +4706,12 @@ fn build_rows(
                 )
             });
 
+        // How long this task's worktree cut has been going, when one is. Only
+        // a task not yet running a step can have one.
+        let cutting = (!live)
+            .then(|| crate::cut::running(repo, task.id()))
+            .flatten();
+
         // What happens to this task next. For one that is moving that is the
         // step it goes to; for one that is stuck it is whatever has to happen
         // before it moves at all, which is a person far more often than a step.
@@ -4700,18 +4758,25 @@ fn build_rows(
                         crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
                     )
                 });
-                // The dispatcher parks this task at its next pass, so the
-                // row says why now rather than "waiting for a worker slot".
+                //
+                // So is a worktree cut still going: an agent step's task
+                // stays on `queued` for the whole cut, and the cut is what it
+                // waits on, not a worker slot.
+                //
+                // The dispatcher parks a task with a stale `gate_at:` at its
+                // next pass, so the row says why now rather than "waiting for
+                // a worker slot".
                 let stale = crate::commands::stale_gate_at(task, pipeline)
                     .map(|gate_at| crate::commands::stale_gate_line(task, pipeline, gate_at));
-                match (stale, hook, dependency) {
-                    (Some(stale), _, _) => (State::Queued, stale, false),
-                    (None, Some(hook), _) => (State::Queued, hook, false),
-                    (None, None, Some(d)) => (State::Queued, d, false),
+                match (stale, hook, cutting, dependency) {
+                    (Some(stale), _, _, _) => (State::Queued, stale, false),
+                    (None, Some(hook), _, _) => (State::Queued, hook, false),
+                    (None, None, Some(ran), _) => (State::Starting, cutting_line(ran), false),
+                    (None, None, None, Some(d)) => (State::Queued, d, false),
                     // Said once nothing else holds the task, which is when
                     // its dependency has finished: the base it is cut from
                     // and opens against is not the dependency's branch.
-                    (None, None, None) => (
+                    (None, None, None, None) => (
                         State::Queued,
                         closed_dependency_note(repo, task)
                             .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
@@ -4853,6 +4918,14 @@ fn build_rows(
             Some(_) if live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Blocked) => (
                 State::Prompt,
                 format!("press a key in pane `{lane}`"),
+                false,
+            ),
+            // The task's worktree is being cut by a run beside the
+            // dispatcher's pass: a repository hook is slow, and only this task
+            // waits on it.
+            Some(_) if cutting.is_some() => (
+                State::Starting,
+                cutting_line(cutting.unwrap_or_default()),
                 false,
             ),
             Some(_) if serial_holder.is_some() => (
@@ -7933,6 +8006,138 @@ mod tests {
         assert_eq!(
             header_cells(running, None, "v1".to_string()).join(" · "),
             "dispatcher running · pid 1234 · v1"
+        );
+    }
+
+    /// A routine firing waiting on its `open` hook has no task file yet, but
+    /// the queue shows it: one `opening ticket` row, for as long as the hook
+    /// runs, and none for an id that is already a queued task.
+    #[test]
+    fn a_routine_waiting_on_its_open_hook_reads_opening_ticket() {
+        let (repo, _root_guard) = fixture("opening-row");
+        add(&repo, "queued-one", &[], Some(crate::pipeline::QUEUED));
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        for id in ["nite-1", "queued-one"] {
+            let key = crate::command_step::Runs::key("open", id);
+            runs.start(&key, "sleep 60", &repo.root, &Default::default())
+                .unwrap();
+        }
+
+        let rows = rows(&repo, &Pipelines::builtin()).unwrap();
+        for id in ["nite-1", "queued-one"] {
+            runs.stop(&crate::command_step::Runs::key("open", id));
+        }
+
+        let opening: Vec<_> = rows
+            .iter()
+            .filter(|row| row.next.contains("opening ticket"))
+            .collect();
+        assert_eq!(
+            opening.len(),
+            1,
+            "{:?}",
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(opening[0].id, "nite-1");
+        assert!(matches!(opening[0].state, State::Queued));
+        assert!(
+            opening[0].next.contains("(stopped at 1m)"),
+            "{}",
+            opening[0].next
+        );
+    }
+
+    /// A task whose worktree is being cut beside the dispatcher's pass reads
+    /// `cutting worktree`, not the line of a task waiting for a slot, and a
+    /// task with no cut running keeps the line it had.
+    #[test]
+    fn a_task_whose_worktree_is_being_cut_reads_cutting_worktree() {
+        let (repo, _root_guard) = fixture("cutting-row");
+        add(&repo, "cutting-one", &[], Some("implement"));
+        add(&repo, "idle-one", &["cutting-one"], Some("implement"));
+        // An agent step's task stays on `queued` while its worktree is cut.
+        add_to(&repo, "cutting-queued", &[], None, Some("other"));
+        let runs = crate::command_step::Runs::new(&repo.cuts_dir());
+        for id in ["cutting-one", "cutting-queued"] {
+            runs.start(
+                &crate::command_step::Runs::key("cut", id),
+                "sleep 60",
+                &repo.root,
+                &Default::default(),
+            )
+            .unwrap();
+        }
+
+        let rows = rows(&repo, &Pipelines::builtin()).unwrap();
+        for id in ["cutting-one", "cutting-queued"] {
+            runs.stop(&crate::command_step::Runs::key("cut", id));
+        }
+
+        let next = |id: &str| rows.iter().find(|r| r.id == id).unwrap().next.clone();
+        assert!(
+            next("cutting-queued").starts_with("cutting worktree"),
+            "{}",
+            next("cutting-queued")
+        );
+        assert!(
+            next("cutting-one").starts_with("cutting worktree"),
+            "{}",
+            next("cutting-one")
+        );
+        assert!(
+            !next("idle-one").contains("cutting worktree"),
+            "{}",
+            next("idle-one")
+        );
+    }
+
+    /// Unqueuing a task whose worktree is being cut ends the cut: the hook and
+    /// everything it started stop, and no checkout or branch is left for the
+    /// task's next queue to trip over. An agent step's task is `queued` for
+    /// its whole cut, so this is the road a person takes when `cutting
+    /// worktree` sits there.
+    #[test]
+    fn unqueuing_a_task_mid_cut_stops_the_hook_and_leaves_no_checkout() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("unqueue-mid-cut");
+        add(&repo, "solo", &[], None);
+        let child = repo.root.join("child.pid");
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nsleep 300 & echo $! >'{}'; wait\n",
+                child.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = repo.worktree_root().join("task-solo");
+        let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "group/demo");
+        assert!(
+            began
+                .unwrap_err()
+                .downcast_ref::<crate::cut::CutPending>()
+                .is_some()
+        );
+        assert!(crate::cut::running(&repo, "solo").is_some());
+
+        let outcome = unqueue_task(&repo, "solo").unwrap();
+
+        assert!(matches!(outcome, Unqueued::Drafted(_)));
+        assert_eq!(crate::cut::running(&repo, "solo"), None);
+        let child: u32 = std::fs::read_to_string(&child)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!crate::headless::alive(child), "the hook's child lived on");
+        assert!(!path.exists(), "the half checkout was left standing");
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/solo"])
+                .is_err(),
+            "the branch the cut made was left behind"
         );
     }
 

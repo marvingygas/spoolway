@@ -199,6 +199,33 @@ pub(crate) fn run_killing_at(
     Ok(String::new())
 }
 
+/// [`run_killing_at`] for a command that is already running on its own: when
+/// `point` fires, the process group led by `group` and then the dispatcher are
+/// killed with `SIGKILL` as soon as `moved` says the command has started
+/// changing the checkout.
+///
+/// A worktree cut runs detached, in a group of its own, so the dispatcher has
+/// no child to wait on. It watches the checkout from here instead, and the
+/// kill lands the same way: inside `git worktree add`, with the checkout half
+/// written. Returns at once when the point is not armed or was already
+/// claimed, and otherwise after [`DURING_WAIT`] if the command never started
+/// changing the checkout.
+pub(crate) fn kill_run_at(repo_root: &Path, point: &str, group: u32, moved: impl Fn() -> bool) {
+    if !ARMED.load(Ordering::SeqCst) || !claim(repo_root, point) {
+        return;
+    }
+    let started = Instant::now();
+    while started.elapsed() < DURING_WAIT {
+        if moved() {
+            // SAFETY: `kill` on a process group has no memory-safety
+            // preconditions; `group` leads the detached run's own session.
+            unsafe { libc::kill(-(group as libc::pid_t), libc::SIGKILL) };
+            die();
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

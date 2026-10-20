@@ -1475,11 +1475,30 @@ impl<'a> Dispatcher<'a> {
             &mut report.actions,
             &mut report.problems,
         );
+        // An `open` hook a stopped `queue add` left running, or one whose job
+        // was dropped, is waited on by no job, so nothing above asks about
+        // it; one past its limit is ended here.
+        crate::jobs::stop_stray_opens(self.repo, &mut report.problems);
 
         // Before the queue is read: a killed writer's half-written temp file
         // is otherwise never cleaned up.
         crate::task::sweep_stale_tmp(&self.repo.queue_dir());
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
+
+        // A worktree cut past its limit is stopped here, for every task and
+        // before any of them is visited: a task that cannot get a worker slot
+        // this pass, or that a person has paused, is not visited, and its
+        // hung hook would otherwise run on past the limit.
+        for task in &tasks {
+            let branch = task
+                .front
+                .branch
+                .clone()
+                .unwrap_or_else(|| crate::task::default_branch(task.id()));
+            if let Some(path) = self.mux.cut_path(&branch) {
+                crate::cut::stop_if_overdue(self.repo, task.id(), &path, &branch);
+            }
+        }
 
         // Every task's own stage, before this pass moves anything — compared
         // against the same tasks' stages once the pass is done, to answer
@@ -5366,6 +5385,14 @@ impl<'a> Dispatcher<'a> {
         command_forget: Option<String>,
         report: &mut Report,
     ) -> Result<()> {
+        // A worktree still being cut is waited for, not retried: nothing
+        // failed, so no strike is spent and no destination is chosen. The
+        // task stays where it is until the cut ends, and a cut that fails
+        // or is stopped at its limit comes back here as an ordinary error.
+        if err.downcast_ref::<crate::cut::CutPending>().is_some() {
+            self.persist(task)?;
+            return Ok(());
+        }
         // `from_ceiling` is true only for the three-strikes road. The pane-busy
         // road keeps routing as it always has, so a busy unblocker pane still
         // reaches `blocked` again rather than parking.
@@ -5787,6 +5814,14 @@ impl<'a> Dispatcher<'a> {
                 let worktree =
                     match ensure_checkout(self.repo, self.mux, task, &mut self.file_seen, shown) {
                         Ok(opened) => opened,
+                        // Its worktree is being cut beside the pass. That is
+                        // no failed launch, so no attempt is spent: the task
+                        // is looked at again next pass, and every other task
+                        // goes on in the meantime.
+                        Err(err) if err.downcast_ref::<crate::cut::CutPending>().is_some() => {
+                            self.persist(task)?;
+                            return Ok(None);
+                        }
                         Err(err) => {
                             let destination = self.note_launch_failure(
                                 task,
@@ -7074,10 +7109,11 @@ pub(crate) fn base_problem_when_unasked(
 /// one per task; the next pass starts a fresh cache and asks again.
 pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 
-/// The branch an uncut `task` is cut from: its own `starts_from:`, else its
-/// first dependency's branch, else `base`. A dependency closed with nothing to
-/// hand over counts as where it stood here, not its branch — see
-/// [`Repo::closed_dependency_base`].
+/// The branch an uncut `task` starts from: its own `starts_from:`, else its
+/// first dependency's branch, else `base`, which the cut reads from `origin`
+/// when `origin` has it (see [`crate::mux::resolve_task_base`]). A dependency
+/// closed with nothing to hand over counts as where it stood here, not its
+/// branch — see [`Repo::closed_dependency_base`].
 ///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in
@@ -7460,7 +7496,29 @@ fn ensure_checkout(
     // first, and open the very workspace this call is meant to leave closed.
     let nothing_to_open = !want_pane && task.front.worktree_path.is_some();
     if task.front.workspace_id.is_none() && !nothing_to_open {
-        let mut found = repo.worktree_for(&branch)?;
+        // The cut runs beside the pass on a backend that can (see
+        // [`crate::cut`]), so this call may find one going, or one with an
+        // answer waiting. Looked at before git is asked what is checked out:
+        // a cut still going has an entry under its `initializing` lock, and
+        // the recovery below would read that as one a dispatcher was killed
+        // in and remove the checkout out from under the running cut.
+        //
+        // A cut that ended with `0` is not recovered at all. It goes on to the
+        // cut arm below, which opens the workspace on the finished checkout
+        // the way a cut made in this call does. Running that arm is also what
+        // keeps the task's `borrowed` and workspace ownership the same as a
+        // cut that finished in one call.
+        let cut_path = mux.cut_path(&branch);
+        let cut_finished = match &cut_path {
+            Some(path) => {
+                crate::cut::poll(repo, task.id(), path, &branch)? == crate::cut::Poll::Finished
+            }
+            None => false,
+        };
+        let mut found = match cut_finished {
+            true => None,
+            false => repo.worktree_for(&branch)?,
+        };
         // A checkout of this task's branch inside spoolway's own `worktrees/`
         // folder, found for a task that has set up a checkout before, is the
         // task's own and not a person's: it is what an earlier pass's cut
@@ -7614,15 +7672,44 @@ fn ensure_checkout(
                 // pushed — so the same local-else-origin resolution the cut
                 // itself uses runs first, or this pins nothing at all
                 // (review finding 2).
-                let base_commit = if branch_exists {
+                //
+                // A task that follows its own `base` is cut from what
+                // `origin` has, so a commit a person has not pushed to their
+                // local base stays out of its pull request. Anything else is
+                // a dependency's `task/<id>` branch, which spoolway made and
+                // may never have pushed, or a person's own `starts_from:`,
+                // and keeps the local-first rule of `resolve_cut_base`.
+                // `starts_from` itself is recorded as it is, so a re-cut
+                // reads the same name back.
+                //
+                // Resolved only when this cut makes the branch. A re-cut
+                // that reuses the task's own branch never reads the start
+                // point, and resolving it would spend a fetch, inside the
+                // pass, for nothing.
+                //
+                // Not asked of a cut that has already finished beside the pass:
+                // nothing reads the start point then, and the fetch would be
+                // paid again on the pass that finds the cut done.
+                let follows_base = starts_from == base;
+                let cut_from = match follows_base && !branch_exists && !cut_finished {
+                    true => crate::mux::resolve_task_base(&repo.root, &base),
+                    false => starts_from.clone(),
+                };
+                // `resolve_task_base` has already fetched, and has already
+                // said whether `origin/<base>` is there, so its answer is
+                // read as it is. `resolve_cut_base` would ask `origin` again
+                // for a base that has neither a local branch nor an `origin`
+                // ref, and so triple the wait on a remote that hangs.
+                let base_commit = if branch_exists || cut_finished {
                     task.front.base_commit.clone()
                 } else {
-                    repo.git(&[
-                        "rev-parse",
-                        &crate::mux::resolve_cut_base(&repo.root, &starts_from),
-                    ])
-                    .ok()
-                    .map(|c| c.trim().to_string())
+                    let pinned = match follows_base {
+                        true => cut_from.clone(),
+                        false => crate::mux::resolve_cut_base(&repo.root, &cut_from),
+                    };
+                    repo.git(&["rev-parse", &pinned])
+                        .ok()
+                        .map(|c| c.trim().to_string())
                 };
                 // Written down before the cut, not after it. `git worktree
                 // add -b` makes the branch first, so a dispatcher stopped
@@ -7632,16 +7719,33 @@ fn ensure_checkout(
                 // times into `blocked`. With `run` and `base_commit` already
                 // on disk, `cut_before` reads the leftover as a re-cut and
                 // reuses it, still pinned to the commit it was cut from.
-                task.front.run = Some(crate::usage::new_run_id());
-                task.front.base_commit = base_commit;
-                persist_task(repo, task, file_seen)?;
-                crate::fault::kill_at(&repo.root, crate::fault::CUT_BEFORE_ADD);
+                //
+                // A cut that finished beside the pass already wrote both, on
+                // the pass that started it; writing them again would mint a
+                // second run id for the one task.
+                if !cut_finished {
+                    task.front.run = Some(crate::usage::new_run_id());
+                    task.front.base_commit = base_commit;
+                    persist_task(repo, task, file_seen)?;
+                    crate::fault::kill_at(&repo.root, crate::fault::CUT_BEFORE_ADD);
+                }
+                // The cut itself, beside the pass: `Ok` means the checkout is
+                // complete, and the backend call below then finds it already
+                // cut. A cut still going comes back as [`crate::cut::CutPending`],
+                // which only this task waits on; a cut that failed or was
+                // stopped at its limit is an ordinary error, counted as a
+                // failed launch by the caller.
+                if let Some(path) = cut_path.as_deref()
+                    && !cut_finished
+                {
+                    crate::cut::begin(repo, task.id(), path, &branch, &cut_from)?;
+                }
                 // A step with no pane to show cuts the checkout alone, on a
                 // backend that can. The workspace is opened later, at the
                 // first step that shows a pane, onto this checkout.
                 let bare = match want_pane {
                     true => None,
-                    false => mux.cut_checkout(&repo.root, &branch, &starts_from)?,
+                    false => mux.cut_checkout(&repo.root, &branch, &cut_from)?,
                 };
                 match bare {
                     Some(checkout) => {
@@ -7652,7 +7756,7 @@ fn ensure_checkout(
                         let workspace = mux.create_workspace(
                             &repo.root,
                             &branch,
-                            &starts_from,
+                            &cut_from,
                             &format!("spoolway/{}", task.display_name()),
                         )?;
                         crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
@@ -9464,6 +9568,10 @@ mod tests {
         /// worktree with git under it instead of answering with the one
         /// stand-in path every other test shares.
         cuts_real_worktrees: Option<PathBuf>,
+        /// Whether the backend says its cut can run beside the pass — see
+        /// [`Mux::cut_path`] — which only means anything with
+        /// `cuts_real_worktrees`.
+        cuts_beside_the_pass: bool,
         /// The repository to run git in when `remove_checkout` really removes
         /// the worktree, as the real backends do, instead of only logging it.
         removes_real_worktrees_from: Option<(PathBuf, PathBuf)>,
@@ -9566,6 +9674,7 @@ mod tests {
                 resident: true,
                 shared_workspace: None,
                 cuts_real_worktrees: None,
+                cuts_beside_the_pass: false,
                 removes_real_worktrees_from: None,
                 leaves_folder_behind: None,
                 dies_mid_cut: false,
@@ -9629,6 +9738,12 @@ mod tests {
         fn cutting_real_worktrees(mut self, root: PathBuf) -> FakeMux {
             self.cuts_real_worktrees = Some(root);
             self
+        }
+        /// [`FakeMux::cutting_real_worktrees`], with the cut run beside the
+        /// pass as the real backends do.
+        fn cutting_beside_the_pass(mut self, root: PathBuf) -> FakeMux {
+            self.cuts_beside_the_pass = true;
+            self.cutting_real_worktrees(root)
         }
         /// A backend whose `remove_checkout` really removes the worktree with
         /// git run in the repository's root, as the real backends do.
@@ -9946,6 +10061,12 @@ mod tests {
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
             self.cut(cwd, branch, base)
+        }
+        fn cut_path(&self, branch: &str) -> Option<PathBuf> {
+            self.cuts_real_worktrees
+                .as_ref()
+                .filter(|_| self.cuts_beside_the_pass)
+                .map(|root| root.join(crate::mux::branch_slug(branch)))
         }
         fn cut_checkout(&self, cwd: &Path, branch: &str, base: &str) -> Result<Option<PathBuf>> {
             if !self.cuts_checkout_alone {
@@ -10448,6 +10569,32 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains("plan/live"), "{prompt}");
+    }
+
+    /// A task that follows its own `base` is cut from `origin/<base>` when
+    /// `origin` has it, so the briefing anchors `your change` and `your
+    /// commits` on that ref. A local base that sits behind `origin` would
+    /// count every commit merged there since as the task's own.
+    #[test]
+    fn what_you_have_anchors_a_base_task_on_the_origin_ref_it_was_cut_from() {
+        let (repo, _root_guard) = fixture("what-you-have-origin");
+        origin_behind_local_work(&repo);
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+
+        let solo = Task::load(&add_task_with(&repo, "solo", "implement", |front| {
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+        let prompt = sent(&repo, &solo, pipeline, step);
+
+        assert!(prompt.contains("`git diff origin/work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("`git log --oneline origin/work..HEAD`"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("you sit on    `work`"), "{prompt}");
     }
 
     /// spoolway keeps no store to resolve `group:` against any more, and no
@@ -23983,6 +24130,139 @@ mod tests {
         std::fs::remove_dir_all(&worktree).ok();
     }
 
+    /// Give the fixture a bare `origin` holding `work`, then commit
+    /// `local-only.txt` to the local `work` without pushing it. Returns the
+    /// commit `origin/work` is at.
+    fn origin_behind_local_work(repo: &Repo) -> String {
+        let origin = repo.root.with_extension("origin.git");
+        let _ = std::fs::remove_dir_all(&origin);
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        repo.git(&["remote", "add", "origin", origin.to_str().unwrap()])
+            .unwrap();
+        repo.git(&["push", "-q", "origin", "work:work"]).unwrap();
+        repo.git(&["fetch", "-q", "origin"]).unwrap();
+        let pushed = repo
+            .git(&["rev-parse", "origin/work"])
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.root.join("local-only.txt"), "not pushed\n").unwrap();
+        repo.git(&["add", "local-only.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "unpushed"]).unwrap();
+        pushed
+    }
+
+    /// A commit on the local base that was never pushed stays out of a
+    /// task's branch: the task is cut from `origin/<base>`, and
+    /// `base_commit` pins that commit. Cut from the local branch, the
+    /// unpushed commit would ride into the task's pull request.
+    #[test]
+    fn a_task_is_cut_from_origins_base_not_the_local_one() {
+        let (repo, _root_guard) = fixture("cut-from-origin-base");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/demo"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        let pushed = origin_behind_local_work(&repo);
+
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(task.front.base_commit.as_deref(), Some(pushed.as_str()));
+        assert!(
+            !worktree.join("local-only.txt").exists(),
+            "the unpushed commit stayed out of the task's checkout"
+        );
+        assert_eq!(
+            task.front.starts_from.as_deref(),
+            Some("work"),
+            "the task file keeps the name, so a re-cut reads the same rule back"
+        );
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A re-cut that reuses the task's own branch never reads its start
+    /// point, so it is handed the recorded `starts_from` by name and does not
+    /// ask `origin` for the base, which would spend a fetch inside the pass
+    /// for nothing.
+    #[test]
+    fn a_recut_is_not_resolved_against_origin() {
+        let (repo, _root_guard) = fixture("recut-skips-origin");
+        let worktree = crate::scratch::root("dispatch-recut-skips-origin-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        origin_behind_local_work(&repo);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("work".into());
+            f.base_commit = Some("0123456789abcdef".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+        }));
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(
+            mux.did("create_workspace"),
+            vec!["create_workspace on task/demo from work".to_string()],
+            "the re-cut is handed `starts_from` as recorded, not `origin/work`"
+        );
+    }
+
+    /// With an `origin` that has the base, a dependent is still cut from its
+    /// parent's local `task/<id>` branch: spoolway made it, and `origin` may
+    /// never have it.
+    #[test]
+    fn a_dependent_is_still_cut_from_its_local_parent_branch_when_origin_exists() {
+        let (repo, _root_guard) = fixture("cut-from-dependency-with-origin");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/second"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        origin_behind_local_work(&repo);
+
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        std::fs::write(repo.root.join("first.txt"), "from first\n").unwrap();
+        repo.git(&["add", "first.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "first's work"]).unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
+        let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
+            f.depends_on = vec!["first".into()];
+        }));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        let parent = repo
+            .git(&["rev-parse", "task/first"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(task.front.base_commit.as_deref(), Some(parent.as_str()));
+        assert!(worktree.join("first.txt").exists());
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
     /// A task's first cut never lands on a branch the task did not create.
     /// A branch named `task/<id>` can be left over from an earlier task that
     /// had the same id, and the new task must not run on its old commits while
@@ -24128,6 +24408,240 @@ mod tests {
         }
         assert!(!admin.join("index.lock").exists());
         std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    /// A `post-checkout` hook for the repository that hangs only in the
+    /// checkout of the task named `hung`, and counts its runs in `ran`.
+    fn hang_in_checkout_of_hung(repo: &Repo) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let ran = repo.root.join("hook-ran");
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ncase \"$PWD\" in *task-hung) echo ran >>'{}'; sleep 300;; esac\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ran
+    }
+
+    /// One task's `post-checkout` hook that never exits must hold that task
+    /// and nobody else: the other task's cut and start go through while the
+    /// first is still hung, and asking again for the first finds the cut
+    /// going rather than starting a second.
+    #[test]
+    fn a_hung_cut_hook_holds_only_its_own_task() {
+        let (repo, _root_guard) = fixture("hung-cut-hook");
+        let ran = hang_in_checkout_of_hung(&repo);
+        let hung_path = add_task_with(&repo, "hung", "implement", |_| {});
+        let other_path = add_task_with(&repo, "other", "implement", |_| {});
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+
+        let mut hung = reload(&hung_path);
+        let err = ensure_workspace(&repo, &mux, &mut hung, &mut Default::default()).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::cut::CutPending>().is_some(),
+            "a cut still going is a wait, not a failure: {err:#}"
+        );
+        assert!(
+            mux.did("create_workspace").is_empty(),
+            "no workspace on a half cut"
+        );
+
+        let began = std::time::Instant::now();
+        let mut other = reload(&other_path);
+        ensure_workspace(&repo, &mux, &mut other, &mut Default::default())
+            .expect("the other task is cut while the first hook hangs");
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(
+            other
+                .front
+                .worktree_path
+                .as_ref()
+                .is_some_and(|p| p.join(".git").exists())
+        );
+        assert!(crate::cut::running(&repo, "hung").is_some());
+
+        let mut again = reload(&hung_path);
+        let err = ensure_workspace(&repo, &mux, &mut again, &mut Default::default()).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::cut::CutPending>().is_some(),
+            "{err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ran).unwrap().lines().count(),
+            1,
+            "a second cut was started for the same task"
+        );
+
+        crate::command_step::Runs::new(&repo.cuts_dir())
+            .stop(&crate::command_step::Runs::key("cut", "hung"));
+        std::fs::remove_dir_all(other.front.worktree_path.clone().unwrap()).ok();
+    }
+
+    /// Passes over a task whose cut is still going, for `pipelines`: the task
+    /// stays on `implement`, no launch attempt is counted and no failure is
+    /// reported, however many passes go by. A task charged a strike per pass
+    /// would be blocked after the third while its hook is only slow.
+    fn passes_over_a_hung_cut_spend_nothing(name: &str, pipelines: &Pipelines) {
+        let (repo, _root_guard) = fixture(name);
+        hang_in_checkout_of_hung(&repo);
+        let path = add_task(&repo, "hung", "implement");
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+
+        for pass in 1..=4 {
+            let report = run_pass_with(&repo, &mux, pipelines);
+            let task = reload(&path);
+            assert_eq!(task.stage(), "implement", "pass {pass} moved the task");
+            assert!(
+                task.front.launch_failures.is_empty(),
+                "pass {pass} counted a launch attempt: {:?}",
+                task.front.launch_failures
+            );
+            assert!(
+                !report.actions.iter().any(|a| a.contains("could not")),
+                "pass {pass} reported a failure: {:?}",
+                report.actions
+            );
+            assert!(
+                crate::cut::running(&repo, "hung").is_some(),
+                "pass {pass} lost the cut"
+            );
+        }
+        crate::command_step::Runs::new(&repo.cuts_dir())
+            .stop(&crate::command_step::Runs::key("cut", "hung"));
+    }
+
+    /// An agent step's task waits out a slow cut without a launch attempt
+    /// being spent on every pass. Fails when `handle_boot_failure` treats the
+    /// pending cut as a failed start.
+    #[test]
+    fn passes_over_a_hung_cut_do_not_charge_an_agent_step_task() {
+        passes_over_a_hung_cut_spend_nothing("pass-hung-cut-agent", &Pipelines::builtin());
+    }
+
+    /// The same for a command step, whose launch goes through `run_command`.
+    /// Fails when its pending-cut arm is taken out and the cut reads as a
+    /// failed run.
+    #[test]
+    fn passes_over_a_hung_cut_do_not_charge_a_command_step_task() {
+        passes_over_a_hung_cut_spend_nothing(
+            "pass-hung-cut-command",
+            &pipelines_running("true", false),
+        );
+    }
+
+    /// A hung cut is stopped at its limit by the pass itself, even for a task
+    /// that pass does not start, and the stop is a failed launch the task is
+    /// charged for when it is next looked at.
+    #[test]
+    fn a_pass_stops_a_cut_past_its_limit_for_a_task_it_does_not_start() {
+        let (repo, _root_guard) = fixture("overdue-cut-sweep");
+        let ran = hang_in_checkout_of_hung(&repo);
+        let hung_path = add_task_with(&repo, "hung", "implement", |_| {});
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+        let mut hung = reload(&hung_path);
+        let err = ensure_workspace(&repo, &mux, &mut hung, &mut Default::default()).unwrap_err();
+        assert!(err.downcast_ref::<crate::cut::CutPending>().is_some());
+        assert!(crate::cut::running(&repo, "hung").is_some());
+        // The task is parked, so the pass never reaches its checkout: only
+        // the sweep over every task's cut can stop this one.
+        let mut parked = reload(&hung_path);
+        parked.set_stage(crate::pipeline::BLOCKED, None);
+        parked.save().unwrap();
+        // The run's start is the pid file's own timestamp: move it back past
+        // the limit instead of waiting the limit out.
+        let runs = crate::command_step::Runs::new(&repo.cuts_dir());
+        let pid_file = runs
+            .log_path(&crate::command_step::Runs::key("cut", "hung"))
+            .with_extension("pid");
+        let started =
+            std::time::SystemTime::now() - crate::repo::GIT_HOOK_TIMEOUT - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&pid_file)
+            .unwrap()
+            .set_modified(started)
+            .unwrap();
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            crate::cut::running(&repo, "hung"),
+            None,
+            "the pass left a cut past its limit running"
+        );
+        let mut again = reload(&hung_path);
+        again.set_stage("implement", None);
+        let err = ensure_workspace(&repo, &mux, &mut again, &mut Default::default()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            err.downcast_ref::<crate::cut::CutPending>().is_none()
+                && text.contains("could not cut a worktree for `task/hung`")
+                && text.contains("was stopped after"),
+            "the stop was not the next visit's failed launch: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ran).unwrap().lines().count(),
+            1,
+            "the cut was started again instead of reporting the stop"
+        );
+    }
+
+    /// A cut that fails is a failed launch the caller counts, and the next
+    /// call tries again from nothing instead of waiting for a run that has
+    /// ended.
+    #[test]
+    fn a_failed_cut_is_an_error_each_time_it_is_tried() {
+        let (repo, _root_guard) = fixture("failed-cut-retry");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.base = Some("no-such-base".into());
+        });
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+
+        for attempt in 1..=3 {
+            let mut task = reload(&path);
+            let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+                .expect_err("the base does not exist");
+            assert!(
+                err.downcast_ref::<crate::cut::CutPending>().is_none(),
+                "attempt {attempt} was taken for a cut still going: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains("could not cut a worktree"),
+                "attempt {attempt}: {err:#}"
+            );
+        }
+    }
+
+    /// A dispatcher killed inside `git worktree add` before git recorded the
+    /// checkout leaves a folder and a branch and no entry. The cut that follows
+    /// must clear the folder, not fail on `already exists` and spend one of
+    /// the three launch attempts.
+    #[test]
+    fn a_folder_without_an_entry_is_cleared_not_spent_as_a_failed_launch() {
+        let (repo, _root_guard) = fixture("folder-no-entry");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.run = Some("rb0".into());
+            f.base_commit = Some("0".repeat(40));
+        });
+        repo.git(&["branch", "task/demo", "work"]).unwrap();
+        let folder = repo.worktree_root().join("task-demo");
+        std::fs::create_dir_all(folder.join("src")).unwrap();
+        std::fs::write(folder.join("src/half.txt"), "x").unwrap();
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+            .expect("a leftover folder is cleared, not failed on");
+
+        assert!(!folder.join("src/half.txt").exists());
+        assert!(folder.join(".git").exists(), "the checkout was cut");
+        std::fs::remove_dir_all(&folder).ok();
     }
 
     /// A checkout under `worktrees/` whose path the task recorded is its own

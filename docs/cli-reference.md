@@ -419,6 +419,24 @@ script that finds paused or blocked tasks matches `state`, not `stage`. A task a
 stopped reads `● hook failed` in STATE and `hook_failed` in the `--json` `state`. Its STEP and
 `stage` read `queued` or `done`, the stage the hook stopped it on.
 
+While a job firing waits on its `open` hook, the list has a row for each task id the hook is
+opening a ticket for. The row has STATE `queued`, no pipeline, and NEXT reads
+`opening ticket 13s (stopped at 1m)`. The row goes when the hook answers and the task takes its
+place in the queue. In `--json` the row is in `tasks` with an empty `pipeline`, so a script that
+reads `tasks` as task files should skip a row with no `pipeline`.
+
+```
+nite-1   queued   ○ queued   opening ticket 13s (stopped at 1m)
+```
+
+While a task's worktree is being cut, its NEXT reads `cutting worktree 24s (stopped at 10m)`.
+The cut stops after 10 minutes. See [Git hooks in a
+cut](dispatcher.md#git-hooks-in-a-cut).
+
+```
+hang3    quick   queued   ◌ starting   cutting worktree 24s (stopped at 10m)
+```
+
 A file in the queue that does not parse has no row. A file that holds an id another file holds,
 such as `dd1 - Copy.md` beside `dd1.md`, has no row either. The dispatcher skips both. Under the
 table, the text output lists the files that do not parse under one heading, and the files that
@@ -709,7 +727,16 @@ problems
 [enter] confirm   [esc] close
 ```
 
-A line names the setting and its state, and nothing else. What to do about it is in
+A line names the setting and its state, and nothing else. A base that tasks are cut from the local
+branch of adds a line under `settings`. That is the case when the project has no `origin`, or when
+this checkout has no `origin/<base>`:
+
+```
+no `origin` remote — tasks are cut from the local `main`, unpushed commits included
+`origin` has no `main` here — tasks are cut from the local `main`, unpushed commits included
+```
+
+The check reads refs already on disk and asks `origin` nothing. What to do about it is in
 [Configuration](configuration.md). A failed task hook is the exception: its row under `problems`
 also names the event, the task, the exit code, the command that clears it and the log path. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Each section is skipped when it has nothing to say, and the
@@ -1518,7 +1545,7 @@ close with this project's own hooks folder: `.spoolway/hooks/` in repo mode, or 
 
 | Event | When it runs |
 |---|---|
-| `open` | Before a task is queued. Synchronous |
+| `open` | Before a task is queued. `queue add` waits for it. A job firing does not, and asks again on each dispatcher pass |
 | `queued`, `blocked`, `paused`, `done` | When a task reaches that state |
 | `started` | When a queued task is ready and about to leave `queued` for its entry step |
 | `fetch` | From `spoolway issue show`. Synchronous |

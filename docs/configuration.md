@@ -240,7 +240,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 | `queue/`, `pending/`, `worktrees/`, `removing/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `system-prompts/` | What finished runs left behind. An entry of a task still in the queue is kept, except in `system-prompts/`. | `retention_days` |
-| `commands/`, `tracking/` | Run files of a task still in the queue | Deleted when the task is archived; `retention_days` sweeps only strays, and keeps an entry whose task is still in the queue |
+| `commands/`, `tracking/`, `cuts/` | Run files of a task still in the queue | Deleted when the task is archived; `retention_days` sweeps only strays, and keeps an entry whose task is still in the queue |
 | `project.toml`, `lanes.json`, `plans-since`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
@@ -439,10 +439,10 @@ archive_retention_days = 0
 |---|---|---|
 | `update_check` | `true` | Show a newer release in the dispatcher header when one is out. The header shows the published version in yellow. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
-| `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/` or `tracking/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
+| `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/`, `cuts/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `cuts/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
 | `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on` or holds its id. The sweep skips `archive/` while a file in `queue/` does not parse, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
 
-Archiving a task removes its files under `tracking/`, `commands/` and its session home at
+Archiving a task removes its files under `tracking/`, `commands/`, `cuts/` and its session home at
 once. Moving a task back to the pending directory stops its running hooks and removes its files
 under `tracking/`, so the next queue fires each hook again. `queue add` cannot name a `depends_on` that was swept out of `archive/`, which happens
 only when `archive_retention_days` is set.
@@ -608,9 +608,22 @@ has no file of its own, such as a `queue add --from -` stream entry. The hook bu
 whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's own
 `## Context` and `## Acceptance criteria` sections; spoolway renders nothing into it.
 
-An `open` hook that is still running after 60 seconds is stopped. The whole `queue add` fails
-and nothing is queued. When a job firing calls the hook, that minute's firing fails and the
-dispatcher's pass goes on.
+An `open` hook that is still running after 60 seconds is stopped, together with every process
+it started. The whole `queue add` fails and nothing is queued.
+
+A job firing runs the hook in the background. The dispatcher's pass goes on at once, asks for the
+answer again on each pass, and queues the routine's tasks when the hook has answered. A hook
+that is still running after 60 seconds is stopped, and that minute's firing fails. See
+[A firing waiting on its `open` hook](jobs.md#a-firing-waiting-on-its-open-hook).
+
+A hook that is still running is never started a second time for the same task. When a
+`queue add` is stopped while its hook runs, the hook keeps running. The next `queue add` of the
+same task, or the next job firing, picks up that run and uses its answer. A hook left behind
+that nothing asks about is stopped by the dispatcher after 60 seconds, with this problem line:
+
+```
+! the open hook for `hx2` was still running after 1m and was stopped — nothing was queued for it. Run `spoolway queue add` again, or let the job that fired it run again, to open it.
+```
 
 The submission is refused, naming the group, when no task in a group sets
 `group_description:`. A group whose tasks in the submission all set `tracking: off` and name

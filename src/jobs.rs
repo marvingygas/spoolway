@@ -464,7 +464,35 @@ pub struct FireRecord {
     /// between that minute and this pass, so nothing in the gap is caught up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_by: Option<String>,
+    /// The workspace clone whose dispatcher is waiting on this job's `open`
+    /// hook, in a shared record only. A pending firing records nothing else
+    /// there, so without it the next clone's pass would find the window due
+    /// and start a second hook, and a second ticket would open. See
+    /// [`Opening`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening: Option<Opening>,
 }
+
+/// A clone's claim on a shared job: its firing is waiting on an `open` hook
+/// that runs in that clone's own tracking directory, which no other clone
+/// reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Opening {
+    /// The workspace dispatcher name of the clone that started the hook, from
+    /// [`Repo::workspace_dispatcher`].
+    pub clone: Option<String>,
+    /// Epoch seconds when the holder last asked about its hook.
+    pub at: i64,
+}
+
+/// How long another clone honours an [`Opening`] that its holder has not
+/// renewed. The holder renews it on every pass that finds its hook still
+/// running, and ends it when the hook settles or is stopped at
+/// [`crate::tracking::OPEN_FETCH_TIMEOUT`], so a claim this old belongs to a
+/// dispatcher that stopped asking. Holding every other clone off for ever
+/// would stop the job from firing at all. Two minutes is far past the gap
+/// between two passes of a live dispatcher, which is seconds.
+const OPENING_HELD_SECS: i64 = 120;
 
 /// Names this process, so a pass can tell its own earlier look from one a
 /// previous dispatcher run left behind. A pid alone is reused after a
@@ -708,6 +736,68 @@ fn note_look(record: &mut FireRecord, shared: bool, path: &Path, name: &str, min
     true
 }
 
+/// Where the clone keeps the mark that a job's firing is waiting on its `open`
+/// hook: next to the hook's own run files, so it is the clone that holds the
+/// run that holds the mark. A workspace's shared job record is read by every
+/// clone, so it only names the clone that waits (see [`Opening`]); the mark
+/// says which window and task.
+fn opening_path(repo: &Repo, scope: Scope, name: &str) -> PathBuf {
+    repo.tracking_dir()
+        .join(format!("job-{}-{name}.opening", scope.label()))
+}
+
+/// The window a job's firing is waiting on and the task whose `open` hook it
+/// waits for. A hook can outlast the minute, and a cron expression other than
+/// every-minute will not match again until its next window, so without the
+/// mark the firing would be dropped with its hook still running and never
+/// recorded.
+fn read_opening(repo: &Repo, scope: Scope, name: &str) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(opening_path(repo, scope, name)).ok()?;
+    let (window, task) = text.split_once('\n')?;
+    Some((window.to_string(), task.trim().to_string()))
+}
+
+fn write_opening(repo: &Repo, scope: Scope, name: &str, window: &str, task: &str) {
+    // A mark that cannot be written costs the firing its later passes, and is
+    // not worth failing the pass for: the hook is still bounded, by the sweep
+    // in [`stop_stray_opens`], and the next due window asks again.
+    let path = opening_path(repo, scope, name);
+    let _ = std::fs::create_dir_all(repo.tracking_dir());
+    let _ = std::fs::write(path, format!("{window}\n{task}\n"));
+}
+
+fn clear_opening(repo: &Repo, scope: Scope, name: &str) {
+    let _ = std::fs::remove_file(opening_path(repo, scope, name));
+}
+
+/// Stop every `open` hook that no enabled job is waiting on and that has run
+/// past its limit: one a `queue add` left running when it was stopped, or one
+/// a job's firing left when the job was disabled or deleted, or when a later
+/// pass dropped the firing before it could ask again. A hook that settles
+/// inside its limit is left, and its answer with it, for the next caller to
+/// read; only a hang is ended, with all the processes it started. Called
+/// every pass, after [`fire_due`], whose jobs are the ones this must not
+/// stop — they are asked about their own.
+pub fn stop_stray_opens(repo: &Repo, problems: &mut Vec<String>) {
+    let Ok(jobs) = load(repo) else {
+        return;
+    };
+    let waited_on: BTreeSet<String> = jobs
+        .iter()
+        .filter(|job| job.spec.enabled)
+        .filter_map(|job| read_opening(repo, job.scope, &job.name))
+        .map(|(_, task)| task)
+        .collect();
+    for (task, ran) in crate::tracking::stop_overdue_strays(repo, &waited_on) {
+        problems.push(format!(
+            "the open hook for `{task}` was still running after {} and was stopped — \
+             nothing was queued for it. Run `spoolway queue add` again, or let the job \
+             that fired it run again, to open it.",
+            crate::tracking::minutes(ran),
+        ));
+    }
+}
+
 /// Fire every enabled job whose expression matches the current local minute,
 /// recording the minute in the job's state file — machine home, or the
 /// workspace's shared file for a project job there. Called at the top of a dispatcher
@@ -842,11 +932,41 @@ pub fn fire_due(
 
         let record = state.entry(job.name.clone()).or_default();
         let looked = own_look(record, shared, &path, &job.name);
-        let due = due_minute(&cron, looked.as_deref(), now);
+        // A firing still waiting on its hook is asked again before any new
+        // window, and a mark for a window since fired or skipped is dropped so
+        // it cannot hold the job on one minute for ever.
+        let waiting = read_opening(repo, job.scope, &job.name)
+            .map(|(window, _)| window)
+            .filter(|window| {
+                record.fired_minute.as_ref() != Some(window)
+                    && record.skipped_minute.as_ref() != Some(window)
+            });
+        let me = repo.workspace_dispatcher();
+        if waiting.is_none() {
+            clear_opening(repo, job.scope, &job.name);
+            // Drop this clone's own claim with its mark; another clone's is
+            // left for that clone to end.
+            if record.opening.as_ref().is_some_and(|held| held.clone == me) {
+                record.opening = None;
+                *dirty = true;
+            }
+        }
+        let due = waiting
+            .as_deref()
+            .and_then(|window| NaiveDateTime::parse_from_str(window, MINUTE_FMT).ok())
+            .or_else(|| due_minute(&cron, looked.as_deref(), now));
         *dirty |= note_look(record, shared, &path, &job.name, &minute);
         let Some(due) = due else {
             continue;
         };
+        // Another clone's firing is waiting on its `open` hook, which only
+        // that clone can see: this window is taken until it settles, or the
+        // claim is too old to be a live dispatcher's.
+        if record.opening.as_ref().is_some_and(|held| {
+            held.clone != me && Local::now().timestamp().saturating_sub(held.at) < OPENING_HELD_SECS
+        }) {
+            continue;
+        }
         // The window's own minute, not the pass's: a job that fired late is
         // recorded — and deduplicated — against the minute it was due.
         let minute = due.format(MINUTE_FMT).to_string();
@@ -905,6 +1025,9 @@ pub fn fire_due(
             problems.push(format!("job {}: {refusal}", job.name));
             continue;
         }
+        // Any outcome but "still running" ends the wait; the pending arm
+        // below keeps it.
+        let mut still_opening = false;
         match crate::commands::queue_routine_target(
             repo,
             pipelines,
@@ -925,6 +1048,31 @@ pub fn fire_due(
                     job.name,
                     ids.join(", ")
                 ));
+            }
+            Err(err) if err.downcast_ref::<crate::tracking::OpenPending>().is_some() => {
+                // The `open` hook is still running, beside this pass. The
+                // window stays unrecorded so the next pass asks again, and
+                // nothing else waits on it. Said once, when it started.
+                if let Some(pending) = err.downcast_ref::<crate::tracking::OpenPending>() {
+                    if pending.started {
+                        actions.push(format!(
+                            "job {} · fired · opening ticket for {}",
+                            job.name, pending.task
+                        ));
+                    }
+                    still_opening = true;
+                    write_opening(repo, job.scope, &job.name, &minute, &pending.task);
+                    if shared {
+                        // Renewed on every pass that asks: a routine with
+                        // several tasks opens one hook after another, so
+                        // the claim outlives any one hook's limit.
+                        record.opening = Some(Opening {
+                            clone: me.clone(),
+                            at: Local::now().timestamp(),
+                        });
+                        *dirty = true;
+                    }
+                }
             }
             Err(err) if err.downcast_ref::<crate::commands::StillQueued>().is_some() => {
                 // A task named after the routine is still in the queue,
@@ -950,7 +1098,7 @@ pub fn fire_due(
                 // left in it neither queue the tasks that did land again nor
                 // re-open their tickets (a failing `open` hook), nor repeat
                 // an error nothing but an edit will lift (a `gate_at:` naming
-                // no step) or wait out a hung hook's limit once more. The
+                // no step) or start a hung hook over. The
                 // next due minute tries again. Only a base `origin` could not
                 // be asked about is left open: it is the one refusal that is
                 // likely gone by the next pass.
@@ -962,6 +1110,12 @@ pub fn fire_due(
                     *dirty = true;
                 }
                 problems.push(format!("job {}: {err:#}", job.name));
+            }
+        }
+        if !still_opening {
+            clear_opening(repo, job.scope, &job.name);
+            if record.opening.take().is_some() {
+                *dirty = true;
             }
         }
     }
@@ -2190,6 +2344,230 @@ mod tests {
             .is_some_and(|record| record.skipped_minute.is_some())
     }
 
+    /// An every-minute job whose routine task needs an issue, and an `open`
+    /// hook that records each start in `hook-starts` and then hangs. Returns
+    /// that file.
+    fn job_with_a_hanging_open_hook(repo: &mut Repo) -> PathBuf {
+        every_minute_job(repo, "nightly", "default");
+        std::fs::write(
+            repo.routines_dir().join("nightly").join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n\
+             group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        let starts = repo.root.join("hook-starts");
+        let dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("open.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho started >>'{}'\nsleep 300 &\nwait\n",
+                starts.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        repo.config.issue_tracking.hook = "open.sh".to_string();
+        starts
+    }
+
+    /// A hook that hangs holds up only its own job. The pass that starts it
+    /// comes back at once, later passes find the run and start no second,
+    /// and once the run is past its limit the next pass stops it and records
+    /// the window as failed — what the pass used to wait a whole minute for.
+    #[test]
+    fn a_hanging_open_hook_does_not_hold_the_pass_or_run_twice() {
+        let (mut repo, _root_guard) = fixture("jobs-open-hangs");
+        let starts = job_with_a_hanging_open_hook(&mut repo);
+
+        let began = std::time::Instant::now();
+        let (actions, problems) = fire(&repo);
+        assert!(began.elapsed() < std::time::Duration::from_secs(20));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        assert!(repo.queued_ids().is_empty(), "nothing is queued yet");
+        let record = read_state(&repo)["nightly"].clone();
+        assert!(record.fired_minute.is_none(), "{record:?}");
+        assert!(read_opening(&repo, Scope::User, "nightly").is_some());
+
+        // Later passes, the minute turned over or not: the same run, said once.
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty() && problems.is_empty(), "{actions:?}");
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "a pass found the running hook and started no second"
+        );
+
+        // Past the limit the run is stopped, and the window fails.
+        let key = crate::command_step::Runs::key("open", "audit-1");
+        let pid_file = repo.tracking_dir().join(format!("{key}.pid"));
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(&pid_file)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let (actions, problems) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(
+            problems.iter().any(|line| line.contains("nightly")
+                && line.contains("still running after 1m and was stopped")),
+            "{problems:?}"
+        );
+        assert!(skipped(&repo), "the failed window is recorded");
+        assert!(read_opening(&repo, Scope::User, "nightly").is_none());
+        assert!(repo.queued_ids().is_empty(), "nothing was queued");
+    }
+
+    /// A firing whose window is not the current minute is still asked about
+    /// on every later pass: a once-a-day job does not match again, so
+    /// without the mark its hook would run on unbounded and the window would
+    /// never be recorded. The mark lives with the clone's hook runs, so a
+    /// workspace's shared record needs no field for it.
+    #[test]
+    fn a_pending_window_is_asked_again_after_its_minute_has_passed() {
+        use chrono::Timelike;
+        let (mut repo, _root_guard) = fixture("jobs-open-late");
+        let starts = job_with_a_hanging_open_hook(&mut repo);
+        let window = settled_now() - Duration::minutes(30);
+        scheduled_job(
+            &repo,
+            "nightly",
+            "default",
+            &format!("{} {} * * *", window.minute(), window.hour()),
+        );
+        std::fs::write(
+            repo.routines_dir().join("nightly").join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n\
+             group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        let window = window.format(MINUTE_FMT).to_string();
+        write_opening(&repo, Scope::User, "nightly", &window, "audit-1");
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        let (actions, _) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+
+        let key = crate::command_step::Runs::key("open", "audit-1");
+        std::fs::File::options()
+            .write(true)
+            .open(repo.tracking_dir().join(format!("{key}.pid")))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        let (_, problems) = fire(&repo);
+        assert!(
+            problems.iter().any(|line| line.contains("was stopped")),
+            "{problems:?}"
+        );
+        assert_eq!(
+            read_state(&repo)["nightly"].skipped_minute.as_deref(),
+            Some(window.as_str()),
+            "the failed window is the one that was pending, not the current minute"
+        );
+        assert!(read_opening(&repo, Scope::User, "nightly").is_none());
+    }
+
+    /// An `open` hook a stopped `queue add` left running is ended once it
+    /// passes its limit, but not while it is young, and not when a job is
+    /// the one waiting on it.
+    #[test]
+    fn a_stray_open_hook_is_stopped_past_its_limit_but_not_a_jobs() {
+        let (mut repo, _root_guard) = fixture("jobs-open-stray");
+        job_with_a_hanging_open_hook(&mut repo);
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        for id in ["stray-1", "young-1", "audit-1"] {
+            let key = crate::command_step::Runs::key("open", id);
+            runs.start(&key, "sleep 300", &repo.root, &Default::default())
+                .unwrap();
+            if id != "young-1" {
+                std::fs::File::options()
+                    .write(true)
+                    .open(repo.tracking_dir().join(format!("{key}.pid")))
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+        }
+        write_opening(&repo, Scope::User, "nightly", "2000-01-01T00:00", "audit-1");
+
+        let mut problems = Vec::new();
+        stop_stray_opens(&repo, &mut problems);
+
+        let state = |id: &str| runs.state(&crate::command_step::Runs::key("open", id));
+        assert_eq!(state("stray-1"), crate::command_step::RunState::Fresh);
+        assert_eq!(state("young-1"), crate::command_step::RunState::Running);
+        assert_eq!(state("audit-1"), crate::command_step::RunState::Running);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("`stray-1`") && problems[0].contains("queue add"));
+        for id in ["young-1", "audit-1"] {
+            runs.stop(&crate::command_step::Runs::key("open", id));
+        }
+    }
+
+    /// A dispatcher killed during a firing leaves the hook running; the next
+    /// one adopts it, waits on it and queues the answer, with the hook run
+    /// once. Standing in for the killed dispatcher is the first `fire`, whose
+    /// run state is dropped the way a restart drops it.
+    #[test]
+    fn a_restarted_dispatcher_adopts_the_open_hook_and_queues_its_answer() {
+        let (mut repo, _root_guard) = fixture("jobs-open-adopted");
+        let starts = job_with_a_hanging_open_hook(&mut repo);
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/open.sh"),
+            format!(
+                "#!/bin/sh\necho started >>'{}'\nsleep 1\necho ticket=T-9 >\"$SPOOLWAY_OUT\"\n",
+                starts.display()
+            ),
+        )
+        .unwrap();
+
+        let (actions, _) = fire(&repo);
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        // A new dispatcher run has a different look record: nothing but the
+        // saved opening window says this job is due.
+        let mut state = read_state(&repo);
+        state.get_mut("nightly").unwrap().checked_by = None;
+        write_state(&repo, &state).unwrap();
+
+        let mut queued = false;
+        for _ in 0..200 {
+            let (actions, problems) = fire(&repo);
+            assert!(problems.is_empty(), "{problems:?}");
+            if actions.iter().any(|line| line.contains("fired · queued")) {
+                queued = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(queued, "the answer was never queued");
+        assert_eq!(repo.task("audit-1").unwrap().extra_str("ticket"), "T-9");
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "the hook ran once"
+        );
+        assert!(read_opening(&repo, Scope::User, "nightly").is_none());
+    }
+
     /// Put the main checkout on `experiment/local-only`, one local commit
     /// ahead of `plan/demo`, or on a detached HEAD.
     fn check_out_another_branch(repo: &Repo, detached: bool) {
@@ -2615,6 +2993,177 @@ mod tests {
             second.queued_ids().is_empty(),
             "nothing queued in the other clone"
         );
+    }
+
+    /// Gives each clone of a workspace an `open` hook that appends to
+    /// `hook-starts`, waits for a `hook-release` file, and then names a
+    /// ticket. Returns both paths. The wait is bounded at ten seconds, so a
+    /// test that fails before it releases the hook does not leave one
+    /// running; a wait for the file, not a sleep, so a loaded machine cannot
+    /// let the hook answer before the test has looked at it running.
+    fn slow_open_hook_in_each_clone(clones: &mut [&mut Repo]) -> (PathBuf, PathBuf) {
+        let starts = clones[0].root.join("hook-starts");
+        let release = clones[0].root.join("hook-release");
+        for repo in clones.iter_mut() {
+            // The hooks folder is where the workspace looks for them, and
+            // creating `.spoolway` in the checkout moves that setup.
+            let dir = crate::tracking::hooks_dir_in(&repo.checkout);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("open.sh");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho started >>'{}'\ni=0\n\
+                     while [ ! -f '{}' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\n\
+                     echo ticket=T-1 >\"$SPOOLWAY_OUT\"\n",
+                    starts.display(),
+                    release.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            repo.config.issue_tracking.hook = "open.sh".to_string();
+        }
+        std::fs::write(
+            clones[0].routines_dir().join("nightly").join("audit.md"),
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n\
+             group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        (starts, release)
+    }
+
+    /// While one clone's firing waits on its `open` hook, no other clone
+    /// fires the same job: the hook runs in the first clone's own tracking
+    /// directory, which the second never reads, so the second would start a
+    /// hook of its own and a second ticket would open. Once the first clone
+    /// has read the answer and queued the task, the second still has nothing
+    /// to fire for that window.
+    #[test]
+    fn a_clone_does_not_fire_while_another_waits_on_its_open_hook() {
+        let (mut first, mut second, _guards) = two_clones("jobs-ws-opening");
+        shared_job(&first);
+        let (starts, release) = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        settled_now();
+
+        let (actions, problems) = fire(&first);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        let record: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            record["nightly"]
+                .opening
+                .as_ref()
+                .map(|held| held.clone.as_deref()),
+            Some(Some("a")),
+            "the shared record names the clone that waits"
+        );
+
+        let (actions, problems) = fire(&second);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "{actions:?} {problems:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "one hook for the window"
+        );
+
+        // Every pass that finds the hook still running renews the claim, so
+        // an old one is not read as a dispatcher that stopped asking. The
+        // claim is made old by hand, and the first clone asks again until it
+        // has seen the claim renewed. Only then is the hook released, and the
+        // first clone, and only it, queues the task.
+        let shared = first.project_jobs_state_file();
+        let mut state: State =
+            serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+        state
+            .get_mut("nightly")
+            .unwrap()
+            .opening
+            .as_mut()
+            .unwrap()
+            .at -= OPENING_HELD_SECS;
+        std::fs::write(&shared, serde_json::to_string(&state).unwrap()).unwrap();
+        let mut renewed = false;
+        let mut queued = false;
+        for _ in 0..200 {
+            let (actions, problems) = fire(&first);
+            assert!(problems.is_empty(), "{problems:?}");
+            if actions == ["job nightly · fired · queued audit-1"] {
+                queued = true;
+                break;
+            }
+            assert!(actions.is_empty(), "{actions:?}");
+            let state: State =
+                serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+            let held = state["nightly"].opening.as_ref().unwrap();
+            renewed |= Local::now().timestamp() - held.at < 30;
+            if renewed {
+                std::fs::write(&release, "").unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(queued, "the answer was never queued");
+        assert!(
+            renewed,
+            "a pass that found the hook running renewed the claim"
+        );
+        let (actions, _) = fire(&second);
+        assert!(actions.is_empty(), "{actions:?}");
+        let record: State = serde_json::from_str(
+            &std::fs::read_to_string(first.project_jobs_state_file()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            record["nightly"].opening.is_none(),
+            "a settled firing ends the claim"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            1,
+            "still one hook"
+        );
+    }
+
+    /// A claim left by a clone whose dispatcher is gone does not keep the
+    /// job from firing in the others for ever.
+    #[test]
+    fn a_claim_older_than_the_hook_limit_does_not_hold_other_clones_off() {
+        let (mut first, mut second, _guards) = two_clones("jobs-ws-stale-opening");
+        shared_job(&first);
+        let (starts, release) = slow_open_hook_in_each_clone(&mut [&mut first, &mut second]);
+        settled_now();
+        let shared = first.project_jobs_state_file();
+        let mut state = State::new();
+        state.insert(
+            "nightly".to_string(),
+            FireRecord {
+                opening: Some(Opening {
+                    clone: Some("a".to_string()),
+                    at: Local::now().timestamp() - OPENING_HELD_SECS - 5,
+                }),
+                ..Default::default()
+            },
+        );
+        std::fs::write(&shared, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let (actions, problems) = fire(&second);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            ["job nightly · fired · opening ticket for audit-1"]
+        );
+        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        std::fs::write(&release, "").unwrap();
     }
 
     /// A clone that finds the shared record's lock held by a live process

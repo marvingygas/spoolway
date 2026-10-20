@@ -252,6 +252,16 @@ impl<'a> Dispatcher<'a> {
             runs.stop(&key);
         }
 
+        // A worktree cut that is still going is a run of the same kind, and
+        // it is writing the checkout about to be removed.
+        if let Err(e) = crate::cut::stop_and_reclaim(
+            self.repo,
+            task.id(),
+            "carry on, because the task is archived either way",
+        ) {
+            report.problems.push(format!("{e:#}"));
+        }
+
         // The worktree is about to be removed. If it still holds work
         // `auto_commit` cannot record — a git command failing, or
         // `dispatch.auto_commit` off — tearing it down destroys that work,
@@ -1323,6 +1333,16 @@ impl<'a> Dispatcher<'a> {
                 runs.forget_pane(&key);
             }
             runs.stop(&key);
+        }
+
+        // A worktree cut that is still going is a run of the same kind, and
+        // it is writing the checkout about to be removed.
+        if let Err(e) = crate::cut::stop_and_reclaim(
+            self.repo,
+            task.id(),
+            "carry on, because the arm is discarded either way",
+        ) {
+            report.problems.push(format!("{e:#}"));
         }
 
         self.tear_down_checkout(task, report);

@@ -293,7 +293,12 @@ fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
                 .clone()
                 .unwrap_or_else(|| "HEAD".to_string());
             let sits_value = format!("`{base}`");
-            (base, sits_value, String::new())
+            // A task that follows its own `base` was cut from `origin/<base>`
+            // when `origin` has it, so a local `<base>` that sits behind
+            // `origin` would count every commit merged there since as this
+            // task's own. The diff and the log read from the ref the cut used.
+            let anchor = crate::mux::known_origin_ref(&repo.root, &base).unwrap_or(base);
+            (anchor, sits_value, String::new())
         }
     };
 

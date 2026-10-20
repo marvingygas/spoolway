@@ -972,6 +972,13 @@ fn queue_unqueue_forced(
         }
         runs.stop(&key);
     }
+    // A worktree cut left running is one of these too, and writes the
+    // checkout that comes down below.
+    crate::cut::stop_and_reclaim(
+        repo,
+        id,
+        &format!("run `spoolway queue unqueue {id} --force` again"),
+    )?;
 
     let mut task = repo.task(id)?;
 
@@ -2637,6 +2644,30 @@ fn open_and_prefix(
     gate: ToolGate,
     log: &mut dyn TicketLog,
 ) -> Result<()> {
+    open_and_prefix_waiting(
+        repo,
+        submitted,
+        task_files,
+        tasks,
+        gate,
+        log,
+        crate::tracking::OpenWait::Block,
+    )
+}
+
+/// [`open_and_prefix`], saying whether to wait for a running `open` hook.
+/// With [`crate::tracking::OpenWait::Poll`] a hook still running ends the
+/// call with a [`crate::tracking::OpenPending`] error, and nothing has been
+/// queued or written.
+fn open_and_prefix_waiting(
+    repo: &Repo,
+    submitted: &[(String, String)],
+    task_files: &[String],
+    tasks: &mut [Task],
+    gate: ToolGate,
+    log: &mut dyn TicketLog,
+    wait: crate::tracking::OpenWait,
+) -> Result<()> {
     // Before `open_tickets` ever calls the hook: a declared requirement this
     // machine cannot meet means the call can only fail, and by the time it
     // does the group's epic may already exist on the forge — see
@@ -2670,7 +2701,7 @@ fn open_and_prefix(
     // it into the queue — because a sibling task further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let opened = open_tickets(repo, submitted, task_files, tasks, log)?;
+    let opened = open_tickets(repo, submitted, task_files, tasks, log, wait)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
@@ -2738,6 +2769,76 @@ impl TicketLog for PrintedTickets {
 
     fn done(&mut self) {
         println!();
+    }
+}
+
+/// [`TicketLog`] that keeps what it is told and says it later, for a job
+/// firing whose hook may still be running: a pass that ends pending says
+/// nothing, so the group's header does not print on every pass of a hang,
+/// and the firing that settles prints its lines once.
+#[derive(Default)]
+struct BufferedTickets(Vec<Told>);
+
+enum Told {
+    Group(String),
+    Row([String; 4]),
+    Note(String),
+    Done,
+}
+
+impl BufferedTickets {
+    /// Tell `out` everything kept, in the order it was told.
+    fn say_to(self, out: &mut dyn TicketLog) {
+        for told in self.0 {
+            match told {
+                Told::Group(group) => out.group(&group),
+                Told::Row([kind, status, ticket, name]) => out.row(&kind, &status, &ticket, &name),
+                Told::Note(line) => out.note(&line),
+                Told::Done => out.done(),
+            }
+        }
+    }
+}
+
+/// End a polled firing's pass. A settled firing spends its `open` runs and
+/// tells `out` what its hooks said; one still pending does neither, so a hook
+/// that hangs repeats nothing on every pass and the next pass finds the
+/// answers already in.
+fn end_polled_firing(
+    repo: &Repo,
+    tasks: &[Task],
+    pending: bool,
+    log: BufferedTickets,
+    out: &mut dyn TicketLog,
+) {
+    if !pending {
+        crate::tracking::settle_opens(repo, tasks);
+        log.say_to(out);
+    }
+}
+
+impl TicketLog for BufferedTickets {
+    fn group(&mut self, group: &str) {
+        self.0.push(Told::Group(group.to_string()));
+    }
+
+    fn waiting(&mut self, _id: &str) {}
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        self.0.push(Told::Row([
+            kind.to_string(),
+            status.to_string(),
+            ticket.to_string(),
+            name.to_string(),
+        ]));
+    }
+
+    fn note(&mut self, line: &str) {
+        self.0.push(Told::Note(line.to_string()));
+    }
+
+    fn done(&mut self) {
+        self.0.push(Told::Done);
     }
 }
 
@@ -3201,6 +3302,7 @@ fn open_tickets(
     task_files: &[String],
     tasks: &mut [Task],
     log: &mut dyn TicketLog,
+    wait: crate::tracking::OpenWait,
 ) -> Result<OpenedTickets> {
     // `group:` on every task in this batch is still the bare name a task
     // wrote — `validate_batch` never prefixes it — so every map here is keyed
@@ -3378,8 +3480,19 @@ fn open_tickets(
             &depends_tickets,
             &known_description,
             &task_file,
+            wait,
         )? {
             crate::tracking::OpenResult::NoHook => unreachable!("checked configured() above"),
+            // Only a job firing polls. Nothing is written back or saved: the
+            // routine's tasks are not in the queue yet, and the firing asks
+            // again on a later pass, finding the answers already in.
+            crate::tracking::OpenResult::Pending { started } => {
+                return Err(crate::tracking::OpenPending {
+                    task: tasks[i].id().to_string(),
+                    started,
+                }
+                .into());
+            }
             crate::tracking::OpenResult::Answered {
                 epic,
                 ticket,
@@ -10763,6 +10876,10 @@ pub(crate) fn check_routine_target(
 ///
 /// A routine with a live task named after it is refused with a
 /// [`StillQueued`], before anything is minted — see [`claim_routines`].
+///
+/// The `open` hook is not waited on: a hook still running ends the call with
+/// a [`crate::tracking::OpenPending`], nothing saved, and the caller asks
+/// again on a later pass.
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -10795,14 +10912,32 @@ pub(crate) fn queue_routine_target(
     // to.
     let task_files = readable_task_files(&submitted);
     let gate = ToolGate::Print { interactive: false };
-    open_and_prefix(
+    // Polled, not waited on: this runs inside the dispatcher's pass, and a
+    // hook that hangs would otherwise hold every other task for its whole
+    // limit. A firing whose hook is still running comes back as an
+    // `OpenPending` and is asked again on the next pass, which finds the
+    // same ids minted (nothing was saved) and so the same `open` runs.
+    //
+    // What the ticket log would say is kept until the firing settles: a hook
+    // that hangs would otherwise repeat the group's header on every pass.
+    let mut log = BufferedTickets::default();
+    let opened = open_and_prefix_waiting(
         repo,
         &[],
         &task_files,
         &mut tasks,
         gate,
-        &mut PrintedTickets,
-    )?;
+        &mut log,
+        crate::tracking::OpenWait::Poll,
+    );
+    // Whatever ended the firing — answered, failed or timed out — its `open`
+    // runs are spent; only a pending one keeps them for the next pass.
+    let pending = opened
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.downcast_ref::<crate::tracking::OpenPending>().is_some());
+    end_polled_firing(repo, &tasks, pending, log, &mut PrintedTickets);
+    opened?;
     // The same lock-and-recheck `queue_add_tasks` saves with: a scheduled
     // firing can land on the same minted id as a person's add or another
     // firing.
@@ -22121,6 +22256,28 @@ mod tests {
     mod open_hook {
         use super::*;
 
+        /// [`queue_routine_target`] asked again, as a job's next pass does,
+        /// until the `open` hook it started has settled. A job firing does
+        /// not wait on its hook, so the first answer is usually "still
+        /// opening".
+        fn routine_settled(
+            repo: &Repo,
+            pipelines: &Pipelines,
+            base: Option<&str>,
+            target: &std::path::Path,
+            pipeline: &str,
+        ) -> Result<Vec<Task>> {
+            for _ in 0..400 {
+                match queue_routine_target(repo, pipelines, base, target, pipeline) {
+                    Err(err) if err.downcast_ref::<crate::tracking::OpenPending>().is_some() => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    settled => return settled,
+                }
+            }
+            panic!("the open hook never settled");
+        }
+
         /// Points `[issue_tracking].hook` at an executable script under
         /// `.spoolway/hooks/`, the only place a hook may ever be named from.
         fn with_hook(repo: &mut Repo, script: &str) {
@@ -22132,6 +22289,57 @@ mod tests {
             std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
             std::fs::set_permissions(&path, perms).unwrap();
             repo.config.issue_tracking.hook = "open.sh".to_string();
+        }
+
+        /// A [`TicketLog`] that keeps the lines it is told, to compare.
+        #[derive(Default)]
+        struct Recorded(Vec<String>);
+
+        impl TicketLog for Recorded {
+            fn group(&mut self, group: &str) {
+                self.0.push(format!("group {group}"));
+            }
+            fn waiting(&mut self, _id: &str) {}
+            fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+                self.0.push(format!("row {kind} {status} {ticket} {name}"));
+            }
+            fn note(&mut self, line: &str) {
+                self.0.push(format!("note {line}"));
+            }
+            fn done(&mut self) {
+                self.0.push("done".to_string());
+            }
+        }
+
+        /// A firing whose hook is still running says nothing, so a hang does
+        /// not print the group's header on every pass; the pass that settles
+        /// it says all of it once, in the order it was told.
+        #[test]
+        fn a_pending_firing_says_nothing_and_a_settled_one_says_it_once() {
+            let (repo, _root_guard) = fixture("open-buffered-log");
+            let told = || {
+                let mut log = BufferedTickets::default();
+                log.group("nightly");
+                log.row("task", "opened", "T-1", "audit-1");
+                log.note("names prefixed");
+                log.done();
+                log
+            };
+
+            let mut out = Recorded::default();
+            end_polled_firing(&repo, &[], true, told(), &mut out);
+            assert!(out.0.is_empty(), "{:?}", out.0);
+
+            end_polled_firing(&repo, &[], false, told(), &mut out);
+            assert_eq!(
+                out.0,
+                [
+                    "group nightly",
+                    "row task opened T-1 audit-1",
+                    "note names prefixed",
+                    "done"
+                ]
+            );
         }
 
         /// A project that has never touched `[issue_tracking]` pays for none
@@ -23282,7 +23490,7 @@ mod tests {
                           group_description: nightly audit\n---\n## Goal\n\nDo it.\n";
             let path = write_routine(&repo, "nightly", "audit", source);
 
-            let tasks = queue_routine_target(
+            let tasks = routine_settled(
                 &repo,
                 &Pipelines::builtin(),
                 Some("plan/demo"),
@@ -23576,7 +23784,7 @@ mod tests {
             let first_path = write_routine(&repo, "nightly", "first", first);
             let second_path = write_routine(&repo, "nightly", "second", second);
 
-            let err = queue_routine_target(
+            let err = routine_settled(
                 &repo,
                 &Pipelines::builtin(),
                 Some("plan/demo"),

@@ -97,7 +97,8 @@ Paragraphs sent only when they apply:
 | Which step this pass stands in for, that step's own `description:` when it has one, and where to read its craft: `spoolway prompt show <name>` for an agent step, the command line itself for a command step. For an agent step, also the ready `spoolway report --pass --stage <step>` command that runs that step again, for a lane that only cleared the cause. A command step gets no such command, because a plain pass already runs it again. | the step is `blocked`, rendered against a real task whose `blocked_from` names a step this pipeline still has |
 
 `WHAT YOU HAVE` lists the lane's diff command, log command, scratch path, and what its branch
-sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to: `Status Log`,
+sits on. For a task cut from its `base:`, the diff and log commands name `origin/<base>` when this
+checkout has that ref, and `<base>` otherwise. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to: `Status Log`,
 `Handoff`, `Blocker`. Their wording is fixed and built into spoolway. See
 [Tasks and the queue](tasks.md#the-body-is-the-projects).
 

@@ -19,6 +19,7 @@ mod confdoc;
 mod config;
 mod confkv;
 mod cron;
+mod cut;
 mod dispatch;
 mod editor;
 mod eval;

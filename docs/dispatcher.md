@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/browser.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/browser.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs", "src/cut.rs"]
 ---
 
 # The dispatcher
@@ -62,6 +62,16 @@ because it is waiting on a person. A queue file that does not parse keeps the ru
 pass names the file until it is fixed or moved out of the queue. While any job is enabled, the run also stays up on an empty
 queue and prints when the next job fires. A job store that will not parse keeps the run up too.
 See [Jobs](jobs.md).
+
+An `open` hook that is still running also keeps the run up on an empty queue. The plain run
+prints:
+
+```
+nothing queued
+an open hook is still running — staying up to stop it at 1m if it hangs
+```
+
+The run ends on its next empty pass, once the hook has answered or been stopped.
 
 ### A dependency with no task
 
@@ -131,7 +141,7 @@ own work, so the board keeps redrawing through a slow pass too.
 A task that `spoolway queue unqueue` moves to the pending directory or deletes while a pass runs is dropped
 by that pass. The pass does not write its task file back. It starts no command and sends no
 briefing for the task, and it removes the checkout and the branch it cut for it, unless that branch
-holds commits. A lane already booting for the task is stopped.
+holds commits. A lane already booting for the task is stopped, and so is a worktree cut still running for it.
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. See
@@ -151,8 +161,9 @@ weights. The footer counts lanes by the same rule.
 
 A task with a `depends_on` is cut from its first dependency's branch. When that dependency was
 [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), the task is
-cut from the branch that dependency started from. A task without a `depends_on` is cut
-from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
+cut from the branch that dependency started from. A task without a `depends_on` is cut from
+`origin/<base>` when `origin` has the base, and from the local `<base>` branch when it does
+not. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
 [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse, or that holds an id another file holds, is skipped and named under the board. See [When it stops](#when-it-stops).
 
@@ -362,7 +373,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, or that a dependency it names is not a task. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -1156,9 +1167,17 @@ so the next dispatcher re-cuts onto it. Otherwise, choose one:
 
 ### A cut that was stopped part way
 
-A dispatcher killed while `git worktree add` runs leaves a half checkout under `worktrees/`. Git
-marks that checkout as locked with the reason `initializing` until the files are out. The
-dispatcher cuts every worktree with `LC_ALL=C`, so the reason is always that English word.
+A machine that goes down, or a kill of the cut's process group, while `git worktree add` runs
+leaves a half checkout under `worktrees/`. Git marks that checkout as locked with the reason
+`initializing` until the files are out. The dispatcher cuts every worktree with `LC_ALL=C`, so the
+reason is always that English word.
+
+A dispatcher that is stopped or killed does not stop the cut. The next dispatcher finds the cut
+by its run files under `cuts/` and waits for it. It cuts nothing a second time.
+
+When the cut's run is gone and left no exit code, the dispatcher stops whatever the run left
+running and cuts again. This spends no launch attempt. The third vanished run in a row counts as a
+failed launch.
 
 On the task's next start, the dispatcher looks at a checkout of the task's branch under
 `worktrees/`:
@@ -1167,6 +1186,7 @@ On the task's next start, the dispatcher looks at a checkout of the task's branc
 |---|---|
 | locked `initializing` | removes it and cuts it again onto the same branch |
 | any other checkout of a task that has started before | takes it back as the task's own, and not as borrowed |
+| a folder git has no record of | clears it, then cuts, without counting a launch attempt |
 
 A checkout under `worktrees/` is never marked `borrowed` for a task that has started before. A
 checkout that a person locked for another reason is never removed.
@@ -1174,23 +1194,44 @@ checkout that a person locked for another reason is never removed.
 ### Git hooks in a cut
 
 The dispatcher runs `git worktree add` with your repository's own git hooks, such as a
-`post-checkout` that installs packages. It does not skip them. A git hook that is still running
-after 10 minutes is stopped together with the processes it started. The cut fails and the
-failure names the hook and the limit:
+`post-checkout` that installs packages. It does not skip them.
+
+The cut runs beside the pass as a detached process, the way a command step does. The pass waits
+about 1.5 seconds for a new cut. A repository with no slow hook is cut in that time, and the task
+starts in the same pass. A cut that is still going after that is left to a later pass, and only
+its own task waits. Every other task keeps moving.
+
+While the cut runs, `spoolway queue list` shows the task with NEXT reading
+`cutting worktree 24s (stopped at 10m)`. A cut that is still going counts as no failed launch.
+This holds for an agent step, whose task stays `queued`, and for a command step.
 
 ```
-`git worktree add <path> task/cart-totals` was stopped after 10m because its `post-checkout` git hook was still running. spoolway does not skip a repository's git hooks: make that hook exit, then run this again.
+hang3   quick   queued   ◌ starting   cutting worktree 24s (stopped at 10m)
+```
+
+A git hook that is still running after 10 minutes is stopped together with the processes it
+started. Every pass checks every cut of a task in the queue, so the limit holds for a task that
+waits for a worker slot or that a person paused. The cut fails and the failure names the hook
+and the limit:
+
+```
+could not cut a worktree for `task/cart-totals` at <path>: `git worktree add --no-track -b task/cart-totals <path> main` was stopped after 10m because its `post-checkout` git hook was still running. spoolway does not skip a repository's git hooks: make that hook exit, then run this again.
 ```
 
 When the dispatcher cannot tell which hook was running, the failure says the call was still
 running and lists the git hooks it could have been.
 
 The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
-afresh. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
+afresh. A failed cut is tried again on a later pass. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
 failure gives the by-hand command shown under [A removal that was stopped or
 failed](#a-removal-that-was-stopped-or-failed). Run it before the task is resumed.
 The failure counts toward the launch-failure ceiling described under [Restarts, laps and
-escalation](#restarts-laps-and-escalation).
+escalation](#restarts-laps-and-escalation). The third failure moves the task to `blocked`.
+
+A task that leaves the queue while its cut runs, by `spoolway queue unqueue`, a discard or
+cleanup, has its cut stopped first. A checkout and branch the cut made are removed with it.
+
+The cut keeps its run files in the `cuts/` folder of the project's home. See [Runtime state](configuration.md#runtime-state).
 
 The commit that saves leftover work when a task reaches `done` runs the `pre-commit`,
 `prepare-commit-msg`, `commit-msg` and `post-commit` hooks under the same 10-minute limit. When
@@ -1199,14 +1240,25 @@ beside `uncommitted work could not be recorded before cleanup`.
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
-A base that only `origin` has is fetched before the worktree is cut. The dispatcher runs
-`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. It runs this
-fetch twice for each cut, so a pass can wait up to about 22 seconds. The fetch uses your own
-`core.sshCommand`.
+A task is cut from what `origin` has, so a commit on your local base that you have not pushed
+stays out of its branch and its pull request. Before the worktree is cut, the dispatcher runs
+`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. The task is then
+cut from `origin/<base>`. A dependent is cut from its dependency's local branch, which may never
+reach `origin`, and a `starts_from:` you set is cut from that branch as it is. The fetch uses your
+own `core.sshCommand`.
+
+A cut that makes no new branch, such as one after you deleted the worktree by hand, runs no fetch.
+A base that has no local branch and no `origin/<base>` after the fetch is fetched a second time
+when the worktree is cut, so a pass can wait up to about 22 seconds.
+
+When `origin` is missing, or has no `<base>`, the task is cut from the local branch, and the
+unpushed commits on it come along. The warnings screen shown before the run names each such
+base under `settings`. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
 
 When the fetch does not finish in 10 seconds, the dispatcher stops it and the transport it
-started. The cut then uses the base name as written in the task. If your checkout has that branch,
-the task starts. If it does not, the cut fails and the failure names the fetch:
+started. The cut then uses the `origin/<base>` an earlier fetch left, when your checkout has it,
+and the base name as written in the task otherwise. If your checkout has that branch, the task
+starts. If it does not, the cut fails and the failure names the fetch:
 
 ```
 could not cut a worktree for `task/cart-totals` at <path>; `git fetch origin task/gh-412-checkout` did not finish within 10s and was stopped, so `task/gh-412-checkout` may exist on origin but not here. Run `git fetch origin task/gh-412-checkout` in the repository yourself, then resume the task

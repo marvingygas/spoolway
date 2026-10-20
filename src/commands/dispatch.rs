@@ -132,12 +132,16 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // over `Nothing queued` meanwhile — the screen, not the queue, decides
     // when it ends.
     if live_tasks.is_empty() && live_problems.is_empty() && !args.screen {
-        if !crate::jobs::keeps_dispatcher_up(repo) {
+        if idle_may_end(repo) {
             println!("nothing is queued, so there is nothing to dispatch.");
             println!("  spoolway queue add --from <path>");
             return Ok(EXIT_EMPTY_QUEUE);
         }
-        print_staying_up(&crate::jobs::staying_up(repo));
+        if crate::jobs::keeps_dispatcher_up(repo) {
+            print_staying_up(&crate::jobs::staying_up(repo));
+        } else {
+            print_open_hook_wait();
+        }
         idle_announced = true;
     }
 
@@ -408,7 +412,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             Ok((tasks, problems)) if tasks.is_empty() && problems.is_empty() => {
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
-                if !crate::jobs::keeps_dispatcher_up(repo) && !args.screen {
+                if idle_may_end(repo) && !args.screen {
                     stop(&live, pipelines, mux.as_ref())?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
@@ -417,7 +421,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // empty queue, not every pass, then loop on into the wait.
                 if !idle_announced {
                     println!();
-                    print_staying_up(&crate::jobs::staying_up(repo));
+                    if crate::jobs::keeps_dispatcher_up(repo) {
+                        print_staying_up(&crate::jobs::staying_up(repo));
+                    } else {
+                        print_open_hook_wait();
+                    }
                 }
                 idle_announced = true;
             }
@@ -1586,6 +1594,24 @@ fn stop(repo: &Repo, pipelines: &Pipelines, mux: &dyn crate::mux::Mux) -> Result
     Ok(())
 }
 
+/// Whether a dispatcher with an empty queue may end: no job keeps it up, and no
+/// `open` hook is running. A hook with nobody left to ask about it would run
+/// on past its limit, so the run stays up until the hook settles or the sweep
+/// in [`crate::jobs::stop_stray_opens`] has stopped it.
+fn idle_may_end(repo: &Repo) -> bool {
+    !crate::jobs::keeps_dispatcher_up(repo) && !crate::tracking::any_open_running(repo)
+}
+
+/// Said when the queue is empty and no job is enabled, but an `open` hook is
+/// still running, so the run stays up to end it if it hangs.
+fn print_open_hook_wait() {
+    println!("nothing queued");
+    println!(
+        "an open hook is still running — staying up to stop it at {} if it hangs",
+        crate::tracking::minutes(crate::tracking::OPEN_FETCH_TIMEOUT)
+    );
+}
+
 /// Print the "a job keeps this run resident" lines under the plain run. The
 /// board shows the same facts its own way — see [`crate::status`].
 fn print_staying_up(jobs: &crate::jobs::StayingUp) {
@@ -1771,6 +1797,46 @@ mod tests {
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_EMPTY_QUEUE
         );
+    }
+
+    /// An empty queue with no job still keeps the dispatcher up while an
+    /// `open` hook runs, and lets it end once the hook has settled: it is the
+    /// dispatcher's pass that stops a hook that hangs, so one that left
+    /// earlier would leave the hook with nothing to end it.
+    #[test]
+    fn an_empty_queue_ends_only_once_no_open_hook_runs() {
+        let (mut repo, _root_guard) = fixture("empty-queue-open-hook");
+        let dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("open.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 1\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        repo.config.issue_tracking.hook = "open.sh".to_string();
+        assert!(idle_may_end(&repo));
+
+        let task = crate::task::Task::parse(
+            std::path::PathBuf::from("hooked.md"),
+            "---\nid: hooked\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        crate::tracking::open_ticket(
+            &repo,
+            &task,
+            1,
+            "",
+            "",
+            "",
+            "",
+            crate::tracking::OpenWait::Poll,
+        )
+        .unwrap();
+        assert!(!idle_may_end(&repo), "the hook is still running");
+
+        while crate::tracking::any_open_running(&repo) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(idle_may_end(&repo), "a settled hook holds nothing up");
     }
 
     /// A task naming no `pipeline:` refuses the whole start, naming the task
