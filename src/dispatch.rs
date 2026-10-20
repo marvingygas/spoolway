@@ -7005,7 +7005,7 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 
 /// The branch an uncut `task` is cut from: its own `starts_from:`, else its
 /// first dependency's branch, else `base`. A dependency closed with nothing to
-/// hand over counts as its own base here, not its branch — see
+/// hand over counts as where it stood here, not its branch — see
 /// [`Repo::closed_dependency_base`].
 ///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
@@ -7181,17 +7181,13 @@ fn ensure_checkout(
     // A dependent cut before its dependency was closed with nothing to hand
     // over still records that dependency's branch as `starts_from`, which was
     // never pushed. The pull request opens against `starts_from` (the shipped
-    // `create-pr` prompt says so), so it is pointed at the dependency's own
-    // base instead. Only the recorded name moves: the worktree, its branch
+    // `create-pr` prompt says so), so it is pointed at where the dependency
+    // stood instead. Only the recorded name moves: the worktree, its branch
     // and `base_commit` are left alone. A `starts_from` a person pointed
     // elsewhere is not the dependency's branch and is kept.
     if cut_before
-        && let (Some(dep), Some(from)) = (
-            task.front.depends_on.first().cloned(),
-            task.front.starts_from.clone(),
-        )
-        && let Some(base) = repo.closed_dependency_base(&dep)
-        && repo.dependency_own_branch(&dep).ok().as_deref() == Some(from.as_str())
+        && let Some(from) = task.front.starts_from.clone()
+        && let Some(base) = repo.retarget_cut_start(task, &from)
     {
         task.front.starts_from = Some(base);
         persist_task(repo, task, file_seen)?;

@@ -225,7 +225,7 @@ pub(crate) fn situating(
 ///
 /// The diff and log read against `task.front.base` when there is no
 /// dependency, and against the first dependency's own branch when there is
-/// (its own base, if it was closed with nothing to hand over) —
+/// (where it stood, if it was closed with nothing to hand over) —
 /// read from that task's own `branch:` field through
 /// [`Repo::dependency_branch`], not `task.front.base` even then: `base` is
 /// only the queueing worktree's branch at the moment this task was added,
@@ -276,11 +276,15 @@ fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
             // task's worktree: a prompt that named a guessed branch would
             // tell the lane to diff against a ref that need not exist.
             let branch = repo.dependency_branch(first)?;
-            (
-                branch.clone(),
-                format!("`{first}`, branch `{branch}`"),
-                extra,
-            )
+            // A dependency closed without a pull request has no branch of its
+            // own worth sitting on: the worktree is cut from where it
+            // stood, and naming it beside that branch would tell the lane
+            // the branch is the dependency's own.
+            let sits_value = match repo.closed_dependency_base(first) {
+                Some(_) => format!("`{branch}`, where `{first}` closed without a pull request"),
+                None => format!("`{first}`, branch `{branch}`"),
+            };
+            (branch, sits_value, extra)
         }
         None => {
             let base = task
