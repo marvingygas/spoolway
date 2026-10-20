@@ -1223,6 +1223,7 @@ fn report_gate_warnings(warnings: &[String]) {
 /// project-wide (`repo.overrides_dir()`), so a lane in any worktree sees the
 /// same fork on its next pass.
 pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -1574,6 +1575,7 @@ fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
 /// `<to>.md` would be a file neither reads, and rewriting the shared file
 /// would change what `from` reads too.
 pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    repo.refuse_in_lane("the private `local/` folder")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -1634,6 +1636,7 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
 /// whole; the legacy flat `<name>.md` shape has no folder of its own, so it
 /// is copied as the single file it is.
 pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    repo.refuse_in_lane("the private `local/` folder")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }

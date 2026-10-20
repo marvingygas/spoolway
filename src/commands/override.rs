@@ -52,6 +52,7 @@ fn parse_target(target: &str) -> Result<Target> {
 /// actually running, same as [`prompt::show`] — and writes the project-wide
 /// layer, so the fork is there for a lane in any worktree on its next start.
 pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -101,6 +102,7 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
 /// project's home, so this refuses before doing anything else rather than
 /// silently guess.
 pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     if let Some(err) = home_error {
         return Err(anyhow::anyhow!(
             "{err:#} — {}'s stamped home could not be resolved, so `config override` has \
@@ -542,6 +544,7 @@ fn promote_config(repo: &Repo, write_root: &Path) -> Result<()> {
 
 /// `spoolway override drop [<target>]`.
 pub fn override_drop(repo: &Repo, target: Option<&str>) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
     let Some(target) = target else {
         match std::fs::remove_dir_all(&dir) {
