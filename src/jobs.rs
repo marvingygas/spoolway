@@ -481,16 +481,18 @@ pub struct Opening {
     /// The workspace dispatcher name of the clone that started the hook, from
     /// [`Repo::workspace_dispatcher`].
     pub clone: Option<String>,
-    /// Epoch seconds when the claim was made.
+    /// Epoch seconds when the holder last asked about its hook.
     pub at: i64,
 }
 
-/// How long another clone honours an [`Opening`]. The holder stops its hook
-/// at [`crate::tracking::OPEN_FETCH_TIMEOUT`] and records the window then,
-/// which ends the claim; the extra minute covers its pass cadence. A claim
-/// older than this belongs to a dispatcher that is gone, and holding every
-/// other clone off for ever would stop the job from firing at all.
-const OPENING_HELD_SECS: i64 = crate::tracking::OPEN_FETCH_TIMEOUT.as_secs() as i64 + 60;
+/// How long another clone honours an [`Opening`] that its holder has not
+/// renewed. The holder renews it on every pass that finds its hook still
+/// running, and ends it when the hook settles or is stopped at
+/// [`crate::tracking::OPEN_FETCH_TIMEOUT`], so a claim this old belongs to a
+/// dispatcher that stopped asking. Holding every other clone off for ever
+/// would stop the job from firing at all. Two minutes is far past the gap
+/// between two passes of a live dispatcher, which is seconds.
+const OPENING_HELD_SECS: i64 = 120;
 
 /// Names this process, so a pass can tell its own earlier look from one a
 /// previous dispatcher run left behind. A pid alone is reused after a
@@ -769,11 +771,13 @@ fn clear_opening(repo: &Repo, scope: Scope, name: &str) {
 }
 
 /// Stop every `open` hook that no enabled job is waiting on and that has run
-/// past its limit: one a `queue add` left running when it was stopped. A
-/// hook that settles inside its limit is left, and its answer with it, for
-/// the `queue add` that comes back to read; only a hang is ended, with all
-/// the processes it started. Called every pass, after [`fire_due`], whose
-/// jobs are the ones this must not stop — they are asked about their own.
+/// past its limit: one a `queue add` left running when it was stopped, or one
+/// a job's firing left when the job was disabled or deleted, or when a later
+/// pass dropped the firing before it could ask again. A hook that settles
+/// inside its limit is left, and its answer with it, for the next caller to
+/// read; only a hang is ended, with all the processes it started. Called
+/// every pass, after [`fire_due`], whose jobs are the ones this must not
+/// stop — they are asked about their own.
 pub fn stop_stray_opens(repo: &Repo, problems: &mut Vec<String>) {
     let Ok(jobs) = load(repo) else {
         return;
@@ -787,7 +791,8 @@ pub fn stop_stray_opens(repo: &Repo, problems: &mut Vec<String>) {
     for (task, ran) in crate::tracking::stop_overdue_strays(repo, &waited_on) {
         problems.push(format!(
             "the open hook for `{task}` was still running after {} and was stopped — \
-             nothing was queued for it. Run `spoolway queue add` again to open it.",
+             nothing was queued for it. Run `spoolway queue add` again, or let the job \
+             that fired it run again, to open it.",
             crate::tracking::minutes(ran),
         ));
     }
@@ -1057,7 +1062,10 @@ pub fn fire_due(
                     }
                     still_opening = true;
                     write_opening(repo, job.scope, &job.name, &minute, &pending.task);
-                    if shared && record.opening.as_ref().is_none_or(|held| held.clone != me) {
+                    if shared {
+                        // Renewed on every pass that asks: a routine with
+                        // several tasks opens one hook after another, so
+                        // the claim outlives any one hook's limit.
                         record.opening = Some(Opening {
                             clone: me.clone(),
                             at: Local::now().timestamp(),
@@ -3062,11 +3070,42 @@ mod tests {
             "one hook for the window"
         );
 
-        // The hook answers; the first clone, and only it, queues the task.
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        let (actions, problems) = fire(&first);
-        assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(actions, ["job nightly · fired · queued audit-1"]);
+        // Every pass that finds the hook still running renews the claim, so
+        // an old one is not read as a dispatcher that stopped asking. The
+        // claim is made old by hand, and the first clone asks again until the
+        // hook answers and it, and only it, queues the task.
+        let shared = first.project_jobs_state_file();
+        let mut state: State =
+            serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+        state
+            .get_mut("nightly")
+            .unwrap()
+            .opening
+            .as_mut()
+            .unwrap()
+            .at -= OPENING_HELD_SECS;
+        std::fs::write(&shared, serde_json::to_string(&state).unwrap()).unwrap();
+        let mut renewed = false;
+        let mut queued = false;
+        for _ in 0..200 {
+            let (actions, problems) = fire(&first);
+            assert!(problems.is_empty(), "{problems:?}");
+            if actions == ["job nightly · fired · queued audit-1"] {
+                queued = true;
+                break;
+            }
+            assert!(actions.is_empty(), "{actions:?}");
+            let state: State =
+                serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+            let held = state["nightly"].opening.as_ref().unwrap();
+            renewed |= Local::now().timestamp() - held.at < 30;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(queued, "the answer was never queued");
+        assert!(
+            renewed,
+            "a pass that found the hook running renewed the claim"
+        );
         let (actions, _) = fire(&second);
         assert!(actions.is_empty(), "{actions:?}");
         let record: State = serde_json::from_str(

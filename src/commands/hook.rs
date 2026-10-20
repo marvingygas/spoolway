@@ -56,7 +56,10 @@ fn render_hook_contract(repo: &Repo) -> String {
     out.push('\n');
 
     out.push_str(
-        "open        — synchronous, from `spoolway queue add`, before the task is queued\n",
+        "open        — from `spoolway queue add`, which waits for it before the task is queued,\n\
+         \x20             and from a job firing a routine, which does not: the dispatcher asks again\n\
+         \x20             on each pass. A run still going, or finished and unread, is read by the\n\
+         \x20             next caller instead of started again\n",
     );
     render_vars(&mut out, OPEN_EVENT_VARS);
     out.push_str(

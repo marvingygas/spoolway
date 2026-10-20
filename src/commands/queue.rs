@@ -2743,9 +2743,8 @@ enum Told {
 }
 
 impl BufferedTickets {
-    /// Print everything kept, in the order it was told.
-    fn say(self) {
-        let mut out = PrintedTickets;
+    /// Tell `out` everything kept, in the order it was told.
+    fn say_to(self, out: &mut dyn TicketLog) {
         for told in self.0 {
             match told {
                 Told::Group(group) => out.group(&group),
@@ -2754,6 +2753,23 @@ impl BufferedTickets {
                 Told::Done => out.done(),
             }
         }
+    }
+}
+
+/// End a polled firing's pass. A settled firing spends its `open` runs and
+/// tells `out` what its hooks said; one still pending does neither, so a hook
+/// that hangs repeats nothing on every pass and the next pass finds the
+/// answers already in.
+fn end_polled_firing(
+    repo: &Repo,
+    tasks: &[Task],
+    pending: bool,
+    log: BufferedTickets,
+    out: &mut dyn TicketLog,
+) {
+    if !pending {
+        crate::tracking::settle_opens(repo, tasks);
+        log.say_to(out);
     }
 }
 
@@ -10801,10 +10817,7 @@ pub(crate) fn queue_routine_target(
         .as_ref()
         .err()
         .is_some_and(|err| err.downcast_ref::<crate::tracking::OpenPending>().is_some());
-    if !pending {
-        crate::tracking::settle_opens(repo, &tasks);
-        log.say();
-    }
+    end_polled_firing(repo, &tasks, pending, log, &mut PrintedTickets);
     opened?;
     // The same lock-and-recheck `queue_add_tasks` saves with: a scheduled
     // firing can land on the same minted id as a person's add or another
@@ -21966,6 +21979,57 @@ mod tests {
             std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
             std::fs::set_permissions(&path, perms).unwrap();
             repo.config.issue_tracking.hook = "open.sh".to_string();
+        }
+
+        /// A [`TicketLog`] that keeps the lines it is told, to compare.
+        #[derive(Default)]
+        struct Recorded(Vec<String>);
+
+        impl TicketLog for Recorded {
+            fn group(&mut self, group: &str) {
+                self.0.push(format!("group {group}"));
+            }
+            fn waiting(&mut self, _id: &str) {}
+            fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+                self.0.push(format!("row {kind} {status} {ticket} {name}"));
+            }
+            fn note(&mut self, line: &str) {
+                self.0.push(format!("note {line}"));
+            }
+            fn done(&mut self) {
+                self.0.push("done".to_string());
+            }
+        }
+
+        /// A firing whose hook is still running says nothing, so a hang does
+        /// not print the group's header on every pass; the pass that settles
+        /// it says all of it once, in the order it was told.
+        #[test]
+        fn a_pending_firing_says_nothing_and_a_settled_one_says_it_once() {
+            let (repo, _root_guard) = fixture("open-buffered-log");
+            let told = || {
+                let mut log = BufferedTickets::default();
+                log.group("nightly");
+                log.row("task", "opened", "T-1", "audit-1");
+                log.note("names prefixed");
+                log.done();
+                log
+            };
+
+            let mut out = Recorded::default();
+            end_polled_firing(&repo, &[], true, told(), &mut out);
+            assert!(out.0.is_empty(), "{:?}", out.0);
+
+            end_polled_firing(&repo, &[], false, told(), &mut out);
+            assert_eq!(
+                out.0,
+                [
+                    "group nightly",
+                    "row task opened T-1 audit-1",
+                    "note names prefixed",
+                    "done"
+                ]
+            );
         }
 
         /// A project that has never touched `[issue_tracking]` pays for none
