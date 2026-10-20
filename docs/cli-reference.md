@@ -702,7 +702,16 @@ problems
 [enter] confirm   [esc] close
 ```
 
-A line names the setting and its state, and nothing else. What to do about it is in
+A line names the setting and its state, and nothing else. A base that tasks are cut from the local
+branch of adds a line under `settings`. That is the case when the project has no `origin`, or when
+this checkout has no `origin/<base>`:
+
+```
+no `origin` remote — tasks are cut from the local `main`, unpushed commits included
+`origin` has no `main` here — tasks are cut from the local `main`, unpushed commits included
+```
+
+The check reads refs already on disk and asks `origin` nothing. What to do about it is in
 [Configuration](configuration.md). A failed task hook is the exception: its row under `problems`
 also names the event, the task, the exit code, the command that clears it and the log path. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Each section is skipped when it has nothing to say, and the

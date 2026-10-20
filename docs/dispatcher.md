@@ -149,7 +149,8 @@ same as a session you started by hand. Typing into one on a local model may make
 weights. The footer counts lanes by the same rule.
 
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
-from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
+from `origin/<base>` when `origin` has the base, and from the local `<base>` branch when it does
+not. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
 [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse, or that holds an id another file holds, is skipped and named under the board. See [When it stops](#when-it-stops).
 
@@ -1174,14 +1175,25 @@ beside `uncommitted work could not be recorded before cleanup`.
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
-A base that only `origin` has is fetched before the worktree is cut. The dispatcher runs
-`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. It runs this
-fetch twice for each cut, so a pass can wait up to about 22 seconds. The fetch uses your own
-`core.sshCommand`.
+A task is cut from what `origin` has, so a commit on your local base that you have not pushed
+stays out of its branch and its pull request. Before the worktree is cut, the dispatcher runs
+`git fetch origin <base>` in your checkout and waits at most 10 seconds for it. The task is then
+cut from `origin/<base>`. A dependent is cut from its dependency's local branch, which may never
+reach `origin`, and a `starts_from:` you set is cut from that branch as it is. The fetch uses your
+own `core.sshCommand`.
+
+A cut that makes no new branch, such as one after you deleted the worktree by hand, runs no fetch.
+A base that has no local branch and no `origin/<base>` after the fetch is fetched a second time
+when the worktree is cut, so a pass can wait up to about 22 seconds.
+
+When `origin` is missing, or has no `<base>`, the task is cut from the local branch, and the
+unpushed commits on it come along. The warnings screen shown before the run names each such
+base under `settings`. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
 
 When the fetch does not finish in 10 seconds, the dispatcher stops it and the transport it
-started. The cut then uses the base name as written in the task. If your checkout has that branch,
-the task starts. If it does not, the cut fails and the failure names the fetch:
+started. The cut then uses the `origin/<base>` an earlier fetch left, when your checkout has it,
+and the base name as written in the task otherwise. If your checkout has that branch, the task
+starts. If it does not, the cut fails and the failure names the fetch:
 
 ```
 could not cut a worktree for `task/cart-totals` at <path>; `git fetch origin task/gh-412-checkout` did not finish within 10s and was stopped, so `task/gh-412-checkout` may exist on origin but not here. Run `git fetch origin task/gh-412-checkout` in the repository yourself, then resume the task
