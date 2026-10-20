@@ -288,6 +288,16 @@ lane without a session, set `blocked_session = false` in the config.
   both the gate and the blocked step. See [Gates](#gates).
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
+- A task blocked at a step its pipeline no longer defines gets no unblocker lane. The dispatcher
+  parks it on `paused` and logs the step with the command that sends it on:
+
+  ```
+  t1: stopped at `document`, which pipeline `p` no longer defines — parked on `paused`.
+      Send it on with: spoolway resume t1 --stage <step>
+  ```
+
+  An unblocker lane already running for that task keeps it. Its `--pass` is refused, and its
+  `--block` parks the task on that step. `spoolway restart` refuses such a task too.
 - `spoolway resume` and `spoolway queue resume` refuse a `blocked` task while its unblocker lane is live
   or starting. Run `spoolway queue pause <task>` first to take the task from the unblocker, then
   `spoolway resume <task> --stage <step>` with the step it blocked on. A resume without `--stage`
