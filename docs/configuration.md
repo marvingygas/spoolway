@@ -839,7 +839,8 @@ sets only `prompt_cache_ttl` therefore leaves a `*haiku*` row's `compact_ctx`, `
 `context_window` in force. A tier merges the same way when it names the same threshold as the
 price table's tier, so setting one tier rate leaves the other four at the table's values.
 `spoolway models` lists the rows a model's values came from on a `rows:` line. A bare name
-also matches `vendor/name`. Leave a field out and it keeps the value from the built-in or
+also matches `vendor/name`, but only when no row matches the full name. Once one does, bare-name
+rows are not merged in. Leave a field out and it keeps the value from the built-in or
 refreshed price table, when that table has an entry for the model. Only a model with no
 entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets
 `cache_write_5m` and leaves `cache_write_1h` out prices hourly cache writes at its own

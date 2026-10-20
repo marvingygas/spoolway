@@ -2290,8 +2290,15 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config, unattended: bool)
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
     // at it yet. `local` itself is never a failure, so this is a note.
+    // `local` is read through `resolve` on the row's own key, so a `qwen*` row
+    // that sets it quiets the note for a `qwen3` row that sets only `slots`:
+    // the two merge when a model matches both.
     for (glob, price) in &config.models {
-        if price.local || price.slots == 0 {
+        if price.slots == 0
+            || crate::models::resolve(&config.models, glob)
+                .price
+                .is_some_and(|merged| merged.local)
+        {
             continue;
         }
         findings.push(Finding::Note(format!(
@@ -3730,6 +3737,37 @@ mod tests {
             "{}",
             local_notes[0]
         );
+    }
+
+    /// A row that sets `slots` is not noted for lacking `local` when a less
+    /// literal row it merges with sets it. Fails when each row is read alone:
+    /// `qwen3` would be told to set `local` though it resolves local.
+    #[test]
+    fn slots_without_local_reads_the_merged_rows() {
+        let pipelines = Pipelines::builtin();
+        let mut config = Config::default();
+        config.models.insert(
+            "qwen*".into(),
+            crate::usage::ModelPrice {
+                local: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "qwen3".into(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+        let notes: Vec<String> = model_health_checks(&pipelines, &config, false)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains("but not `local`") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.is_empty(), "{notes:#?}");
     }
 
     /// `spoolway doctor` names a `[models]` row nothing routes to, and stays

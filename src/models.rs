@@ -798,8 +798,13 @@ fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
 /// still answer both a step's `ornith/Ornith-1.5-35B-A3B` and pi's own bare
 /// `Ornith-1.5-35B-A3B`, with no leading `*` required for either.
 ///
-/// All of them rather than one, because the rows add up: [`resolve`] takes
-/// each value from the first row here that sets it.
+/// All of the rows of the pass that matched, rather than one, because they
+/// add up: [`resolve`] takes each value from the first row here that sets
+/// it. The two passes do not add up with each other. Once a row matches the
+/// full name, a row that matches only the bare name is not consulted, since
+/// a hosted `vendor/name` must never pick up a local row's `slots` for having
+/// the same suffix. To give a `vendor/*` model a value from a bare-name row,
+/// write the value on a row the full name matches.
 pub(crate) fn matching_rows<'a>(
     config_models: &'a BTreeMap<String, ModelPrice>,
     model: &str,
@@ -814,12 +819,10 @@ pub(crate) fn matching_rows<'a>(
     }
 }
 
-/// The most literal of [`matching_rows`]: the row a person edits, and the one
-/// that names a pool.
-///
-/// Crate-visible so `crate::status::view` can tell whether two model names
-/// land on the same pool — the same reason [`resolve`] itself needs the key
-/// and not only the price it holds.
+/// The most literal of [`matching_rows`]: the row a person edits, which
+/// `doctor` names when a model has no `prompt_cache_ttl`. Pools are named by
+/// [`row_setting`] over `slots` instead, since a more literal row may set
+/// other values and not the cap.
 pub(crate) fn resolved_row<'a>(
     config_models: &'a BTreeMap<String, ModelPrice>,
     model: &str,
@@ -1682,6 +1685,31 @@ mod tests {
                 ]
             );
         });
+    }
+
+    /// A row matching the full `vendor/name` ends the search: a bare-name row
+    /// is not merged in beneath it. Keeps a hosted model from taking a local
+    /// row's `slots` for sharing its suffix. A name no row matches in full
+    /// still reaches the bare-name rows, all of them merged.
+    #[test]
+    fn the_suffix_pass_runs_only_when_no_row_matches_the_full_name() {
+        let slotted = ModelPrice {
+            slots: 2,
+            ..Default::default()
+        };
+        let config = BTreeMap::from([
+            (
+                "openrouter/*".to_string(),
+                ModelPrice {
+                    input: 1.0,
+                    ..Default::default()
+                },
+            ),
+            ("qwen3".to_string(), slotted),
+            ("qwen*".to_string(), ModelPrice::default()),
+        ]);
+        assert_eq!(matching_rows(&config, "openrouter/qwen3"), ["openrouter/*"]);
+        assert_eq!(matching_rows(&config, "local/qwen3"), ["qwen3", "qwen*"]);
     }
 
     /// The `rows:` line of `spoolway models` names the rows that supply

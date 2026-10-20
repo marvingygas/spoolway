@@ -2208,8 +2208,7 @@ impl Config {
     /// It shows a person that the cache lifetime is theirs to choose, now that
     /// no value is assumed for them. It is a comment and not a row holding a
     /// blank `prompt_cache_ttl`, because the blank is refused by every release
-    /// before this one, and because a row of its own takes part in model
-    /// matching: `claude-*` outranks a person's `*haiku*` row and silences it.
+    /// before this one.
     /// A row already there means the choice is made, so it brings no example.
     pub(crate) fn cache_hint_globs(&self) -> Vec<&'static str> {
         let mut globs: Vec<&'static str> = self

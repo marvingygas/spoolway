@@ -8355,7 +8355,7 @@ fn prepare_boot(
     // passes into a run. Each refusal carries the error text `doctor` fails
     // the same value with: `agent_checks`' for the mode, which is the row
     // `doctor` shows for a step's agent, and `hand_written_value_checks`' for
-    // the model row.
+    // each of the model's matching rows.
     let checkout_config = crate::config::Config::path_in(&repo.checkout);
     if crate::agent::adapter(&profile.kind).is_some()
         && let Err(err) = profile.permission_mode_status()
@@ -9270,6 +9270,38 @@ mod tests {
     use crate::task::Frontmatter;
     use std::path::Path;
     use std::sync::Mutex;
+
+    /// A pool is keyed on the row that sets `slots`, not the most literal row
+    /// that matches. Fails keyed on the most literal: the tier-only
+    /// `claude-haiku-5-5` row would count its own lanes apart from
+    /// `claude-haiku-4-5`'s under `*haiku*`, and a one-slot cap would let two
+    /// lanes run.
+    #[test]
+    fn slot_key_names_the_row_that_sets_slots() {
+        let rows = BTreeMap::from([
+            (
+                "claude-haiku-5-5".to_string(),
+                crate::usage::ModelPrice {
+                    context_window: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "*haiku*".to_string(),
+                crate::usage::ModelPrice {
+                    slots: 1,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(slot_key(&rows, "claude-haiku-5-5"), "*haiku*");
+        assert_eq!(slot_key(&rows, "claude-haiku-4-5"), "*haiku*");
+        assert_eq!(
+            slot_key(&rows, "gpt-5"),
+            "gpt-5",
+            "no row: the model's name"
+        );
+    }
 
     /// Records what the dispatcher asked of the multiplexer, and answers from a
     /// scripted lane list.
