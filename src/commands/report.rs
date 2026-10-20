@@ -302,11 +302,21 @@ pub fn report(
         blocked: destination == crate::pipeline::BLOCKED,
     });
 
+    // The lap bound's park is the one arrival whose note is not an arrival
+    // line: it is an entry of its own, two lines long, and `set_stage` would
+    // prefix it with the arrow and flatten the second line into the first.
+    // The arrival is written bare and the note follows it as drawn.
     let arrival = crate::dispatch::with_walk_note(
-        pause_note.as_deref().or(args.message.as_deref()),
+        pause_note
+            .as_deref()
+            .filter(|_| !lap_limited)
+            .or(args.message.as_deref()),
         routed.walked_past,
     );
     task.set_stage(&destination, arrival.as_deref());
+    if lap_limited && let Some(note) = pause_note.as_deref() {
+        task.log_status(note);
+    }
     // The line `set_stage` just wrote is spoolway's own arrival note, credited
     // to no step, the same as every other arrival. A gate is the one road
     // where that note replaces the lane's own `-m` rather than carrying it —
@@ -383,7 +393,10 @@ pub fn report(
         None if lap_limited => println!(
             "{id}: {current} --{outcome}--> {} - {}{}",
             crate::pipeline::PAUSED,
-            pause_note.as_deref().unwrap_or_default(),
+            pause_note
+                .as_deref()
+                .unwrap_or_default()
+                .replace("\n    ", " "),
             stop_choices(&id, &crate::mux::lane_name(&current, &task))
         ),
         // The routed destination was a cleanup terminal, and the worktree
@@ -746,7 +759,7 @@ pub fn route(
                     gated: false,
                     pause_note: Some(format!(
                         "`{step}` still fails after {laps} unblocker laps — parked on \
-                         `paused`. Make `{step}` pass, then: spoolway resume {id}",
+                         `paused`.\n    Make `{step}` pass, then: spoolway resume {id}",
                         step = counted,
                         id = task.id()
                     )),
@@ -5061,7 +5074,7 @@ mod tests {
         assert_eq!(
             routed.pause_note.as_deref(),
             Some(
-                "`work` still fails after 3 unblocker laps — parked on `paused`. \
+                "`work` still fails after 3 unblocker laps — parked on `paused`.\n    \
                  Make `work` pass, then: spoolway resume laps"
             )
         );
@@ -7169,6 +7182,52 @@ mod tests {
         )
         .unwrap();
         assert!(queued(&repo, "laps").front.unblock_laps.is_empty());
+    }
+
+    /// The park is an entry of its own in the Status Log: the sentence on one
+    /// line, the way to resume on an indented line under it, and no arrow
+    /// prefix on either. The arrival to `paused` is its own bare line.
+    ///
+    /// Fails if the note goes through the arrival line, which prefixes it with
+    /// `→ \`paused\`:` and joins the two lines.
+    #[test]
+    fn the_lap_limit_park_is_written_to_the_status_log_as_two_lines() {
+        let (repo, _root_guard) = unattended_fixture("lap-park-status-log");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "laps", &[]);
+
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            Pipeline::parse("default", DIRECT_LAPS).unwrap(),
+        );
+        let mut task = queued(&repo, "laps");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.front
+            .unblock_laps
+            .insert("work".into(), UNBLOCK_LAP_LIMIT);
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "laps", Outcome::Pass);
+
+        let task = queued(&repo, "laps");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains(
+                " `work` still fails after 3 unblocker laps — parked on `paused`.\n    \
+                 Make `work` pass, then: spoolway resume laps\n"
+            ),
+            "{log}"
+        );
+        assert!(
+            !log.contains("→ `paused`: `work`"),
+            "the note is not an arrival line: {log}"
+        );
     }
 
     /// Releasing a pass that `gate_at: blocked` held is a person stepping in
