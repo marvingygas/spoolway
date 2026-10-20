@@ -4338,7 +4338,7 @@ fn paused_next(
             Some(crate::commands::Caught::Pass)
                 if crate::commands::held_unblocker_pass(task, gated) =>
             {
-                crate::commands::cleared_block_target(task, pipeline, true)
+                crate::commands::held_pass_target(task, pipeline)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
             // A held failure resumes down the step's `on_fail` — see

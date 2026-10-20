@@ -1449,6 +1449,8 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.launch_failures = Default::default();
     front.launch_busy_since = Default::default();
     front.unblock_laps = Default::default();
+    front.held_pass_to = None;
+    front.unblocked_from = None;
     front.arrived_from = None;
 
     let body = ends_with_newline(body.to_string());

@@ -288,6 +288,11 @@ pub fn report(
         ));
         destination = crate::pipeline::BLOCKED.to_string();
         set_blocked_from(&mut task, &current);
+        // An unblocker's own pass leaves `current` as `blocked`, which the
+        // line above refuses to record.
+        if let Some(stopped) = task.front.unblocked_from.take() {
+            task.front.blocked_from = Some(stopped);
+        }
     }
 
     // Left for the dispatcher to bank into this lane's ledger line. Recorded
@@ -816,9 +821,22 @@ pub fn route(
         // read, so it would fall back to the pipeline's entry and take the
         // entry's `on_pass` whatever step the task actually stopped at.
         let held_here = task.front.gate_at.as_deref() == Some(crate::pipeline::BLOCKED);
+        // The hold's resume cannot work the target out again: a `--stage` is
+        // written nowhere else. Set on every pass from `blocked`, so a value
+        // left by an earlier hold never outlives it.
+        task.front.held_pass_to =
+            (gated_at.is_none() && routed_target == target && held_here).then(|| target.clone());
         if gated_at.is_none() && routed_target == target && !held_here {
             resume_at(task, &target);
         }
+        // A pass that goes to `done` is cleaned up, and work that cannot be
+        // committed holds it on `blocked` again — here in `report`, or in
+        // cleanup itself. By then `blocked_from` is gone, and the fallback
+        // would tell the next unblocker the task stopped at the pipeline's
+        // entry, so the step is kept for that hold to put back. Written
+        // after `resume_at`, which does not clear it.
+        task.front.unblocked_from =
+            (gated_at.is_none() && routed_target == crate::pipeline::DONE).then(|| origin.clone());
         routed_target
     } else if paused_from_blocked {
         // No second destination once the lane on `blocked` cannot clear the
@@ -1841,6 +1859,20 @@ pub fn cleared_block_target(task: &Task, pipeline: &Pipeline, takes_over: bool) 
     step.on_pass.clone().unwrap_or(origin)
 }
 
+/// Where a pass held by `gate_at: blocked` goes once released: the step the
+/// unblocker named with `--stage`, or else the `on_pass` of the step the task
+/// stopped at, which is where the pass would have gone unheld.
+///
+/// [`resume_road`] and the board's `(next)` row both ask this, so the road and
+/// the row name the same step.
+pub fn held_pass_target(task: &Task, pipeline: &Pipeline) -> String {
+    task.front
+        .held_pass_to
+        .clone()
+        .filter(|step| pipeline.step(step).is_some())
+        .unwrap_or_else(|| cleared_block_target(task, pipeline, true))
+}
+
 /// Whether `gated` is `blocked` and the pause holds its unblocker's `--pass`.
 ///
 /// [`caught_at`] calls a `--block` from `blocked` a pass too, since it only
@@ -1979,6 +2011,7 @@ pub fn resume_at(task: &mut Task, target: &str) {
         task.front.resume = Some(target.to_string());
     }
     task.front.blocked_from = None;
+    task.front.held_pass_to = None;
 }
 
 /// Which road a bare `spoolway resume <task>` takes out of a stop, and the
@@ -2102,9 +2135,9 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
             // `gate_at: blocked` held the unblocker's own pass. `blocked` has
             // no `on_pass` to read, so the plain branch below would send the
             // task back onto `blocked` for a second unblocker lane. The pass
-            // goes where it would have gone unheld, which is the same
-            // `cleared_block_target` a pass from `blocked` reads.
-            cleared_block_target(task, pipeline, true)
+            // goes where it would have gone unheld: the step the unblocker
+            // named, or what a pass from `blocked` reads.
+            held_pass_target(task, pipeline)
         } else if caught == Some(Caught::Blocked) {
             // What `set_blocked_from` already ran for on the way here — a
             // `--block`, a step's own `on_fail: blocked`, or a spent loop's
@@ -4436,6 +4469,20 @@ mod tests {
         pipelines
     }
 
+    /// `implement`, `review` and `document` in a row ending on `done`, with
+    /// `blocked` staffed, for the roads that hold an unblocker's pass.
+    fn held_pass_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: document\n  \
+                     - id: document\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
     /// The same, with `blocked` declared as a staffed step of its own.
     fn staffed_pipelines() -> Pipelines {
         let yaml = "steps:\n  - id: work\n    agent: pi\n    on_pass: done\n  \
@@ -4711,6 +4758,71 @@ mod tests {
                 .unwrap_or_default()
                 .contains("could not be committed"),
             "the record must say why the pass did not land"
+        );
+    }
+
+    /// An unblocker's pass that goes to `done` while the worktree holds work
+    /// that cannot be committed is held on `blocked` with `blocked_from` still
+    /// naming the step the task stopped at, so the next unblocker is briefed on
+    /// `document` and its pass finishes the task. Run with `auto_commit` off,
+    /// where any tracked change counts as work that could not be committed.
+    #[test]
+    fn a_held_dirty_unblocker_pass_keeps_the_step_the_task_stopped_at() {
+        let (mut repo, _root_guard) = fixture("held-dirty-unblocker");
+        repo.config.dispatch.auto_commit = false;
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.root.join("tracked"), "as committed").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-q", "-m", "root"]);
+        add(&repo, "dirtied", &[]);
+        let pipelines = held_pass_pipelines();
+
+        let mut task = queued(&repo, "dirtied");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("document".into());
+        task.save().unwrap();
+
+        std::fs::write(repo.root.join("tracked"), "uncommitted").unwrap();
+        let worktree = repo.root.to_str().unwrap().to_string();
+        let pass = |repo: &Repo| {
+            crate::platform::test_env::with_env("SPOOLWAY_WORKTREE", &worktree, || {
+                report(
+                    repo,
+                    &pipelines,
+                    &ReportArgs {
+                        task: Some("dirtied".into()),
+                        stage: None,
+                        pass: true,
+                        fail: false,
+                        block: false,
+                        pause: false,
+                        message: None,
+                        handoff: vec![],
+                    },
+                    Some(crate::pipeline::BLOCKED),
+                )
+            })
+            .unwrap()
+        };
+        pass(&repo);
+
+        let task = queued(&repo, "dirtied");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("document"));
+        assert_eq!(
+            resume_target(&task, pipelines.for_task(&task).unwrap()),
+            "document",
+            "a second unblocker is told the task stopped at `document`"
+        );
+
+        git(&["checkout", "tracked"]);
+        pass(&repo);
+        assert_eq!(
+            queued(&repo, "dirtied").stage(),
+            crate::pipeline::DONE,
+            "the second pass finishes the task; no passed step runs again"
         );
     }
 
@@ -5921,6 +6033,61 @@ mod tests {
         assert_eq!(
             task.front.blocked_from, None,
             "the resume clears `blocked_from` as an unheld pass from `blocked` does"
+        );
+    }
+
+    /// An unblocker that answers `--pass --stage review` on a `gate_at:
+    /// blocked` task is held on `paused`, and the resume goes to `review`, the
+    /// step it named, rather than to `review`'s `on_pass` where the task never
+    /// runs that review again.
+    #[test]
+    fn a_held_unblocker_pass_resumes_on_the_step_it_named() {
+        let (repo, _root_guard) = unattended_fixture("gate-at-blocked-stage");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "named", &[]);
+        let pipelines = held_pass_pipelines();
+
+        let mut task = queued(&repo, "named");
+        task.bank_launch(crate::pipeline::QUEUED, "review");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("review".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("named".into()),
+                stage: Some("review".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: None,
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "named");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            "review",
+            "the road names the step the unblocker asked for"
+        );
+
+        resume(&repo, &pipelines, &resume_args("named", None), None).unwrap();
+        let task = queued(&repo, "named");
+        assert_eq!(task.stage(), "review");
+        assert_eq!(
+            task.front.held_pass_to, None,
+            "the resume spends the record"
         );
     }
 

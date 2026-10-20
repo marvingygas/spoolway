@@ -821,6 +821,29 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unblock_laps: BTreeMap<String, u32>,
 
+    /// The step an unblocker's `--pass` was sending the task to when
+    /// `gate_at: blocked` held it on `paused`.
+    ///
+    /// Without it the resume could only recompute the pass's destination from
+    /// `blocked_from`, which is the `on_pass` of the step the task stopped at.
+    /// A `--stage` the unblocker named is written nowhere else, so the resume
+    /// would skip the step it asked for. Read by `held_pass_target` in
+    /// `src/commands/report.rs`, and cleared with `blocked_from` when the
+    /// task leaves the hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_pass_to: Option<String>,
+
+    /// The step an unblocker's `--pass` stood in for, kept when the pass sent
+    /// the task to `done`.
+    ///
+    /// The pass clears `blocked_from`. If cleanup then holds the task on
+    /// `blocked` for work it could not commit, nothing else says where the
+    /// task had stopped, and the next unblocker would be told the pipeline's
+    /// entry. That hold, in `report` or in cleanup, puts it back as
+    /// `blocked_from` and drops this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unblocked_from: Option<String>,
+
     /// The step this task last moved here from, written by [`Task::set_stage`]
     /// and read by the dispatcher to key the two counters above.
     ///

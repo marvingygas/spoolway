@@ -1323,6 +1323,8 @@ mod tests {
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
             unblock_laps: Default::default(),
+            held_pass_to: None,
+            unblocked_from: None,
             arrived_from: None,
             extra: Default::default(),
         };

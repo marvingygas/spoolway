@@ -201,6 +201,13 @@ impl<'a> Dispatcher<'a> {
                     .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
                     .unwrap_or_else(|| task.stage().to_string());
                 crate::commands::set_blocked_from(task, &back);
+                // A pass from `blocked` that came here left no `blocked_from`
+                // and a `last_report` filed from `blocked`, which `back` can
+                // only answer with the pipeline's entry. It kept the step it
+                // stood in for.
+                if let Some(stopped) = task.front.unblocked_from.take() {
+                    task.front.blocked_from = Some(stopped);
+                }
                 task.log_status(&format!(
                     "reached `{}` with work that could not be committed — held at `{}` \
                      rather than tearing the worktree down",

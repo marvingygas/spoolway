@@ -10600,6 +10600,8 @@ mod tests {
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
             unblock_laps: Default::default(),
+            held_pass_to: None,
+            unblocked_from: None,
             arrived_from: None,
             extra: Default::default(),
         };
@@ -24737,6 +24739,77 @@ mod tests {
                 .unwrap_or_default()
                 .contains("could not be committed"),
             "the record must say why"
+        );
+    }
+
+    /// An unblocker's pass from `blocked` that goes to `done`, where cleanup
+    /// then finds work it cannot commit, holds the task on `blocked` still
+    /// naming the step it first stopped at (`document`). Held with the
+    /// pipeline's entry instead, the next unblocker's pass runs `review` and
+    /// `document` a second time.
+    #[test]
+    fn a_cleanup_hold_after_an_unblockers_pass_keeps_the_step_it_stopped_at() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, _root_guard) = fixture("cleanup-after-unblocker");
+        let worktree = crate::scratch::root("dispatch-cleanup-after-unblocker-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
+        let hooks = worktree.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(
+            hooks.join("pre-commit"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("left.txt"), "work that never got recorded").unwrap();
+
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: document\n  \
+                     - id: document\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.blocked_from = Some("document".into());
+        });
+
+        crate::commands::report(
+            &repo,
+            &pipelines,
+            &crate::cli::ReportArgs {
+                task: Some("demo".into()),
+                stage: None,
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: None,
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
+
+        let mux = FakeMux::new(vec![]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("document"),
+            "the next unblocker is told the task stopped at `document`"
         );
     }
 
