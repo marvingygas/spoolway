@@ -965,7 +965,7 @@ A `paused` task restarts the step it was parked or gated on. A task parked from 
 | On `hook_failed` | Run `spoolway resume <task>` |
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
-| Blocked at a step the pipeline no longer defines | Run `spoolway resume <task> --stage <step>`. A restart would otherwise start the first step over |
+| Blocked or paused at a step the pipeline no longer defines | Run `spoolway resume <task> --stage <step>`. A restart would otherwise start the first step over |
 
 With `--step <step>`, the command restarts only while the task is on that step. When the task has moved on, it exits 1 and restarts nothing:
 

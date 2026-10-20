@@ -3164,17 +3164,22 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     // `resume_target` answers a stopped step the pipeline dropped with its
     // entry, and starting the entry over would run every step that already
     // passed again. A restart takes no `--stage`, so the refusal sends the
-    // person to the resume that does.
+    // person to the resume that does. A task the dispatcher parked for the
+    // same reason names the lost step in `paused_at`, and gets the same
+    // refusal rather than the generic one below.
+    let lost = |missing: &str| {
+        anyhow::anyhow!(
+            "task `{id}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
+             restart has no step to start over. Send it to a step that exists:\n  spoolway \
+             resume {id} --stage <step>",
+            pipeline.name
+        )
+    };
     let stopped_step = || -> Result<String> {
-        if let Some(missing) = stranded_step(task, pipeline) {
-            bail!(
-                "task `{id}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
-                 restart has no step to start over. Send it to a step that exists: `spoolway \
-                 resume {id} --stage <step>`.",
-                pipeline.name
-            );
+        match stranded_step(task, pipeline) {
+            Some(missing) => Err(lost(&missing)),
+            None => Ok(resume_target(task, pipeline)),
         }
-        Ok(resume_target(task, pipeline))
     };
     let step = match stage {
         crate::pipeline::PAUSED => match task
@@ -3183,6 +3188,9 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
             .clone()
             .or_else(|| task.front.paused_at.clone())
         {
+            Some(step) if !is_stage_word(&step) && pipeline.step(&step).is_none() => {
+                return Err(lost(&step));
+            }
             Some(step) => step,
             None => stopped_step()?,
         },
@@ -10669,7 +10677,36 @@ mod tests {
 
         let err = restart_step(&task, pipeline).unwrap_err().to_string();
         assert!(err.contains("stopped at `renamed-away`"), "{err}");
-        assert!(err.contains("spoolway resume lost --stage <step>"), "{err}");
+        assert!(
+            err.ends_with("exists:\n  spoolway resume lost --stage <step>"),
+            "{err}"
+        );
+    }
+
+    /// The task the dispatcher parked for a lost step is refused the same
+    /// way, rather than with "is on `renamed-away`", which a paused task is
+    /// not.
+    #[test]
+    fn restarting_a_parked_task_whose_step_is_gone_gives_the_same_refusal() {
+        let (repo, _root_guard) = fixture("restart-stranded-park");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.paused_at = Some("renamed-away".into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "parked");
+        let pipeline = pipelines.for_task(&task).unwrap();
+
+        let err = restart_step(&task, pipeline).unwrap_err().to_string();
+        assert!(err.contains("stopped at `renamed-away`"), "{err}");
+        assert!(
+            err.contains("so a restart has no step to start over"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("exists:\n  spoolway resume lost --stage <step>"),
+            "{err}"
+        );
     }
 
     /// An unblocker lane that started before the pipeline lost the stopped

@@ -2779,11 +2779,13 @@ impl<'a> Dispatcher<'a> {
             task.reset_loop_counts();
             task.front.unblock_laps.clear();
             task.front.paused_at = Some(missing);
-            task.set_stage(crate::pipeline::PAUSED, Some(&note));
+            // The arrival is written bare and the note follows as an entry of
+            // its own: `set_stage` would flatten the note's second line, the
+            // command to run, into the first.
+            task.set_stage(crate::pipeline::PAUSED, None);
+            task.log_status(&note);
             if self.persist(task)? {
-                report
-                    .actions
-                    .push(format!("{}: {}", task.id(), note.replace('\n', " ")));
+                report.actions.push(format!("{}: {note}", task.id()));
             }
             return Ok(Routed::NextTask);
         }
@@ -24852,7 +24854,7 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![]);
-        run_pass_with(&repo, &mux, &pipelines);
+        let report = run_pass_with(&repo, &mux, &pipelines);
 
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
@@ -24861,12 +24863,22 @@ mod tests {
             mux.did("start ").is_empty(),
             "no unblocker lane starts for a task with nowhere to go"
         );
+        // Two lines, the command on its own indented one, as drawn.
         assert!(
-            task.body
-                .contains("`document`, which pipeline `default` no longer defines")
-                && task.body.contains("spoolway resume demo --stage <step>"),
+            task.body.contains(
+                "which pipeline `default` no longer defines — parked on `paused`.\n    \
+                 Send it on with: spoolway resume demo --stage <step>\n"
+            ),
             "{}",
             task.body
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("`paused`.\n    Send it on")),
+            "{:?}",
+            report.actions
         );
     }
 
