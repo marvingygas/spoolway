@@ -190,6 +190,17 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // `args.screen` skips both: bare `spoolway`'s dispatch tab already asked
     // them as popups of its own, off [`overrides_popup`] and
     // [`warnings_popup`], before it started this run.
+    // Where lanes will find the dispatcher's own `spoolway` is settled here,
+    // while this process still runs the binary it started as: an update
+    // during a long run replaces the file under it, and a first look taken
+    // when the first lane starts would judge the new install instead. The
+    // warnings gate below shows a refusal as a setting; the dispatch tab
+    // skips that gate, so the child says it on stderr, which the tab shows.
+    if args.screen
+        && let Err(why) = crate::release::dispatcher_bin_dir()
+    {
+        eprintln!("{why}");
+    }
     if !args.screen {
         if !overrides_gate(repo)? {
             return Ok(0);

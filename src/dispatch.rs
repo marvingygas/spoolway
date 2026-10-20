@@ -10027,6 +10027,12 @@ mod tests {
             let mut names: Vec<&str> = spec.env.keys().map(String::as_str).collect();
             names.sort_unstable();
             self.log(format!("env {} {}", spec.name, names.join(" ")));
+            // The lane's `PATH` too, to check whose `spoolway` it reaches first.
+            self.log(format!(
+                "path {} {}",
+                spec.name,
+                spec.env.get("PATH").map_or("-", String::as_str)
+            ));
             // One value too, since a name alone cannot tell a threshold of 30
             // from one of 60.
             self.log(format!(
@@ -28822,6 +28828,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A lane reports with the dispatcher's own `spoolway`, not an older one
+    /// first on the person's `PATH`. The environment a lane is started with
+    /// is where that is decided, so it is read off the lane that is started.
+    #[test]
+    fn a_lane_is_started_with_the_dispatchers_folder_first_on_its_path() {
+        let (repo, _root_guard) = fixture("lane-dispatcher-path");
+        add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]);
+        crate::release::test_dir::pin(Path::new("/opt/dispatcher-bin"));
+
+        run_pass(&repo, &mux);
+
+        let started = mux.did("path");
+        let line = started.first().expect("no lane was started");
+        assert!(
+            line.ends_with(" /opt/dispatcher-bin") || line.contains(" /opt/dispatcher-bin:"),
+            "the lane's PATH does not start with the dispatcher's folder: {line}"
+        );
     }
 
     /// The prompt contract's environment table is what somebody writing a

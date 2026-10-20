@@ -689,6 +689,10 @@ fn cached_reading(
 /// - `Err(why)`: the folder's `spoolway` is gone or is another version.
 ///   `PATH` is left alone, and `why` is shown among the startup settings.
 pub fn dispatcher_bin_dir() -> &'static Result<Option<PathBuf>, String> {
+    #[cfg(test)]
+    if let Some(answer) = test_dir::current() {
+        return answer;
+    }
     static DIR: std::sync::OnceLock<Result<Option<PathBuf>, String>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| match std::env::current_exe() {
         Ok(exe) => resolve_bin_dir(&exe, current()),
@@ -859,6 +863,30 @@ fn upgraded_command(program: &Path, args: &[String]) -> Command {
     // contains only its own version.
     command.env(ENV_UPGRADED, current());
     command
+}
+
+/// A test's stand-in for [`dispatcher_bin_dir`], since the real answer is
+/// worked out once per process from the test binary, which claims nothing.
+#[cfg(test)]
+pub(crate) mod test_dir {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static DIR: RefCell<Option<&'static Result<Option<PathBuf>, String>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<&'static Result<Option<PathBuf>, String>> {
+        DIR.with(|dir| *dir.borrow())
+    }
+
+    /// Make this thread's dispatcher run from `dir` until the thread ends.
+    /// The answer is leaked, which a test process can afford.
+    pub(crate) fn pin(dir: &Path) {
+        let answer: &'static _ = Box::leak(Box::new(Ok(Some(dir.to_path_buf()))));
+        DIR.with(|slot| *slot.borrow_mut() = Some(answer));
+    }
 }
 
 #[cfg(test)]
