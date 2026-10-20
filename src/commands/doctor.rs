@@ -273,6 +273,7 @@ pub(crate) fn cheap_findings(
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
+    report.record_all(stale_gate_checks(&tasks, pipelines));
     report.record_all(cheap_branch_checks(repo, &tasks));
     report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
@@ -481,6 +482,7 @@ pub fn doctor(
     report.record_all(orphaned_home_note());
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
+    report.record_all(stale_gate_checks(&tasks, pipelines));
     report.record_all(queue_id_checks(repo));
     report.record_all(branch_and_forge_checks(
         repo,
@@ -2582,6 +2584,26 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             Some(Finding::Check(
                 format!("task template of pipeline `{}`", pipeline.name),
                 Err(anyhow::anyhow!("{problem}")),
+            ))
+        })
+        .collect()
+}
+
+/// One failed row for each queued task whose `gate_at:` names a step its
+/// pipeline no longer has. The dispatcher parks such a task before it starts;
+/// this says so while the pipeline edit can still be undone.
+fn stale_gate_checks(tasks: &[Task], pipelines: &Pipelines) -> Vec<Finding> {
+    tasks
+        .iter()
+        .filter_map(|task| {
+            let pipeline = pipelines.for_task(task).ok()?;
+            let gate_at = crate::commands::stale_gate_at(task, pipeline)?;
+            Some(Finding::Check(
+                format!("gate of task `{}`", task.id()),
+                Err(anyhow::anyhow!(
+                    "{}",
+                    crate::commands::stale_gate_note(task, pipeline, gate_at)
+                )),
             ))
         })
         .collect()

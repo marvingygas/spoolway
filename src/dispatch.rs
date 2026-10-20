@@ -2560,6 +2560,21 @@ impl<'a> Dispatcher<'a> {
         }
         if stage == crate::pipeline::QUEUED {
             let id = task.id().to_string();
+            // A `gate_at:` no step has is never matched, so the task would
+            // run to `done` past where its author asked it to stop. It waits
+            // on `paused` with the gate named, before a hook fires or a lane
+            // starts; a resume sends it back here, and parks it again until
+            // the task file names a step.
+            if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
+                let note = crate::commands::stale_gate_note(task, pipeline, gate_at);
+                task.set_stage(crate::pipeline::PAUSED, None);
+                task.log_status(&note);
+                if self.persist(task)? {
+                    report.moved = true;
+                    report.actions.push(format!("{id}: {note}"));
+                }
+                return Ok(Routed::NextTask);
+            }
             // A hook that has not yet exited clean holds the task here
             // rather than let it start. `Pending` covers both "still
             // running" and "not started yet" — a real hook (an HTTP call,
@@ -24895,6 +24910,29 @@ mod tests {
             "{:?}",
             report.actions
         );
+    }
+
+    /// A queued task whose `gate_at:` names no step is parked on `paused`
+    /// before it starts, with the gate named and no lane launched. Fails
+    /// without the park: the task leaves `queued` and a lane starts.
+    #[test]
+    fn a_queued_task_with_a_gate_at_no_step_has_is_parked_before_it_starts() {
+        let (repo, _root_guard) = unattended_fixture("queued-stale-gate");
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.gate_at = Some("review-renamed".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass_with(&repo, &mux, &Pipelines::builtin());
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert!(
+            task.body.contains("`gate_at: review-renamed`"),
+            "{}",
+            task.body
+        );
+        assert!(mux.did("start ").is_empty(), "no lane starts");
     }
 
     /// A lane that started on `blocked` before the pipeline lost the stopped

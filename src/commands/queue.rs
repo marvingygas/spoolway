@@ -1768,10 +1768,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
 /// The `gate_at:` of `task` when `pipeline` has no step of that name, which
 /// is what [`check_gate_at`] and a trial arm both refuse.
 fn unmatched_gate_at<'a>(task: &'a Task, pipeline: &crate::pipeline::Pipeline) -> Option<&'a str> {
-    task.front
-        .gate_at
-        .as_deref()
-        .filter(|gate_at| pipeline.step(gate_at).is_none())
+    crate::commands::stale_gate_at(task, pipeline)
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -9436,6 +9433,23 @@ fn build_trial_arm(
         .filter(|step| pipeline.step(step).is_some())
         .cloned()
         .collect();
+    // A ticked skip of the very step `gate_at:` names is no better than a
+    // missing step: a skipped step never runs and never reports, so the gate
+    // would never fire and the arm would run straight past where its author
+    // asked it to stop.
+    if let Some(gate_at) = arm
+        .front
+        .gate_at
+        .as_deref()
+        .filter(|gate_at| arm.front.skip.iter().any(|skipped| skipped == gate_at))
+    {
+        bail!(
+            "{name} has `gate_at: {gate_at}`, but the trial skips `{gate_at}` on pipeline \
+             `{}`, so the gate would never fire. Untick `{gate_at}` in the trial, or change \
+             or drop `gate_at:` in {name}.",
+            pipeline.name
+        );
+    }
     arm.path = std::path::PathBuf::from(format!("{id}.md"));
     Ok(arm)
 }
@@ -16544,6 +16558,50 @@ mod tests {
         )
         .expect("default has an `implement` step");
         assert_eq!(arm.front.gate_at.as_deref(), Some("implement"));
+    }
+
+    /// A trial arm that skips the step the task's `gate_at:` names is refused:
+    /// a skipped step never reports, so the gate could never hold. The same
+    /// arm without that skip is built. Fails without the check: the arm is
+    /// built with a gate on a step it skips.
+    #[test]
+    fn a_trial_arm_that_skips_its_gate_at_step_is_refused() {
+        let pipelines = Pipelines::builtin();
+        let doc = task_text("gated", "group: demo\ngate_at: implement\n", BODY);
+        let stamp = TrialStamp {
+            trial: "t1",
+            source_group: "demo",
+            group: "demo-default",
+        };
+        let default = pipelines.get("default").unwrap();
+
+        let skip = ["implement".to_string()].into_iter().collect();
+        let err = build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-1",
+            &stamp,
+            default,
+            &skip,
+        )
+        .expect_err("the trial skips the gated step");
+        let said = format!("{err:#}");
+        assert!(said.contains("gated.md has `gate_at: implement`"), "{said}");
+        assert!(said.contains("the gate would never fire"), "{said}");
+        assert!(said.contains("Untick `implement`"), "{said}");
+
+        let other = ["review".to_string()].into_iter().collect();
+        build_trial_arm(
+            "gated.md",
+            &doc,
+            "plan/demo",
+            "gated-2",
+            &stamp,
+            default,
+            &other,
+        )
+        .expect("skipping some other step leaves the gate in place");
     }
 
     /// Six `queue add` calls of a root task into one group, all validated

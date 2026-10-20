@@ -1024,7 +1024,8 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
 /// nowhere good, so both are caught here, while the edit can still be undone.
 /// Each of the four step fields is read because a task can be stopped on any
 /// of them: `stage:` for a running one, `paused_at` for a gate, `blocked_from`
-/// for a block and `parked_from` for a `p` park. The reserved stages are
+/// for a block and `parked_from` for a `p` park. A fifth name, the task's own
+/// `gate_at:`, is read for the step it is meant to stop at. The reserved stages are
 /// stand-ins rather than steps, so they are never reported as missing.
 ///
 /// A task whose `pipeline:` is absent is left to the dispatcher's own start
@@ -1061,6 +1062,12 @@ fn live_task_problems(tasks: &[crate::task::Task], pipelines: &Pipelines) -> Vec
                 task.id(),
                 pipeline.name
             ));
+        }
+        // `gate_at` names a step too, but the holds compare it with a step
+        // id, so a name no step has never matches and the task runs past
+        // where its author asked it to stop.
+        if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
+            problems.push(crate::commands::stale_gate_note(task, pipeline, gate_at));
         }
     }
     problems
@@ -2385,6 +2392,34 @@ mod tests {
             );
         }
         assert_eq!(problems.len(), 5, "{problems:?}");
+    }
+
+    /// A queued task whose `gate_at:` names a step its pipeline lacks is named
+    /// by the check, with the gate and the way to fix it; a gate that matches
+    /// a step is not. Fails without the `gate_at` read: no problem is listed.
+    #[test]
+    fn live_task_problems_name_a_gate_at_no_step_has() {
+        let (repo, _root_guard) = repo_for("live-task-stale-gate");
+        let pipelines = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+        let task = |id: &str, gate: &str| {
+            crate::task::Task::parse(
+                std::path::PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"),
+            )
+            .unwrap()
+        };
+        let entry = pipelines.get("default").unwrap().entry().to_string();
+        let tasks = vec![task("stale", "review-renamed"), task("fine", &entry)];
+
+        let problems = live_task_problems(&tasks, &pipelines);
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("queued task `stale`")
+                && problems[0].contains("`gate_at: review-renamed`")
+                && problems[0].contains("Change `gate_at:` in the task"),
+            "{problems:?}"
+        );
     }
 
     // -----------------------------------------------------------------

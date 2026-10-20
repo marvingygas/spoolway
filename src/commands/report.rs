@@ -1653,6 +1653,38 @@ pub fn missing_step_park_note(task: &Task, pipeline: &Pipeline, missing: &str) -
     )
 }
 
+/// The `gate_at:` of `task` when `pipeline` has no step of that name.
+///
+/// Both holds on a gate compare `gate_at` with a step id, so a name no step
+/// has is never matched and the task runs past where its author asked it to
+/// stop. `queue add` refuses such a name up front; this finds the one a
+/// pipeline edit left behind afterwards, and is what a trial arm is judged by.
+pub fn stale_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
+    task.front
+        .gate_at
+        .as_deref()
+        .filter(|gate_at| pipeline.step(gate_at).is_none())
+}
+
+/// The line that names a task whose `gate_at:` is [`stale_gate_at`]: what the
+/// dispatcher logs when it parks the task, and what `pipeline check`, `doctor`
+/// and the queue row say of it. One wording, so the four cannot disagree.
+pub fn stale_gate_note(task: &Task, pipeline: &Pipeline, gate_at: &str) -> String {
+    let kind = if task.stage() == crate::pipeline::QUEUED {
+        "queued"
+    } else {
+        "live"
+    };
+    format!(
+        "{kind} task `{}` has `gate_at: {gate_at}`, which pipeline `{}` does not define. \
+         Change `gate_at:` in the task to a step `{}` has ({}).",
+        task.front.id,
+        pipeline.name,
+        pipeline.name,
+        pipeline.step_ids().join(", ")
+    )
+}
+
 /// Which of the two roads holds a task at `step` for `outcome`/`destination`
 /// — the one predicate every reader of a gate now shares, rather than each
 /// deriving its own copy. `compose::report_contract` asks it of a

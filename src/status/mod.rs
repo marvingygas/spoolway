@@ -4642,14 +4642,21 @@ fn build_rows(
                         crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
                     )
                 });
-                match (hook, dependency) {
-                    (Some(hook), _) => (State::Queued, hook, false),
-                    (None, Some(d)) => (State::Queued, d, false),
-                    (None, None) => (
-                        State::Queued,
-                        "waiting for a worker slot to free up".to_string(),
-                        false,
-                    ),
+                // The dispatcher parks this task at its next pass, so the
+                // row says why now rather than "waiting for a worker slot".
+                let stale = crate::commands::stale_gate_at(task, pipeline)
+                    .map(|gate_at| crate::commands::stale_gate_note(task, pipeline, gate_at));
+                match (stale, hook, dependency) {
+                    (Some(stale), _, _) => (State::Queued, stale, false),
+                    (None, hook, dependency) => match (hook, dependency) {
+                        (Some(hook), _) => (State::Queued, hook, false),
+                        (None, Some(d)) => (State::Queued, d, false),
+                        (None, None) => (
+                            State::Queued,
+                            "waiting for a worker slot to free up".to_string(),
+                            false,
+                        ),
+                    },
                 }
             }
             _ if parked_on_blocked => {
@@ -4683,7 +4690,13 @@ fn build_rows(
                     && task.front.parked_from.is_none()
                     && crate::commands::resume_target(task, pipeline) == crate::pipeline::QUEUED;
                 if never_started {
-                    (State::Paused, "→ queued — [r] resumes it".to_string(), true)
+                    // Parked for a `gate_at:` its pipeline lost: a resume
+                    // only parks it again until the task file is changed.
+                    let next = match crate::commands::stale_gate_at(task, pipeline) {
+                        Some(gate_at) => crate::commands::stale_gate_note(task, pipeline, gate_at),
+                        None => "→ queued — [r] resumes it".to_string(),
+                    };
+                    (State::Paused, next, true)
                 } else {
                     // A row parked by a person's own Escape or the board's
                     // `pause` (`parked_from` set, `escalated: false`) is a
@@ -13577,6 +13590,27 @@ mod tests {
         assert_eq!(
             paused_next(&task, pipeline, 0).as_deref(),
             Some("implement")
+        );
+    }
+
+    /// A queued task whose `gate_at:` names no step of its pipeline says so in
+    /// its row, as the dispatcher's park will, instead of waiting for a slot.
+    /// Fails without the row's check: the row reads "waiting for a worker slot".
+    #[test]
+    fn a_queued_row_names_a_gate_at_its_pipeline_lacks() {
+        let (repo, _root_guard) = fixture("queued-stale-gate-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("review-renamed".into());
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert!(
+            rows[0].next.contains("`gate_at: review-renamed`")
+                && rows[0].next.contains("Change `gate_at:` in the task"),
+            "{}",
+            rows[0].next
         );
     }
 
