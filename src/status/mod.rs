@@ -4614,6 +4614,12 @@ fn build_rows(
                 )
             });
 
+        // How long this task's worktree cut has been going, when one is. Only
+        // a task not yet running a step can have one.
+        let cutting = (!live)
+            .then(|| crate::cut::running(repo, task.id()))
+            .flatten();
+
         // What happens to this task next. For one that is moving that is the
         // step it goes to; for one that is stuck it is whatever has to happen
         // before it moves at all, which is a person far more often than a step.
@@ -4789,6 +4795,18 @@ fn build_rows(
             Some(_) if live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Blocked) => (
                 State::Prompt,
                 format!("press a key in pane `{lane}`"),
+                false,
+            ),
+            // The task's worktree is being cut by a run beside the
+            // dispatcher's pass: a repository hook is slow, and only this task
+            // waits on it.
+            Some(_) if cutting.is_some() => (
+                State::Starting,
+                format!(
+                    "cutting worktree {} (stopped at {})",
+                    crate::tracking::minutes(cutting.unwrap_or_default()),
+                    crate::tracking::minutes(crate::repo::GIT_HOOK_TIMEOUT),
+                ),
                 false,
             ),
             Some(_) if serial_holder.is_some() => (
@@ -7870,6 +7888,35 @@ mod tests {
             opening[0].next.contains("(stopped at 1m)"),
             "{}",
             opening[0].next
+        );
+    }
+
+    /// A task whose worktree is being cut beside the dispatcher's pass reads
+    /// `cutting worktree`, not the line of a task waiting for a slot, and a
+    /// task with no cut running keeps the line it had.
+    #[test]
+    fn a_task_whose_worktree_is_being_cut_reads_cutting_worktree() {
+        let (repo, _root_guard) = fixture("cutting-row");
+        add(&repo, "cutting-one", &[], Some("implement"));
+        add(&repo, "idle-one", &["cutting-one"], Some("implement"));
+        let runs = crate::command_step::Runs::new(&repo.cuts_dir());
+        let key = crate::command_step::Runs::key("cut", "cutting-one");
+        runs.start(&key, "sleep 60", &repo.root, &Default::default())
+            .unwrap();
+
+        let rows = rows(&repo, &Pipelines::builtin()).unwrap();
+        runs.stop(&key);
+
+        let next = |id: &str| rows.iter().find(|r| r.id == id).unwrap().next.clone();
+        assert!(
+            next("cutting-one").starts_with("cutting worktree"),
+            "{}",
+            next("cutting-one")
+        );
+        assert!(
+            !next("idle-one").contains("cutting worktree"),
+            "{}",
+            next("idle-one")
         );
     }
 

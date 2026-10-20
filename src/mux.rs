@@ -362,6 +362,15 @@ pub trait Mux: Sync {
         base: &str,
         label: &str,
     ) -> Result<Workspace>;
+    /// Where this backend cuts the checkout of `branch` with git, when the
+    /// cut can run beside the dispatcher's pass — see [`crate::cut`] — and then
+    /// be adopted by [`Mux::create_workspace`] or [`Mux::cut_checkout`], which
+    /// find the finished checkout and cut nothing. `None`, the default, for a
+    /// backend that cuts some other way: the caller then cuts inside the pass
+    /// through those two calls alone.
+    fn cut_path(&self, _branch: &str) -> Option<PathBuf> {
+        None
+    }
     /// Cut a task's own worktree with git and open no workspace on it, for a
     /// step that shows no pane. `Ok(None)` means this backend does not split
     /// the two, and the caller falls back to [`Mux::create_workspace`]; that is
@@ -2040,6 +2049,10 @@ impl Mux for Herdr {
         self.cut_task_worktree(branch, base).map(Some)
     }
 
+    fn cut_path(&self, branch: &str) -> Option<PathBuf> {
+        Some(self.worktree_root.join(branch_slug(branch)))
+    }
+
     fn remove_workspace(&self, workspace_id: &str) -> Result<()> {
         self.call_ignoring_result(&["worktree", "remove", "--workspace", workspace_id, "--force"])
     }
@@ -2760,7 +2773,7 @@ pub(crate) fn branch_slug(branch: &str) -> String {
 
 /// The environment `git worktree add` runs in; see the comment in
 /// [`cut_worktree`].
-const CUT_ENV: &[(&str, &str)] = &[("LC_ALL", "C")];
+pub(crate) const CUT_ENV: &[(&str, &str)] = &[("LC_ALL", "C")];
 
 /// Cut a worktree with git, at exactly the path asked for.
 ///
@@ -2797,31 +2810,19 @@ fn cut_worktree_within(
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let path_arg = path.display().to_string();
-    let exists = run(repo, "git", &["rev-parse", "--verify", "--quiet", branch]).is_ok();
-    let base_ref;
-    let mut fetch_timed_out = false;
-    let args: Vec<&str> = match exists {
-        true => vec!["worktree", "add", &path_arg, branch],
-        false => {
-            (base_ref, fetch_timed_out) = resolve_cut_base_noting_timeout(repo, base);
-            // `--no-track`: git's own `branch.autoSetupMerge` default sets
-            // this new branch's upstream to `origin/<base>` when the start
-            // point is a remote-tracking ref, which a cut from a local base
-            // never did — an ordinary `git push` in the lane then fails,
-            // asking for `--set-upstream` on a branch nothing ever asked to
-            // track (review finding 3). Both cut paths must leave the same
-            // branch behind.
-            vec![
-                "worktree",
-                "add",
-                "--no-track",
-                "-b",
-                branch,
-                &path_arg,
-                &base_ref,
-            ]
-        }
-    };
+    // A checkout [`crate::cut`] has already finished for this branch is the
+    // cut. The dispatcher cuts beside its pass and then asks the backend to
+    // open a workspace on the result, and running `git worktree add` again
+    // here would fail on the folder it just made and run the hook twice.
+    if cut_is_finished(repo, path, branch) {
+        return Ok(());
+    }
+    let CutCommand {
+        args,
+        branch_existed: exists,
+        fetch_timed_out,
+    } = cut_command(repo, path, branch, base);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     // `LC_ALL=C`: git writes the reason of its `initializing` lock into the
     // entry in the language it runs in, and a cut killed part way leaves that
     // word behind for [`crate::repo::Repo::worktree_initializing`] to look for
@@ -2848,45 +2849,10 @@ fn cut_worktree_within(
         // husky install leaves in the person's repo.
         crate::repo::run_git_hooked_within(repo, &args, CUT_ENV, &["post-checkout"], hook_limit)
     };
-    // `post-checkout` runs after git has written the files and dropped its
-    // `initializing` lock, so a hook stopped at its limit leaves a checkout
-    // that looks finished. The retry would adopt it and run the step in a
-    // worktree whose hook never completed. Taken away here, with the branch
-    // if this call made it, so the retry cuts afresh and fails visibly again
-    // if the hook is still hung.
-    //
-    // The removal can fail: [`remove_worktree`] makes the checkout's own
-    // folders writable, but not the one it sits in, which a hook may have made
-    // read-only. The checkout then stays, and with the lock gone the retry would adopt
-    // it all the same. So an entry git still lists is locked as
-    // `initializing` again, which is what `ensure_workspace` reads as
-    // unfinished: it tries the removal itself and, if that fails too, stops
-    // with the command to run by hand rather than running the step in it.
-    // An entry git has already dropped leaves only a folder, and the next cut
-    // refuses to land in a folder that is not empty.
     if let Err(err) = &cut
         && let Some(stopped) = err.downcast_ref::<crate::repo::GitTimedOut>()
     {
-        let root = path.parent().unwrap_or(path);
-        match remove_worktree(repo, root, path) {
-            Ok(()) => {
-                if !exists {
-                    let _ = run(repo, "git", &["branch", "-D", branch]);
-                }
-            }
-            Err(removal) => {
-                let _ = run(
-                    repo,
-                    "git",
-                    &["worktree", "lock", "--reason", "initializing", &path_arg],
-                );
-                bail!(
-                    "{stopped} The worktree it left half set up at {path_arg} could not be \
-                     removed ({removal:#}). Run `{}`, then resume the task.",
-                    remove_by_hand_command(repo, path)
-                );
-            }
-        }
+        undo_stopped_cut(repo, path, branch, exists, &stopped.0)?;
     }
     cut.with_context(|| {
         cut_failure(
@@ -2896,6 +2862,136 @@ fn cut_worktree_within(
         )
     })?;
     Ok(())
+}
+
+/// Take away what a cut left when its hook was stopped at the limit, with
+/// the branch if the cut made it. `stopped` is the message the stop gave.
+///
+/// `post-checkout` runs after git has written the files and dropped its
+/// `initializing` lock, so a hook stopped at its limit leaves a checkout
+/// that looks finished. The retry would adopt it and run the step in a
+/// worktree whose hook never completed. Taken away here, with the branch
+/// if this call made it, so the retry cuts afresh and fails visibly again
+/// if the hook is still hung.
+///
+/// The removal can fail: [`remove_worktree`] makes the checkout's own
+/// folders writable, but not the one it sits in, which a hook may have made
+/// read-only. The checkout then stays, and with the lock gone the retry would adopt
+/// it all the same. So an entry git still lists is locked as
+/// `initializing` again, which is what `ensure_workspace` reads as
+/// unfinished: it tries the removal itself and, if that fails too, stops
+/// with the command to run by hand rather than running the step in it.
+/// An entry git has already dropped leaves only a folder, and the next cut
+/// refuses to land in a folder that is not empty.
+pub(crate) fn undo_stopped_cut(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    branch_existed: bool,
+    stopped: &str,
+) -> Result<()> {
+    let path_arg = path.display().to_string();
+    let root = path.parent().unwrap_or(path);
+    match remove_worktree(repo, root, path) {
+        Ok(()) => {
+            if !branch_existed {
+                let _ = run(repo, "git", &["branch", "-D", branch]);
+            }
+            Ok(())
+        }
+        Err(removal) => {
+            let _ = run(
+                repo,
+                "git",
+                &["worktree", "lock", "--reason", "initializing", &path_arg],
+            );
+            bail!(
+                "{stopped} The worktree it left half set up at {path_arg} could not be \
+                 removed ({removal:#}). Run `{}`, then resume the task.",
+                remove_by_hand_command(repo, path)
+            );
+        }
+    }
+}
+
+/// The `git worktree add` that cuts `branch` at a path, with what was learnt
+/// while working its arguments out.
+pub(crate) struct CutCommand {
+    /// Everything after `git`.
+    pub args: Vec<String>,
+    /// Whether `branch` was already there, so the cut checks it out rather
+    /// than making it.
+    pub branch_existed: bool,
+    /// Whether the fetch for the start point had to be stopped, which
+    /// [`cut_failure`] names when the cut then fails on a base the fetch never
+    /// brought in.
+    pub fetch_timed_out: bool,
+}
+
+/// The arguments [`cut_worktree`] and [`crate::cut`] both run, so a cut
+/// beside the pass and a cut inside it leave the same branch behind.
+pub(crate) fn cut_command(repo: &Path, path: &Path, branch: &str, base: &str) -> CutCommand {
+    let path_arg = path.display().to_string();
+    let exists = run(repo, "git", &["rev-parse", "--verify", "--quiet", branch]).is_ok();
+    if exists {
+        return CutCommand {
+            args: vec!["worktree".into(), "add".into(), path_arg, branch.into()],
+            branch_existed: true,
+            fetch_timed_out: false,
+        };
+    }
+    let (base_ref, fetch_timed_out) = resolve_cut_base_noting_timeout(repo, base);
+    // `--no-track`: git's own `branch.autoSetupMerge` default sets
+    // this new branch's upstream to `origin/<base>` when the start
+    // point is a remote-tracking ref, which a cut from a local base
+    // never did — an ordinary `git push` in the lane then fails,
+    // asking for `--set-upstream` on a branch nothing ever asked to
+    // track (review finding 3). Both cut paths must leave the same
+    // branch behind.
+    CutCommand {
+        args: [
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            branch,
+            &path_arg,
+            &base_ref,
+        ]
+        .map(String::from)
+        .to_vec(),
+        branch_existed: false,
+        fetch_timed_out,
+    }
+}
+
+/// Whether `path` is a checkout of `branch` that git lists and that is not
+/// held under its `initializing` lock: a cut that ran to the end.
+///
+/// Both sides are compared resolved, because git lists the real path while
+/// the project home may be spelled through a link.
+pub(crate) fn cut_is_finished(repo: &Path, path: &Path, branch: &str) -> bool {
+    let Ok(listing) = run(repo, "git", &["worktree", "list", "--porcelain"]) else {
+        return false;
+    };
+    let wanted = crate::platform::resolve_through_existing(path);
+    let reference = format!("branch refs/heads/{branch}");
+    let (mut here, mut on_branch, mut unfinished) = (false, false, false);
+    let mut finished = false;
+    // Entries are separated by a blank line; the last has none after it.
+    for line in listing.lines().chain(std::iter::once("")) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            here = crate::platform::resolve_through_existing(Path::new(rest)) == wanted;
+        } else if here && line.trim() == reference {
+            on_branch = true;
+        } else if here && line.trim() == "locked initializing" {
+            unfinished = true;
+        } else if line.is_empty() {
+            finished |= here && on_branch && !unfinished;
+            (here, on_branch, unfinished) = (false, false, false);
+        }
+    }
+    finished
 }
 
 /// The command a person can run to take a worktree away by hand when
@@ -3019,7 +3115,7 @@ fn make_writable(_root: &Path) {}
 /// The bare base is what failed, and when the fetch was cut short that is
 /// because the base never arrived, not because it is wrong. Without this the
 /// block reads as a bad `base:` and names neither the fetch nor its bound.
-fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> String {
+pub(crate) fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> String {
     match fetch_timed_out {
         true => format!(
             "{cut}; `git fetch origin {base}` did not finish within {}s and was \
@@ -3249,7 +3345,7 @@ pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
 /// [`resolve_cut_base`], plus whether its fetch had to be stopped at
 /// [`CUT_FETCH_TIMEOUT`]. [`cut_worktree`] needs the second half to say so
 /// when the cut then fails on a base the fetch never brought in.
-fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
+pub(crate) fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
     let local = format!("refs/heads/{base}");
     if run(repo, "git", &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
         return (base.to_string(), false);

@@ -709,6 +709,13 @@ impl Repo {
         self.home_subdir(crate::tracking::TRACKING_DIR)
     }
 
+    /// What a worktree cut leaves behind while it runs beside the dispatcher's
+    /// pass: its log, pid and exit code, one set per task — see
+    /// [`crate::cut`].
+    pub fn cuts_dir(&self) -> PathBuf {
+        self.home_subdir(crate::cut::CUTS_DIR)
+    }
+
     /// Every directory [`crate::retain`]'s sweep may delete an old entry
     /// from under `housekeeping.retention_days`. [`Repo::archive_dir`] is
     /// deliberately not here: finished tasks age under their own key,
@@ -730,6 +737,7 @@ impl Repo {
             self.system_prompts_dir(),
             self.commands_dir(),
             self.tracking_dir(),
+            self.cuts_dir(),
             self.headless_dir(),
             self.scratch_dir(),
         ]
@@ -4420,8 +4428,10 @@ pub fn run_with_env(
 /// How long one of spoolway's own git calls may run while it executes a git
 /// hook of the person's repo, such as a husky `post-checkout`. Generous,
 /// because a hook may do real work — an `npm ci` is the usual one — but not
-/// unbounded: the call is made from inside the dispatcher's pass, and a hook
-/// that never exits would hold every task with it.
+/// unbounded: a hook that never exits would hold the call, and whatever
+/// waits on it, for ever. A worktree cut runs beside the dispatcher's pass
+/// and is stopped at this limit by [`crate::cut`]; `spoolway report` runs its
+/// own calls under it from the lane's process.
 pub const GIT_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// The error [`run_git_hooked`] fails with when git was still running at the
@@ -4483,28 +4493,13 @@ pub(crate) fn run_git_hooked_within(
     );
     match outcome {
         crate::mux::GitWithin::NotRun => bail!("running `{shown}`: git could not be started"),
-        crate::mux::GitWithin::TimedOut => {
-            let after = crate::tracking::minutes(limit);
-            Err(GitTimedOut(match seen.into_inner() {
-                Some(hook) => format!(
-                    "`{shown}` was stopped after {after} because its `{hook}` git hook was \
-                     still running. spoolway does not skip a repository's git hooks: make that \
-                     hook exit, then run this again."
-                ),
-                None => format!(
-                    "`{shown}` was still running after {after} and was stopped. It runs these \
-                     git hooks: {}; one of them may be stuck, or git may be waiting on \
-                     something else, such as a signing prompt or a lock. Find what is hung, then \
-                     run this again.",
-                    hooks
-                        .iter()
-                        .map(|h| format!("`{h}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            })
-            .into())
-        }
+        crate::mux::GitWithin::TimedOut => Err(GitTimedOut(hook_stopped_message(
+            &shown,
+            limit,
+            seen.into_inner(),
+            hooks,
+        ))
+        .into()),
         crate::mux::GitWithin::Finished {
             success,
             stdout,
@@ -4522,6 +4517,37 @@ pub(crate) fn run_git_hooked_within(
     }
 }
 
+/// What a git call stopped at its limit tells the person: which hook was
+/// still running when it could be seen (`seen`), else the hooks the call can
+/// run. Shared by the synchronous call above and by [`crate::cut`], which
+/// stops its detached `git worktree add` at the same limit.
+pub(crate) fn hook_stopped_message(
+    shown: &str,
+    limit: std::time::Duration,
+    seen: Option<String>,
+    hooks: &[&str],
+) -> String {
+    let after = crate::tracking::minutes(limit);
+    match seen {
+        Some(hook) => format!(
+            "`{shown}` was stopped after {after} because its `{hook}` git hook was \
+             still running. spoolway does not skip a repository's git hooks: make that \
+             hook exit, then run this again."
+        ),
+        None => format!(
+            "`{shown}` was still running after {after} and was stopped. It runs these \
+             git hooks: {}; one of them may be stuck, or git may be waiting on \
+             something else, such as a signing prompt or a lock. Find what is hung, then \
+             run this again.",
+            hooks
+                .iter()
+                .map(|h| format!("`{h}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// The git hook running under the process group `group` leads, found by
 /// looking for a process whose command line names a file of one of `hooks`
 /// inside the directory git reads hooks from. `None` when no such process is
@@ -4532,7 +4558,7 @@ pub(crate) fn run_git_hooked_within(
 /// `core.hooksPath`. Husky 9 sets that to `.husky/_` and runs the stub there
 /// first, so matching a directory literally called `hooks` would never name
 /// it.
-fn running_hook_name(cwd: &Path, group: u32, hooks: &[&str]) -> Option<String> {
+pub(crate) fn running_hook_name(cwd: &Path, group: u32, hooks: &[&str]) -> Option<String> {
     let dir = Command::new("git")
         .args(["rev-parse", "--git-path", "hooks"])
         .current_dir(cwd)

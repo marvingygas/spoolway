@@ -155,6 +155,7 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     let headless = repo.headless_dir();
     let commands = repo.commands_dir();
     let tracking = repo.tracking_dir();
+    let cuts = repo.cuts_dir();
 
     let mut budget = limit;
     for dir in repo.byproduct_dirs() {
@@ -163,7 +164,9 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         }
         let guard = match dir {
             _ if dir == headless => Some(&headless_spared),
-            _ if dir == scratch || dir == commands || dir == tracking => Some(&queued),
+            _ if dir == scratch || dir == commands || dir == tracking || dir == cuts => {
+                Some(&queued)
+            }
             _ => None,
         };
         let mut removed = sweep_dir(&dir, max_age, budget, guard);

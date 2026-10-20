@@ -376,6 +376,7 @@ impl<'a> Dispatcher<'a> {
         // a task nobody can reach any more (review finding 64).
         runs.reclaim_task(task.id());
         crate::tracking::reclaim(self.repo, task.id());
+        crate::cut::reclaim(self.repo, task.id());
         self.forget_lane_names(task, report);
 
         // And now — past every early return — the per-session agent homes the
@@ -1142,6 +1143,7 @@ impl<'a> Dispatcher<'a> {
 
         runs.reclaim_task(task.id());
         crate::tracking::reclaim(self.repo, task.id());
+        crate::cut::reclaim(self.repo, task.id());
         self.forget_lane_names(task, report);
 
         // Every session home this arm was ever given, not just the lane

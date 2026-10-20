@@ -790,6 +790,10 @@ impl Mux for Headless {
         })
     }
 
+    fn cut_path(&self, branch: &str) -> Option<PathBuf> {
+        Some(self.worktree_root.join(branch_slug(branch)))
+    }
+
     fn remove_workspace(&self, id: &str) -> Result<()> {
         let Some((kind, path)) = workspace_path(id) else {
             bail!("`{id}` is not a headless workspace id");
