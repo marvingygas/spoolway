@@ -1061,20 +1061,21 @@ A task switched from `panes` while it runs has all its earlier panes in its firs
 a finished lane, and the limit closes them one pane at a time. That tab keeps the task's name while
 it holds more than one step. The headless backend has no tabs, so it ignores the setting.
 
-### Commands are hidden by default
+### Commands are shown by default
 
-A command step opens no pane and does not open the task's workspace. See [herdr](#herdr). It runs
-detached, and its output goes to the same log file, which is `commands/<task> · <step>.log` under
-the project's home. It sees the same named environment
-as a run in a pane. A hidden command is never a lane, so it takes no part in `visible_lanes`.
-
-To watch commands run, set `hide_commands = false` with `spoolway config set
-dispatch.hide_commands false`. A command then opens a pane like an agent step and the pane stays
-open after the command exits, so the output of a failed gate is still on screen. A shown command
+A command step opens a pane like an agent step. The pane stays open after the command exits, so
+the output of a failed gate is still on screen. The output also goes to the log file, which is
+`commands/<task> · <step>.log` under the project's home. A shown command
 counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose
 command is still running is never closed by the limit, and that includes a `background: true`
 step. A command step that comes back replaces its own pane in place. Every shown command pane
 closes when the task is done.
+
+To run commands without a pane, set `hide_commands = true` with `spoolway config set
+dispatch.hide_commands true`. A hidden command opens no pane and does not open the task's
+workspace. See [herdr](#herdr). It runs detached and writes the same log file, and it sees the same
+named environment as a run in a pane. A hidden command is never a lane, so it takes no part in
+`visible_lanes`. A config that already holds `hide_commands = true` keeps hiding commands.
 
 A step's `hide:` key overrides this setting for that step. `hide: true` keeps the step detached
 while commands are shown. `hide: false` gives the step a pane while commands are hidden, and the

@@ -410,9 +410,9 @@ A pipeline that gives a background step an `on_fail` does not load. The message 
 fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:
 the task then waits for the command, and its exit picks `on_pass` or `on_fail`.
 
-A command step runs detached with no pane by default. Its output goes to the log file under
-`commands/`. Set `dispatch.hide_commands = false` and every command step runs in its own pane
-instead. The `hide:` key overrides that project setting for one step in either direction.
+A command step runs in a pane of its own by default, and its output also goes to the log file
+under `commands/`. Set `dispatch.hide_commands = true` and every command step runs detached with
+no pane instead. The `hide:` key overrides that project setting for one step in either direction.
 `hide: false` gives the step a pane while the project hides commands. `hide: true` keeps the step
 detached while the project shows them. Without `hide:`, the step follows `dispatch.hide_commands`.
 
@@ -441,8 +441,8 @@ patch, then promote again.
 A shown command behaves the same whichever setting showed it. The pane stays open after the
 command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit
 pushes it out. So a `hide: false` step in a project that hides commands takes a lane slot and
-keeps its pane, even though every other command there is hidden. See [Commands are hidden by
-default](dispatcher.md#commands-are-hidden-by-default). `hide:` is separate from the internal
+keeps its pane, even though every other command there is hidden. See [Commands are shown by
+default](dispatcher.md#commands-are-shown-by-default). `hide:` is separate from the internal
 test-only dispatcher backend, which has no panes and runs every command detached.
 
 A paned step's script is written to `<task> · <step>.sh` beside the log, readable by you alone,

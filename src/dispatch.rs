@@ -25411,8 +25411,8 @@ mod tests {
     /// found the workspace already open and split a second pane.
     #[test]
     fn an_agent_step_after_a_hidden_command_takes_the_workspaces_first_pane() {
-        let (repo, _root_guard) = fixture("first-pane-hidden-then-agent");
-        assert!(repo.config.dispatch.hide_commands);
+        let (mut repo, _root_guard) = fixture("first-pane-hidden-then-agent");
+        repo.config.dispatch.hide_commands = true;
         let path = add_task(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("true", false);
@@ -25445,8 +25445,8 @@ mod tests {
     /// step and no workspace was opened for the agent.
     #[test]
     fn a_hidden_first_step_opens_no_workspace_until_an_agent_step_needs_one() {
-        let (repo, _root_guard) = fixture("lazy-workspace-hidden-then-agent");
-        assert!(repo.config.dispatch.hide_commands);
+        let (mut repo, _root_guard) = fixture("lazy-workspace-hidden-then-agent");
+        repo.config.dispatch.hide_commands = true;
         let path = add_task(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![])
             .offering_panes()
@@ -26149,15 +26149,15 @@ mod tests {
         assert!(runs.pane(&key).is_some(), "its pane is still recorded");
     }
 
-    /// The default: a command step opens no pane, and still logs to the same
+    /// With `hide_commands = true`: a command step opens no pane, and still logs to the same
     /// file with the same named environment a shown run gets.
     ///
     /// Fails before `hide_commands` existed, when a command step on a backend
     /// that offers panes always opened one.
     #[test]
     fn a_hidden_command_opens_no_pane_and_logs_to_the_same_file() {
-        let (repo, _root_guard) = fixture("command-hidden");
-        assert!(repo.config.dispatch.hide_commands);
+        let (mut repo, _root_guard) = fixture("command-hidden");
+        repo.config.dispatch.hide_commands = true;
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo hidden; echo \"task=$SPOOLWAY_TASK\"", false);

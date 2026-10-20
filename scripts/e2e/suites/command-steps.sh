@@ -842,10 +842,10 @@ else bad "a command step is not confined to its worktree (at \`$(stage_of unconf
 works "and it really did write where no lane could" test -f "$OUTSIDE"
 
 # ------------------------------------------------------------------ a pane, or none
-# With `dispatch.hide_commands` set to `false`, a command step with no
-# `hide:` runs in a pane of its own, under a real multiplexer. By default,
-# and with `hide: true`, it runs silent and detached. With
-# `hide_commands = true`, a step with `hide: false` still gets its pane.
+# By default, and with `dispatch.hide_commands` set to `false`, a command step
+# with no `hide:` runs in a pane of its own, under a real multiplexer. With
+# `hide_commands = true`, and with `hide: true`, it runs silent and detached.
+# With `hide_commands = true`, a step with `hide: false` still gets its pane.
 # None of the three is provable against the headless backend the rest of this suite runs on — a
 # pane is the one thing only a real pane can be asked whether it opened — so
 # this switches to `herdr`, against `scripts/e2e/herdr-stub.sh`, for as long
@@ -861,9 +861,8 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-# Commands are hidden by default, which opens no pane; the cases below are
-# about the pane a shown one gets.
-must "commands shown" "$SPOOLWAY" config set dispatch.hide_commands false
+# Commands are shown by default, which opens a pane; the cases below are about
+# that pane, so they read the default and set nothing.
 
 # The pane gate itself, proven end to end rather than only by the unit tests
 # in src/commands/dispatch.rs — those already know the answer they are
@@ -1104,7 +1103,7 @@ else
   ok "a shown command's pane is closed once its task is done"
 fi
 
-# The hidden half: the same shape, with `hide: true` added — today's
+# The hidden half: the same shape, with `hide: true` added — a
 # silent, detached run, and no pane ever asked for. Held open by a release
 # file of its own for the same reason the visible half is: its log is read
 # while it runs, and the archive reclaims that log the moment the one step
@@ -1223,7 +1222,7 @@ else bad "the task finishes and is archived (at \`$(stage_of lazy)\`)"; fi
 # no `hide:` key, follows the project and opens none. Each is held by a release
 # file for the reason the visible half is: the pane file and the log are read
 # while the step runs, and the archive reclaims them.
-must "commands hidden again" "$SPOOLWAY" config set dispatch.hide_commands true
+must "commands hidden" "$SPOOLWAY" config set dispatch.hide_commands true
 OVERRIDE_RELEASE="$LIVE/override.release"
 FOLLOW_RELEASE="$LIVE/follow.release"
 rm -f "$OVERRIDE_RELEASE" "$FOLLOW_RELEASE"

@@ -94,9 +94,9 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.hide_commands",
         values: "true, false",
-        default: "true",
-        sentence: "Whether a command step runs without a pane. Set to `false` and its pane \
-                    stays open after it exits, counting toward `visible_lanes`.",
+        default: "false",
+        sentence: "Whether a command step runs without a pane. Off, its pane stays open \
+                    after it exits, counting toward `visible_lanes`.",
     },
     Reference {
         key: "dispatch.lane_layout",
@@ -1510,27 +1510,27 @@ mod tests {
         assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
     }
 
-    /// `hide_commands` is a bool, written even while it is `true`.
+    /// `hide_commands` is a bool, written even while it is `false`.
     #[test]
     fn hide_commands_is_readable_and_writable_at_its_default() {
         let config = Config::default();
-        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "true");
+        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "false");
 
-        let shown = set(&config, "dispatch.hide_commands", "false").unwrap();
-        assert!(!shown.dispatch.hide_commands);
-        assert_eq!(get(&shown, "dispatch.hide_commands").unwrap(), "false");
+        let hidden = set(&config, "dispatch.hide_commands", "true").unwrap();
+        assert!(hidden.dispatch.hide_commands);
+        assert_eq!(get(&hidden, "dispatch.hide_commands").unwrap(), "true");
         assert!(
-            toml::to_string(&shown)
+            toml::to_string(&hidden)
                 .unwrap()
-                .contains("hide_commands = false")
+                .contains("hide_commands = true")
         );
 
-        let back = set(&shown, "dispatch.hide_commands", "true").unwrap();
-        assert!(back.dispatch.hide_commands);
+        let back = set(&hidden, "dispatch.hide_commands", "false").unwrap();
+        assert!(!back.dispatch.hide_commands);
         assert!(
             toml::to_string(&back)
                 .unwrap()
-                .contains("hide_commands = true")
+                .contains("hide_commands = false")
         );
         assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
     }

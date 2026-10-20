@@ -275,7 +275,7 @@ auto_commit = true           # commit a lane's leftover work when its step settl
 priority = "group"           # fill a free slot from a group already running first; "any" weighs every ready task
 lane_child_ceiling = "1h"    # how long a lane's running child process excuses it from reminders
 visible_lanes = 3            # a task's most recent lanes kept open, or "all"
-hide_commands = true         # run command steps without a pane
+hide_commands = false        # true runs command steps without a pane
 lane_layout = "panes"        # every step a pane of one tab; "tabs" gives each step its own tab
 
 [unattended]

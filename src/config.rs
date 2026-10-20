@@ -631,14 +631,16 @@ pub struct DispatchConfig {
     pub visible_lanes: VisibleLanes,
 
     /// Whether a command step runs detached, with no pane, so it never takes
-    /// a place in its task's tab. On by default: a gate's pane used to close
-    /// the moment its exit code was read, so it only ever cost the lanes
-    /// beside it their room. Its output is in the run's log either way.
+    /// a place in its task's tab. Its output is in the run's log either way.
     ///
-    /// Off, a command opens a pane like an agent step's and keeps it after
-    /// the command exits. It then counts toward [`Self::visible_lanes`] and
-    /// closes oldest first like a finished agent lane. A pane whose command is
-    /// still running is never closed for the limit.
+    /// Off by default, so a failed gate's output stays on screen. A command
+    /// then opens a pane like an agent step's and keeps it after the command
+    /// exits. It counts toward [`Self::visible_lanes`] and closes oldest first
+    /// like a finished agent lane. A pane whose command is still running is
+    /// never closed for the limit.
+    ///
+    /// A config that already writes `hide_commands = true` keeps hiding: the
+    /// default only fills a key the file never names.
     ///
     /// A step's own `hide:` overrides this for that step, in either
     /// direction; a step with no `hide:` follows it.
@@ -708,7 +710,7 @@ impl Default for DispatchConfig {
             auto_commit: true,
             priority: Priority::default(),
             visible_lanes: VisibleLanes::default(),
-            hide_commands: true,
+            hide_commands: false,
             lane_layout: LaneLayout::default(),
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
@@ -3993,22 +3995,23 @@ mod tests {
         );
     }
 
-    /// `hide_commands` is written while it is `true`, and when a person turns
-    /// it off.
+    /// `hide_commands` is written while it holds its default of `false`, a
+    /// config that never names it loads `false`, and a written `true` stays.
     #[test]
     fn hide_commands_is_written_in_a_defaulted_config() {
         let config = Config::default();
-        assert!(config.dispatch.hide_commands);
+        assert!(!config.dispatch.hide_commands);
         assert!(
             toml::to_string(&config)
                 .unwrap()
-                .contains("hide_commands = true")
+                .contains("hide_commands = false")
         );
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
-        assert!(absent.dispatch.hide_commands);
+        assert!(!absent.dispatch.hide_commands);
 
         let on: Config = toml::from_str("[dispatch]\nhide_commands = true\n").unwrap();
+        assert!(on.dispatch.hide_commands);
         assert!(
             toml::to_string(&on)
                 .unwrap()
@@ -4179,7 +4182,7 @@ mod tests {
             "priority = \"group\"",
             "lane_child_ceiling = \"1h\"",
             "visible_lanes = 3",
-            "hide_commands = true",
+            "hide_commands = false",
             "lane_layout = \"panes\"",
         ] {
             assert!(body.contains(line), "{line} missing from {body}");
@@ -4190,7 +4193,7 @@ mod tests {
         assert_eq!(back.dispatch.priority, Priority::Group);
         assert_eq!(back.dispatch.lane_child_ceiling, Duration::from_secs(3600));
         assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(3));
-        assert!(back.dispatch.hide_commands);
+        assert!(!back.dispatch.hide_commands);
         assert_eq!(back.dispatch.lane_layout, LaneLayout::Panes);
         config.agrees_with(&rendered).unwrap();
     }
