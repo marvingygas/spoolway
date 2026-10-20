@@ -276,8 +276,10 @@ pub(crate) fn cheap_findings(
     report.record_all(cheap_branch_checks(repo, &tasks));
     report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
-    if let Err(why) = crate::release::dispatcher_bin_dir() {
-        report.record(Finding::Note(why.clone()));
+    // Asked afresh, not read from the cache: the dispatch tab asks this on
+    // every start, from a process that may have outlived an update.
+    if let Err(why) = crate::release::dispatcher_bin_dir_now() {
+        report.record(Finding::Note(why));
     }
     report.record(Finding::Check(
         "git identity".into(),
@@ -6383,6 +6385,23 @@ mod tests {
                 Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
                     !t.starts_with("editor") && !t.contains("editor.toml"),
             }),
+            "{warnings:?}"
+        );
+    }
+
+    /// A dispatcher whose folder no longer holds its own `spoolway` says so
+    /// among the settings, which is what the dispatch tab shows before it
+    /// starts a run.
+    #[test]
+    fn cheap_findings_notes_a_dispatcher_folder_that_lanes_cannot_use() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-bin-dir");
+        crate::release::test_dir::pin_answer(Err("lanes use the `spoolway` on PATH: gone".into()));
+
+        let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default(), false);
+        assert!(
+            warnings.iter().any(
+                |w| matches!(w, Warning::Setting(t) if t == "lanes use the `spoolway` on PATH: gone")
+            ),
             "{warnings:?}"
         );
     }

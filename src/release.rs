@@ -694,10 +694,26 @@ pub fn dispatcher_bin_dir() -> &'static Result<Option<PathBuf>, String> {
         return answer;
     }
     static DIR: std::sync::OnceLock<Result<Option<PathBuf>, String>> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| match std::env::current_exe() {
+    DIR.get_or_init(dispatcher_bin_dir_now)
+}
+
+/// [`dispatcher_bin_dir`]'s question asked afresh, for the process that is
+/// about to start a dispatcher and has to say what that dispatcher will find.
+///
+/// The board's dispatch tab is such a process. It starts a child from its own
+/// binary and lives across installs, so its cached answer may be from before
+/// an update. The child judges the binary at startup, and the board's own
+/// executable is the one the child runs, so a fresh look here is the child's
+/// answer.
+pub fn dispatcher_bin_dir_now() -> Result<Option<PathBuf>, String> {
+    #[cfg(test)]
+    if let Some(answer) = test_dir::current() {
+        return answer.clone();
+    }
+    match std::env::current_exe() {
         Ok(exe) => resolve_bin_dir(&exe, current()),
         Err(_) => Ok(None),
-    })
+    }
 }
 
 /// [`dispatcher_bin_dir`]'s answer for one executable path and version.
@@ -882,9 +898,14 @@ pub(crate) mod test_dir {
     }
 
     /// Make this thread's dispatcher run from `dir` until the thread ends.
-    /// The answer is leaked, which a test process can afford.
     pub(crate) fn pin(dir: &Path) {
-        let answer: &'static _ = Box::leak(Box::new(Ok(Some(dir.to_path_buf()))));
+        pin_answer(Ok(Some(dir.to_path_buf())));
+    }
+
+    /// Make this thread's dispatcher get `answer` until the thread ends.
+    /// The answer is leaked, which a test process can afford.
+    pub(crate) fn pin_answer(answer: Result<Option<PathBuf>, String>) {
+        let answer: &'static _ = Box::leak(Box::new(answer));
         DIR.with(|slot| *slot.borrow_mut() = Some(answer));
     }
 }

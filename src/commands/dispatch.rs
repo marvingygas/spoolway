@@ -194,13 +194,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // while this process still runs the binary it started as: an update
     // during a long run replaces the file under it, and a first look taken
     // when the first lane starts would judge the new install instead. The
-    // warnings gate below shows a refusal as a setting; the dispatch tab
-    // skips that gate, so the child says it on stderr, which the tab shows.
-    if args.screen
-        && let Err(why) = crate::release::dispatcher_bin_dir()
-    {
-        eprintln!("{why}");
-    }
+    // person is told of a refusal as a setting, by the gate below or by the
+    // dispatch tab's popup, which judged the same binary a moment before.
+    let _ = crate::release::dispatcher_bin_dir();
     if !args.screen {
         if !overrides_gate(repo)? {
             return Ok(0);
