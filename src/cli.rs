@@ -1562,14 +1562,17 @@ pub enum PipelineCommand {
     /// into.
     Promote(PipelinePromoteArgs),
 
-    /// Rename a private pipeline and move the tasks naming it onto the new
-    /// name — how a name clash with a tracked pipeline is settled.
+    /// Rename a private pipeline and move what names it onto the new name —
+    /// how a name clash with a tracked pipeline is settled.
     ///
     /// Renames `local/pipelines/<old>.yml`, and its private skeleton with it
-    /// when it has one. Every task naming `<old>` is rewritten to name
-    /// `<new>`, so each keeps the steps it was queued with. Refused when
-    /// `<new>` already names a pipeline, tracked or private, when `<old>` is
-    /// not private, in a lane, and while a task on `<old>` is on a step.
+    /// when it has one. Every queued task, drafted task and user job naming
+    /// `<old>` is rewritten to name `<new>`, so each keeps the steps it was
+    /// queued with. A job in the tracked `.spoolway/jobs.toml` is named and
+    /// left alone. Refused when `<new>` already names a pipeline, tracked or
+    /// private, when `<old>` is not private, in a lane, while a task on
+    /// `<old>` is on a step, and while a task file that will not parse may
+    /// name `<old>`.
     Rename(PipelineRenameArgs),
 }
 

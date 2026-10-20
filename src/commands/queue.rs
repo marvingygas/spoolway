@@ -7307,7 +7307,7 @@ fn handle_gate_key(
 /// Shared by [`with_gate`], which never writes this back to disk, and
 /// [`write_back_ids`], which does — this only ever touches the text in
 /// memory; what happens to the result is each caller's own business.
-fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
+pub(super) fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     // `split_fence` accepts a leading byte order mark, so a routine saved
     // with one reaches here too. `trim` does not count it as whitespace, so
     // left on, the fence would not be found and the id would go unminted.

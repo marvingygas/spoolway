@@ -264,6 +264,66 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Whether a task file that will not parse still looks as if it names
+/// `pipeline`: a top-level `pipeline:` line holding that name, quotes or not.
+/// A file that cannot even be read counts as naming it, because nothing says
+/// it does not.
+///
+/// For a caller that must not step past a task on a pipeline it is about to
+/// rename. The task cannot be moved while its file is broken, and once the
+/// file is mended it would still name the old pipeline.
+pub(crate) fn unparsed_file_may_name_pipeline(path: &Path, pipeline: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    text.lines().any(|line| {
+        line.strip_prefix("pipeline:")
+            .is_some_and(|value| value.trim().trim_matches(['"', '\'']) == pipeline)
+    })
+}
+
+/// The task files in `dir` that name `pipeline`, split by whether this
+/// reader can say so for certain.
+pub(crate) struct NamingPipeline {
+    /// Files that parse and carry `pipeline: <name>` in their front matter.
+    pub parsed: Vec<PathBuf>,
+    /// Files that do not parse but may still name it, see
+    /// [`unparsed_file_may_name_pipeline`].
+    pub unparsed: Vec<PathBuf>,
+}
+
+/// Every task file directly in `dir` naming `pipeline`, read the way
+/// [`list_groups_in`] reads a pending task's `pipeline:` key.
+///
+/// `dir` is [`Repo::pending_dir`] for `pipeline rename`: a drafted task names
+/// its pipeline there just as a queued one does, and it keeps that name until
+/// somebody queues it.
+pub(crate) fn files_naming_pipeline(dir: &Path, pipeline: &str) -> Result<NamingPipeline> {
+    let mut found = NamingPipeline {
+        parsed: Vec::new(),
+        unparsed: Vec::new(),
+    };
+    for path in md_files(dir)? {
+        let front = std::fs::read_to_string(&path).ok().and_then(|doc| {
+            let (yaml, _) = crate::task::split_fence(&doc).ok()?;
+            serde_norway::from_str::<serde_norway::Value>(yaml).ok()
+        });
+        match front {
+            Some(front) => {
+                if front_pipeline_name(&front).is_some_and(|name| name.trim() == pipeline) {
+                    found.parsed.push(path);
+                }
+            }
+            None => {
+                if unparsed_file_may_name_pipeline(&path, pipeline) {
+                    found.unparsed.push(path);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Every group across the pending directory, the queue directory and the
 /// archive directory — queueable groups before queued ones before done ones,
 /// and each third newest-written first — the order the left pane draws, so

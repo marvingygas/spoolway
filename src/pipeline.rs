@@ -2755,10 +2755,15 @@ impl Pipelines {
 /// and only from [`Pipelines::load`] (never `load_tracked`), by
 /// [`Pipelines::load_impl`]. See [`crate::local`].
 ///
-/// One refusal here, fatal rather than skipped the way a stale override is:
-/// a private pipeline or prompt whose name already belongs to a tracked one
-/// (nothing private may stand in for a tracked file, so this cannot be
-/// allowed to sit there silently shadowed).
+/// A private pipeline whose name already belongs to a tracked one is not a
+/// failure of the load. Nothing private may stand in for a tracked file, and
+/// neither may run, so both leave the set and the name is recorded in
+/// `clashes`: a task naming it is held, every other pipeline is untouched,
+/// and `pipeline rename` settles it. Two cases are fatal instead, rather than
+/// skipped the way a stale override is: a private prompt whose name already
+/// belongs to a tracked one, and two private files of one pipeline name.
+/// Neither has a command that settles it, and both would sit there silently
+/// shadowed.
 ///
 /// A *tracked* pipeline's step naming a prompt that exists only privately —
 /// that pipeline would break the moment it ran anywhere else — is just as
@@ -5172,7 +5177,7 @@ mod tests {
     }
 
     /// A private prompt whose name already belongs to a tracked one is
-    /// refused, naming both files, the same as a private pipeline's clash.
+    /// refused, naming both files. Unlike a pipeline clash, it is not held.
     #[test]
     fn a_private_prompt_naming_a_tracked_prompt_is_refused() {
         with_override_fixture("private-prompt-clash", |root| {

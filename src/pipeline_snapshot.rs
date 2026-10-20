@@ -215,6 +215,15 @@ impl LoadedPipelines {
         self.written.pipelines.keys().map(String::as_str).collect()
     }
 
+    /// Every pipeline name the dispatcher held out of its set because a
+    /// private file clashed with a tracked one, sorted. [`Self::names`] does
+    /// not list them: the dispatcher routes nothing on them, and the "it has"
+    /// list in [`Self::pipelines`]'s refusal would offer a name that cannot
+    /// run.
+    pub fn clash_names(&self) -> Vec<&str> {
+        self.written.clashes.keys().map(String::as_str).collect()
+    }
+
     /// A routing graph holding only the pipelines `names` asks for.
     ///
     /// Refuses a name the dispatcher never loaded, with the restart that

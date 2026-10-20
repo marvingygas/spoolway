@@ -691,10 +691,16 @@ fn routing_for_rows<'a>(
 ) -> Result<std::borrow::Cow<'a, Pipelines>> {
     match (graph, pipeline_snapshot::LoadedPipelines::live(repo)) {
         (Ok(files), _) => Ok(std::borrow::Cow::Borrowed(files)),
-        (Err(_), Some(loaded)) => match loaded.pipelines(&loaded.names()) {
-            Ok(copy) => Ok(std::borrow::Cow::Owned(copy)),
-            Err(_) => routing(graph).map(std::borrow::Cow::Borrowed),
-        },
+        (Err(_), Some(loaded)) => {
+            // The clashed names too: left out, a task held by a name clash
+            // would read "no pipeline `hotfix`" here instead of held.
+            let mut names = loaded.names();
+            names.extend(loaded.clash_names());
+            match loaded.pipelines(&names) {
+                Ok(copy) => Ok(std::borrow::Cow::Owned(copy)),
+                Err(_) => routing(graph).map(std::borrow::Cow::Borrowed),
+            }
+        }
         (Err(_), None) => routing(graph).map(std::borrow::Cow::Borrowed),
     }
 }
@@ -795,6 +801,31 @@ mod tests {
         assert!(routed.names().is_empty());
         let routed = routing_for_task(&repo, &broken, Some("../escape")).unwrap();
         assert!(routed.names().is_empty());
+    }
+
+    /// While a dispatcher runs and the files will not load, a row reads the
+    /// dispatcher's copy, and a task held by a name clash is still held
+    /// there, not "no pipeline". Fails before the change: the copy was built
+    /// from the loaded names alone, which leave a clashed name out.
+    #[test]
+    fn rows_fall_back_to_the_dispatchers_copy_with_its_name_clashes() {
+        let (repo, _root) = crate::commands::testutil::fixture("routing-for-rows-clash");
+        let mut held = Pipelines::builtin();
+        held.clashes.insert(
+            "hotfix".to_string(),
+            pipeline::Clash {
+                tracked: "/r/.spoolway/pipelines/hotfix.yml".into(),
+                private: "/h/local/pipelines/hotfix.yml".into(),
+            },
+        );
+        let broken: Result<Pipelines> = Err(anyhow::anyhow!("t.yml does not parse"));
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        pipeline_snapshot::write(&repo, &held).unwrap();
+
+        let routed = routing_for_rows(&repo, &broken).unwrap();
+
+        assert!(routed.clashes.contains_key("hotfix"));
+        assert!(routed.pipelines.contains_key("default"));
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) {
