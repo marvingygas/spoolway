@@ -11,6 +11,9 @@
 //! Nothing here draws or reads keys. [`delete_set`] works out what a delete
 //! would take, for the confirm popup, and [`delete_pending`] removes it
 //! after checking that the pending directory still says the same thing.
+//!
+//! A plan row on the same screen is deleted here too, by [`delete_plan`]:
+//! its one page under `plans/`, and only while no task names that page.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -268,6 +271,75 @@ pub(crate) fn delete_pending(
     remove_in_order(&removal_order(&now), &repo.pending_dir(), |path| {
         std::fs::remove_file(path)
     })
+}
+
+/// How [`delete_plan`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanDeleteOutcome {
+    Removed,
+    /// A task names the page in `plan:` now, so it was left alone.
+    Named,
+    Failed {
+        /// What went wrong, with no remedy: the popup showing it adds one,
+        /// chosen by `kind`.
+        error: String,
+        /// The kind of the error removing the page gave. `None` when the
+        /// removal was never tried: a read of the task folders that failed,
+        /// or a path that is not a plan page.
+        kind: Option<std::io::ErrorKind>,
+    },
+}
+
+/// Removes the plan page at `page`, if it is still a plan no task names.
+///
+/// The pending, queue and archive folders are read again first, by the
+/// rule the queue screen lists plans by, since a task cut from the plan
+/// after its row was drawn would be left linking to a page that is gone.
+/// A page some task now names answers [`PlanDeleteOutcome::Named`] with
+/// nothing removed.
+///
+/// Only an `.html` file directly inside `plans/` is ever removed, never a
+/// folder there: those hold mockups that tasks link to. A page already gone
+/// counts as removed, the same as [`delete_pending`] treats a missing file.
+pub(crate) fn delete_plan(repo: &Repo, page: &Path) -> PlanDeleteOutcome {
+    let plans = repo.plans_dir();
+    if page.parent() != Some(plans.as_path())
+        || page.extension().and_then(|e| e.to_str()) != Some("html")
+    {
+        return PlanDeleteOutcome::Failed {
+            error: format!(
+                "{} is not a plan page in {}, so nothing was removed",
+                page.display(),
+                plans.display()
+            ),
+            kind: None,
+        };
+    }
+    let groups = match list_groups_and_skipped(repo) {
+        Ok((groups, _)) => groups,
+        Err(err) => {
+            return PlanDeleteOutcome::Failed {
+                error: format!("{err:#}"),
+                kind: None,
+            };
+        }
+    };
+    let path = page.to_string_lossy();
+    if groups
+        .iter()
+        .flat_map(|group| &group.tasks)
+        .any(|task| task.plan.as_deref() == Some(path.as_ref()))
+    {
+        return PlanDeleteOutcome::Named;
+    }
+    match std::fs::remove_file(page) {
+        Ok(()) => PlanDeleteOutcome::Removed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => PlanDeleteOutcome::Removed,
+        Err(err) => PlanDeleteOutcome::Failed {
+            error: err.to_string(),
+            kind: Some(err.kind()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -585,6 +657,87 @@ mod tests {
         assert!(error.contains(&dir.display().to_string()), "{error}");
         assert!(!error.contains("pick delete again"), "{error}");
         assert!(!error.contains("doctor"), "{error}");
+    }
+
+    /// A plan page in `plans/`, as the queue screen lists one.
+    fn plan(repo: &Repo, file: &str) -> PathBuf {
+        let path = repo.plans_dir().join(file);
+        std::fs::write(&path, "<html></html>").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_plan_no_task_names_is_removed_and_nothing_else_is() {
+        let (repo, _guard) = crate::commands::testutil::fixture("pdel-plan");
+        let page = plan(&repo, "2026-10-21-search.html");
+        let other = plan(&repo, "2026-10-20-onboarding.html");
+        let mockups = repo.plans_dir().join("2026-10-21-search");
+        std::fs::create_dir(&mockups).unwrap();
+
+        assert_eq!(delete_plan(&repo, &page), PlanDeleteOutcome::Removed);
+
+        assert!(!page.exists());
+        assert!(other.exists());
+        assert!(mockups.is_dir(), "a folder under plans/ is never touched");
+        // Gone already: the disk says what the delete was asked for.
+        assert_eq!(delete_plan(&repo, &page), PlanDeleteOutcome::Removed);
+    }
+
+    #[test]
+    fn a_plan_a_task_names_now_is_left_alone() {
+        let (repo, _guard) = crate::commands::testutil::fixture("pdel-plan-named");
+        let page = plan(&repo, "2026-10-21-search.html");
+        let extra = format!("plan: {}\n", page.display());
+        std::fs::write(
+            repo.pending_dir().join("search-index.md"),
+            doc("search-index", "search", &extra),
+        )
+        .unwrap();
+
+        assert_eq!(delete_plan(&repo, &page), PlanDeleteOutcome::Named);
+        assert!(page.exists());
+    }
+
+    /// Only an `.html` file directly in `plans/` goes: another kind of file,
+    /// or a page anywhere else, is refused before anything is removed. A
+    /// folder named like a page passes that check, but fails to remove and
+    /// stays.
+    #[test]
+    fn anything_but_a_page_in_plans_is_refused() {
+        let (repo, _guard) = crate::commands::testutil::fixture("pdel-plan-refused");
+        let folder = repo.plans_dir().join("mockups.html");
+        std::fs::create_dir(&folder).unwrap();
+        let note = repo.plans_dir().join("notes.md");
+        std::fs::write(&note, "x").unwrap();
+        let task = write(&repo, "wire", "cart", &[]);
+
+        let outcome = delete_plan(&repo, &note);
+        let PlanDeleteOutcome::Failed { error, kind } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(kind, None);
+        assert_eq!(
+            error,
+            format!(
+                "{} is not a plan page in {}, so nothing was removed",
+                note.display(),
+                repo.plans_dir().display()
+            )
+        );
+        assert!(matches!(
+            delete_plan(&repo, &task),
+            PlanDeleteOutcome::Failed { kind: None, .. }
+        ));
+        assert!(note.exists());
+        assert!(task.exists());
+
+        // Named like a page, but a folder: removing it fails, and it stays.
+        let outcome = delete_plan(&repo, &folder);
+        assert!(
+            matches!(outcome, PlanDeleteOutcome::Failed { kind: Some(_), .. }),
+            "{outcome:?}"
+        );
+        assert!(folder.is_dir());
     }
 
     fn entry(dir: &Path, id: &str, deps: &[&str]) -> DeleteEntry {

@@ -1448,7 +1448,7 @@ pub struct IssueShowArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum GroupCommand {
-    /// List groups with tasks still open, one line each: group, count, task ids.
+    /// List groups with tasks still open, then plans with no tasks, one line each.
     ///
     /// The one-line-per-group format is depended on and is not to be reflowed:
     /// it is how a person sees what a group has left before landing its stack.
@@ -1458,6 +1458,10 @@ pub enum GroupCommand {
     /// finished has no line here. `group:` on a queued task is read verbatim,
     /// never path-parsed — a bare word and a path are different groups even
     /// when they share a file stem.
+    ///
+    /// Plan pages that no task with a `group:` names yet are listed too, after
+    /// the groups, newest first. Their line reads `<name>  0 open — plan <path>`, so a
+    /// script that counts groups can tell a plan from a group by `0 open — plan`.
     List,
 }
 

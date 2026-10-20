@@ -4436,7 +4436,10 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
 
 use super::jobs::WalkStep;
 use super::pending::{Group, GroupState, PendingTask, TaskState};
-use super::pending_delete::{DeleteGroup, DeleteOutcome, DeleteTarget, delete_pending, delete_set};
+use super::pending_delete::{
+    DeleteGroup, DeleteOutcome, DeleteTarget, PlanDeleteOutcome, delete_pending, delete_plan,
+    delete_set,
+};
 use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
@@ -4558,6 +4561,20 @@ enum Mode {
         target: DeleteTarget,
         set: Vec<DeleteGroup>,
     },
+    /// The options menu's delete popup over a plan row: `page`, the one
+    /// plan page it removes, held from when delete was picked for the same
+    /// reason [`Mode::DeletePending`] holds its set. `enter` on its one
+    /// answer, `delete`, removes it through [`delete_plan`], which refuses
+    /// if a task names the page by then. `esc` keeps it. Every other key
+    /// does nothing.
+    DeletePlan {
+        title: String,
+        page: std::path::PathBuf,
+    },
+    /// The notice a plan page that could not be removed opens: the error,
+    /// the file and what to fix. Unlike [`Mode::Outcome`] it is closed by
+    /// `esc` and nothing else, which its own key row says.
+    PlanNotDeleted(Notice),
     /// The options menu's new job schedule and pipeline popups over the
     /// routines pane `nav` describes, writing a job for the routine
     /// highlighted when new job was picked. The popups, their keys and the save are the jobs tab's own —
@@ -5167,16 +5184,26 @@ fn task_key(task: &PendingTask) -> TaskKey {
     task.path.display().to_string()
 }
 
-/// A selected group, addressed by its `group:` string.
+/// A selected group, addressed by its `group:` string, or a plan row,
+/// addressed by its page's absolute path.
 ///
 /// A whole group is the unit a person submits: its tasks are a chain, written
 /// together and ordered by `depends_on`, and half a chain in the queue is a
 /// task waiting on a dependency nobody queued. The tasks pane is what that
 /// group holds, not a second list to pick from.
+///
+/// A plan row is not keyed by its name, because a group of the same name can
+/// be listed beside it: a slug planned again after its first group finished
+/// is one. Keyed by name, every lookup would find whichever of the two sorts
+/// first, and trial or save as routine on the done group would act on the
+/// plan's empty task list instead.
 type GroupKey = String;
 
 fn group_key(group: &Group) -> GroupKey {
-    group.name.clone()
+    match &group.page {
+        Some(page) => page.to_string_lossy().into_owned(),
+        None => group.name.clone(),
+    }
 }
 
 /// Whether a group can be submitted at all: it has to have tasks, and at
@@ -5386,6 +5413,9 @@ pub(crate) struct ScreenState {
 struct NamedFiles {
     dir: std::path::PathBuf,
     files: std::collections::BTreeSet<std::path::PathBuf>,
+    /// Why `plans/` would not read, as last named — see
+    /// [`announce_plans_error`].
+    plans: Option<String>,
 }
 
 impl ScreenState {
@@ -5417,7 +5447,7 @@ impl ScreenState {
 }
 
 /// Whether `group` is one this screen lists at all, under any [`HideScope`]
-/// or filter: queueable or done, never [`GroupState::Queued`]. The "nothing
+/// or filter: queueable, a plan or done, never [`GroupState::Queued`]. The "nothing
 /// to queue — N hidden" count is taken over these alone, so it never counts
 /// a group no key here can bring back.
 fn reachable(group: &Group) -> bool {
@@ -5431,7 +5461,11 @@ fn visible(groups: &[Group], scope: HideScope) -> Vec<&Group> {
     groups
         .iter()
         .filter(|group| match scope {
-            HideScope::Pending => group.state == GroupState::Queueable,
+            // A plan row is never hidden: `h` hides what is finished, and
+            // a plan's tasks are not even cut yet.
+            HideScope::Pending => {
+                matches!(group.state, GroupState::Queueable | GroupState::Plan)
+            }
             HideScope::PlusDone => reachable(group),
         })
         .collect()
@@ -5598,7 +5632,11 @@ pub(crate) fn queue_tab(
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
-    let (groups, skipped) = super::pending::list_groups_and_skipped(repo)?;
+    let super::pending::Rows {
+        groups,
+        unreadable: skipped,
+        plans_error,
+    } = super::pending::list_rows(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
     let dir = repo.pending_dir();
@@ -5607,9 +5645,13 @@ pub(crate) fn queue_tab(
             .waiting
             .push_back(outcome(opening_title(&groups), msg));
     }
+    if let Some(err) = &plans_error {
+        state.waiting.push_back(plans_notice(err));
+    }
     state.named = Some(NamedFiles {
         dir,
         files: skipped.into_iter().collect(),
+        plans: plans_error,
     });
     state.mode = state.after_popup(Mode::Browsing);
     let exit = run_screen_from(
@@ -5740,6 +5782,7 @@ fn run_screen_from(
                 .iter()
                 .flat_map(|named| named.files.iter().cloned())
                 .collect(),
+            plans_error: state.named.as_ref().and_then(|named| named.plans.clone()),
         },
     );
     // The seed above lands as generation 0 and is already in `groups`, so
@@ -6056,6 +6099,26 @@ fn run_screen_from(
                 // keystroke can neither delete nor dismiss it.
                 _ => {}
             },
+            Mode::DeletePlan { page, .. } => match key {
+                Key::Enter => {
+                    let page = page.clone();
+                    let outcome = delete_plan(repo, &page);
+                    state.mode = after_plan_delete(repo, &mut groups, &mut state, &page, outcome);
+                    // A reading already in flight could still carry the
+                    // removed page back, as after a pending delete.
+                    known_reading = known_reading.max(reader.started_count());
+                }
+                Key::Esc => state.mode = Mode::Browsing,
+                // Every other key leaves the popup open, so a stray
+                // keystroke can neither delete nor dismiss it.
+                _ => {}
+            },
+            // `esc` closes it, and nothing else does, as its key row says.
+            Mode::PlanNotDeleted(_) => {
+                if key == Key::Esc {
+                    state.mode = state.after_popup(Mode::Browsing);
+                }
+            }
             Mode::Options(menu) => match key {
                 Key::Esc => state.mode = menu.closed(),
                 Key::Enter => {
@@ -6242,10 +6305,14 @@ fn wait_for_key(
 }
 
 /// Swap `fresh` into `groups`, keeping `group_cursor` on whatever group it
-/// was pointing at, by name, rather than by index — a reload can reorder the
-/// list out from under it, since `list_groups` sorts newest first and an
-/// edit touches a task's own modified time — and clamping it back on screen
-/// the ordinary way when that group is gone.
+/// was pointing at, by its [`GroupKey`], rather than by index — a reload can
+/// reorder the list out from under it, since `list_rows` sorts newest first
+/// and an edit touches a task's own modified time — and clamping it back on
+/// screen the ordinary way when that group is gone.
+///
+/// A plan row whose tasks were just cut is gone from `fresh`, and the cursor
+/// moves to the group whose tasks name its page in `plan:`. That group may
+/// carry any name, so it is found by the page, not by the plan's name.
 ///
 /// Shared by [`reload`], which fetches `fresh` synchronously on the calling
 /// thread, and [`refresh_from_reader`], which takes it from whatever
@@ -6254,14 +6321,20 @@ fn wait_for_key(
 fn adopt_groups(fresh: Vec<Group>, groups: &mut Vec<Group>, state: &mut ScreenState) {
     let cursor = shown(groups, state)
         .get(state.group_cursor)
-        .map(|group| group_key(group));
+        .map(|group| (group_key(group), group.page.is_some()));
     *groups = fresh;
-    if let Some(key) = cursor
-        && let Some(index) = shown(groups, state)
+    if let Some((key, was_plan)) = cursor {
+        let shown = shown(groups, state);
+        let cut_from = |group: &&Group| {
+            was_plan && group.tasks.iter().any(|t| t.plan.as_deref() == Some(&key))
+        };
+        if let Some(index) = shown
             .iter()
             .position(|group| group_key(group) == key)
-    {
-        state.group_cursor = index;
+            .or_else(|| shown.iter().position(cut_from))
+        {
+            state.group_cursor = index;
+        }
     }
     clamp_cursors(groups, state);
 }
@@ -6279,12 +6352,13 @@ fn adopt_groups(fresh: Vec<Group>, groups: &mut Vec<Group>, state: &mut ScreenSt
 /// never waits on this itself — but kept, test-only, as the plain
 /// synchronous read it always was: its own test below is what checks the
 /// cursor-preserving swap in [`adopt_groups`] directly, against a real
-/// `list_groups` read, without a reader thread's timing in the way.
+/// `list_rows` read, without a reader thread's timing in the way.
 #[cfg(test)]
 fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
-    let Ok(fresh) = super::pending::list_groups(repo) else {
+    let Ok(rows) = super::pending::list_rows(repo) else {
         return;
     };
+    let fresh = rows.groups;
     adopt_groups(fresh, groups, state);
 }
 
@@ -6300,11 +6374,14 @@ struct QueueSnapshot {
     /// The pending files [`super::pending::list_groups_and_skipped`] passed
     /// over, read in the same pass as `groups`.
     unreadable: Vec<std::path::PathBuf>,
+    /// Why `plans/` would not read in that pass — see
+    /// [`super::pending::Rows::plans_error`].
+    plans_error: Option<String>,
 }
 
 /// The read [`run_screen_from`]'s loop used to run on the key thread itself
 /// — `crate::repo::branch_at` for `state.board_branch`, every key, and
-/// `super::pending::list_groups_and_skipped` once a second while idle — kept
+/// `super::pending::list_rows` once a second while idle — kept
 /// off that thread by a thread of its own: [`crate::status`]'s own generic
 /// `Reader<T>`, the same `board-reader-thread` decision the dispatch tab's
 /// board already reuses for its own `Snapshot`, rather than a second copy
@@ -6341,10 +6418,10 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 /// What lets a reading of the queue tab be skipped when nothing it looks at
 /// has moved.
 ///
-/// A reading looks at the pending, queue and archive directories, the files
-/// in the first two, and the checkout's `HEAD`. [`crate::watch::Stamp`]
-/// records all of them before each reading, and a tick whose stamp equals the
-/// last settled one returns [`Attempt::Unchanged`] without starting a
+/// A reading looks at the pending, queue, archive and plans directories, the
+/// files in the first two, the `plans-since` stamp, and the checkout's
+/// `HEAD`. [`crate::watch::Stamp`] records all of them before each reading,
+/// and a tick whose stamp equals the last settled one returns [`Attempt::Unchanged`] without starting a
 /// process, reading a file or building a snapshot. The reader keeps the
 /// snapshot it already holds, so [`refresh_from_reader`] sees no new
 /// generation and copies nothing.
@@ -6363,10 +6440,14 @@ impl IdleCheck {
         let head = self.branch.head_path(cwd);
         let stamp = crate::watch::Stamp::capture(
             &[repo.pending_dir(), repo.queue_dir()],
-            &[repo.archive_dir()]
-                .into_iter()
-                .chain(head)
-                .collect::<Vec<_>>(),
+            &[
+                repo.archive_dir(),
+                repo.plans_dir(),
+                repo.home().join(super::pending::PLANS_SINCE),
+            ]
+            .into_iter()
+            .chain(head)
+            .collect::<Vec<_>>(),
         );
         if let Some(before) = &self.stamp
             && stamp.unchanged_since(before)
@@ -6382,7 +6463,7 @@ impl IdleCheck {
     }
 }
 
-/// [`super::pending::list_groups_and_skipped`] and
+/// [`super::pending::list_rows`] and
 /// [`crate::repo::branch_at`], together
 /// — what [`QueueReader`] reads on its own thread once its seed has been
 /// handed back once. `None` when the pending directory itself cannot be
@@ -6394,12 +6475,13 @@ fn build_queue_snapshot(
     cwd: &std::path::Path,
     watch: &mut crate::watch::BranchWatch,
 ) -> Option<QueueSnapshot> {
-    let (groups, unreadable) = super::pending::list_groups_and_skipped(repo).ok()?;
+    let rows = super::pending::list_rows(repo).ok()?;
     let branch = watch.read(cwd, || crate::repo::branch_at(cwd));
     Some(QueueSnapshot {
-        groups,
+        groups: rows.groups,
         branch,
-        unreadable,
+        unreadable: rows.unreadable,
+        plans_error: rows.plans_error,
     })
 }
 
@@ -6438,6 +6520,7 @@ fn refresh_from_reader(
     // named. This only compares the standing reading's list of broken files
     // with the ones already named; it copies nothing.
     announce_unreadable(&snapshot.unreadable, groups, state);
+    announce_plans_error(snapshot.plans_error.as_ref(), state);
 }
 
 /// Name the pending files in `current` that this screen has not named yet.
@@ -6468,6 +6551,38 @@ fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: 
     }
 }
 
+/// The notice that names why `plans/` would not read: the plan rows are
+/// missing until it reads again, which the next reading tries.
+fn plans_notice(err: &str) -> Mode {
+    outcome(
+        "plans not listed",
+        format!(
+            "Plan pages are missing from this list, because {err}.\n\n\
+             Make that path a folder this user can read, and the next read \
+             lists them."
+        ),
+    )
+}
+
+/// Name why `plans/` would not read, once for each error, by the rules
+/// [`announce_unreadable`] keeps: only over plain browsing, and forgotten
+/// once the folder reads again, so breaking it again is named again. A tab
+/// with no [`NamedFiles`] names nothing.
+fn announce_plans_error(error: Option<&String>, state: &mut ScreenState) {
+    let browsing = matches!(state.mode, Mode::Browsing);
+    let Some(named) = state.named.as_mut() else {
+        return;
+    };
+    match error {
+        None => named.plans = None,
+        Some(err) if browsing && named.plans.as_ref() != Some(err) => {
+            named.plans = Some(err.clone());
+            state.mode = plans_notice(err);
+        }
+        Some(_) => {}
+    }
+}
+
 /// The highlighted group's tasks, or `None` when nothing is under the cursor
 /// at all — an empty pending directory, or a filter that matched nothing.
 fn highlighted_tasks<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a [PendingTask]> {
@@ -6492,9 +6607,9 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 /// offers open task, then open plan where [`super::pending::plan_of`]
 /// finds a `plan:` on it, then gate, and then delete while the task is still
 /// a pending file. Over the groups pane a group offers trial and then save as
-/// routine, both only where [`trial_target`] allows them, so a group with
-/// no tasks opens the menu with nothing in it, and then delete while the
-/// group holds at least one pending file. Delete is never offered on a
+/// routine, both only where [`trial_target`] allows them, and then delete
+/// while the group holds at least one pending file. A plan row there offers
+/// open plan and then delete, both on its page. Delete is never offered on a
 /// queued or done task: those files live in the queue or the archive, which
 /// this menu does not touch. `None`, and no menu, when the focused pane
 /// highlights no row at all: an empty pending directory, a filter that
@@ -6514,6 +6629,11 @@ fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu>
             }
             (task.id.clone(), task_key(task), items)
         }
+        Focus::Groups if group.page.is_some() => (
+            group.name.clone(),
+            group_key(group),
+            vec![RowOption::OpenPlan, RowOption::Delete],
+        ),
         Focus::Groups => {
             let mut items = match trial_target(groups, state) {
                 Some(_) => vec![RowOption::Trial, RowOption::SaveRoutine],
@@ -6596,9 +6716,10 @@ impl Picked<'_> {
     /// `item` picked off `menu`: exactly what its old key ran, through that
     /// key's own check, so an item whose row no longer allows it does
     /// nothing. Delete on the pending screen, which had no key, opens its
-    /// popup through [`begin_pending_delete`]. On the pending screen the
-    /// menu's row must also still be the highlighted one — see
-    /// [`OptionsMenu`]'s `row` — or the menu closes having done nothing.
+    /// popup through [`begin_pending_delete`], or [`begin_plan_delete`] on a
+    /// plan row. On the pending screen the menu's row must also still be the
+    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
+    /// having done nothing.
     fn run(
         &self,
         groups: &[Group],
@@ -6651,7 +6772,9 @@ impl Picked<'_> {
                     name: group.name.clone(),
                 })
             }
-            RowOption::Delete => begin_pending_delete(groups, state).unwrap_or(closed),
+            RowOption::Delete => begin_plan_delete(groups, state)
+                .or_else(|| begin_pending_delete(groups, state))
+                .unwrap_or(closed),
             // The routines tab's new job is never put on the pending
             // screen's menu.
             RowOption::NewJob => closed,
@@ -6903,15 +7026,31 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
 }
 
 /// Open plan over the pending screen: open the page the highlighted task's
-/// `plan:` names in the default browser, through
-/// [`crate::browser::open_plan`], which starts it in the background so the
-/// screen never waits on it.
+/// `plan:` names, or the highlighted plan row's own page, in the default
+/// browser, through [`crate::browser::open_plan`], which starts it in the
+/// background so the screen never waits on it.
 ///
 /// `plan:` is read off the task file again here, not trusted from when the
 /// menu opened: a task that lost it since then gets nothing done. A page
 /// that is gone, or a machine with no opener, comes back as the
 /// [`Mode::Outcome`] popup, for the reason [`open_highlighted`] gives.
+///
+/// A plan row whose page is gone gets nothing done either: the row leaves
+/// on the next read, and the popup for a gone page tells a person to fix
+/// the `plan:` of a task this row does not have.
 fn open_highlighted_plan(groups: &[Group], state: &ScreenState) -> Mode {
+    if let Some(page) = highlighted_plan_page(groups, state) {
+        if !page.exists() {
+            return Mode::Browsing;
+        }
+        return match crate::browser::open_plan(&page.to_string_lossy()) {
+            None => Mode::Browsing,
+            Some(notice) => Mode::Outcome {
+                notice,
+                routines: None,
+            },
+        };
+    }
     let Some(task) =
         highlighted_tasks(groups, state).and_then(|tasks| tasks.get(state.task_cursor))
     else {
@@ -7410,7 +7549,7 @@ fn wrapped(prefix: &str, body: &str, width: usize) -> Vec<String> {
 }
 
 /// A group's pane tail: the bare `" queued"` or `" done"`, or empty for a
-/// group still in [`GroupState::Queueable`].
+/// group still in [`GroupState::Queueable`] and for a plan row.
 ///
 /// Used to carry the queue file's own modification time too, but the
 /// dispatcher rewrites that file at every step boundary, so the instant read
@@ -7419,7 +7558,7 @@ fn wrapped(prefix: &str, body: &str, width: usize) -> Vec<String> {
 /// telling that lie.
 fn group_tail(group: &Group) -> String {
     match group.state {
-        GroupState::Queueable => String::new(),
+        GroupState::Queueable | GroupState::Plan => String::new(),
         GroupState::Queued => " queued".to_string(),
         GroupState::Done => " done".to_string(),
     }
@@ -7427,23 +7566,32 @@ fn group_tail(group: &Group) -> String {
 
 /// The indices in `shown` where [`groups_pane_lines`] draws a blank
 /// separator row — one for every point [`Group::state`] actually changes
-/// between one row and the next. [`reachable`] keeps queued groups off the
-/// screen, so a list holding both queueable and done groups draws one.
+/// between one row and the next, except from a queueable group to a plan.
+/// [`reachable`] keeps queued groups off the screen, so a list holding done
+/// groups beside queueable groups or plans draws one.
 ///
-/// `shown` is already in `list_groups`' own order — queueable groups, then
-/// queued ones, then done ones — so a single left-to-right scan is enough:
+/// `shown` is already in `list_rows`' own order — queueable groups, then
+/// plans, then queued groups, then done ones — so a single left-to-right
+/// scan is enough:
 /// a boundary sits wherever a row's state differs from the row right before
 /// it. [`group_line_index`] uses these same boundaries to keep a
 /// line-addressed pane (see [`window`]) in step with `group_cursor`, which
 /// still addresses groups, never a separator between them.
 fn group_boundaries(shown: &[&Group]) -> Vec<usize> {
+    // Plan rows sit straight under the queueable groups with no blank row
+    // between, so the two count as one state here.
+    let section = |state: GroupState| match state {
+        GroupState::Plan => GroupState::Queueable,
+        other => other,
+    };
     let mut boundaries = Vec::new();
     let mut previous: Option<GroupState> = None;
     for (i, group) in shown.iter().enumerate() {
-        if previous.is_some_and(|state| state != group.state) {
+        let state = section(group.state);
+        if previous.is_some_and(|prev| prev != state) {
             boundaries.push(i);
         }
-        previous = Some(group.state);
+        previous = Some(state);
     }
     boundaries
 }
@@ -7473,15 +7621,16 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 }
 
 /// The left pane's rows: one per distinct `group:` across the pending
-/// tasks, its checkbox, and whether the archive already holds it — or,
-/// once `h` has hidden every one of them, a single line saying so rather
-/// than an empty pane a person could mistake for a project with nothing
-/// pending at all.
+/// tasks and one per plan page no task names, its checkbox, and whether
+/// the archive already holds it — or, once `h` has hidden every one of
+/// them, a single line saying so rather than an empty pane a person could
+/// mistake for a project with nothing pending at all.
 ///
 /// The checkbox is here and nowhere else, because a group is what gets
 /// submitted. A group not still [`GroupState::Queueable`] has no box at all
-/// — at least one of its tasks is no longer waiting in `pending/`. A done
-/// group is what `h` hides on; a queued one never shows at all.
+/// — at least one of its tasks is no longer waiting in `pending/`, or, for a
+/// plan, it has no tasks yet. A done group is what `h` hides on; a queued
+/// one never shows at all.
 ///
 /// No task count: the pane beside this one is the group's tasks, so a number
 /// here says the same thing twice and costs the names the room to be read.
@@ -7579,6 +7728,10 @@ fn groups_pane_lines(
     (lines, starts)
 }
 
+/// What the tasks pane says beside a plan row: the skill that cuts a plan
+/// page into tasks.
+const PLAN_HINT: &str = "Use /spoolway-tasks";
+
 /// The characters a tasks-pane row spends before its own name even starts:
 /// the cursor marker and the space after it — half of [`ROW_PREFIX_COLUMNS`],
 /// since this pane draws no checkbox.
@@ -7624,7 +7777,8 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 /// one-sentence description — plus the task's own header row above them.
 ///
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
-/// pane to the left, and this is what that group holds.
+/// pane to the left, and this is what that group holds. Beside a plan row,
+/// which holds no tasks, the pane says only [`PLAN_HINT`].
 ///
 /// Comes back with the line each task's header row sits on — see [`Items`]
 /// — and the line range the highlighted task occupies as well — its header
@@ -7639,6 +7793,14 @@ pub(crate) fn tasks_pane_lines(
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return (Vec::new(), Vec::new(), (0, 0));
     };
+    // A plan has no tasks to list yet, only the way to cut some.
+    if group.state == GroupState::Plan {
+        return (
+            vec![String::new(), format!("  {PLAN_HINT}")],
+            Vec::new(),
+            (0, 0),
+        );
+    }
     let tasks = &group.tasks;
 
     let mut lines = Vec::new();
@@ -7962,10 +8124,11 @@ pub(super) fn two_pane_frame(
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
-/// [`Mode::NewJob`] — none
+/// [`Mode::DeletePlan`], [`Mode::NewJob`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
-/// reads only `enter` to close it, which its own popup says, and the line
+/// reads only `enter` to close it, or only `esc` for
+/// [`Mode::PlanNotDeleted`], which its own popup says, and the line
 /// under the frame stays the one the screen will read again once it is
 /// closed — all but [`Mode::JobSaved`], which the routines tab's mockup
 /// draws over its own `[enter] confirm` line. [`Mode::Options`] keeps the
@@ -7986,9 +8149,10 @@ fn footer(state: &ScreenState) -> String {
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
-        Mode::DeleteRoutine { .. } | Mode::DeletePending { .. } | Mode::Gate { .. } => {
-            hint(&crate::screen::answer_keys())
-        }
+        Mode::DeleteRoutine { .. }
+        | Mode::DeletePending { .. }
+        | Mode::DeletePlan { .. }
+        | Mode::Gate { .. } => hint(&crate::screen::answer_keys()),
         Mode::NewJob { walk, .. } => walk.footer(),
         Mode::JobSaved { .. } => hint(&confirm()),
         Mode::Trial(trial) => match trial.stage {
@@ -8216,6 +8380,11 @@ fn popup(
             title,
             set,
             (checkbox_row_cap(layout), popup_height(layout)),
+        )),
+        Mode::DeletePlan { title, page } => Some(delete_plan_panel(title, page)),
+        Mode::PlanNotDeleted(notice) => Some(plan_not_deleted_panel(
+            notice,
+            crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout)),
         )),
         Mode::NewJob { walk, .. } => Some(walk.panel(pipelines)),
         // Wrapped no wider than the frame has room for, so a narrow
@@ -9845,6 +10014,19 @@ const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
                                Nothing was deleted.\n\
                                Pick delete again to see the current list.";
 
+/// The last line of a notice for a delete that failed: what to fix before
+/// picking delete again, chosen by the kind of error removing a file gave.
+/// Shared by the pending tasks' and the plan page's notices, so the two
+/// never word the same remedy differently.
+fn delete_remedy(kind: Option<std::io::ErrorKind>) -> &'static str {
+    match kind {
+        Some(std::io::ErrorKind::PermissionDenied) => {
+            "Fix the file's permissions, then pick delete again."
+        }
+        _ => "Fix the error above, then pick delete again.",
+    }
+}
+
 /// The pending screen after `enter` on delete's popup, whatever the delete
 /// answered: `groups` read again so the removed files drop out, the
 /// selection cut to groups that can still be queued, gates dropped for
@@ -9862,8 +10044,8 @@ fn after_pending_delete(
     state: &mut ScreenState,
     answer: DeleteOutcome,
 ) -> Mode {
-    let (fresh, reread_err) = match super::pending::list_groups_and_skipped(repo) {
-        Ok((fresh, _)) => (fresh, None),
+    let (fresh, reread_err) = match super::pending::list_rows(repo) {
+        Ok(rows) => (rows.groups, None),
         Err(err) => (without_removed(groups), Some(format!("{err:#}"))),
     };
     adopt_groups(fresh, groups, state);
@@ -9898,12 +10080,7 @@ fn after_pending_delete(
             removed,
             left,
         } => {
-            let remedy = match kind {
-                Some(std::io::ErrorKind::PermissionDenied) => {
-                    "Fix the file's permissions, then pick delete again."
-                }
-                _ => "Fix the error above, then pick delete again.",
-            };
+            let remedy = delete_remedy(kind);
             let mut text = partial_delete(&anyhow::Error::msg(error.clone()), &removed, &left);
             // A delete stopped by this same read failing already opens on
             // its error; naming it a second time says nothing more.
@@ -9923,17 +10100,130 @@ fn after_pending_delete(
 /// A group left with no task at all drops out. One that still holds queued
 /// or done tasks stays, as a read would list it, its state folded again
 /// from what it has left, so a group with no pending task left is no
-/// longer selectable.
+/// longer selectable. A plan row stays exactly as it was: it never held a
+/// task, and a delete of pending tasks does not touch its page.
 fn without_removed(groups: &[Group]) -> Vec<Group> {
     let mut kept = groups.to_vec();
-    for group in &mut kept {
+    for group in kept.iter_mut().filter(|g| g.state != GroupState::Plan) {
         group
             .tasks
             .retain(|t| t.state != TaskState::Pending || t.path.exists());
         group.state = super::pending::group_state(&group.tasks);
     }
-    kept.retain(|group| !group.tasks.is_empty());
+    kept.retain(|group| group.state == GroupState::Plan || !group.tasks.is_empty());
     kept
+}
+
+/// The page of the plan row the groups pane highlights, or `None` when the
+/// focus is on the tasks pane or the row is a group.
+fn highlighted_plan_page<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Path> {
+    if state.focus != Focus::Groups {
+        return None;
+    }
+    shown(groups, state)
+        .get(state.group_cursor)?
+        .page
+        .as_deref()
+}
+
+/// A plan page as its popups name it: `plans/` and the file's name, which
+/// is all that tells two plans apart, since every page sits in that one
+/// folder of the project home.
+fn plan_file(page: &Path) -> String {
+    let name = page.file_name().map_or_else(
+        || page.display().to_string(),
+        |name| name.to_string_lossy().into(),
+    );
+    format!("{}/{name}", crate::config::PLANS_DIR)
+}
+
+/// Delete picked off a plan row's menu: [`Mode::DeletePlan`] for the page
+/// of the plan row the groups pane highlights. `None` on any other row.
+fn begin_plan_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
+    let page = highlighted_plan_page(groups, state)?;
+    let name = &shown(groups, state).get(state.group_cursor)?.name;
+    Some(Mode::DeletePlan {
+        title: format!("delete plan {name}"),
+        page: page.to_path_buf(),
+    })
+}
+
+/// Delete's popup over a plan row: the one page it removes, two columns in
+/// under its count, as [`delete_pending_panel`] indents a task.
+fn delete_plan_panel(title: &str, page: &Path) -> Vec<String> {
+    let body = [
+        String::new(),
+        "Delete 1 plan page:".to_string(),
+        String::new(),
+        format!("  {}", plan_file(page)),
+    ];
+    crate::screen::ask(title, &body, &["delete".to_string()], 0)
+}
+
+/// The pending screen after `enter` on a plan row's delete popup: `groups`
+/// read again so a removed page's row drops out, and the cursor kept on its
+/// row or pulled back inside what is left. Answers the popup to open: none
+/// after a removal, a notice when nothing was removed.
+///
+/// A re-read that fails is named in that notice, or in one of its own after
+/// a removal, the same as [`after_pending_delete`] does. The list then keeps
+/// every row but those whose page is gone, so the removed plan is not drawn
+/// as if it were still there.
+fn after_plan_delete(
+    repo: &Repo,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    page: &Path,
+    answer: PlanDeleteOutcome,
+) -> Mode {
+    let (fresh, reread_err) = match super::pending::list_rows(repo) {
+        Ok(rows) => (rows.groups, None),
+        Err(err) => {
+            let mut kept = groups.clone();
+            kept.retain(|group| group.page.as_ref().is_none_or(|page| page.exists()));
+            (kept, Some(format!("{err:#}")))
+        }
+    };
+    adopt_groups(fresh, groups, state);
+    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    let file = plan_file(page);
+    match answer {
+        PlanDeleteOutcome::Removed => match reread_err {
+            Some(err) => outcome("plan deleted", reread(&err)),
+            None => Mode::Browsing,
+        },
+        PlanDeleteOutcome::Named => {
+            let mut text = format!("A task names {file} in plan: now.\nNothing was deleted.");
+            if let Some(err) = reread_err {
+                text.push_str(&format!("\n\n{}", reread(&err)));
+            }
+            outcome("not deleted", text)
+        }
+        PlanDeleteOutcome::Failed { error, kind } => {
+            let remedy = delete_remedy(kind);
+            let mut text = format!("{error}\n  {file}");
+            // A delete stopped by this same read failing already opens on
+            // its error; naming it a second time says nothing more.
+            if let Some(err) = reread_err.filter(|err| *err != error) {
+                text.push_str(&format!("\n\n{}", reread(&err)));
+            }
+            Mode::PlanNotDeleted(Notice::new(
+                "plan not deleted",
+                format!("{text}\n\n{remedy}"),
+            ))
+        }
+    }
+}
+
+/// [`Mode::PlanNotDeleted`]'s popup: the notice over `[esc] close`, the one
+/// key that closes it, wrapped to `width` like every other notice.
+fn plan_not_deleted_panel(notice: &Notice, width: usize) -> Vec<String> {
+    crate::screen::notice(
+        &notice.title,
+        &notice.text,
+        &keys(&[("esc", "close")]),
+        width,
+    )
 }
 
 /// Every task in the ticked routines — each one's nested subfolders
@@ -13692,6 +13982,7 @@ mod tests {
                 groups: Vec::new(),
                 branch: None,
                 unreadable: Vec::new(),
+                plans_error: None,
             },
         );
         let mut known = 0;
@@ -13727,9 +14018,9 @@ mod tests {
     }
 
     /// With nothing changed, [`IdleCheck::read`] returns no reading, reads no
-    /// pending file and starts no `git`. Edited, it reads again, and
-    /// starts `git` only once `HEAD` has moved. Before [`IdleCheck`] every
-    /// reading read every file and started `git`.
+    /// pending file and starts no `git`. Edited, or given a new plan page, it
+    /// reads again, and starts `git` only once `HEAD` has moved. Before
+    /// [`IdleCheck`] every reading read every file and started `git`.
     #[test]
     fn an_idle_reading_reads_no_file_and_starts_no_process() {
         let (repo, _root_guard) = fixture("queue-idle-check");
@@ -13737,9 +14028,17 @@ mod tests {
         let mut idle = IdleCheck::default();
         let git_runs = || crate::repo::runs_here_under(&repo.root);
         let file_reads = || super::pending::pending_reads_here_under(&repo.pending_dir());
-        for dir in [repo.pending_dir(), repo.queue_dir(), repo.archive_dir()] {
+        let since = repo.home().join(super::pending::PLANS_SINCE);
+        std::fs::write(&since, "0").unwrap();
+        for dir in [
+            repo.pending_dir(),
+            repo.queue_dir(),
+            repo.archive_dir(),
+            repo.plans_dir(),
+        ] {
             age(&dir);
         }
+        age(&since);
         age(&path);
         if let Some(head) = idle.branch.head_path(&repo.root) {
             age(&head);
@@ -13775,6 +14074,12 @@ mod tests {
         );
         assert!(file_reads() > reads);
         assert_eq!(git_runs(), runs, "an edit to a task does not move HEAD");
+
+        std::fs::write(repo.plans_dir().join("2026-10-20-new.html"), "").unwrap();
+        assert!(
+            matches!(idle.read(&repo, &repo.root), Attempt::Fresh(_)),
+            "a new plan page is read again"
+        );
     }
 
     /// A file that breaks while the queue tab stays open is named when the
@@ -13790,6 +14095,7 @@ mod tests {
         state.named = Some(NamedFiles {
             dir: repo.pending_dir(),
             files: Default::default(),
+            plans: None,
         });
         let reader = start_queue_reader(
             repo.clone(),
@@ -13798,6 +14104,7 @@ mod tests {
                 groups: groups.clone(),
                 branch: None,
                 unreadable: Vec::new(),
+                plans_error: None,
             },
         );
         let mut known = 0;
@@ -13852,6 +14159,7 @@ mod tests {
         state.named = Some(NamedFiles {
             dir,
             files: Default::default(),
+            plans: None,
         });
 
         state.mode = Mode::Filter;
@@ -13879,6 +14187,7 @@ mod tests {
         state.named = Some(NamedFiles {
             dir: dir.clone(),
             files: Default::default(),
+            plans: None,
         });
 
         state.mode = Mode::Filter;
@@ -17069,6 +17378,527 @@ mod tests {
             ],
             "{lines:?}"
         );
+    }
+
+    /// A plan page in `plans/` that no task names, written a moment after
+    /// the last so creation times order the pages. The `plans-since` stamp
+    /// is set to the earliest instant, so the page's time never hides it.
+    fn plan_page(repo: &Repo, file: &str) -> String {
+        std::fs::write(repo.home().join("plans-since"), "1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let path = repo.plans_dir().join(file);
+        std::fs::write(&path, "<html></html>").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// The rows the screen lists, plan rows included.
+    fn rows(repo: &Repo) -> Vec<Group> {
+        super::super::pending::list_rows(repo).unwrap().groups
+    }
+
+    /// Plans draw after the queueable groups and before the done ones,
+    /// newest first, with no blank row before them and one before the done
+    /// groups. A plan row has no checkbox and no tail.
+    #[test]
+    fn plan_rows_sit_between_the_queueable_and_done_groups() {
+        let (repo, _root_guard) = fixture("screen-plan-rows");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        already_done(&repo, "cook", "cook");
+        plan_page(&repo, "2026-10-20-onboarding.html");
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+
+        let mut state = ScreenState::new();
+        state.hide_scope = HideScope::PlusDone;
+        let shown = visible(&groups, state.hide_scope);
+        let (lines, _) = groups_pane_lines(&groups, &shown, &state, 30);
+        let lines: Vec<&str> = lines.iter().map(|line| line.trim_end()).collect();
+        assert_eq!(
+            lines,
+            [
+                "> [ ] cart",
+                "      search",
+                "      onboarding",
+                "",
+                "      cook                done",
+            ],
+        );
+    }
+
+    /// Beside a plan row the tasks pane holds one blank line and the skill
+    /// that cuts it, and nothing else.
+    #[test]
+    fn the_tasks_pane_beside_a_plan_row_names_the_skill_that_cuts_it() {
+        let (repo, _root_guard) = fixture("screen-plan-tasks-pane");
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let state = ScreenState::new();
+
+        let (lines, starts, _) = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 52);
+        assert_eq!(lines, ["", "  Use /spoolway-tasks"]);
+        assert!(starts.is_empty(), "a plan row has no task rows: {starts:?}");
+    }
+
+    /// `space` on a plan row leaves the selection alone, and `enter` with
+    /// the cursor on one queues exactly the groups selected: here the one
+    /// group above it, and nothing for the plan, which stays listed.
+    #[test]
+    fn space_and_enter_on_a_plan_row_queue_only_the_selection() {
+        let (repo, _root_guard) = fixture("screen-plan-space-enter");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: cart\ntouches: [src/wire.rs]\n", BODY),
+        );
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+
+        // Select cart, move onto the plan row and press `space` there: the
+        // selection still holds cart alone, with no tick on the plan.
+        let mut state = ScreenState::new();
+        for key in [Key::Char(' '), Key::Down, Key::Char(' ')] {
+            handle_browse_key(&groups, &mut state, key);
+        }
+        assert_eq!(
+            shown(&groups, &state)[state.group_cursor].state,
+            GroupState::Plan
+        );
+        let cart = std::collections::BTreeSet::from(["cart".to_string()]);
+        assert_eq!(state.selected, cart);
+
+        // The same keys and then `enter`, through the whole screen. Without
+        // a plan row, Down stays on cart and the second `space` takes its
+        // tick off, so `enter` would queue nothing.
+        screen(&repo, groups, " \x1b[B \r");
+        assert!(
+            repo.queue_dir().join("wire.md").exists(),
+            "cart was not queued"
+        );
+        let queued: Vec<_> = std::fs::read_dir(repo.queue_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(queued, ["wire.md"], "only cart's task may be queued");
+        let after = rows(&repo);
+        assert!(
+            after
+                .iter()
+                .any(|g| g.name == "search" && g.state == GroupState::Plan),
+            "the plan stays listed: {after:?}"
+        );
+    }
+
+    /// `h` never hides a plan row, and `f` finds one by its name.
+    #[test]
+    fn a_plan_row_survives_h_and_matches_f_by_name() {
+        let (repo, _root_guard) = fixture("screen-plan-h-f");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let mut state = ScreenState::new();
+
+        for scope in [HideScope::Pending, HideScope::PlusDone] {
+            state.hide_scope = scope;
+            assert!(
+                visible(&groups, scope).iter().any(|g| g.name == "search"),
+                "the plan row must be on screen at {scope:?}"
+            );
+        }
+        state.filter = "search".to_string();
+        let names: Vec<&str> = shown(&groups, &state)
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(names, ["search"]);
+    }
+
+    /// Once a task names the highlighted plan, the next reload lists it as
+    /// a queueable group instead, and the cursor stays on it.
+    #[test]
+    fn a_plan_whose_tasks_are_cut_reloads_as_a_queueable_group() {
+        let (repo, _root_guard) = fixture("screen-plan-cut");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let mut groups = rows(&repo);
+        let mut state = ScreenState::new();
+        state.group_cursor = 1;
+        assert_eq!(shown(&groups, &state)[1].state, GroupState::Plan);
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let front = format!("group: search\nplan: {page}\n");
+        write_pending(
+            &repo,
+            "search-index",
+            &task_text("search-index", &front, BODY),
+        );
+        reload(&repo, &mut groups, &mut state);
+
+        let shown = shown(&groups, &state);
+        assert!(
+            shown.iter().all(|g| g.state != GroupState::Plan),
+            "{shown:?}"
+        );
+        let cursor = shown[state.group_cursor];
+        assert_eq!(
+            (cursor.name.as_str(), cursor.state),
+            ("search", GroupState::Queueable)
+        );
+    }
+
+    /// A plan cut into a group of another name moves the cursor to that
+    /// group too: the group is found by the page its tasks name in `plan:`.
+    #[test]
+    fn the_cursor_follows_a_cut_plan_to_a_group_of_another_name() {
+        let (repo, _root_guard) = fixture("screen-plan-cut-renamed");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let mut groups = rows(&repo);
+        let mut state = ScreenState::new();
+        state.group_cursor = 1;
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let front = format!("group: find\nplan: {page}\n");
+        write_pending(&repo, "index", &task_text("index", &front, BODY));
+        reload(&repo, &mut groups, &mut state);
+
+        assert_eq!(shown(&groups, &state)[state.group_cursor].name, "find");
+    }
+
+    /// A plan row and a done group of the same name are two rows with two
+    /// keys. The cursor stays on the done group across a reload, and save
+    /// as routine on it copies the done group's task, not the plan's none.
+    #[test]
+    fn a_plan_and_a_done_group_of_the_same_name_stay_apart() {
+        let (repo, _root_guard) = fixture("screen-plan-same-name");
+        already_done(&repo, "cook", "search");
+        plan_page(&repo, "2026-10-21-search.html");
+        let mut groups = rows(&repo);
+        let mut state = ScreenState::new();
+        state.hide_scope = HideScope::PlusDone;
+        let done = shown(&groups, &state)
+            .iter()
+            .position(|g| g.state == GroupState::Done)
+            .unwrap();
+        state.group_cursor = done;
+        let plan = shown(&groups, &state)
+            .iter()
+            .position(|g| g.state == GroupState::Plan)
+            .unwrap();
+        assert_ne!(
+            group_key(shown(&groups, &state)[plan]),
+            group_key(shown(&groups, &state)[done])
+        );
+
+        reload(&repo, &mut groups, &mut state);
+        let cursor = shown(&groups, &state)[state.group_cursor];
+        assert_eq!(cursor.state, GroupState::Done);
+
+        let panel = save_routine_panel(&groups, &group_key(cursor), "r").unwrap();
+        assert!(
+            panel.iter().any(|line| line.contains("copies 1 task ")),
+            "{panel:?}"
+        );
+    }
+
+    /// A delete whose re-read fails keeps every plan row, which it never
+    /// touched, while the deleted task's group drops out.
+    #[test]
+    fn the_delete_fallback_keeps_plan_rows() {
+        let (repo, _root_guard) = fixture("screen-plan-delete-fallback");
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        std::fs::remove_file(wire).unwrap();
+
+        let kept = without_removed(&groups);
+        let kept: Vec<(&str, GroupState)> =
+            kept.iter().map(|g| (g.name.as_str(), g.state)).collect();
+        assert_eq!(kept, [("search", GroupState::Plan)]);
+    }
+
+    /// A `plans/` that will not read still lists the groups, and the screen
+    /// names why once over plain browsing. It is not named again while the
+    /// error stays the same, and is forgotten once the folder reads again.
+    #[test]
+    fn a_plans_folder_that_will_not_read_is_named_once() {
+        let (repo, _root_guard) = fixture("screen-plan-unreadable");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        let plans = repo.home().join(crate::config::PLANS_DIR);
+        std::fs::create_dir_all(repo.home()).unwrap();
+        let _ = std::fs::remove_dir_all(&plans);
+        // A file where the folder should be: `read_dir` fails on it the same
+        // way for every user, which a folder with its permissions taken away
+        // does not when the tests run as root.
+        std::fs::write(&plans, "not a folder").unwrap();
+
+        let listed = super::super::pending::list_rows(&repo).unwrap();
+        assert_eq!(listed.groups.len(), 1, "{:?}", listed.groups);
+        let err = listed.plans_error.expect("the read error is handed back");
+
+        let mut state = ScreenState::new();
+        state.named = Some(NamedFiles {
+            dir: repo.pending_dir(),
+            files: Default::default(),
+            plans: None,
+        });
+        announce_plans_error(Some(&err), &mut state);
+        let Mode::Outcome { notice, .. } = &state.mode else {
+            panic!("the error was never named: {:?}", state.mode);
+        };
+        assert!(notice.text.contains(&err), "{}", notice.text);
+        assert!(
+            notice.text.contains("a folder this user can read"),
+            "{}",
+            notice.text
+        );
+
+        state.mode = Mode::Browsing;
+        announce_plans_error(Some(&err), &mut state);
+        assert!(matches!(state.mode, Mode::Browsing), "{:?}", state.mode);
+        announce_plans_error(None, &mut state);
+        announce_plans_error(Some(&err), &mut state);
+        assert!(
+            matches!(state.mode, Mode::Outcome { .. }),
+            "{:?}",
+            state.mode
+        );
+    }
+
+    /// `o` on a plan row opens a menu titled with the plan's name, listing
+    /// open plan then delete, the cursor on open plan.
+    #[test]
+    fn a_plan_rows_menu_offers_open_plan_then_delete() {
+        let (repo, _root_guard) = fixture("screen-plan-menu");
+        plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let mut state = ScreenState::new();
+
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::OpenPlan, RowOption::Delete]);
+        state.mode = Mode::Options(menu);
+        let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
+        assert_eq!(
+            panel,
+            [
+                format!("{TOP_LEFT}─ search {}{TOP_RIGHT}", "─".repeat(24)),
+                "│  > open plan                    │".to_string(),
+                "│    delete                       │".to_string(),
+                "│                                 │".to_string(),
+                "│  [enter] confirm   [esc] close  │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
+    }
+
+    /// Open plan on a plan row hands its page to the browser opener and
+    /// goes back to the screen.
+    #[test]
+    fn picking_open_plan_on_a_plan_row_opens_its_page() {
+        let (repo, _root_guard) = fixture("screen-plan-open");
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let state = ScreenState::new();
+        let pipelines = Pipelines::builtin();
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+        let menu = pending_options(&groups, &state).unwrap();
+
+        let mode = picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan);
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert_eq!(crate::browser::opened(), [std::path::PathBuf::from(page)]);
+    }
+
+    /// Delete on a plan row opens a popup naming its one page; `enter`
+    /// removes the page and the row is gone from the next frame, and `esc`
+    /// removes nothing.
+    #[test]
+    fn delete_on_a_plan_row_removes_its_page_after_one_confirm() {
+        let (repo, _root_guard) = fixture("screen-plan-delete");
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        let page = std::path::PathBuf::from(plan_page(&repo, "2026-10-21-search.html"));
+        let groups = rows(&repo);
+        let mut state = ScreenState::new();
+        state.group_cursor = 1;
+        let Some(Mode::DeletePlan { title, page: held }) = begin_plan_delete(&groups, &state)
+        else {
+            panic!("no popup");
+        };
+        assert_eq!(held, page);
+        state.mode = Mode::DeletePlan { title, page: held };
+        let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
+        assert_eq!(
+            panel,
+            [
+                format!(
+                    "{TOP_LEFT}─ delete plan search {}{TOP_RIGHT}",
+                    "─".repeat(13)
+                ),
+                "│                                  │".to_string(),
+                "│  Delete 1 plan page:             │".to_string(),
+                "│                                  │".to_string(),
+                "│    plans/2026-10-21-search.html  │".to_string(),
+                "│                                  │".to_string(),
+                "│  > delete                        │".to_string(),
+                "│                                  │".to_string(),
+                "│  [enter] confirm   [esc] close   │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(34)),
+            ]
+        );
+
+        let kept = last_frame(&screen(&repo, rows(&repo), "\x1b[Bo\x1b[B\r\x1b")).to_string();
+        assert!(page.exists(), "esc must remove nothing");
+        assert!(kept.contains("search"), "{kept}");
+
+        let last = last_frame(&screen(&repo, rows(&repo), "\x1b[Bo\x1b[B\r\r")).to_string();
+        assert!(!page.exists(), "enter must remove the page");
+        assert!(!last.contains("search"), "the row is gone: {last}");
+        assert!(last.contains("cart"), "{last}");
+    }
+
+    /// A task that names the plan by the time `enter` is pressed keeps the
+    /// page: the `not deleted` notice says nothing was deleted, and the plan
+    /// reloads as that task's group.
+    #[test]
+    fn a_plan_a_task_names_by_enter_is_not_deleted() {
+        let (repo, _root_guard) = fixture("screen-plan-delete-named");
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let mut groups = rows(&repo);
+        let mut state = ScreenState::new();
+        let Some(Mode::DeletePlan { page: held, .. }) = begin_plan_delete(&groups, &state) else {
+            panic!("no popup");
+        };
+        let front = format!("group: search\nplan: {page}\n");
+        write_pending(
+            &repo,
+            "search-index",
+            &task_text("search-index", &front, BODY),
+        );
+
+        let answer = delete_plan(&repo, &held);
+        let mode = after_plan_delete(&repo, &mut groups, &mut state, &held, answer);
+
+        assert!(held.exists(), "the page a task names must stay");
+        let Mode::Outcome { notice, .. } = mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "not deleted");
+        assert_eq!(
+            notice.text,
+            "A task names plans/2026-10-21-search.html in plan: now.\nNothing was deleted."
+        );
+        assert!(groups.iter().all(|g| g.state != GroupState::Plan));
+    }
+
+    /// If a fresh read moves another row under the cursor while the menu is
+    /// open, `enter` on delete closes the menu and opens no popup.
+    #[test]
+    fn delete_on_a_plan_menu_whose_row_moved_does_nothing() {
+        let (repo, _root_guard) = fixture("screen-plan-menu-moved");
+        let page = plan_page(&repo, "2026-10-21-search.html");
+        let groups = rows(&repo);
+        let state = ScreenState::new();
+        let menu = pending_options(&groups, &state).unwrap();
+        write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
+        let groups = rows(&repo);
+        let pipelines = Pipelines::builtin();
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+
+        assert_eq!(shown(&groups, &state)[0].name, "cart");
+        let mode = picked.run(&groups, &[], &state, &menu, RowOption::Delete);
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert!(std::path::Path::new(&page).exists());
+    }
+
+    /// A page that could not be removed opens the `plan not deleted`
+    /// notice, word for word: the error, the file, and the remedy for a
+    /// permission error, closed by `esc`. Any other error ends on the one
+    /// general remedy.
+    #[test]
+    fn a_plan_page_that_will_not_go_names_the_error_and_the_file() {
+        let (repo, _root_guard) = fixture("screen-plan-delete-failed");
+        let page = repo.plans_dir().join("2026-10-21-search.html");
+        let mut groups = Vec::new();
+        let mut state = ScreenState::new();
+        let answer = PlanDeleteOutcome::Failed {
+            error: "Permission denied (os error 13)".to_string(),
+            kind: Some(std::io::ErrorKind::PermissionDenied),
+        };
+
+        let Mode::PlanNotDeleted(notice) =
+            after_plan_delete(&repo, &mut groups, &mut state, &page, answer)
+        else {
+            panic!("no notice");
+        };
+        assert_eq!(
+            plan_not_deleted_panel(&notice, crate::screen::NOTICE_WRAP),
+            [
+                "╭─ plan not deleted ────────────────────────────────────╮",
+                "│                                                       │",
+                "│  Permission denied (os error 13)                      │",
+                "│    plans/2026-10-21-search.html                       │",
+                "│                                                       │",
+                "│  Fix the file's permissions, then pick delete again.  │",
+                "│                                                       │",
+                "│  [esc] close                                          │",
+                "╰───────────────────────────────────────────────────────╯",
+            ]
+        );
+
+        let answer = PlanDeleteOutcome::Failed {
+            error: "Is a directory (os error 21)".to_string(),
+            kind: Some(std::io::ErrorKind::IsADirectory),
+        };
+        let Mode::PlanNotDeleted(notice) =
+            after_plan_delete(&repo, &mut groups, &mut state, &page, answer)
+        else {
+            panic!("no notice");
+        };
+        assert_eq!(
+            notice.text,
+            "Is a directory (os error 21)\n  plans/2026-10-21-search.html\n\n\
+             Fix the error above, then pick delete again."
+        );
+    }
+
+    /// A real permission error on `plans/` keeps the page and the row, and
+    /// the notice it opens takes no key but `esc`.
+    #[test]
+    fn a_plans_folder_that_takes_no_write_keeps_the_page() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-plan-delete-perms");
+        let page = std::path::PathBuf::from(plan_page(&repo, "2026-10-21-search.html"));
+        let dir = repo.plans_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o500); // read + execute, no write
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        let drawn = screen(&repo, rows(&repo), "o\x1b[B\r\r\r");
+        let held = last_frame(&drawn).to_string();
+        let closed = last_frame(&screen(&repo, rows(&repo), "o\x1b[B\r\r\x1b")).to_string();
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // folder this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        assert!(page.exists());
+        assert!(held.contains("plan not deleted"), "enter closed it: {held}");
+        assert!(held.contains("Fix the file's permissions"), "{held}");
+        assert!(
+            !closed.contains("plan not deleted"),
+            "esc kept it: {closed}"
+        );
+        assert!(closed.contains("search"), "the row stays: {closed}");
     }
 
     /// A reload can reorder `shown` out from under the cursor — a task

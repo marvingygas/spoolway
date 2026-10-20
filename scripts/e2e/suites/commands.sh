@@ -1535,6 +1535,22 @@ touch -d "2 days ago" "$OLD_QUEUED"
 # the once-per-process pass.
 must "an ordinary command runs the retention sweep" "$SPOOLWAY" group list
 
+# The sweep's `group list` also stamped when plan listing began, so a page
+# written now is newer than the stamp and no task names it.
+PLAN_PAGE="$SPOOLWAY_PROJECT_HOME/plans/2099-01-01-lonely-plan.html"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/plans"
+echo "<html></html>" > "$PLAN_PAGE"
+says "group list prints a plan page no task names as a 0 open line" \
+  "lonely-plan                   0 open — plan $PLAN_PAGE" "$SPOOLWAY" group list
+
+# A page a pending task names is already being cut, so it prints no line.
+NAMED_PAGE="$SPOOLWAY_PROJECT_HOME/plans/2099-01-02-named-plan.html"
+echo "<html></html>" > "$NAMED_PAGE"
+pending_doc names-a-plan "$BODY" "group: names-a-plan" "plan: $NAMED_PAGE"
+silent_about "a plan page a pending task names prints no line" \
+  "$NAMED_PAGE" "$SPOOLWAY" group list
+rm -f "$PLAN_PAGE" "$NAMED_PAGE" "$SPOOLWAY_PROJECT_HOME/pending/names-a-plan.md"
+
 works "the aged prompt went" test ! -e "$OLD_PROMPT"
 works "the aged queue entry did not — queue/ is never swept, whatever its age" \
   test -f "$OLD_QUEUED"

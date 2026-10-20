@@ -488,7 +488,7 @@ page exists. Picking it starts the browser in the background, so the board keeps
 nothing waits on the browser. macOS uses `open`, WSL uses `wslview` or else `explorer.exe`, and
 any other Linux uses `xdg-open`. When the page is gone, or the platform's program is not on
 `PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
-The queue screen's tasks pane lists `open plan` the same way. The routines pane does not.
+The queue screen's tasks pane lists `open plan` the same way. A plan row on that screen lists it too, and opens its own page. The routines pane does not.
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
@@ -1250,6 +1250,7 @@ queued, and the command can be run again once the worktree is gone.
 | `depends_on` | The ids the task depended on. |
 | `worktree_path` | The task's worktree. Left out when the task had none. |
 | `base` | The branch the task's group lands on. Left out when the task has none. |
+| `plan` | The plan page the task names in `plan:`. `null` when the task names none. |
 | `trial` | `true` when the task was a trial arm. Left out otherwise. |
 | `slug` | The task's issue slug. Left out when the task has none. |
 | `url` | The task's issue URL. Left out when the task has none. |
@@ -1272,8 +1273,8 @@ folder's.
 
 Archiving a task adds its line to a screen's cache without reading any other archived file.
 
-The index is rebuilt from the `<id>.md` files when it is missing, when a line does not parse, or
-when the folder has changed since the index was written. A file that does not parse is left out.
+The index is rebuilt from the `<id>.md` files when it is missing, when a line does not parse or
+has no `plan` field, or when the folder has changed since the index was written. A file that does not parse is left out.
 A rebuilt line uses the file's modification time as `archived_at` and the file's creation time as `created_ns`.
 
 The retention sweep removes the line of every archive file it deletes. It never deletes

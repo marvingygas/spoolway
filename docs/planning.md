@@ -127,8 +127,32 @@ runs `spoolway task contract --from` over the directory to check the set.
 <img src="screenshots/queue.png" alt="the queue screen">
 
 Bare `spoolway` opens the screen, on the queue tab. The left pane, titled `groups`, lists one
-row per group in the pending directory. The right pane, titled `tasks`, lists the highlighted
-group's tasks and what each waits on.
+row per group in the pending directory, and one per plan page no task names yet. The right
+pane, titled `tasks`, lists the highlighted group's tasks and what each waits on.
+
+A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
+forgotten. A page counts as named once any pending, queued or archived task points at it in
+`plan:`. Plan rows sit right under the queueable groups, newest first, and above the done
+groups. A plan row shows only its name, without the date in front of it, with no checkbox and
+no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-tasks`:
+
+```
+╭─ groups ───────────────┬─ tasks ────────────────────────────────────────────╮
+│   [ ] checkout         │                                                    │
+│   [ ] cart             │   Use /spoolway-tasks                              │
+│ >     search           │                                                    │
+│       onboarding       │                                                    │
+╰────────────────────────┴────────────────────────────────────────────────────╯
+```
+
+`space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
+name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
+instead. Only pages written after the time kept in `~/.spoolway/<label>-<id>/plans-since` are
+shown. Older pages stay off the screen.
+
+When the `plans/` folder cannot be read, the screen lists the groups without plan rows and
+shows a notice titled `plans not listed`. The notice names the read error. It appears once per
+error, and the plan rows return on the next reload after the folder reads again.
 
 | Key | What it does |
 |---|---|
@@ -158,6 +182,15 @@ One more command:
 spoolway group list         # every group with open tasks, and which tasks are open
 ```
 
+After the groups it prints one line for each plan page that no task with a `group:` names, newest first:
+
+```
+payments                      2 open — payments-refunds, payments-webhooks
+search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/plans/2026-10-21-search.html
+```
+
+A plan line always reads `0 open — plan <path>`, so a script that counts groups can tell it apart.
+
 ### Options menu
 
 `o` opens a menu for the row the focused pane highlights, titled with that row's name. With
@@ -179,13 +212,14 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 | Item | Listed on | What it does |
 |---|---|---|
 | `open task` | A task. | Open the task in your editor. |
-| `open plan` | A task whose `plan:` is set and not empty. | Open the plan page `plan:` names in your default browser. See [Options menu](dispatcher.md#options-menu). |
+| `open plan` | A task whose `plan:` is set and not empty, or a plan row. | Open the plan page `plan:` names, or the plan row's page, in your default browser. See [Options menu](dispatcher.md#options-menu). |
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
 | `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |
-| `delete` | A group with a pending task, or a pending task. | Delete pending files. See [Deleting pending tasks](#deleting-pending-tasks). |
+| `delete` | A group with a pending task, a pending task, or a plan row. | Delete pending files. See [Deleting pending tasks](#deleting-pending-tasks). On a plan row, delete the plan page. See [Deleting a plan page](#deleting-a-plan-page). |
 
-A group with no tasks opens the menu with `nothing to do here` over `[esc] close`. `enter`
+A plan row opens the menu with `open plan` and then `delete`. A group with no tasks and no plan
+page opens the menu with `nothing to do here` over `[esc] close`. `enter`
 runs the item under the cursor, and `esc` closes the menu having done nothing. If a fresh read
 of the pending directory moves another row under the cursor while the menu is open, `enter`
 closes the menu and does nothing.
@@ -230,6 +264,35 @@ Some outcomes open a notice instead of closing the popup:
 | `not deleted` | The pending tasks changed after the popup opened. | `Nothing was deleted.` and `Pick delete again to see the current list.` |
 | `tasks not fully deleted` | A file could not be removed. | The error, the `removed:` and `left:` lists, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` |
 | `tasks deleted` | The delete finished, but the pending directory would not read again. | The read error. |
+
+### Deleting a plan page
+
+`delete` on a plan row removes the plan's `.html` page from `plans/`, so a plan nobody will cut
+leaves the list. It removes that one file. A folder under `plans/` stays. The popup is titled
+`delete plan <name>` and names the page:
+
+```
+╭─ delete plan search ─────────────╮
+│                                  │
+│  Delete 1 plan page:             │
+│                                  │
+│    plans/2026-10-21-search.html  │
+│                                  │
+│  > delete                        │
+│                                  │
+│  [enter] confirm   [esc] close   │
+╰──────────────────────────────────╯
+```
+
+`enter` removes the page, and the row is gone after the screen reads the groups again. `esc`
+closes the popup and removes nothing.
+
+Two outcomes open a notice instead:
+
+| Title | When | What it says |
+|---|---|---|
+| `not deleted` | A task names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
+| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` Only `esc` closes it. |
 
 ### Trials
 

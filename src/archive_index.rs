@@ -5,9 +5,9 @@
 //! records that it happened, so every reader that wants the list of archived
 //! tasks has had to parse the whole folder — a cost that grows for as long as
 //! history is kept. The index is a copy of what those readers use: id, group,
-//! title, pipeline, branch, `depends_on`, worktree path, base, the branch it
-//! started from, whether the task was a trial arm, issue slug and url, the
-//! file's creation time and the archived time.
+//! title, pipeline, branch, `depends_on`, worktree path, base, plan page, the
+//! branch it started from, whether the task was a trial arm, issue slug and
+//! url, the file's creation time and the archived time.
 //! The folder of `<id>.md` files stays exactly as it was and is still the
 //! source of truth; the index can always be rebuilt from it.
 //!
@@ -84,6 +84,13 @@ pub struct Entry {
     /// group band's hyperlink at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The plan page the task names as `plan:`, which the queue tab reads to
+    /// tell a plan with finished tasks from one with none. Always written,
+    /// as `null` when the task names no plan: a line without the key was
+    /// written before the field existed, and [`parse_lines`] rebuilds the
+    /// index on seeing one.
+    #[serde(default)]
+    pub plan: Option<String>,
     /// When the task's file was created, in nanoseconds since the epoch: its
     /// birth time, or its modification time where the filesystem keeps no
     /// birth time. The queue tab orders groups by it, so it needs more
@@ -113,6 +120,11 @@ impl Entry {
             url: Some(task.extra_str("url"))
                 .filter(|url| !url.is_empty())
                 .map(str::to_string),
+            plan: task
+                .front
+                .plan
+                .clone()
+                .filter(|plan| !plan.trim().is_empty()),
             created_ns: created_ns(&task.path),
             archived_at,
         }
@@ -150,6 +162,7 @@ impl Entry {
         if self.trial {
             task.front.trial = Some(String::new());
         }
+        task.front.plan = self.plan.clone();
         for (key, value) in [("slug", &self.slug), ("url", &self.url)] {
             if let Some(value) = value {
                 task.front
@@ -343,11 +356,18 @@ fn stamp(archive: &Path) {
     }
 }
 
-/// Parse every line, or `None` if any non-blank line does not parse.
+/// Parse every line, or `None` if any non-blank line does not parse or lacks
+/// the `plan` key. The key is always written, even as `null`, so its absence
+/// means the line predates the field; reading such an index as it stands
+/// would report every finished plan as having no tasks.
 fn parse_lines(raw: &str) -> Option<Vec<Entry>> {
     raw.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).ok())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            value.get("plan")?;
+            serde_json::from_value(value).ok()
+        })
         .collect()
 }
 
@@ -628,6 +648,38 @@ mod tests {
                 .unwrap()
                 .contains("torn")
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// An index written before lines carried `plan` rebuilds once, from the
+    /// files, and the rebuilt lines then read without another rebuild.
+    #[test]
+    fn a_line_without_the_plan_key_rebuilds_once() {
+        let (repo, base) = repo_in("aidx-no-plan");
+        archive_file(&repo, "a", "");
+        let path = repo.archive_dir().join("a.md");
+        let doc = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            doc.replace("group: g\n", "group: g\nplan: /p/x.html\n"),
+        )
+        .unwrap();
+        read(&repo);
+        let old = std::fs::read_to_string(index_path(&repo))
+            .unwrap()
+            .replace(",\"plan\":\"/p/x.html\"", "");
+        assert!(!old.contains("plan"));
+        std::fs::write(index_path(&repo), old).unwrap();
+        stamp(&repo.archive_dir());
+        assert!(is_current(&repo), "only the missing key may be the fault");
+        testutil::reset_rebuilds();
+
+        let entries = read(&repo);
+
+        assert_eq!(entries[0].plan.as_deref(), Some("/p/x.html"));
+        assert_eq!(REBUILDS.with(std::cell::Cell::get), 1);
+        read(&repo);
+        assert_eq!(REBUILDS.with(std::cell::Cell::get), 1, "rebuilt twice");
         std::fs::remove_dir_all(&base).ok();
     }
 

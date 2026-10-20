@@ -155,8 +155,10 @@ With no subcommand, prints its usage and exits, the same as `spoolway queue --he
 
 Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
 that still has a task to queue or has every task archived. A group with every task already
-queued never appears. The left pane is titled `groups`. The right pane is titled `tasks` and
-lists the highlighted group's tasks. Each task shows its `Pipeline:`, `Depends on:`,
+queued never appears. Below the groups that can be queued, the pane also lists one row per plan
+page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
+is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
+Beside a plan row it says `Use /spoolway-tasks`. Each task shows its `Pipeline:`, `Depends on:`,
 `Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
 dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
 board's branch.
@@ -184,14 +186,15 @@ task, in this order:
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
-Over the groups pane it offers these for the highlighted group, and a group with no tasks says
-`nothing to do here`. To reach them from the tasks pane, press `tab` first.
+Over the groups pane it offers these for the highlighted group. A group with no tasks and no plan
+page says `nothing to do here`. To reach them from the tasks pane, press `tab` first.
 
 | Item | What it does |
 |---|---|
+| `open plan` | On a plan row, open its page in your default browser |
 | `trial` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `save as routine` | Save the group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
-| `delete` | Delete the group's pending tasks, and the pending tasks that depend on them. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
+| `delete` | Delete the group's pending tasks, and the pending tasks that depend on them. See [Deleting pending tasks](planning.md#deleting-pending-tasks). On a plan row, delete the plan page. See [Deleting a plan page](planning.md#deleting-a-plan-page) |
 
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
@@ -561,12 +564,18 @@ by hand, then run the command again.
 ### `spoolway group list`
 
 Print one line per group with open tasks: the group, how many tasks are open, and their ids.
+After the groups, it prints one line for each plan page that no task with a `group:` names,
+newest first. A plan line always reads `0 open — plan <path>`.
 
 ```
 $ spoolway group list
 auth                          2 open — auth-api, auth-session
 pipeline-handover             1 open — pipeline-and-prompts
+search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/plans/2026-10-21-search.html
 ```
+
+If the plan pages cannot be read, the group lines still print. A notice on stderr names the
+path that failed.
 
 ### `spoolway dispatch`
 

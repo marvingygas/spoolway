@@ -46,6 +46,7 @@ pub const JOBS_STORE: &str = "jobs.toml";
 /// change without a signature changing anywhere.
 pub const QUEUE_DIR: &str = "queue";
 pub const ARCHIVE_DIR: &str = "archive";
+pub const PLANS_DIR: &str = "plans";
 pub const PENDING_DIR: &str = "pending";
 
 /// Directory under the project's home holding one scratch worktree per task,
