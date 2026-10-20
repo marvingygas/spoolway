@@ -1128,7 +1128,8 @@ impl Repo {
 
     /// [`Repo::closed_dependency_base`] asking `gh` for its pull requests, so
     /// a test can stand a script in for it without touching the environment.
-    /// `depth` bounds the walk up a chain of closed dependencies.
+    /// `depth` stops a cycle among hand-edited archived `depends_on` lists
+    /// from recursing for ever; past 16 the dependency counts as not closed.
     fn closed_dependency_base_asking(
         &self,
         dep_id: &str,

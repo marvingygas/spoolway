@@ -10243,6 +10243,39 @@ mod tests {
         assert!(!prompt.contains("auth"), "{prompt}");
     }
 
+    /// A dependency closed with nothing to hand over has no branch of its own
+    /// to sit on, so the brief names the branch the worktree is cut from and
+    /// says why, instead of calling it the dependency's branch. An empty patch
+    /// settles it with no `gh` asked.
+    #[test]
+    fn what_you_have_says_a_closed_dependency_handed_its_base_on() {
+        let (repo, _root_guard) = fixture("what-you-have-closed");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+        let archived = add_task_with(&repo, "a-noop", "done", |f| {
+            f.branch = Some("task/a-noop".into());
+            f.base = Some("work".into());
+            f.patch = Some(crate::task::Patch::default());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("a-noop.md")).unwrap();
+        let dependent = Task::load(&add_task_with(&repo, "b-dep", "implement", |front| {
+            front.depends_on = vec!["a-noop".into()];
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+
+        let prompt = sent(&repo, &dependent, pipeline, step);
+
+        assert!(prompt.contains("`git diff work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("you sit on    `work`, where `a-noop` closed without a pull request"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("branch `work`"), "{prompt}");
+    }
+
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
     /// with no dependency, and the dependency's own recorded `branch:` —
     /// never `task.front.base` — when there is one. Pinned here rather than

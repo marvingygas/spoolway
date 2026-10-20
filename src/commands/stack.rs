@@ -19,12 +19,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::*;
+use crate::repo::gh_program;
 
 /// The pull request body's hard ceiling. GitHub's own API refuses a body past
 /// this outright rather than truncating it, so `spoolway stack` has to.
 const MAX_BODY: usize = 65_536;
-
-use crate::repo::gh_program;
 
 /// One labeled line of `spoolway stack`'s own report — `<label>` padded to a
 /// fixed column so a run's whole report reads as a table, the way the plan's
