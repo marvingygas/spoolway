@@ -948,12 +948,16 @@ grows as a spiral. A step that comes back is the exception. See [Finished lanes 
 pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
 unless it is its workspace's only tab.
 
-A new workspace opens with one pane. The first step that shows a pane runs in that pane. That is an
-agent step, or a command step that shows its command. A hidden command step
-runs before it and leaves the pane alone, so the next agent step still uses it. The dispatcher
-records the pane as `spare_pane` in the task file until a step takes it. A pane with a command still running in
-it is left alone, and the step splits beside it. An idle pane is moved to the task's worktree
-before the step runs in it.
+A task's workspace opens at the first step that shows a pane. That is an agent step, or a command step
+that shows its command. The workspace comes with one pane, and that step runs in it. A hidden command
+step before it needs only the worktree, so the task has no workspace, tab or pane yet. A task that
+ends on hidden command steps never opens a workspace.
+
+If a step's launch fails after the workspace opened, or a hidden command finds its workspace gone and
+the dispatcher reopens it, the dispatcher records the unused first pane as `spare_pane` in the task
+file until a step takes it. A pane with a command still running in it is
+left alone, and the step splits beside it. An idle pane is moved to the task's worktree before the
+step runs in it.
 
 A task's tab is renamed to the task's id, or to the routine's name for a copy of a routine, and stays that way across a dispatcher restart. Its
 panes then show only the step.
@@ -1060,8 +1064,9 @@ it holds more than one step. The headless backend has no tabs, so it ignores the
 
 ### Commands are hidden by default
 
-A command step opens no pane. It runs detached, and its output goes to the same log file, which
-is `commands/<task> · <step>.log` under the project's home. It sees the same named environment
+A command step opens no pane and does not open the task's workspace. See [herdr](#herdr). It runs
+detached, and its output goes to the same log file, which is `commands/<task> · <step>.log` under
+the project's home. It sees the same named environment
 as a run in a pane. A hidden command is never a lane, so it takes no part in `visible_lanes`.
 
 To watch commands run, set `hide_commands = false` with `spoolway config set
