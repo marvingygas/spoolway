@@ -949,7 +949,7 @@ pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on 
 unless it is its workspace's only tab.
 
 A new workspace opens with one pane. The first step that shows a pane runs in that pane. That is an
-agent step, or a command step when `dispatch.hide_commands` is `false`. A hidden command step
+agent step, or a command step that shows its command. A hidden command step
 runs before it and leaves the pane alone, so the next agent step still uses it. The dispatcher
 records the pane as `spare_pane` in the task file until a step takes it. A pane with a command still running in
 it is left alone, and the step splits beside it. An idle pane is moved to the task's worktree
@@ -981,7 +981,7 @@ name spoolway shows in files, messages and commands is `<task> · <step>`.
 
 Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with
 an error naming the pane and the byte count, and nothing is typed. A command step's pane, when
-`dispatch.hide_commands` is `false`, is typed one short line that runs the step's script file. See [Background and
+the step shows its command, is typed one short line that runs the step's script file. See [Background and
 headless](pipelines.md#background-and-headless).
 
 ### Finished lanes keep their pane
@@ -1040,7 +1040,7 @@ no label of its own.
 
 The workspace's first tab becomes the first step's tab. Every step after it opens a new tab in the
 background, and never takes focus from the tab you are looking at. That is an agent step, or a
-command step when `dispatch.hide_commands` is `false`. The dispatcher renames a step's tab
+command step that shows its command. The dispatcher renames a step's tab
 whenever herdr shows a different name for it, so a name herdr forgot when it restarted comes back.
 
 A step that comes back reuses its own tab. Its new pane replaces the old one inside that tab, so
@@ -1070,7 +1070,12 @@ open after the command exits, so the output of a failed gate is still on screen.
 counts toward `visible_lanes` and closes oldest first, like a finished agent lane. A pane whose
 command is still running is never closed by the limit, and that includes a `background: true`
 step. A command step that comes back replaces its own pane in place. Every shown command pane
-closes when the task is done. A step with `headless: true` stays detached whatever this key says.
+closes when the task is done.
+
+A step's `hide:` key overrides this setting for that step. `hide: true` keeps the step detached
+while commands are shown. `hide: false` gives the step a pane while commands are hidden, and the
+pane behaves like any other shown command's pane. A step with no `hide:` follows the setting. See
+[Background and headless](pipelines.md#background-and-headless).
 
 ## Looking into a lane
 

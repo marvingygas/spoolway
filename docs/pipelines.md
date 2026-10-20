@@ -395,7 +395,7 @@ A background step is a sidecar with no verdict. Its run never moves the task, ho
 a non-zero exit, a timeout and a pass all leave the task where it is. A task that reaches `done`
 is archived without waiting for the run, and a run still going is stopped when the task is
 cleaned up. A run that ends is counted once in the ledger. If it has a pane, the pane closes
-unless `dispatch.hide_commands` is `false`.
+unless the step shows its command.
 
 A run that exits non-zero, or is stopped at its `timeout:`, leaves one line in the task's
 `## Status Log`. The line is saved even though the task does not move. A run that exits 0 leaves
