@@ -7526,12 +7526,24 @@ fn ensure_checkout(
                 // pushed — so the same local-else-origin resolution the cut
                 // itself uses runs first, or this pins nothing at all
                 // (review finding 2).
+                //
+                // A task that follows its own `base` is cut from what
+                // `origin` has, so a commit a person has not pushed to their
+                // local base stays out of its pull request. Anything else,
+                // a dependency's `task/<id>` branch above all, is a branch
+                // spoolway made and may never have pushed, so it is cut from
+                // the local branch. `starts_from` itself is recorded as it
+                // is, so a re-cut reads the same name back.
+                let cut_from = match starts_from == base {
+                    true => crate::mux::resolve_task_base(&repo.root, &base),
+                    false => starts_from.clone(),
+                };
                 let base_commit = if branch_exists {
                     task.front.base_commit.clone()
                 } else {
                     repo.git(&[
                         "rev-parse",
-                        &crate::mux::resolve_cut_base(&repo.root, &starts_from),
+                        &crate::mux::resolve_cut_base(&repo.root, &cut_from),
                     ])
                     .ok()
                     .map(|c| c.trim().to_string())
@@ -7553,7 +7565,7 @@ fn ensure_checkout(
                 // first step that shows a pane, onto this checkout.
                 let bare = match want_pane {
                     true => None,
-                    false => mux.cut_checkout(&repo.root, &branch, &starts_from)?,
+                    false => mux.cut_checkout(&repo.root, &branch, &cut_from)?,
                 };
                 match bare {
                     Some(checkout) => {
@@ -7564,7 +7576,7 @@ fn ensure_checkout(
                         let workspace = mux.create_workspace(
                             &repo.root,
                             &branch,
-                            &starts_from,
+                            &cut_from,
                             &format!("spoolway/{}", task.display_name()),
                         )?;
                         crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
@@ -23630,6 +23642,101 @@ mod tests {
             worktree.join("first.txt").exists(),
             "the dependent's worktree already carries the dependency's work, ancestry rather than a later rebase"
         );
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// Give the fixture a bare `origin` holding `work`, then commit
+    /// `local-only.txt` to the local `work` without pushing it. Returns the
+    /// commit `origin/work` is at.
+    fn origin_behind_local_work(repo: &Repo) -> String {
+        let origin = repo.root.with_extension("origin.git");
+        let _ = std::fs::remove_dir_all(&origin);
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        repo.git(&["remote", "add", "origin", origin.to_str().unwrap()])
+            .unwrap();
+        repo.git(&["push", "-q", "origin", "work:work"]).unwrap();
+        repo.git(&["fetch", "-q", "origin"]).unwrap();
+        let pushed = repo
+            .git(&["rev-parse", "origin/work"])
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.root.join("local-only.txt"), "not pushed\n").unwrap();
+        repo.git(&["add", "local-only.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "unpushed"]).unwrap();
+        pushed
+    }
+
+    /// A commit on the local base that was never pushed stays out of a
+    /// task's branch: the task is cut from `origin/<base>`, and
+    /// `base_commit` pins that commit. Cut from the local branch, the
+    /// unpushed commit would ride into the task's pull request.
+    #[test]
+    fn a_task_is_cut_from_origins_base_not_the_local_one() {
+        let (repo, _root_guard) = fixture("cut-from-origin-base");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/demo"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        let pushed = origin_behind_local_work(&repo);
+
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(task.front.base_commit.as_deref(), Some(pushed.as_str()));
+        assert!(
+            !worktree.join("local-only.txt").exists(),
+            "the unpushed commit stayed out of the task's checkout"
+        );
+        assert_eq!(
+            task.front.starts_from.as_deref(),
+            Some("work"),
+            "the task file keeps the name, so a re-cut reads the same rule back"
+        );
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// With an `origin` that has the base, a dependent is still cut from its
+    /// parent's local `task/<id>` branch: spoolway made it, and `origin` may
+    /// never have it.
+    #[test]
+    fn a_dependent_is_still_cut_from_its_local_parent_branch_when_origin_exists() {
+        let (repo, _root_guard) = fixture("cut-from-dependency-with-origin");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/second"));
+        let _ = std::fs::remove_dir_all(&worktree);
+        origin_behind_local_work(&repo);
+
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        std::fs::write(repo.root.join("first.txt"), "from first\n").unwrap();
+        repo.git(&["add", "first.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "first's work"]).unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
+        let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
+            f.depends_on = vec!["first".into()];
+        }));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        let parent = repo
+            .git(&["rev-parse", "task/first"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(task.front.base_commit.as_deref(), Some(parent.as_str()));
+        assert!(worktree.join("first.txt").exists());
 
         std::fs::remove_dir_all(&worktree).ok();
     }

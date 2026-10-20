@@ -274,6 +274,7 @@ pub(crate) fn cheap_findings(
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
     report.record_all(cheap_branch_checks(repo, &tasks));
+    report.record_all(cut_base_notes(repo, &tasks));
     report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
     report.record(Finding::Check(
@@ -345,6 +346,57 @@ fn cheap_branch_checks(repo: &Repo, tasks: &[Task]) -> Vec<Finding> {
             Ok(Some(bases.join(", "))),
         )]
     }
+}
+
+/// Notes for a base a task will be cut from without `origin`'s copy of it.
+///
+/// A task follows `origin/<base>` so that a commit a person has not pushed
+/// stays out of its pull request. Where `origin` is missing, or this checkout
+/// knows no `origin/<base>`, the cut falls back to the local branch and the
+/// unpushed commits ride along, so the startup list says so before the run
+/// starts. Only refs already on disk are read: this runs where nothing may
+/// reach the network. A base with no local branch is left to the cut, which
+/// fetches it from `origin` or fails by name.
+fn cut_base_notes(repo: &Repo, tasks: &[Task]) -> Vec<Finding> {
+    let mut bases: Vec<String> = tasks.iter().filter_map(|t| t.front.base.clone()).collect();
+    if bases.is_empty() {
+        bases.extend(repo.branch().ok());
+    }
+    bases.sort();
+    bases.dedup();
+    let has_origin = repo
+        .git(&["remote"])
+        .is_ok_and(|remotes| remotes.lines().any(|name| name.trim() == "origin"));
+    bases
+        .into_iter()
+        .filter(|base| {
+            repo.git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{base}"),
+            ])
+            .is_ok()
+        })
+        .filter_map(|base| {
+            let tracked = repo
+                .git(&[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/remotes/origin/{base}"),
+                ])
+                .is_ok();
+            let why = match (has_origin, tracked) {
+                (false, _) => "no `origin` remote".to_string(),
+                (true, false) => format!("`origin` has no `{base}` here"),
+                (true, true) => return None,
+            };
+            Some(Finding::Note(format!(
+                "{why} — tasks are cut from the local `{base}`, unpushed commits included"
+            )))
+        })
+        .collect()
 }
 
 /// How `doctor` should treat the live pane check — one argument standing in
@@ -5108,6 +5160,54 @@ mod tests {
 
         login_checks(&repo.checkout, "login.sh", true);
         assert!(marker.exists(), "login_checks never ran it");
+    }
+
+    /// The startup list names a base the cut will take from the local branch:
+    /// once with no `origin` remote, once with an `origin` this checkout knows
+    /// no `main` of, and not at all when `origin/main` is known.
+    #[test]
+    fn cut_base_notes_name_a_base_cut_from_the_local_branch() {
+        let (repo, _root_guard) = scratch_repo("cut-base-notes");
+        let origin = repo.root.with_extension("origin.git");
+        let _ = std::fs::remove_dir_all(&origin);
+        crate::scratch::git_init(&repo.root, &["-b", "main"]);
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "seed"])
+            .unwrap();
+        let texts = |repo: &Repo| -> Vec<String> {
+            cut_base_notes(repo, &[])
+                .into_iter()
+                .map(|f| match f {
+                    Finding::Note(text) => text,
+                    _ => panic!("a note was expected"),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            texts(&repo),
+            ["no `origin` remote — tasks are cut from the local `main`, unpushed commits included"]
+        );
+
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        repo.git(&["remote", "add", "origin", origin.to_str().unwrap()])
+            .unwrap();
+        assert_eq!(
+            texts(&repo),
+            [
+                "`origin` has no `main` here — tasks are cut from the local `main`, unpushed commits included"
+            ]
+        );
+
+        repo.git(&["push", "-q", "origin", "main:main"]).unwrap();
+        repo.git(&["fetch", "-q", "origin"]).unwrap();
+        assert!(texts(&repo).is_empty());
+
+        std::fs::remove_dir_all(&origin).ok();
     }
 
     /// A hook with no `# spoolway-requires:` line at all produces exactly the

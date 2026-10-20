@@ -3234,6 +3234,10 @@ fn fetch_within(repo: &Path, base: &str, timeout: Duration) -> bool {
 /// local branch of its own: `git worktree add -b <branch> <path>
 /// <commit-ish>` only ever makes `<branch>`, whatever `<commit-ish>` names,
 /// and a fetch only ever updates `refs/remotes/origin/*`.
+///
+/// This is the rule for a branch spoolway itself made, such as a parent's
+/// `task/<id>`, which may never reach `origin`. A task's own `base` takes
+/// [`resolve_task_base`] instead.
 pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
     resolve_cut_base_noting_timeout(repo, base).0
 }
@@ -3246,35 +3250,74 @@ fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
     if run(repo, "git", &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
         return (base.to_string(), false);
     }
-    // Best-effort, and prompts off: a base this checkout has never fetched
-    // may be gone by the time this runs, offline, or (private remote) behind
-    // a credential nobody here is at a terminal to type — any of which
-    // fails this fetch, and the fall-through below, naming `base` bare, is
-    // exactly what the ordinary `git worktree add` error already told a
-    // person about it before this function existed at all. The prompt is
-    // turned off for the same reason `Repo::remote_branch_answer` turns it
-    // off: this must fail outright rather than hang the dispatcher waiting
-    // on a password (review finding 5).
-    //
-    // `GIT_TERMINAL_PROMPT=0` does not reach an ssh passphrase or host-key
-    // prompt, or an ssh transport that is only slow, so the fetch is also
-    // given [`CUT_FETCH_TIMEOUT`]. Ssh options such as `BatchMode` are not
-    // added through `GIT_SSH_COMMAND`, because that outranks a person's own
-    // `core.sshCommand`.
+    // A start point that already names a remote-tracking ref, such as the
+    // `origin/main` [`resolve_task_base`] hands the cut, is settled. Asking
+    // `origin` for a branch called `origin/main` would only spend a fetch,
+    // and up to [`CUT_FETCH_TIMEOUT`], on a ref that cannot exist there.
+    let tracking = format!("refs/remotes/{base}");
+    if run(
+        repo,
+        "git",
+        &["rev-parse", "--verify", "--quiet", &tracking],
+    )
+    .is_ok()
+    {
+        return (base.to_string(), false);
+    }
+    let (remote, timed_out) = fetch_origin_base(repo, base);
+    (remote.unwrap_or_else(|| base.to_string()), timed_out)
+}
+
+/// The commit-ish a task's first cut starts from when it follows its `base`:
+/// `origin/<base>` whenever `origin` has the base, the local `<base>` branch
+/// otherwise.
+///
+/// A person's local `main` may carry commits they have not pushed. Cut from
+/// it, those commits ride into every task's branch and its pull request.
+/// Cut from `origin`, a task holds only its own work.
+///
+/// The fetch is best effort and bounded by [`CUT_FETCH_TIMEOUT`], like the
+/// one in [`resolve_cut_base`]. When it fails, an `origin/<base>` ref left by
+/// an earlier fetch is still used. With no such ref, or no `origin` at all,
+/// the local branch is used, and `doctor`'s startup list says so ahead of
+/// time. Never used for a dependency's branch: see [`resolve_cut_base`].
+pub(crate) fn resolve_task_base(repo: &Path, base: &str) -> String {
+    match fetch_origin_base(repo, base).0 {
+        Some(remote) => remote,
+        None => base.to_string(),
+    }
+}
+
+/// Fetch `base` from `origin`, and give `origin/<base>` back when this
+/// checkout has that remote-tracking ref afterwards, with whether the fetch
+/// had to be stopped.
+///
+/// Best-effort, and prompts off: a base this checkout has never fetched
+/// may be gone by the time this runs, offline, or (private remote) behind
+/// a credential nobody here is at a terminal to type. Any of those fails
+/// this fetch, and the caller then names `base` bare, which is exactly what
+/// the ordinary `git worktree add` error already told a person about it
+/// before this function existed at all. The prompt is turned off for the
+/// same reason `Repo::remote_branch_answer` turns it off: this must fail
+/// outright rather than hang the dispatcher waiting on a password (review
+/// finding 5).
+///
+/// `GIT_TERMINAL_PROMPT=0` does not reach an ssh passphrase or host-key
+/// prompt, or an ssh transport that is only slow, so the fetch is also
+/// given [`CUT_FETCH_TIMEOUT`]. Ssh options such as `BatchMode` are not
+/// added through `GIT_SSH_COMMAND`, because that outranks a person's own
+/// `core.sshCommand`.
+fn fetch_origin_base(repo: &Path, base: &str) -> (Option<String>, bool) {
     let timed_out = fetch_within(repo, base, CUT_FETCH_TIMEOUT);
     let remote = format!("origin/{base}");
     let remote_ref = format!("refs/remotes/{remote}");
-    let resolved = match run(
+    let found = run(
         repo,
         "git",
         &["rev-parse", "--verify", "--quiet", &remote_ref],
     )
-    .is_ok()
-    {
-        true => remote,
-        false => base.to_string(),
-    };
-    (resolved, timed_out)
+    .is_ok();
+    (found.then_some(remote), timed_out)
 }
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
@@ -5478,6 +5521,66 @@ mod tests {
         );
         assert!(timed_out, "the stopped fetch is reported to the caller");
 
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// A task's own base is read from `origin` when `origin` has it, and from
+    /// the local branch when `origin` is missing or lacks the base. The
+    /// local `main` here is one commit ahead of `origin/main`, so the answer
+    /// tells the two apart.
+    #[test]
+    fn a_task_base_follows_origin_and_falls_back_to_the_local_branch() {
+        let origin = crate::scratch::root("mux-task-base-origin");
+        let work = crate::scratch::root("mux-task-base-work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run(&origin, "git", &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "seed"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_task_base(&work, "main"),
+            "main",
+            "no origin remote at all: the local branch"
+        );
+
+        run(
+            &work,
+            "git",
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_task_base(&work, "main"),
+            "main",
+            "origin lacks the base: the local branch"
+        );
+
+        run(&work, "git", &["push", "-q", "origin", "main:main"]).unwrap();
+        run(
+            &work,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "unpushed"],
+        )
+        .unwrap();
+        assert_eq!(resolve_task_base(&work, "main"), "origin/main");
+        assert_eq!(
+            resolve_cut_base(&work, "main"),
+            "main",
+            "a branch spoolway made keeps the local-first rule"
+        );
+        assert_eq!(
+            resolve_cut_base(&work, "origin/main"),
+            "origin/main",
+            "a remote-tracking start point is taken as it is"
+        );
+
+        std::fs::remove_dir_all(&origin).ok();
         std::fs::remove_dir_all(&work).ok();
     }
 
