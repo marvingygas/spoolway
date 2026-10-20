@@ -7003,8 +7003,9 @@ pub(crate) fn base_problem_when_unasked(
 /// one per task; the next pass starts a fresh cache and asks again.
 pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 
-/// The branch an uncut `task` is cut from: its own `starts_from:`, else its
-/// first dependency's branch, else `base`.
+/// The branch an uncut `task` starts from: its own `starts_from:`, else its
+/// first dependency's branch, else `base`, which the cut reads from `origin`
+/// when `origin` has it (see [`crate::mux::resolve_task_base`]).
 ///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in
@@ -7529,24 +7530,37 @@ fn ensure_checkout(
                 //
                 // A task that follows its own `base` is cut from what
                 // `origin` has, so a commit a person has not pushed to their
-                // local base stays out of its pull request. Anything else,
-                // a dependency's `task/<id>` branch above all, is a branch
-                // spoolway made and may never have pushed, so it is cut from
-                // the local branch. `starts_from` itself is recorded as it
-                // is, so a re-cut reads the same name back.
-                let cut_from = match starts_from == base {
+                // local base stays out of its pull request. Anything else is
+                // a dependency's `task/<id>` branch, which spoolway made and
+                // may never have pushed, or a person's own `starts_from:`,
+                // and keeps the local-first rule of `resolve_cut_base`.
+                // `starts_from` itself is recorded as it is, so a re-cut
+                // reads the same name back.
+                //
+                // Resolved only when this cut makes the branch. A re-cut
+                // that reuses the task's own branch never reads the start
+                // point, and resolving it would spend a fetch, inside the
+                // pass, for nothing.
+                let follows_base = starts_from == base;
+                let cut_from = match follows_base && !branch_exists {
                     true => crate::mux::resolve_task_base(&repo.root, &base),
                     false => starts_from.clone(),
                 };
+                // `resolve_task_base` has already fetched, and has already
+                // said whether `origin/<base>` is there, so its answer is
+                // read as it is. `resolve_cut_base` would ask `origin` again
+                // for a base that has neither a local branch nor an `origin`
+                // ref, and so triple the wait on a remote that hangs.
                 let base_commit = if branch_exists {
                     task.front.base_commit.clone()
                 } else {
-                    repo.git(&[
-                        "rev-parse",
-                        &crate::mux::resolve_cut_base(&repo.root, &cut_from),
-                    ])
-                    .ok()
-                    .map(|c| c.trim().to_string())
+                    let pinned = match follows_base {
+                        true => cut_from.clone(),
+                        false => crate::mux::resolve_cut_base(&repo.root, &cut_from),
+                    };
+                    repo.git(&["rev-parse", &pinned])
+                        .ok()
+                        .map(|c| c.trim().to_string())
                 };
                 // Written down before the cut, not after it. `git worktree
                 // add -b` makes the branch first, so a dispatcher stopped
@@ -10292,6 +10306,32 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains("plan/live"), "{prompt}");
+    }
+
+    /// A task that follows its own `base` is cut from `origin/<base>` when
+    /// `origin` has it, so the briefing anchors `your change` and `your
+    /// commits` on that ref. A local base that sits behind `origin` would
+    /// count every commit merged there since as the task's own.
+    #[test]
+    fn what_you_have_anchors_a_base_task_on_the_origin_ref_it_was_cut_from() {
+        let (repo, _root_guard) = fixture("what-you-have-origin");
+        origin_behind_local_work(&repo);
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+
+        let solo = Task::load(&add_task_with(&repo, "solo", "implement", |front| {
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+        let prompt = sent(&repo, &solo, pipeline, step);
+
+        assert!(prompt.contains("`git diff origin/work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("`git log --oneline origin/work..HEAD`"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("you sit on    `work`"), "{prompt}");
     }
 
     /// spoolway keeps no store to resolve `group:` against any more, and no
@@ -23702,6 +23742,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A re-cut that reuses the task's own branch never reads its start
+    /// point, so it is handed the recorded `starts_from` by name and does not
+    /// ask `origin` for the base, which would spend a fetch inside the pass
+    /// for nothing.
+    #[test]
+    fn a_recut_is_not_resolved_against_origin() {
+        let (repo, _root_guard) = fixture("recut-skips-origin");
+        let worktree = crate::scratch::root("dispatch-recut-skips-origin-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        origin_behind_local_work(&repo);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("work".into());
+            f.base_commit = Some("0123456789abcdef".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+        }));
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(
+            mux.did("create_workspace"),
+            vec!["create_workspace on task/demo from work".to_string()],
+            "the re-cut is handed `starts_from` as recorded, not `origin/work`"
+        );
     }
 
     /// With an `origin` that has the base, a dependent is still cut from its

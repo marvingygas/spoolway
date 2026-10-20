@@ -3032,14 +3032,18 @@ fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> String {
     }
 }
 
-/// How long the fetch in [`resolve_cut_base`] may take before it is stopped.
+/// How long a fetch of one ref from `origin` may take before it is stopped.
 ///
-/// It runs inside the dispatcher's pass, twice per cut of a remote-only base,
-/// and nothing else in the pass runs while it waits. Ten seconds is ample for
-/// one ref over a working connection. A fetch that takes longer, whether its
-/// transport is stuck on a prompt or only slow, is given up on too: the cut
-/// then names the base bare, and if that fails, [`cut_worktree`] says the
-/// fetch was stopped and what to do about it.
+/// The fetches run inside the dispatcher's pass, and nothing else in the pass
+/// runs while one waits. A task that follows its own `base` fetches once in
+/// [`resolve_task_base`], and once more in [`cut_worktree`] only when that
+/// found neither a local branch nor an `origin` ref. A branch cut from a
+/// dependency's or a person's own start point fetches in [`resolve_cut_base`]
+/// when it is not a local branch, and once more in [`cut_worktree`]. Ten
+/// seconds is ample for one ref over a working connection. A fetch that takes
+/// longer, whether its transport is stuck on a prompt or only slow, is given
+/// up on too: the cut then names the base bare, and if that fails,
+/// [`cut_worktree`] says the fetch was stopped and what to do about it.
 const CUT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How a git command run by [`git_within`] ended.
@@ -3268,6 +3272,22 @@ fn resolve_cut_base_noting_timeout(repo: &Path, base: &str) -> (String, bool) {
     (remote.unwrap_or_else(|| base.to_string()), timed_out)
 }
 
+/// `origin/<base>` when this checkout has that remote-tracking ref, without
+/// asking `origin` anything. The cut's own answer is [`resolve_task_base`];
+/// this is what the lane briefing reads afterwards, to anchor its diff on the
+/// ref the branch was cut from.
+pub(crate) fn known_origin_ref(repo: &Path, base: &str) -> Option<String> {
+    let remote = format!("origin/{base}");
+    let remote_ref = format!("refs/remotes/{remote}");
+    run(
+        repo,
+        "git",
+        &["rev-parse", "--verify", "--quiet", &remote_ref],
+    )
+    .is_ok()
+    .then_some(remote)
+}
+
 /// The commit-ish a task's first cut starts from when it follows its `base`:
 /// `origin/<base>` whenever `origin` has the base, the local `<base>` branch
 /// otherwise.
@@ -3309,15 +3329,7 @@ pub(crate) fn resolve_task_base(repo: &Path, base: &str) -> String {
 /// `core.sshCommand`.
 fn fetch_origin_base(repo: &Path, base: &str) -> (Option<String>, bool) {
     let timed_out = fetch_within(repo, base, CUT_FETCH_TIMEOUT);
-    let remote = format!("origin/{base}");
-    let remote_ref = format!("refs/remotes/{remote}");
-    let found = run(
-        repo,
-        "git",
-        &["rev-parse", "--verify", "--quiet", &remote_ref],
-    )
-    .is_ok();
-    (found.then_some(remote), timed_out)
+    (known_origin_ref(repo, base), timed_out)
 }
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
@@ -5578,6 +5590,70 @@ mod tests {
             resolve_cut_base(&work, "origin/main"),
             "origin/main",
             "a remote-tracking start point is taken as it is"
+        );
+
+        std::fs::remove_dir_all(&origin).ok();
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// A fetch that fails leaves the `origin/<base>` an earlier fetch brought
+    /// in, so an offline dispatcher still cuts from what `origin` last said
+    /// and not from a local branch that may carry unpushed commits. Without
+    /// that ref the local branch is the only answer left.
+    #[test]
+    fn a_failed_fetch_still_cuts_from_the_origin_ref_an_earlier_fetch_left() {
+        let origin = crate::scratch::root("mux-task-base-offline-origin");
+        let work = crate::scratch::root("mux-task-base-offline-work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run(&origin, "git", &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(
+            &work,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "seed"],
+        )
+        .unwrap();
+        run(
+            &work,
+            "git",
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        run(&work, "git", &["push", "-q", "origin", "main:main"]).unwrap();
+        run(&work, "git", &["fetch", "-q", "origin"]).unwrap();
+        run(
+            &work,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "unpushed"],
+        )
+        .unwrap();
+
+        // `origin` now points at a repository that is not there, so the fetch
+        // in `resolve_task_base` fails outright.
+        let gone = origin.with_extension("gone");
+        run(
+            &work,
+            "git",
+            &["remote", "set-url", "origin", gone.to_str().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_task_base(&work, "main"),
+            "origin/main",
+            "the ref the earlier fetch left is used, not the local branch"
+        );
+
+        run(
+            &work,
+            "git",
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_task_base(&work, "main"),
+            "main",
+            "with no ref left, the local branch"
         );
 
         std::fs::remove_dir_all(&origin).ok();

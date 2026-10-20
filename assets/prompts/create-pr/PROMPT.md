@@ -9,6 +9,7 @@ Done: the branch is pushed, and one pull request is open for it with a body a re
 - commit anything left uncommitted, then push the commits as they are
 - a pull request already open for this branch is the one to update, never a reason to open a second
 - the body summarises `git diff <that branch>...HEAD` in plain English: one bullet per change, what changed and why
+- when that branch is `base:` and `origin/<that branch>` exists, diff against `origin/<that branch>` instead: the task was cut from it, and a local copy that is behind it shows other people's merged commits as yours
 - the body ends with `Co-Authored-By: <your own product name>`, such as `Claude Code` or `Codex`
 
 ## Never
