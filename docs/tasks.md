@@ -491,7 +491,8 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 --force` removes that value, so a task sent again is cut again from its start branch. A
 `starts_from:` you set before the cut stays.
 
-`unqueue --force` keeps the task's branch when it has commits no remote has. Sending the task
+`unqueue --force` keeps the task's branch when it has commits no remote has. In a repo with no
+remote, it keeps the branch when the task's base branch does not contain it. Sending the task
 again with that branch in place is refused by `queue add`, because its first cut never uses a
 branch that already exists. Nothing is queued. Rename the branch with `git branch -m task/<id>
 <name>` and set `starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop
@@ -501,7 +502,8 @@ disk](dispatcher.md#where-work-happens-on-disk).
 A started copy of a routine is handled differently. `unqueue --force` tears its checkout down, then
 deletes the copy, because the routine is still under `.spoolway/routines/` to queue again. It
 writes nothing to the pending directory and names the routine file. If the copy's branch has
-commits no remote has, the branch is kept and the command prints its name. Nothing sends that
+commits no remote has, the branch is kept and the command prints its name. In a repo with no
+remote, the branch is kept when the copy's base branch does not contain it. Nothing sends that
 branch back to a draft, so merge or push it, or run `git branch -D` on it. A copy whose routine
 file is gone is carried to pending as any other task.
 

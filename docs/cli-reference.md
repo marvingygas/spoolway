@@ -532,7 +532,8 @@ A copy of a routine is deleted instead, when a routine file under `.spoolway/rou
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
 the routine file's path, and the routine stays there to queue again. `--force` does the same for a
 copy that has started, after it tears the checkout down. A branch with commits no remote has is
-kept, and the command prints its name.
+kept, and the command prints its name. In a repo with no remote, a branch the task's base branch
+does not contain is kept.
 
 ```
 $ spoolway queue unqueue prune-1
