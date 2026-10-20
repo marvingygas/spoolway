@@ -5737,7 +5737,7 @@ impl<'a> Dispatcher<'a> {
                         }
                     };
                 let (worktree, fresh_pane) = worktree;
-                let env = BTreeMap::from([
+                let mut env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
                     (
@@ -5753,6 +5753,9 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
+                // A command's `spoolway` is the dispatcher's own, for the
+                // reason a lane's is: see [`crate::release::dispatcher_bin_dir`].
+                crate::release::use_dispatcher_binary(&mut env);
                 // A command runs in a pane unless its step's `hide:`, else
                 // `dispatch.hide_commands`, hides it (`shown`, above).
                 // Otherwise it is detached, as the headless backend runs
@@ -8568,6 +8571,9 @@ fn prepare_boot(
         "SPOOLWAY_SCRATCH".to_string(),
         scratch.display().to_string(),
     );
+    // The lane reports with the dispatcher's own `spoolway`, never an older
+    // one first on the person's `PATH` — see [`crate::release::dispatcher_bin_dir`].
+    crate::release::use_dispatcher_binary(&mut env);
 
     // The pane this lane runs in: the one the task's workspace has just opened
     // for it, the first pane an earlier pass opened and nothing has used since,

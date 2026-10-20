@@ -276,6 +276,9 @@ pub(crate) fn cheap_findings(
     report.record_all(cheap_branch_checks(repo, &tasks));
     report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
+    if let Err(why) = crate::release::dispatcher_bin_dir() {
+        report.record(Finding::Note(why.clone()));
+    }
     report.record(Finding::Check(
         "git identity".into(),
         crate::commands::dispatch::check_git_identity(repo, pipelines, config),
