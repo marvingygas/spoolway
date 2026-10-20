@@ -1348,7 +1348,7 @@ An arm is a disposable copy:
 - It runs every step the person left in, so a step such as `create-pr` still pushes its branch and
   opens a pull request. Tick that step to skip it in the trial picker.
 - A new trial mints arm ids that no local branch or fetched remote-tracking branch holds, so
-  a fetched pushed arm never blocks the next trial.
+  an arm whose pushed branch this clone has fetched never blocks the next trial.
 - Its branch is deleted at cleanup whether or not a remote has it.
 - It carries `trial_group:`, the source group a person tried. Every ledger line it banks stores
   that source group beside `trial:`. The field is absent on an ordinary task's lines.
