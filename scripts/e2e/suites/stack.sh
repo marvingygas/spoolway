@@ -825,6 +825,36 @@ else
   bad "and leaves that branch and the task's branch alone"
 fi
 
+# Every agent lane exports `SPOOLWAY_WORKTREE`, so naming a worktree is no
+# licence either: another checkout's worktree is refused the same way.
+env_out=$(SPOOLWAY_WORKTREE="$WORKTREES/person-wt" "$SPOOLWAY" stack handed 2>&1)
+env_status=$?
+if [ "$env_status" -eq 1 ] && grep -qF 'Nothing was committed or pushed' <<<"$env_out"; then
+  ok "\`SPOOLWAY_WORKTREE\` naming a worktree on another branch is refused too"
+else
+  bad "\`SPOOLWAY_WORKTREE\` naming a worktree on another branch is refused too (exit $env_status)"; sed 's/^/        /' <<<"$env_out"
+fi
+if [ "$(git -C "$WORKTREES/person-wt" rev-parse HEAD)" = "$side_head" ] \
+   && [ "$(git ls-remote origin refs/heads/task/handed)" = "$handed_remote" ] \
+   && [ "$(git rev-parse task/handed)" = "$handed_local" ]; then
+  ok "and nothing is moved"
+else
+  bad "and nothing is moved"
+fi
+
+# The task's own worktree on a detached HEAD is told what is wrong, not sent
+# to the directory it is already in.
+git -C "$WORKTREES/handed" checkout -q --detach
+det_out=$(cd "$WORKTREES/handed" && "$SPOOLWAY" stack handed 2>&1)
+det_status=$?
+if [ "$det_status" -eq 1 ] && grep -qF 'detached HEAD' <<<"$det_out" \
+   && grep -qF 'Nothing was committed or pushed' <<<"$det_out"; then
+  ok "a detached HEAD in the task's worktree is named as the problem"
+else
+  bad "a detached HEAD in the task's worktree is named as the problem (exit $det_status)"; sed 's/^/        /' <<<"$det_out"
+fi
+git -C "$WORKTREES/handed" checkout -q task/handed
+
 # The same command, with the worktree named the way a lane names it, from the
 # directory a lane's command step happens to run in.
 lane_out=$(SPOOLWAY_WORKTREE="$WORKTREES/handed" "$SPOOLWAY" stack handed 2>&1)
