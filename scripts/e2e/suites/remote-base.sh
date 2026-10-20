@@ -189,8 +189,8 @@ says "the queued task starts from main" \
 # about. The stuck task's base is an `origin` branch nothing here has fetched,
 # so its cut fetches. The other task's base is local, but a task that follows
 # its own base is cut from `origin/<base>`, so its cut fetches too. Each fetch
-# is bounded, so it must still start once the stuck task's fetches have
-# stopped, long before the transport would answer.
+# is bounded, so it must still start once the stuck task's fetches and its own
+# have stopped, before the transport would answer.
 dispatcher_stop
 HUNG_BASE=task/gh-415-hung
 must "a branch made only in the bare origin for the stuck fetch" \
