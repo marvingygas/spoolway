@@ -1253,4 +1253,304 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    // Checks that every `spoolway` command a shipped skill names exists.
+    //
+    // Eval's command-step table shipped while calibrate went on saying it did
+    // not exist, because nothing compared a skill with the binary. These tests
+    // ask the clap tree itself, so a renamed flag fails the day it is renamed
+    // and no list is kept by hand. They read names only: they cannot tell
+    // whether a sentence is true, and they do not look at a flag's value.
+
+    /// Commands a skill names on purpose to say they are wrong or gone. One
+    /// entry per line, as `(the name the failure prints after "names", why it
+    /// may stay)`, for example `("spoolway eval --every", "…")`. Empty today:
+    /// a skill that names a missing command is a bug in the skill until a
+    /// reason is written here.
+    const ALLOWED: &[(&str, &str)] = &[];
+
+    /// The `spoolway …` text a skill names, as `(line, text after the word
+    /// spoolway)`, with the line a code span starts on. Only code spans and
+    /// fenced blocks count: a prose sentence such as "spoolway sync replaces a
+    /// copy" is not a command. A span may wrap onto the next line of its
+    /// paragraph, so an open span carries over until its closing backtick, and
+    /// a blank line or a fence ends it unclosed.
+    fn named_commands(text: &str) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        let mut fenced = false;
+        let mut span: Option<(usize, String)> = None;
+        for (index, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                span = None;
+                continue;
+            }
+            if fenced {
+                for rest in after_each_spoolway(line) {
+                    // A fenced command is followed by a description set off
+                    // by a run of spaces; those words are prose, not names.
+                    let rest = rest.split("  ").next().unwrap_or(rest);
+                    found.push((index + 1, rest.to_string()));
+                }
+                continue;
+            }
+            if line.trim().is_empty() {
+                span = None;
+                continue;
+            }
+            for (at, piece) in line.split('`').enumerate() {
+                // Every piece after the first follows a backtick, which closes
+                // the open span or opens a new one.
+                if at > 0 {
+                    match span.take() {
+                        Some((start, words)) => {
+                            for rest in after_each_spoolway(&words) {
+                                found.push((start, rest.to_string()));
+                            }
+                        }
+                        None => span = Some((index + 1, String::new())),
+                    }
+                }
+                if let Some((_, words)) = &mut span {
+                    if !words.is_empty() {
+                        words.push(' ');
+                    }
+                    words.push_str(piece);
+                }
+            }
+        }
+        found
+    }
+
+    /// The text after each `spoolway ` that stands alone as a word. A path
+    /// such as `.spoolway/prompts` or `~/.spoolway/x` is not the binary.
+    fn after_each_spoolway(segment: &str) -> Vec<&str> {
+        const WORD: &str = "spoolway ";
+        segment
+            .match_indices(WORD)
+            .filter(|(at, _)| {
+                !segment[..*at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || "./-_~".contains(c))
+            })
+            .map(|(at, _)| &segment[at + WORD.len()..])
+            .collect()
+    }
+
+    /// What is wrong with the command `words` (the text after `spoolway`), or
+    /// `None` if every subcommand and long flag it names exists. Reading stops
+    /// at a placeholder, a pipe or any other shell syntax, because what follows
+    /// is a value or another command.
+    fn unknown_name(root: &clap::Command, words: &str) -> Option<(String, String)> {
+        let mut cmd = root;
+        let mut path = String::from("spoolway");
+        let mut may_descend = true;
+        let mut tokens = words
+            .split_whitespace()
+            .map(|t| t.trim_end_matches([',', '.', ';', ':', ')']));
+        while let Some(token) = tokens.next() {
+            if token.is_empty()
+                || token.starts_with(['<', '[', '|', '&', ';', '>', '$', '(', '"', '\''])
+            {
+                break;
+            }
+            if let Some(long) = token.strip_prefix("--") {
+                if long.is_empty() {
+                    break;
+                }
+                let (name, has_value) = match long.split_once('=') {
+                    Some((name, _)) => (name, true),
+                    None => (long, false),
+                };
+                if name == "help" || name == "version" {
+                    continue;
+                }
+                let Some(arg) = cmd.get_arguments().find(|a| {
+                    a.get_long() == Some(name)
+                        || a.get_all_aliases().is_some_and(|all| all.contains(&name))
+                }) else {
+                    return Some((
+                        format!("{path} --{name}"),
+                        format!(
+                            "names `{path} --{name}`, and `{path}` has no `--{name}`.\n  \
+                             Use a flag `{path} --help` lists, or add the flag to the CLI\n  \
+                             before the skill names it."
+                        ),
+                    ));
+                };
+                // The word after a flag that takes a value is that value, and
+                // may look like a subcommand (`--by step`).
+                if !has_value && arg.get_action().takes_values() {
+                    tokens.next();
+                }
+            } else if token.starts_with('-') {
+                // A short flag: names are checked for long flags only.
+            } else if may_descend {
+                match cmd.find_subcommand(token) {
+                    Some(sub) => {
+                        cmd = sub;
+                        path = format!("{path} {token}");
+                    }
+                    None if cmd.has_subcommands() && cmd.get_positionals().next().is_none() => {
+                        return Some((
+                            format!("{path} {token}"),
+                            format!(
+                                "names `{path} {token}`, and `{path}` has no subcommand `{token}`.\n  \
+                                 Use a command `{path} --help` lists, or add the command to the CLI\n  \
+                                 before the skill names it."
+                            ),
+                        ));
+                    }
+                    // A positional value, such as the `<name>` of `prompt show`.
+                    None => may_descend = false,
+                }
+            }
+        }
+        None
+    }
+
+    fn built_cli() -> clap::Command {
+        let mut root = crate::cli::command();
+        // Builds the tree, which also hands global flags down to subcommands.
+        root.build();
+        root
+    }
+
+    #[test]
+    fn skills_name_real_commands() {
+        let root = built_cli();
+        let mut failures = Vec::new();
+        for file in shipped_skill_files() {
+            let path = format!(
+                "assets/skills/{}/{}/{}",
+                file.provider.name(),
+                file.skill,
+                file.file
+            );
+            for (line, words) in named_commands(file.text) {
+                let Some((name, message)) = unknown_name(&root, &words) else {
+                    continue;
+                };
+                if ALLOWED.iter().any(|(allowed, _)| name == *allowed) {
+                    continue;
+                }
+                failures.push(format!("{path}:{line}\n  {message}"));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}\n", failures.join("\n"));
+    }
+
+    fn sample() -> clap::Command {
+        use clap::{Arg, ArgAction, Command};
+        let mut root = Command::new("spoolway")
+            .subcommand(
+                Command::new("eval")
+                    .arg(Arg::new("by").long("by").num_args(1))
+                    .arg(
+                        Arg::new("per_task")
+                            .long("per-task")
+                            .action(ArgAction::SetTrue),
+                    ),
+            )
+            .subcommand(
+                Command::new("prompt")
+                    .arg(Arg::new("by").long("by").num_args(1))
+                    .subcommand(Command::new("show").arg(Arg::new("name")))
+                    .subcommand(Command::new("list")),
+            );
+        root.build();
+        root
+    }
+
+    fn unknown(words: &str) -> Option<String> {
+        unknown_name(&sample(), words).map(|(name, _)| name)
+    }
+
+    /// A skill writes `<step>` where a person supplies a value.
+    #[test]
+    fn a_placeholder_ends_the_command() {
+        assert_eq!(unknown("eval --by <step> --per-task"), None);
+        assert_eq!(unknown("prompt show <name>"), None);
+        assert_eq!(unknown("eval <window> --nope"), None);
+    }
+
+    /// `step` after `--by` is the flag's value, not a subcommand.
+    #[test]
+    fn a_value_after_a_flag_is_not_read_as_a_name() {
+        assert_eq!(unknown("eval --by step --per-task"), None);
+        assert_eq!(unknown("eval --by=step"), None);
+        assert_eq!(unknown("prompt show calibrate"), None);
+    }
+
+    /// A pipe, and the description a fenced line carries, are not the command.
+    #[test]
+    fn a_pipe_and_a_description_end_the_command() {
+        assert_eq!(unknown("eval | grep --nope"), None);
+        let found = named_commands("```\n    spoolway prompt list   lists --nope\n```\n");
+        assert_eq!(found, vec![(2, "prompt list".to_string())]);
+        let found = named_commands("`spoolway prompt list | show`");
+        assert_eq!(found, vec![(1, "prompt list | show".to_string())]);
+        assert_eq!(unknown("prompt list | show"), None);
+    }
+
+    /// A value given to a flag on a command that has subcommands is not read
+    /// as one: `step` here is not a subcommand of `prompt`.
+    #[test]
+    fn a_flag_value_is_skipped_before_a_subcommand_is_read() {
+        assert_eq!(unknown("prompt --by step list"), None);
+        assert_eq!(
+            unknown("prompt --by step gone"),
+            Some("spoolway prompt gone".to_string())
+        );
+    }
+
+    /// A span that wraps onto the next line is one command; words after its
+    /// closing backtick are prose, on the same line or the next.
+    #[test]
+    fn a_span_that_wraps_a_line_is_read_whole() {
+        let wrapped = "Run `spoolway eval --by\nstep --per-task` now, then say spoolway x.\n";
+        assert_eq!(
+            named_commands(wrapped),
+            vec![(1, "eval --by step --per-task".to_string())]
+        );
+        let after =
+            "`spoolway eval` --nope and spoolway gone\nspoolway also `spoolway prompt list`\n";
+        assert_eq!(
+            named_commands(after),
+            vec![(1, "eval".to_string()), (2, "prompt list".to_string())]
+        );
+        // A blank line ends an unclosed span, so it cannot swallow later prose.
+        let open = "`spoolway eval\n\nspoolway gone `x`\n";
+        assert_eq!(named_commands(open), vec![]);
+    }
+
+    /// Only code spans and fenced blocks are commands.
+    #[test]
+    fn prose_outside_a_code_span_is_not_read() {
+        let text = "spoolway nonsense --nope runs.\n\
+                    See `.spoolway/prompts` and `~/.spoolway/x`.\n\
+                    ```\nspoolway eval\n```\n\
+                    spoolway after --the-fence\n";
+        assert_eq!(named_commands(text), vec![(4, "eval".to_string())]);
+    }
+
+    /// The check itself still fails: a guard that cannot fail guards nothing.
+    #[test]
+    fn an_unknown_flag_and_an_unknown_subcommand_are_named() {
+        assert_eq!(
+            unknown("eval --every"),
+            Some("spoolway eval --every".to_string())
+        );
+        assert_eq!(
+            unknown("eval --by x --nope"),
+            Some("spoolway eval --nope".to_string())
+        );
+        assert_eq!(
+            unknown("prompt gone"),
+            Some("spoolway prompt gone".to_string())
+        );
+        assert_eq!(unknown("nothing"), Some("spoolway nothing".to_string()));
+        assert_eq!(unknown("prompt show x --help"), None);
+    }
 }

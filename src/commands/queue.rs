@@ -10,6 +10,7 @@ use crate::screen::{
     Key, Notice, PollableRead, confirm, hint, key_hint, keys, overlay, pad_to, panel, plural,
     read_key,
 };
+use crate::status::Attempt;
 
 /// Which dependencies a task on a wait step is still waiting for, or, when
 /// one of them has no task file at all, that it never will finish.
@@ -1345,6 +1346,24 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         && value != &serde_norway::Value::String("off".to_string())
     {
         bail!("{name}: `tracking:` may only be set to `off`");
+    }
+    // Banked onto every ledger row the task writes, where `eval` reads it
+    // as a number. Refused here, at the one gate every submitted task
+    // passes, because a quoted `"18"` or a `250` would otherwise queue and
+    // then be dropped from every row without a word — see
+    // `Task::complexity`.
+    if let Some(value) = front.extra.get("complexity")
+        && crate::task::complexity_of(value).is_none()
+    {
+        let shown = serde_norway::to_string(value).unwrap_or_default();
+        bail!(
+            "{name} sets `complexity: {}`, which is not a whole number from {} to {}. \
+             Set it to a whole number in that range, 100 being extremely complex, or \
+             remove the key.",
+            shown.trim(),
+            crate::task::COMPLEXITY_RANGE.start(),
+            crate::task::COMPLEXITY_RANGE.end(),
+        );
     }
     // `SPOOLWAY_LABELS` hands a hook every label comma-joined — see
     // `tracking::build_env` and `tracking::open_env` — and Jira's own
@@ -5713,8 +5732,9 @@ fn run_screen_from(
         QueueSnapshot {
             groups: groups.clone(),
             branch: state.board_branch.clone(),
-            // What the opening message already named is what the seed holds;
-            // `refresh_from_reader` never announces the seed itself.
+            // What the opening message already named is what the seed holds.
+            // `refresh_from_reader` offers this list on every call; it names
+            // none of it because `named.files` already holds the same files.
             unreadable: state
                 .named
                 .iter()
@@ -6306,14 +6326,60 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
     // this ever runs, so the closure hands it straight back the one time it
     // is asked for a value it does not have to build. The `Option` holding
     // it guards that: `take` empties it on that first call, so every call
-    // after it really does read.
+    // after it goes to [`IdleCheck`], which reads only when something it
+    // stamps has moved.
     let mut initial = Some(initial);
-    QueueReader::start(move || {
+    let mut idle = IdleCheck::default();
+    QueueReader::start_watching(move || {
         if let Some(seed) = initial.take() {
-            return Some(seed);
+            return Attempt::Fresh(seed);
         }
-        build_queue_snapshot(&repo, &cwd)
+        idle.read(&repo, &cwd)
     })
+}
+
+/// What lets a reading of the queue tab be skipped when nothing it looks at
+/// has moved.
+///
+/// A reading looks at the pending, queue and archive directories, the files
+/// in the first two, and the checkout's `HEAD`. [`crate::watch::Stamp`]
+/// records all of them before each reading, and a tick whose stamp equals the
+/// last settled one returns [`Attempt::Unchanged`] without starting a
+/// process, reading a file or building a snapshot. The reader keeps the
+/// snapshot it already holds, so [`refresh_from_reader`] sees no new
+/// generation and copies nothing.
+///
+/// A reading that fails is [`Attempt::Failed`] and keeps no stamp, so the
+/// next tick tries again rather than treating the failure as the current
+/// state.
+#[derive(Default)]
+struct IdleCheck {
+    stamp: Option<crate::watch::Stamp>,
+    branch: crate::watch::BranchWatch,
+}
+
+impl IdleCheck {
+    fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Attempt<QueueSnapshot> {
+        let head = self.branch.head_path(cwd);
+        let stamp = crate::watch::Stamp::capture(
+            &[repo.pending_dir(), repo.queue_dir()],
+            &[repo.archive_dir()]
+                .into_iter()
+                .chain(head)
+                .collect::<Vec<_>>(),
+        );
+        if let Some(before) = &self.stamp
+            && stamp.unchanged_since(before)
+        {
+            return Attempt::Unchanged;
+        }
+        self.stamp = None;
+        let Some(snapshot) = build_queue_snapshot(repo, cwd, &mut self.branch) else {
+            return Attempt::Failed;
+        };
+        self.stamp = Some(stamp);
+        Attempt::Fresh(snapshot)
+    }
 }
 
 /// [`super::pending::list_groups_and_skipped`] and
@@ -6322,10 +6388,14 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 /// handed back once. `None` when the pending directory itself cannot be
 /// read; a detached checkout reads as no branch rather than a reason to
 /// fail the whole reading, the same tolerance the inline `branch_at` call
-/// this replaces always gave.
-fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
+/// this replaces always gave. `watch` starts git only when `HEAD` moved.
+fn build_queue_snapshot(
+    repo: &Repo,
+    cwd: &std::path::Path,
+    watch: &mut crate::watch::BranchWatch,
+) -> Option<QueueSnapshot> {
     let (groups, unreadable) = super::pending::list_groups_and_skipped(repo).ok()?;
-    let branch = crate::repo::branch_at(cwd).ok();
+    let branch = watch.read(cwd, || crate::repo::branch_at(cwd));
     Some(QueueSnapshot {
         groups,
         branch,
@@ -6346,6 +6416,9 @@ fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnaps
 /// when a call here actually adopts something, never on every call, so a
 /// reading this very call just woke is never rejected for having started
 /// "too recently" — the bug an earlier version of this function had.
+///
+/// The standing reading's broken files are offered to
+/// [`announce_unreadable`] on every call, adopted or not.
 fn refresh_from_reader(
     reader: &QueueReader,
     known: &mut u64,
@@ -6354,13 +6427,17 @@ fn refresh_from_reader(
 ) {
     reader.wake();
     let (snapshot, generation) = reader.latest_with_generation();
-    if generation <= *known {
-        return;
+    if generation > *known {
+        adopt_groups(snapshot.groups.clone(), groups, state);
+        state.board_branch = snapshot.branch.clone();
+        *known = generation;
     }
-    adopt_groups(snapshot.groups.clone(), groups, state);
-    state.board_branch = snapshot.branch.clone();
+    // Asked on every call, adopted or not. A tick that finds nothing changed
+    // lands no reading, so a file found broken while a filter or a question
+    // was open would otherwise wait for an unrelated change before it was
+    // named. This only compares the standing reading's list of broken files
+    // with the ones already named; it copies nothing.
     announce_unreadable(&snapshot.unreadable, groups, state);
-    *known = generation;
 }
 
 /// Name the pending files in `current` that this screen has not named yet.
@@ -6372,7 +6449,7 @@ fn refresh_from_reader(
 /// that is repaired is forgotten, so breaking it again is named again.
 ///
 /// The popup opens only over plain browsing. Over any other mode, the files
-/// stay unnamed and the next reading names them once that mode is closed, so
+/// stay unnamed and the next refresh names them once that mode is closed, so
 /// a notice never replaces a half-typed filter or an open question.
 fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: &mut ScreenState) {
     let browsing = matches!(state.mode, Mode::Browsing);
@@ -12573,6 +12650,34 @@ mod tests {
         );
     }
 
+    /// `complexity:` is banked as a number, so anything but a whole number
+    /// from 1 to 100 is refused, naming the task, the value and the range.
+    /// A task within the range keeps its value, and one without the key
+    /// queues as before. Fails without the check: every value is accepted.
+    #[test]
+    fn a_complexity_outside_one_to_a_hundred_is_refused_naming_the_value() {
+        for bad in ["0", "101", "-3", "18.5", "\"18\"", "high", "~"] {
+            let text = task_text("demo", &format!("group: demo\ncomplexity: {bad}\n"), BODY);
+            let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+            let said = format!("{err:#}");
+            assert!(said.contains("mine.md"), "{bad}: {said}");
+            assert!(said.contains("from 1 to 100"), "{bad}: {said}");
+            assert!(said.contains("`complexity: "), "{bad}: {said}");
+        }
+        let text = task_text("demo", "group: demo\ncomplexity: 250\n", BODY);
+        let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(format!("{err:#}").contains("`complexity: 250`"), "{err:#}");
+
+        for good in [1, 18, 100] {
+            let text = task_text("demo", &format!("group: demo\ncomplexity: {good}\n"), BODY);
+            let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+            assert_eq!(task.complexity(), Some(good));
+        }
+        let text = task_text("demo", "group: demo\n", BODY);
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert_eq!(task.complexity(), None);
+    }
+
     /// An empty label fails neither the whitespace nor the comma check, so
     /// it gets its own message rather than the wrong one of those two.
     #[test]
@@ -13613,6 +13718,65 @@ mod tests {
         );
     }
 
+    /// Back-date a file or directory so a stamp counts it as settled.
+    fn age(path: &std::path::Path) {
+        crate::scratch::set_mtime(
+            path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
+    }
+
+    /// With nothing changed, [`IdleCheck::read`] returns no reading, reads no
+    /// pending file and starts no `git`. Edited, it reads again, and
+    /// starts `git` only once `HEAD` has moved. Before [`IdleCheck`] every
+    /// reading read every file and started `git`.
+    #[test]
+    fn an_idle_reading_reads_no_file_and_starts_no_process() {
+        let (repo, _root_guard) = fixture("queue-idle-check");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: demo\n", BODY));
+        let mut idle = IdleCheck::default();
+        let git_runs = || crate::repo::runs_here_under(&repo.root);
+        let file_reads = || super::pending::pending_reads_here_under(&repo.pending_dir());
+        for dir in [repo.pending_dir(), repo.queue_dir(), repo.archive_dir()] {
+            age(&dir);
+        }
+        age(&path);
+        if let Some(head) = idle.branch.head_path(&repo.root) {
+            age(&head);
+        }
+
+        assert!(
+            matches!(idle.read(&repo, &repo.root), Attempt::Fresh(_)),
+            "the first reading"
+        );
+        let (runs, reads) = (git_runs(), file_reads());
+        assert!(reads > 0);
+
+        for _ in 0..3 {
+            assert!(
+                matches!(idle.read(&repo, &repo.root), Attempt::Unchanged),
+                "nothing changed"
+            );
+        }
+        assert_eq!(git_runs(), runs, "an idle reading must start no process");
+        assert_eq!(file_reads(), reads, "an idle reading must read no file");
+
+        std::fs::write(
+            &path,
+            task_text("wire", "group: demo\n", "A longer body.\n"),
+        )
+        .unwrap();
+        age(&path);
+        age(&repo.pending_dir());
+        let changed = idle.read(&repo, &repo.root);
+        assert!(
+            matches!(changed, Attempt::Fresh(_)),
+            "an edited file is read again"
+        );
+        assert!(file_reads() > reads);
+        assert_eq!(git_runs(), runs, "an edit to a task does not move HEAD");
+    }
+
     /// A file that breaks while the queue tab stays open is named when the
     /// reader lands it, once — not only on the next visit to the tab. Before,
     /// only the tab's opening message named such files, so a task written
@@ -13668,6 +13832,39 @@ mod tests {
             }
         }
         assert!(matches!(state.mode, Mode::Browsing), "{:?}", state.mode);
+    }
+
+    /// A file found broken while a filter is open is named once browsing
+    /// returns, even though no reading lands in between: an idle tick lands
+    /// none. Before, the notice waited for an unrelated file to change.
+    #[test]
+    fn a_file_broken_under_a_filter_is_named_without_a_new_reading() {
+        let dir = std::path::PathBuf::from("/pending");
+        let bad = dir.join("tokens.md");
+        let mut seed = Some(QueueSnapshot {
+            unreadable: vec![bad.clone()],
+            ..Default::default()
+        });
+        let reader = QueueReader::start(move || seed.take());
+        let mut known = 0;
+        let mut groups = Vec::new();
+        let mut state = ScreenState::new();
+        state.named = Some(NamedFiles {
+            dir,
+            files: Default::default(),
+        });
+
+        state.mode = Mode::Filter;
+        refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+        assert!(matches!(state.mode, Mode::Filter), "{:?}", state.mode);
+
+        state.mode = Mode::Browsing;
+        refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+        assert!(
+            matches!(state.mode, Mode::Outcome { .. }),
+            "{:?}",
+            state.mode
+        );
     }
 
     /// [`announce_unreadable`] leaves a half-typed filter or an open question
@@ -13738,9 +13935,10 @@ mod tests {
         let (thread_repo, thread_cwd) = (repo.clone(), repo.root.clone());
         let (thread_calls, thread_gate) =
             (std::sync::Arc::clone(&calls), std::sync::Arc::clone(&gate));
+        let mut watch = crate::watch::BranchWatch::default();
         let reader = QueueReader::start(move || {
             let call = thread_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let fresh = build_queue_snapshot(&thread_repo, &thread_cwd);
+            let fresh = build_queue_snapshot(&thread_repo, &thread_cwd, &mut watch);
             if call == blocked_call {
                 let (lock, cond) = &*thread_gate;
                 let mut released = lock.lock().unwrap();

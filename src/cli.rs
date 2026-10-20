@@ -571,8 +571,8 @@ impl EvalBy {
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
         pipeline, step or version instead; the columns naming a row change with it, and \
         --by task alone adds CTX PEAK. A \
-        Total line closes the table with what adds up: distinct TASKS, BLOCKS, and the sums of \
-        IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
+        Total line closes the table with what adds up: distinct TASKS, BLOCKS, TURNS, and the \
+        sums of IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
         calendar time the lanes took. With --per-task the table ends on an Average line \
         instead: each sum over the table's distinct TASKS, with USD left blank and USD/TASK \
         carrying the average. Read TASKS before believing a figure: a row that has only run a couple of times can \
@@ -587,23 +587,28 @@ impl EvalBy {
         spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
         TASKS counts every task that touched the row. PASS is the share of lanes that \n  \
-        reported pass, and BLOCKS is how many lanes ended blocked. CTX AVG is the mean of \n  \
-        every lane's own peak context reading, each as a share of its model's window. \n  \
-        Under --by task alone, CTX PEAK beside it is the highest share any one of the \n  \
-        task's lanes reached. IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's \n  \
-        total. With --per-task, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, USD/TASK \n  \
-        and TIME/TASK are each that total over TASKS. IN USD, OUT USD, CACHE R USD and \n  \
-        CACHE W USD price the column before each at today's price table, so together \n  \
-        they can differ from USD, which was banked when the lane settled. With \n  \
-        --per-task each is divided by TASKS like the rest.\n\n  \
+        reported pass, and BLOCKS is how many lanes ended blocked. TURNS counts the \n  \
+        model's replies in the row's lanes, subagents' included. Each reply re-reads \n  \
+        the conversation from the cache, so CACHE R grows with TURNS times context: \n  \
+        read TURNS beside CTX AVG to tell which of the two drove it. CTX AVG is the \n  \
+        mean of every lane's own peak context reading, each as a share of its model's \n  \
+        window. Under --by task alone, CTX PEAK beside it is the highest share any one \n  \
+        of the task's lanes reached, and COMPLEXITY is the task's own `complexity:`, \n  \
+        the planner's experimental estimate from 1 to 100, or - where it set none. \n  \
+        TURNS, IN, OUT, CACHE R, CACHE W, USD and TIME are each the row's total. With \n  \
+        --per-task, TURNS/TASK, IN/TASK, OUT/TASK, CACHE R/TASK, CACHE W/TASK, \n  \
+        USD/TASK and TIME/TASK are each that total over TASKS. IN USD, OUT USD, \n  \
+        CACHE R USD and CACHE W USD price the column before each at today's price \n  \
+        table, so together they can differ from USD, which was banked when the lane \n  \
+        settled. With --per-task each is divided by TASKS like the rest.\n\n  \
         Every figure is a floor: an agent does not always write every request it makes \n  \
         to its transcript, and what it leaves out is missing here.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
-        Total carries distinct TASKS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
-        their four USD columns, USD and TIME. Its TIME is lane time added up, not the \n  \
-        calendar time the lanes took. With --per-task the line is Average: each sum over \n  \
-        the table's distinct TASKS, with USD blank and USD/TASK carrying the average. \n  \
-        PASS, CTX AVG and CTX PEAK stay blank on either."
+        Total carries distinct TASKS, BLOCKS, TURNS and the sums of IN, OUT, CACHE R, \n  \
+        CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, \n  \
+        not the calendar time the lanes took. With --per-task the line is Average: \n  \
+        each sum over the table's distinct TASKS, with USD blank and USD/TASK carrying \n  \
+        the average. PASS, CTX AVG and CTX PEAK stay blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under
@@ -685,8 +690,9 @@ pub struct EvalArgs {
     #[arg(long)]
     pub csv: bool,
 
-    /// Print each token, cost and time figure over the row's TASKS — IN/TASK,
-    /// USD/TASK, TIME/TASK and the rest — instead of the row's totals.
+    /// Print each turn, token, cost and time figure over the row's TASKS —
+    /// TURNS/TASK, IN/TASK, USD/TASK, TIME/TASK and the rest — instead of the
+    /// row's totals.
     /// `--csv` and `--json` follow it, carrying the per-task columns in place
     /// of the totals. Refused beside `--discard`, which prints no figures.
     #[arg(long)]

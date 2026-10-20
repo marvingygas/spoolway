@@ -275,14 +275,19 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let watch = crate::screen::open_dir_watch(&repo.commands_dir());
 
     // The config this run is using. Starts as the one `main` loaded and is
-    // replaced at the top of every pass by whatever `config.toml` and the
-    // config override say then — see `reload_config`.
+    // replaced at the top of any pass that finds `config.toml` or the config
+    // override changed, by whatever they say then — see `ConfigWatch` and
+    // `reload_config`.
     let mut live = repo.clone();
     // The parse error the last reload reported, so a config that stays broken
     // is announced on the pass that found it and not on every pass after.
     let mut reload_error: Option<String> = None;
     // The same for a record of the last good config that cannot be written.
     let mut record_error: Option<String> = None;
+    let mut config_watch = ConfigWatch::default();
+    // What the multiplexer was last asked, carried across the dispatchers
+    // built one per pass — see `crate::dispatch::PassMemory`.
+    let mut pass_memory = crate::dispatch::PassMemory::default();
 
     loop {
         // Before anything is read or moved: a dispatcher whose lock file was
@@ -302,8 +307,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             }
             return Ok(0);
         }
-        reload_config(&mut live, &mut reload_error, &mut record_error);
-        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref());
+        config_watch.reload(&mut live, &mut reload_error, &mut record_error);
+        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref())
+            .with_memory(std::mem::take(&mut pass_memory));
 
         let mut spent_out = None;
         // Whether this pass moved a task and so has more ready to try at
@@ -312,7 +318,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // one wait, not be retried with no pause at all.
         let mut worked = false;
 
-        match dispatcher.pass(&mut || {}) {
+        let outcome = dispatcher.pass(&mut || {});
+        pass_memory = dispatcher.into_memory();
+        match outcome {
             Ok(report) => {
                 worked = skip_wait(&report, consecutive_working);
                 // The ceiling drains rather than kills: the run is over, but not
@@ -447,6 +455,52 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 break;
             }
         }
+    }
+}
+
+/// Whether the files [`reload_config`] reads have moved since it last ran, so
+/// an idle pass does not load the config, start git for the override
+/// layer's location, and render the record again to find nothing different.
+///
+/// It stats `config.toml`, `overrides/config.toml` and the record of the last
+/// good config. The record is watched too, because a person told to delete a
+/// bad one is promised the dispatcher writes it again on its next pass.
+/// A record that could not be written is retried every pass whatever the
+/// stamp says, for the same reason. A load that failed is not retried until
+/// a file moves: the same files give the same error, and it was said once.
+#[derive(Default)]
+struct ConfigWatch {
+    seen: Option<crate::watch::Stamp>,
+}
+
+impl ConfigWatch {
+    /// [`reload_config`], unless nothing it reads has changed since the last
+    /// call that ran it.
+    fn reload(
+        &mut self,
+        live: &mut Repo,
+        reported: &mut Option<String>,
+        record_reported: &mut Option<String>,
+    ) {
+        // Taken before the load, so a write that lands during it is seen as
+        // a change on the next pass.
+        let stamp = crate::watch::Stamp::capture(
+            &[],
+            &[
+                crate::config::Config::path_in(&live.root),
+                crate::overrides::config_patch_path(&live.overrides_dir()),
+                crate::pipeline_snapshot::config_record_path(live),
+            ],
+        );
+        let unchanged = self
+            .seen
+            .as_ref()
+            .is_some_and(|before| stamp.unchanged_since(before));
+        if unchanged && record_reported.is_none() {
+            return;
+        }
+        reload_config(live, reported, record_reported);
+        self.seen = Some(stamp);
     }
 }
 
@@ -1546,6 +1600,74 @@ mod tests {
             "a good record clears the failure"
         );
         assert_eq!(said(&repo), 1);
+    }
+
+    /// Passes over config files that have not moved neither load the config
+    /// nor start git for the override layer's location; an edit is still
+    /// picked up on the pass after it, and a record that could not be
+    /// written is retried each pass whatever the stamp says.
+    #[test]
+    fn an_idle_config_watch_starts_no_process_and_still_sees_an_edit() {
+        let (mut repo, _root) = fixture("config-watch-idle");
+        let config = crate::config::Config::path_in(&repo.root);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let backdate = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        };
+        backdate(&config);
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let record = crate::pipeline_snapshot::config_record_path(&repo);
+        let (mut reported, mut record_reported) = (None, None);
+        let mut watch = ConfigWatch::default();
+
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(record.is_file(), "the first reload records the config");
+        backdate(&record);
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+
+        let before = crate::repo::runs_under(&repo.root);
+        for _ in 0..3 {
+            watch.reload(&mut repo, &mut reported, &mut record_reported);
+        }
+        assert_eq!(
+            crate::repo::runs_under(&repo.root),
+            before,
+            "an idle reload started a process"
+        );
+
+        assert!(repo.config.dispatch.hide_commands);
+        std::fs::write(&config, "[dispatch]\nhide_commands = false\n").unwrap();
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(!repo.config.dispatch.hide_commands, "an edit was not read");
+
+        // A record that cannot be written is tried again on every pass,
+        // even while every file the watch stats stays exactly as it was.
+        backdate(&config);
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(record_reported.is_some(), "the unwritable record is said");
+        std::fs::File::open(&record)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        let before = crate::repo::runs_under(&repo.root);
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(
+            crate::repo::runs_under(&repo.root) > before,
+            "the unwritable record was not tried again"
+        );
+        std::fs::remove_dir(&record).unwrap();
+        watch.reload(&mut repo, &mut reported, &mut record_reported);
+        assert!(record_reported.is_none(), "the next pass tried again");
     }
 
     /// The dispatch tab's step-30 popup body, from the ceiling a pass

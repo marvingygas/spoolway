@@ -13,6 +13,10 @@ command step run. A command step line carries no tokens and no cost. See
 A line written for a copy of a routine carries `routine`, the routine's id. A line for any other
 task leaves it out.
 
+A line for a task that sets `complexity:` carries that number as `complexity`. Lane lines, command
+step lines and the lines the sweep banks for a lane's missed spend all carry it. A line for a task
+without the key leaves it out. See [The frontmatter is spoolway's](tasks.md#the-frontmatter-is-spoolways).
+
 ## How the numbers get there
 
 spoolway does not talk to a model. Each agent writes its own transcript with per-turn token
@@ -136,22 +140,23 @@ spoolway eval --since 2026-06-01 --until 7d    # a window
 ```
 
 ```
-PIPELINE   TASKS  PASS  BLOCKS  CTX AVG       IN      OUT  CACHE R  CACHE W       USD      TIME
-impl          41   82%       3      32%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
-impl_ui       15   79%       2      31%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
-Total         56             5             38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
+PIPELINE   TASKS  PASS  BLOCKS  TURNS  CTX AVG       IN      OUT  CACHE R  CACHE W       USD      TIME
+impl          41   82%       3   2410      32%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
+impl_ui       15   79%       2    890      31%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
+Total         56             5   3300            38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
 ```
 
 | Column | What it is |
 |---|---|
 | `TASKS` | Tasks that touched this row |
+| `TURNS` | The model's replies in the row's lanes, subagents included |
 | `CTX AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | Drawn under `--by task` only: the highest share of its model's window any of the task's lanes reached |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each priced token class, summed over the row |
 | `USD` | Priced spend. Blank when no lane on the row has a price. See [Pricing](#pricing). |
 | `TIME` | Wall time, summed over the row |
 
-`spoolway eval --per-task` divides each token class and the time by `TASKS`. See
+`spoolway eval --per-task` divides the turns, each token class and the time by `TASKS`. See
 [Comparing pipelines](eval.md) for the full column set, `--by` and the rest of the flags.
 
 ## Pricing
@@ -235,6 +240,9 @@ A model is priced from the first table that knows it:
 | Project | `[models]` in `config.toml` | glob |
 | Refreshed | `~/.spoolway/model-prices.json`, written by `spoolway models refresh` | exact name |
 | Built-in | `assets/model-prices.json`, compiled into the binary | exact name |
+
+spoolway reads `~/.spoolway/model-prices.json` again only when the file has changed or can no longer be read.
+Otherwise it prices a model from the copy it already holds.
 
 A project row keeps the refreshed or built-in value for every field it leaves out, when those tables
 know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).

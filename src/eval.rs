@@ -435,6 +435,10 @@ struct Metrics {
     /// Lanes whose report left the task on `blocked`, whatever road took it
     /// there — see [`LaneVerdict`].
     blocked: usize,
+    /// The model's replies, summed over the row's lines — deltas, like
+    /// tokens, so a lane banked twice still counts each turn once. See
+    /// [`Entry::turns`].
+    turns: u64,
     /// Every token class, summed over the row's lines — deltas, like cost.
     tokens: Tokens,
     /// Each of `tokens`' classes priced at today's price table — see
@@ -473,6 +477,7 @@ impl Metrics {
             // plain sum here already lands on each lane's real total
             // whether it wrote one ledger line or two.
             out.time_s += entry.wall_s;
+            out.turns += u64::from(entry.turns);
             out.tokens.add(&entry.tokens);
             out.lines += 1;
             match entry.cost_usd {
@@ -527,6 +532,10 @@ impl Metrics {
 
     fn blocks_per_task(&self) -> f64 {
         self.per_task(self.blocked as f64)
+    }
+
+    fn turns_per_task(&self) -> f64 {
+        self.per_task(self.turns as f64)
     }
 
     fn cost_per_task(&self) -> f64 {
@@ -897,6 +906,12 @@ struct LaneRow {
     /// The row's earliest and latest lane.
     first_ts: String,
     last_ts: String,
+    /// The planner's estimate the run's lines carry — see
+    /// [`Entry::complexity`] — under `task`, and `None` under every other
+    /// `by` or where no line of the run carries one. A number of its own
+    /// rather than read back off `cells`, so an export writes it as a number
+    /// and a sort orders `9` before `18`.
+    complexity: Option<u32>,
     metrics: Metrics,
 }
 
@@ -911,6 +926,7 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
             ("PIPELINE", "pipeline"),
             ("VER", "pipeline_version"),
             ("WHEN", "when"),
+            (COMPLEXITY_HEADER, "complexity"),
         ],
         EvalBy::Pipeline => &[("PIPELINE", "pipeline")],
         EvalBy::Step => &[("PIPELINE", "pipeline"), ("STEP", "step")],
@@ -928,10 +944,11 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
 /// reads. A per-task cell sorts on its per-task figure, not the total it
 /// divides. Each token class is followed by its cost at today's prices — see
 /// [`ClassCost`].
-const LANE_FIGURE_COLUMNS: [(&str, &str); 15] = [
+const LANE_FIGURE_COLUMNS: [(&str, &str); 16] = [
     ("TASKS", "tasks"),
     ("PASS", "pass"),
     ("BLOCKS/TASK", "blocks_per_task"),
+    ("TURNS/TASK", "turns_per_task"),
     ("CTX AVG", "ctx_avg_pct"),
     ("IN/TASK", "in_per_task"),
     ("IN USD/TASK", "in_usd_per_task"),
@@ -952,10 +969,11 @@ const LANE_FIGURE_COLUMNS: [(&str, &str); 15] = [
 /// thing per task would be the one per-task figure left in a view of totals.
 /// `USD` stays last among the costs, as the banked total the four class
 /// costs before it are priced apart from — see [`ClassCost`].
-const LANE_TOTAL_COLUMNS: [(&str, &str); 14] = [
+const LANE_TOTAL_COLUMNS: [(&str, &str); 15] = [
     ("TASKS", "tasks"),
     ("PASS", "pass"),
     ("BLOCKS", "blocks"),
+    ("TURNS", "turns"),
     ("CTX AVG", "ctx_avg_pct"),
     ("IN", "in_tokens"),
     ("IN USD", "in_usd"),
@@ -1086,8 +1104,9 @@ impl Figures {
 
 /// The lanes table's totals, each beside its per-task figure — what
 /// [`Figures::carry`] moves a lanes sort between.
-const LANE_PAIRS: [(&str, &str); 11] = [
+const LANE_PAIRS: [(&str, &str); 12] = [
     ("blocks", "blocks_per_task"),
+    ("turns", "turns_per_task"),
     ("in_tokens", "in_per_task"),
     ("in_usd", "in_usd_per_task"),
     ("out_tokens", "out_per_task"),
@@ -1102,7 +1121,8 @@ const LANE_PAIRS: [(&str, &str); 11] = [
 
 /// The naming columns [`LaneRow::keys`] holds under each `by`: the run id
 /// under `task`, which the screen has no room for, then the `by`'s own but
-/// for `pipeline_version`, which an export reads off the drawn cell — see
+/// for `pipeline_version`, which an export reads off the drawn cell, and
+/// `complexity`, which it writes from [`LaneRow::complexity`] — see
 /// [`lane_export_cell`].
 fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
     match by {
@@ -1112,6 +1132,19 @@ fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
         EvalBy::Step => &["pipeline", "step"],
         EvalBy::Version => &["pipeline", "first"],
     }
+}
+
+/// The `COMPLEXITY` column's header, drawn under `by task` only.
+const COMPLEXITY_HEADER: &str = "COMPLEXITY";
+
+/// A run's `COMPLEXITY` cell: its estimate, or `-` where its lines carry
+/// none, right-aligned under the header the way every figure is. [`naming`]
+/// left-aligns every naming column, so this cell carries its own left
+/// padding to the header's width; no estimate is wider than the header, so
+/// the column stays exactly that wide.
+fn complexity_cell(complexity: Option<u32>) -> String {
+    let value = complexity.map_or_else(|| "-".to_string(), |n| n.to_string());
+    format!("{value:>w$}", w = COMPLEXITY_HEADER.len())
 }
 
 /// What a lane without a `group:` groups under — a dash, the same "nothing
@@ -1198,6 +1231,14 @@ fn grouped_rows<'a>(
                 .iter()
                 .min_by(|a, b| a.ts.cmp(&b.ts))
                 .expect("a group always has a line");
+            // The latest line that carries one, as the label's routine is:
+            // a run whose task file was given a new estimate part-way reads
+            // as its newest, and one that began before the field existed
+            // still reads the estimate its later lines banked.
+            let complexity = match by {
+                EvalBy::Task => lanes.iter().rev().find_map(|e| e.complexity),
+                _ => None,
+            };
             let (cells, keys) = match by {
                 // Without the project this key ends with, which is not a cell.
                 EvalBy::Group | EvalBy::Pipeline => (key[..1].to_vec(), key[..1].to_vec()),
@@ -1221,6 +1262,7 @@ fn grouped_rows<'a>(
                             latest.pipeline.clone(),
                             latest.pipeline_version.clone(),
                             when.clone(),
+                            complexity_cell(complexity),
                         ],
                         vec![key[1].clone(), label, latest.pipeline.clone(), when],
                     )
@@ -1236,6 +1278,7 @@ fn grouped_rows<'a>(
                 project: first.project.clone(),
                 first_ts: earliest.ts.clone(),
                 last_ts: latest.ts.clone(),
+                complexity,
                 metrics: Metrics::default(),
             };
             (key, (row, lanes))
@@ -1338,13 +1381,14 @@ fn ordered_steps(entries: &[&Entry], pipeline: &str, pipelines: Option<&Pipeline
 /// distinct runs over the whole table, not a sum of the rows' — a run
 /// touches every step it ran, so summing `--by step` would count it once per
 /// step. A run id is minted once per task, so distinct runs are the tasks.
-/// `BLOCKS`, the token classes and their costs, `USD` and `TIME` do sum:
-/// every ledger line sits on exactly one row. `TIME` is lane time added
+/// `BLOCKS`, `TURNS`, the token classes and their costs, `USD` and `TIME` do
+/// sum: every ledger line sits on exactly one row. `TIME` is lane time added
 /// up, so lanes that ran side by side count once each — it is not the
 /// calendar time they took.
 struct LaneTotal {
     runs: usize,
     blocked: usize,
+    turns: u64,
     tokens: Tokens,
     /// What `tokens` cost at today's price table — see [`ClassCost`].
     class_cost: ClassCost,
@@ -1375,6 +1419,7 @@ impl LaneTotal {
         LaneTotal {
             runs: runs.len(),
             blocked,
+            turns: entries.iter().map(|e| u64::from(e.turns)).sum(),
             tokens,
             class_cost: ClassCost::of(entries.iter().copied(), models),
             cost: entries.iter().filter_map(|e| e.cost_usd).sum(),
@@ -1423,12 +1468,14 @@ const SEP: &str = "  ";
 /// The per-task view's figure columns, identical under every `by` but for
 /// `peak`, the `CTX PEAK` cell drawn after `CTX AVG` only where
 /// [`draws_ctx_peak`] gives it a column. Every column is as wide as its own
-/// title, apart from `USD`, which is eight wide as in the totals view.
-fn lane_figures(cells: [&str; 15], peak: Option<&str>) -> String {
+/// title, apart from `USD`, which is eight wide as in the totals view, and
+/// `TURNS/TASK`, which is `turns_w` wide — see [`turns_width`].
+fn lane_figures(cells: [&str; 16], peak: Option<&str>, turns_w: usize) -> String {
     let [
         tasks,
         pass,
         blocks,
+        turns,
         avg,
         inp,
         inp_usd,
@@ -1443,11 +1490,23 @@ fn lane_figures(cells: [&str; 15], peak: Option<&str>) -> String {
         time,
     ] = cells;
     format!(
-        "{SEP}{tasks:>5}{SEP}{pass:>4}{SEP}{blocks:>11}{SEP}{avg:>7}{}{SEP}{inp:>7}\
-         {SEP}{inp_usd:>11}{SEP}{out:>8}{SEP}{out_usd:>12}{SEP}{cr:>12}{SEP}{cr_usd:>16}\
+        "{SEP}{tasks:>5}{SEP}{pass:>4}{SEP}{blocks:>11}{SEP}{turns:>turns_w$}{SEP}{avg:>7}{}\
+         {SEP}{inp:>7}{SEP}{inp_usd:>11}{SEP}{out:>8}{SEP}{out_usd:>12}{SEP}{cr:>12}{SEP}{cr_usd:>16}\
          {SEP}{cw:>12}{SEP}{cw_usd:>16}{SEP}{usd:>8}{SEP}{usd_task:>8}{SEP}{time:>9}",
         ctx_peak_cell(peak)
     )
+}
+
+/// How wide the `TURNS` column is drawn: its title or its widest cell,
+/// whichever is wider. A turn count has no ceiling the way a share or a
+/// rounded token count has, so a fixed width would either waste the room
+/// every row has to spare or let one long run push its row out of line with
+/// the rest.
+fn turns_width<'a>(title: &str, cells: impl IntoIterator<Item = &'a str>) -> usize {
+    cells
+        .into_iter()
+        .map(|c| c.chars().count())
+        .fold(title.chars().count(), usize::max)
 }
 
 /// `CTX PEAK`'s cell padded to its own column, eight wide like its title,
@@ -1462,12 +1521,13 @@ fn ctx_peak_cell(peak: Option<&str>) -> String {
 /// is seven wide, room for `149.71M`, each class cost as wide as its own
 /// title, and `USD` and `TIME` eight, room for `128h 39m`. A wider cell
 /// pushes the rest of its row right, as a wide per-task cell does. `peak`
-/// is drawn the way [`lane_figures`] draws it.
-fn lane_total_figures(cells: [&str; 14], peak: Option<&str>) -> String {
+/// and `TURNS` are drawn the way [`lane_figures`] draws them.
+fn lane_total_figures(cells: [&str; 15], peak: Option<&str>, turns_w: usize) -> String {
     let [
         runs,
         pass,
         blocks,
+        turns,
         avg,
         inp,
         inp_usd,
@@ -1481,8 +1541,8 @@ fn lane_total_figures(cells: [&str; 14], peak: Option<&str>) -> String {
         time,
     ] = cells;
     format!(
-        "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{avg:>7}{}{SEP}{inp:>7}\
-         {SEP}{inp_usd:>6}{SEP}{out:>7}{SEP}{out_usd:>7}{SEP}{cr:>7}{SEP}{cr_usd:>11}\
+        "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{turns:>turns_w$}{SEP}{avg:>7}{}\
+         {SEP}{inp:>7}{SEP}{inp_usd:>6}{SEP}{out:>7}{SEP}{out_usd:>7}{SEP}{cr:>7}{SEP}{cr_usd:>11}\
          {SEP}{cw:>7}{SEP}{cw_usd:>11}{SEP}{usd:>8}{SEP}{time:>8}",
         ctx_peak_cell(peak)
     )
@@ -1558,21 +1618,52 @@ fn lanes_table(
         })
         .collect();
 
+    // `TURNS` is worked out ahead of the rest of the figures, since its
+    // width — see [`turns_width`] — has to be known before the header is.
+    let turns_cell = |turns: u64, per_task: f64| match figures {
+        Figures::Totals => turns.to_string(),
+        // Rounded the way the token and time cells beside it are, half away
+        // from zero; `{:.0}` alone would round a tie to even.
+        Figures::Average => format!("{:.0}", per_task.round()),
+    };
+    let row_turns: Vec<String> = rows
+        .iter()
+        .map(|r| turns_cell(r.metrics.turns, r.metrics.turns_per_task()))
+        .collect();
+    let total_turns = turns_cell(total.turns, total.per_task(total.turns as f64));
+    // `TURNS` is the fourth figure column in either view, after `BLOCKS`.
+    let turns_title = match figures {
+        Figures::Totals => LANE_TOTAL_COLUMNS[3].0,
+        Figures::Average => LANE_FIGURE_COLUMNS[3].0,
+    };
+    let turns_w = turns_width(
+        turns_title,
+        row_turns
+            .iter()
+            .chain(std::iter::once(&total_turns))
+            .map(String::as_str),
+    );
+
     let peak = draws_ctx_peak(by);
     let peak_title = peak.then_some(CTX_PEAK_COLUMN.0);
     let header = format!(
         "{}{}",
         naming(&headers, &widths),
         match figures {
-            Figures::Totals => lane_total_figures(LANE_TOTAL_COLUMNS.map(|(h, _)| h), peak_title),
-            Figures::Average => lane_figures(LANE_FIGURE_COLUMNS.map(|(h, _)| h), peak_title),
+            Figures::Totals => {
+                lane_total_figures(LANE_TOTAL_COLUMNS.map(|(h, _)| h), peak_title, turns_w)
+            }
+            Figures::Average => {
+                lane_figures(LANE_FIGURE_COLUMNS.map(|(h, _)| h), peak_title, turns_w)
+            }
         }
     );
     let (header, lead) = marked_header(header, &drawn_lane_columns(by, rows, figures), sort);
     let lines = body
         .iter()
         .zip(rows)
-        .map(|(cells, row)| {
+        .zip(&row_turns)
+        .map(|((cells, row), turns)| {
             let m = &row.metrics;
             let (runs, pass, blocks) = (
                 m.runs.to_string(),
@@ -1591,6 +1682,7 @@ fn lanes_table(
                             &runs,
                             &pass,
                             &blocks,
+                            turns,
                             &avg,
                             &tokens_cell(m.tokens.input),
                             &in_usd,
@@ -1604,6 +1696,7 @@ fn lanes_table(
                             &crate::status::human_secs(m.time_s),
                         ],
                         peak_cell,
+                        turns_w,
                     )
                 }
                 Figures::Average => {
@@ -1614,6 +1707,7 @@ fn lanes_table(
                             &runs,
                             &pass,
                             &format!("{:.2}", m.blocks_per_task()),
+                            turns,
                             &avg,
                             &tokens_cell(m.tokens_per_task(m.tokens.input)),
                             &in_usd,
@@ -1631,6 +1725,7 @@ fn lanes_table(
                             &crate::status::human_secs(m.time_per_task_s().round() as i64),
                         ],
                         peak_cell,
+                        turns_w,
                     )
                 }
             };
@@ -1651,6 +1746,7 @@ fn lanes_table(
                     &runs,
                     "",
                     &total.blocked.to_string(),
+                    &total_turns,
                     "",
                     &tokens_cell(t.input),
                     &in_usd,
@@ -1664,6 +1760,7 @@ fn lanes_table(
                     &crate::status::human_secs(total.time_s),
                 ],
                 total_peak,
+                turns_w,
             )
         }
         // `USD` is left blank here: a total has no place on a line of
@@ -1676,6 +1773,7 @@ fn lanes_table(
                     &runs,
                     "",
                     &format!("{:.2}", total.per_task(total.blocked as f64)),
+                    &total_turns,
                     "",
                     &tokens_cell(total.tokens_per_task(t.input)),
                     &in_usd,
@@ -1690,6 +1788,7 @@ fn lanes_table(
                     &crate::status::human_secs(total.per_task(total.time_s as f64).round() as i64),
                 ],
                 total_peak,
+                turns_w,
             )
         }
     };
@@ -1729,18 +1828,24 @@ fn trial_delta_line(baseline: &LaneRow, row: &LaneRow) -> String {
 // ------------------------------------------------------------ lanes export
 
 /// Every column `--sort` takes under `by`: `project`, the `by`'s own naming
-/// columns, `pipeline_version`, then the figures of both views, beside
-/// `lanes` and `unpriced`, which no view draws. A sort outlives `t`, so it
-/// has to name a column whichever view is drawn — see [`Figures::carry`].
+/// columns, `complexity` under `task`, `pipeline_version`, then the figures
+/// of both views, beside `lanes` and `unpriced`, which no view draws. A sort
+/// outlives `t`, so it has to name a column whichever view is drawn — see
+/// [`Figures::carry`].
 fn lane_sort_keys(by: EvalBy) -> Vec<&'static str> {
     let mut cols = vec!["project"];
     cols.extend(lane_csv_keys(by));
+    if by == EvalBy::Task {
+        cols.push("complexity");
+    }
     cols.extend([
         "pipeline_version",
         "tasks",
         "lanes",
         "pass",
         "blocks",
+        "turns",
+        "turns_per_task",
         "ctx_peak_tokens",
         "ctx_peak_pct",
         "ctx_avg_tokens",
@@ -1814,11 +1919,13 @@ impl ExportCell {
         }
     }
 
-    /// An average of tokens or seconds: rounded to a whole one in CSV, the
-    /// unrounded figure in JSON.
+    /// An average of turns, tokens or seconds: rounded to a whole one in CSV,
+    /// the unrounded figure in JSON. Rounded half away from zero, as the drawn
+    /// cell beside it is, so a tie reads the same on screen and in the file;
+    /// `{:.0}` alone would round `6.5` to `6` where the table draws `7`.
     fn whole(v: Option<f64>) -> ExportCell {
         ExportCell {
-            csv: v.map_or(String::new(), |v| format!("{v:.0}")),
+            csv: v.map_or(String::new(), |v| format!("{:.0}", v.round())),
             json: v.into(),
         }
     }
@@ -1887,10 +1994,13 @@ fn lane_export_cell(by: EvalBy, row: &LaneRow, key: &str) -> ExportCell {
     let c = &m.class_cost;
     match key {
         "project" => ExportCell::text(&row.project),
+        "complexity" => ExportCell::count_or_blank(row.complexity.map(u64::from)),
         "tasks" => ExportCell::count(m.runs as u64),
         "pass" => ExportCell::decimal(m.pass_share().map(|p| p / 100.0)),
         "blocks" => ExportCell::count(m.blocked as u64),
         "blocks_per_task" => ExportCell::decimal(Some(m.blocks_per_task())),
+        "turns" => ExportCell::count(m.turns),
+        "turns_per_task" => ExportCell::whole(Some(m.turns_per_task())),
         "ctx_avg_tokens" => ExportCell::whole(m.ctx_avg.tokens),
         "ctx_avg_pct" => ExportCell::decimal(m.ctx_avg.pct),
         "ctx_peak_tokens" => ExportCell::count_or_blank(m.ctx_peak_tokens),
@@ -1944,6 +2054,8 @@ fn lane_total_cell(total: &LaneTotal, key: &str, figures: Figures) -> Option<Exp
         "tasks" => ExportCell::count(total.runs as u64),
         "blocks" => ExportCell::count(total.blocked as u64),
         "blocks_per_task" => ExportCell::decimal(Some(total.per_task(total.blocked as f64))),
+        "turns" => ExportCell::count(total.turns),
+        "turns_per_task" => ExportCell::whole(Some(total.per_task(total.turns as f64))),
         "in_tokens" => ExportCell::count(t.input),
         "out_tokens" => ExportCell::count(t.output),
         "cache_read_tokens" => ExportCell::count(t.cache_read),
@@ -2220,6 +2332,11 @@ fn commands_json(by: EvalBy, rows: &[CommandRow], total: &CommandMetrics) -> ser
             for (name, value) in lane_csv_keys(by).iter().zip(&row.naming.keys) {
                 obj.insert((*name).into(), value.clone().into());
             }
+            // The table draws `COMPLEXITY` among the naming columns it
+            // shares with the lanes table, so the export carries it too.
+            if by == EvalBy::Task {
+                obj.insert("complexity".into(), row.naming.complexity.into());
+            }
             obj.insert("runs".into(), m.runs.into());
             obj.insert("judged".into(), m.judged.into());
             obj.insert("pass".into(), m.pass_share().map(|p| p / 100.0).into());
@@ -2434,11 +2551,14 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
         // that started in the same minute still sort apart.
         "when" => SortValue::text(&row.first_ts),
         "first" => SortValue::text(&row.first_ts),
+        "complexity" => row.complexity.and_then(|n| SortValue::figure(n as f64)),
         "tasks" => SortValue::figure(m.runs as f64),
         "lanes" => SortValue::figure(m.lanes as f64),
         "pass" => m.pass_share().and_then(SortValue::figure),
         "blocks" => SortValue::figure(m.blocked as f64),
         "blocks_per_task" => SortValue::figure(m.blocks_per_task()),
+        "turns" => SortValue::figure(m.turns as f64),
+        "turns_per_task" => SortValue::figure(m.turns_per_task()),
         "ctx_peak_tokens" => m.ctx_peak_tokens.and_then(|n| SortValue::figure(n as f64)),
         "ctx_peak_pct" => ctx_sort_value(m.ctx_peak_tokens.map(|n| n as f64), m.ctx_peak_pct),
         "ctx_avg_tokens" => m.ctx_avg.tokens.and_then(SortValue::figure),
@@ -5225,15 +5345,29 @@ fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
     // cannot start a thread: that reason reaches the person as a failed
     // load instead of tearing the whole shell down.
     if let Err(err) = std::thread::Builder::new().spawn(move || {
+        let result = load(&repo, &filters);
+        // The load's transcript buffers are freed by now. Without this, glibc
+        // keeps them resident for the rest of the session.
+        crate::memory::trim();
         // A send into a dropped receiver is the screen having moved on — a
         // newer load, or the person leaving the tab — and nothing to report.
-        let _ = tx.send(load(&repo, &filters));
+        let _ = tx.send(result);
     }) {
         let _ = failed.send(Err(
             anyhow::Error::new(err).context("could not start the load")
         ));
     }
     rx
+}
+
+/// Hands freed memory back to the system when dropped — see the use in
+/// [`run_screen_with`] for why its place among the locals matters.
+struct TrimOnDrop;
+
+impl Drop for TrimOnDrop {
+    fn drop(&mut self) {
+        crate::memory::trim();
+    }
 }
 
 /// The hint under an error notice.
@@ -5373,7 +5507,13 @@ impl ScreenState {
         };
         match result {
             Ok(fresh) => {
-                *loaded = Some(fresh);
+                let replaced = loaded.replace(fresh).is_some();
+                // The table this one replaces was freed just now, after the
+                // load thread's own trim. Trim again or its memory stays
+                // resident.
+                if replaced {
+                    crate::memory::trim();
+                }
                 self.filters = filters;
                 if reset_cursor {
                     self.cursor = 0;
@@ -5481,6 +5621,11 @@ fn run_screen_with(
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
+    // The first local, on purpose: locals drop in reverse order, so `loaded`
+    // and `state` (whose `built` cache holds every rendered row) are both
+    // freed before this trims, on every way out of the function. Leaving the
+    // tab is when the table's memory should go back.
+    let _trim_on_leave = TrimOnDrop;
     let mut state = ScreenState::new(args);
     let mut loaded: Option<Loaded> = None;
     // The reason the visit's first load failed, once it has. Hosted, the tab
@@ -6638,7 +6783,8 @@ mod tests {
                 "login",
                 "default",
                 "1.1",
-                &local_minute("2026-08-04T07:00:00+00:00")
+                &local_minute("2026-08-04T07:00:00+00:00"),
+                &complexity_cell(None),
             ]
         );
         assert_eq!(rows[0].keys[0], "r-login", "the export carries the run id");
@@ -6755,6 +6901,90 @@ mod tests {
         assert_eq!(runs, ["r6", "r7", "r8"]);
     }
 
+    /// Three runs, two with an estimate on their lines and one without,
+    /// oldest first: `easy` at 9, `hard` at 64, `plain` with none.
+    fn complexity_runs() -> Vec<Entry> {
+        let run = |task: &str, ts: &str, complexity: Option<u32>| Entry {
+            ts: ts.into(),
+            complexity,
+            ..lane(task, "implement", 1, Some("pass"))
+        };
+        vec![
+            run("easy", "2026-10-19T08:00:00+00:00", Some(9)),
+            run("hard", "2026-10-19T09:00:00+00:00", Some(64)),
+            run("plain", "2026-10-19T10:00:00+00:00", None),
+        ]
+    }
+
+    /// `--by task` draws each run's estimate right-aligned under
+    /// `COMPLEXITY`, right after `WHEN`, and `-` for a run without one; the
+    /// JSON carries it as a number or `null`, and the CSV as a column of its
+    /// own, blank where there is none. Fails without the column: the header
+    /// has no `COMPLEXITY` and the exports no `complexity`.
+    #[test]
+    fn by_task_draws_and_exports_each_runs_complexity() {
+        let entries = complexity_runs();
+        let rows = rows_by(&entries, EvalBy::Task);
+        let total = total_of(&entries);
+
+        let table = lanes_table(EvalBy::Task, &rows, &total, None, Figures::Totals);
+        let at = table
+            .header
+            .find(COMPLEXITY_HEADER)
+            .expect("a COMPLEXITY column");
+        assert!(
+            table.header[..at].trim_end().ends_with("WHEN"),
+            "{}",
+            table.header
+        );
+        let drawn: Vec<&str> = table
+            .rows
+            .iter()
+            .map(|line| &line[at..at + COMPLEXITY_HEADER.len()])
+            .collect();
+        assert_eq!(drawn, ["         -", "        64", "         9"]);
+
+        let json = lanes_json(EvalBy::Task, Figures::Totals, &rows, &total);
+        // Through `get`, not indexing: an index reads a missing key as
+        // `null` too, and a run without an estimate has to carry the key.
+        let by_task = |task: &str| {
+            json["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["task"] == task)
+                .unwrap()
+                .get("complexity")
+                .cloned()
+        };
+        assert_eq!(by_task("easy"), Some(serde_json::json!(9)));
+        assert_eq!(by_task("hard"), Some(serde_json::json!(64)));
+        assert_eq!(by_task("plain"), Some(serde_json::Value::Null));
+
+        let (header, lines) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total);
+        let cells: Vec<String> = lines[..3]
+            .iter()
+            .map(|line| csv_cell(&header, line, "complexity"))
+            .collect();
+        assert_eq!(cells, ["", "64", "9"]);
+    }
+
+    /// A sort on `complexity` orders the estimates as numbers, so `9` comes
+    /// before `64` ascending, where as text it would come after. Fails while
+    /// `--sort` does not take the column.
+    #[test]
+    fn a_sort_on_complexity_orders_the_estimates_as_numbers() {
+        let sort = parse_sort(EvalBy::Task, "complexity:asc").unwrap();
+        let mut rows = rows_by(&complexity_runs(), EvalBy::Task);
+        sort_lane_rows(EvalBy::Task, &mut rows, &sort);
+        let tasks: Vec<&str> = rows.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(&tasks[..2], ["easy", "hard"]);
+        assert!(
+            parse_sort(EvalBy::Step, "complexity").is_err(),
+            "no other `by` draws it"
+        );
+    }
+
     #[test]
     fn by_group_puts_lanes_with_no_group_under_a_dash() {
         let mut grouped = lane("a", "implement", 1, Some("pass"));
@@ -6863,11 +7093,13 @@ mod tests {
             project: "spoolway".into(),
             first_ts: String::new(),
             last_ts: String::new(),
+            complexity: None,
             metrics: Metrics::default(),
         };
         let total = LaneTotal {
             runs: 0,
             blocked: 0,
+            turns: 0,
             tokens: Tokens::default(),
             class_cost: ClassCost::default(),
             cost: 0.0,
@@ -6875,7 +7107,7 @@ mod tests {
             unpriced: 0,
             time_s: 0,
         };
-        const FIGURES: &str = "TASKS  PASS  BLOCKS/TASK  CTX AVG{PEAK}  IN/TASK  \
+        const FIGURES: &str = "TASKS  PASS  BLOCKS/TASK  TURNS/TASK  CTX AVG{PEAK}  IN/TASK  \
                                IN USD/TASK  OUT/TASK  OUT USD/TASK  CACHE R/TASK  \
                                CACHE R USD/TASK  CACHE W/TASK  CACHE W USD/TASK       USD  \
                                USD/TASK  TIME/TASK";
@@ -6898,8 +7130,14 @@ mod tests {
             ),
             (
                 EvalBy::Task,
-                &["release-spoolway-1", "impl_tdd", "1.0", "2026-09-16"],
-                "TASK                PIPELINE  VER  WHEN        ",
+                &[
+                    "unblocker-prompt-text",
+                    "dependabot",
+                    "1.3",
+                    "2026-10-19 20:32",
+                    &complexity_cell(Some(22)),
+                ],
+                "TASK                   PIPELINE    VER  WHEN              COMPLEXITY  ",
             ),
         ];
         for (by, cells, naming) in cases {
@@ -6946,7 +7184,7 @@ mod tests {
         );
         assert_eq!(
             table.rows[0],
-            "impl          2  100%         0.00      32%      642         0.00    \
+            "impl          2  100%         0.00           1      32%      642         0.00    \
              155.8k          2.34        41.91M             12.57        799.4k              3.00     \
              33.80     16.90     1h 12m"
         );
@@ -6955,7 +7193,7 @@ mod tests {
         // `USD/TASK` carrying the average.
         assert_eq!(
             table.total,
-            "Average       2               0.00               642         0.00    \
+            "Average       2               0.00           1               642         0.00    \
              155.8k          2.34        41.91M             12.57        799.4k              3.00               \
              16.90     1h 12m"
         );
@@ -6989,19 +7227,19 @@ mod tests {
         let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
         assert_eq!(
             table.header,
-            "PIPELINE  TASKS  PASS  BLOCKS  CTX AVG       IN  IN USD      OUT  \
+            "PIPELINE  TASKS  PASS  BLOCKS  TURNS  CTX AVG       IN  IN USD      OUT  \
              OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME"
         );
         // Each class cost is its tokens at today's rates — 311.6k out at
         // $15 a million is 4.67 — and need not add up to the banked `USD`.
         assert_eq!(
             table.rows[0],
-            "impl          2  100%       0      32%     1.3k    0.00   311.6k     \
+            "impl          2  100%       0      2      32%     1.3k    0.00   311.6k     \
              4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
         assert_eq!(
             table.total,
-            "Total         2             0              1.3k    0.00   311.6k     \
+            "Total         2             0      2              1.3k    0.00   311.6k     \
              4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
     }
@@ -7429,7 +7667,7 @@ mod tests {
         assert_eq!(
             cells,
             [
-                "Total", "2", "1", "0", "3.0k", "0", "0", "3.00", "3m", "00s"
+                "Total", "2", "1", "3", "0", "3.0k", "0", "0", "3.00", "3m", "00s"
             ],
             "{:?}",
             table.total
@@ -7440,11 +7678,164 @@ mod tests {
         assert_eq!(
             cells,
             [
-                "Average", "2", "0.50", "0", "1.5k", "0", "0", "1.50", "1m", "30s"
+                "Average", "2", "0.50", "2", "0", "1.5k", "0", "0", "1.50", "1m", "30s"
             ],
             "{:?}",
             table.total
         );
+    }
+
+    /// `TURNS` sums each row's turns, and the `Total` line sums every row's;
+    /// per task it is that sum over the row's tasks, the way `BLOCKS/TASK`
+    /// is. `--json` carries the figure under `turns` or `turns_per_task`, and
+    /// `--csv` the figure the table draws, a tie rounded the same way. Fails
+    /// while eval draws and exports no turns at all, and the CSV half while it
+    /// rounded `8.5` to even.
+    #[test]
+    fn turns_sum_per_row_and_in_the_total_and_divide_by_tasks_per_task() {
+        let mut entries = vec![
+            lane("login", "implement", 1, Some("pass")),
+            lane("login", "review", 1, Some("pass")),
+            lane("logout", "implement", 1, Some("pass")),
+        ];
+        for (entry, turns) in entries.iter_mut().zip([10, 4, 7]) {
+            entry.turns = turns;
+        }
+        let rows = rows_by(&entries, EvalBy::Step);
+        let total = total_of(&entries);
+        let cell =
+            |line: &str, column: usize| line.split_whitespace().nth(column).map(String::from);
+
+        // PIPELINE, STEP, TASKS, PASS, BLOCKS, then TURNS.
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::Totals);
+        assert!(
+            table.header.contains("  BLOCKS  TURNS  CTX AVG"),
+            "{}",
+            table.header
+        );
+        assert_eq!(
+            cell(&table.rows[0], 5).as_deref(),
+            Some("17"),
+            "{}",
+            table.rows[0]
+        );
+        assert_eq!(
+            cell(&table.rows[1], 5).as_deref(),
+            Some("4"),
+            "{}",
+            table.rows[1]
+        );
+        // `Total`, TASKS, BLOCKS, then TURNS: `PASS` stays blank.
+        assert_eq!(
+            cell(&table.total, 3).as_deref(),
+            Some("21"),
+            "{}",
+            table.total
+        );
+
+        // 17 over two tasks is 8.5, drawn as 9 the way a token or time cell
+        // rounds a tie; 21 over the table's two tasks is 10.5, drawn as 11.
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::Average);
+        assert!(
+            table.header.contains("  BLOCKS/TASK  TURNS/TASK  CTX AVG"),
+            "{}",
+            table.header
+        );
+        assert_eq!(
+            cell(&table.rows[0], 5).as_deref(),
+            Some("9"),
+            "{}",
+            table.rows[0]
+        );
+        assert_eq!(
+            cell(&table.total, 3).as_deref(),
+            Some("11"),
+            "{}",
+            table.total
+        );
+
+        let totals = lanes_json(EvalBy::Step, Figures::Totals, &rows, &total);
+        assert_eq!(totals["rows"][0]["turns"], 17);
+        assert_eq!(totals["rows"][1]["turns"], 4);
+        assert_eq!(totals["total"]["turns"], 21);
+        let average = lanes_json(EvalBy::Step, Figures::Average, &rows, &total);
+        assert_eq!(average["rows"][0]["turns_per_task"], 8.5);
+        assert_eq!(average["total"]["turns_per_task"], 10.5);
+        assert!(average["rows"][0].get("turns").is_none(), "{average}");
+
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Totals, &rows, &total);
+        assert_eq!(csv_cell(&header, &lines[0], "turns"), "17");
+        assert_eq!(csv_cell(&header, &lines[2], "turns"), "21");
+        let (header, lines) = lanes_csv(EvalBy::Step, Figures::Average, &rows, &total);
+        assert_eq!(csv_cell(&header, &lines[0], "turns_per_task"), "9");
+        assert_eq!(csv_cell(&header, &lines[1], "turns_per_task"), "4");
+        assert_eq!(csv_cell(&header, &lines[2], "turns_per_task"), "11");
+    }
+
+    /// `--sort turns` orders rows by their turn count as a number, and
+    /// `turns_per_task` by the per-task figure. Fails while `--sort` has no
+    /// such column.
+    #[test]
+    fn a_sort_on_turns_orders_the_rows_by_their_count() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("b", "implement", 1, Some("pass")),
+            lane("c", "implement", 1, Some("pass")),
+        ];
+        for (entry, (pipeline, turns)) in
+            entries
+                .iter_mut()
+                .zip([("few", 9), ("many", 120), ("some", 30)])
+        {
+            entry.pipeline = pipeline.into();
+            entry.turns = turns;
+        }
+        let mut rows = rows_by(&entries, EvalBy::Pipeline);
+        for (key, order) in [
+            ("turns", ["many", "some", "few"]),
+            ("turns:asc", ["few", "some", "many"]),
+            ("turns_per_task", ["many", "some", "few"]),
+        ] {
+            let sort = parse_sort(EvalBy::Pipeline, key).unwrap();
+            sort_lane_rows(EvalBy::Pipeline, &mut rows, &sort);
+            let names: Vec<&str> = rows.iter().map(|r| r.keys[0].as_str()).collect();
+            assert_eq!(names, order, "{key}");
+        }
+    }
+
+    /// A turn count wider than its title widens the `TURNS` column for every
+    /// line, so the header, each row and the `Total` line still end their
+    /// cell at the same place. Fails while the column is drawn at a fixed
+    /// width, which pushes only the wide row out of line.
+    #[test]
+    fn a_wide_turn_count_widens_the_turns_column_on_every_line() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("b", "implement", 1, Some("pass")),
+        ];
+        entries[0].pipeline = "wide".into();
+        entries[0].turns = 1_234_567;
+        entries[1].turns = 42;
+        let rows = rows_by(&entries, EvalBy::Pipeline);
+        let total = total_of(&entries);
+        let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
+        let end = |line: &str, cell: &str| line.find(cell).map(|i| i + cell.len());
+        let header_end = end(&table.header, "TURNS");
+        assert!(table.header.contains("BLOCKS    TURNS"), "{}", table.header);
+        let wide = rows.iter().position(|r| r.keys[0] == "wide").unwrap();
+        assert_eq!(
+            end(&table.rows[wide], "1234567"),
+            header_end,
+            "{}",
+            table.rows[wide]
+        );
+        assert_eq!(
+            end(&table.rows[1 - wide], "42"),
+            header_end,
+            "{}",
+            table.rows[1 - wide]
+        );
+        assert_eq!(end(&table.total, "1234609"), header_end, "{}", table.total);
     }
 
     #[test]
@@ -7528,34 +7919,34 @@ mod tests {
         let (header, lines) = lanes_csv(EvalBy::Step, Figures::Totals, &rows, &total);
         assert_eq!(
             header,
-            "project,pipeline,step,tasks,pass,blocks,ctx_avg_tokens,ctx_avg_pct,in_tokens,\
-             in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,\
+            "project,pipeline,step,tasks,pass,blocks,turns,ctx_avg_tokens,ctx_avg_pct,\
+             in_tokens,in_usd,out_tokens,out_usd,cache_read_tokens,cache_read_usd,cache_write_tokens,\
              cache_write_usd,cost_usd,time_s"
         );
         assert_eq!(
             lines,
             [
-                "demo,default,implement,2,0.50,1,,,300,,0,,0,,0,,2.00,120",
+                "demo,default,implement,2,0.50,1,2,,,300,,0,,0,,0,,2.00,120",
                 // Every sum; the share and the context average stay blank.
-                "total,,,2,,1,,,300,,0,,0,,0,,2.00,120",
+                "total,,,2,,1,2,,,300,,0,,0,,0,,2.00,120",
             ]
         );
 
         let (header, lines) = lanes_csv(EvalBy::Step, Figures::Average, &rows, &total);
         assert_eq!(
             header,
-            "project,pipeline,step,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,\
-             in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
+            "project,pipeline,step,tasks,pass,blocks_per_task,turns_per_task,ctx_avg_tokens,\
+             ctx_avg_pct,in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
              cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,\
              cost_per_task,time_per_task_s"
         );
         assert_eq!(
             lines,
             [
-                "demo,default,implement,2,0.50,0.50,,,150,,0,,0,,0,,2.00,1.00,60",
+                "demo,default,implement,2,0.50,0.50,1,,,150,,0,,0,,0,,2.00,1.00,60",
                 // Each figure over the table's two tasks, and `USD` blank, as
                 // the screen's `Average` line leaves it.
-                "average,,,2,,0.50,,,150,,0,,0,,0,,,1.00,60",
+                "average,,,2,,0.50,1,,,150,,0,,0,,0,,,1.00,60",
             ]
         );
     }
@@ -7571,8 +7962,8 @@ mod tests {
         let (header, _) = lanes_csv(EvalBy::Task, Figures::Totals, &rows, &total_of(&entries));
         assert_eq!(
             header,
-            "project,run,task,pipeline,pipeline_version,when,tasks,pass,blocks,ctx_avg_tokens,\
-             ctx_avg_pct,ctx_peak_tokens,ctx_peak_pct,in_tokens,in_usd,out_tokens,out_usd,\
+            "project,run,task,pipeline,pipeline_version,when,complexity,tasks,pass,blocks,\
+             turns,ctx_avg_tokens,ctx_avg_pct,ctx_peak_tokens,ctx_peak_pct,in_tokens,in_usd,out_tokens,out_usd,\
              cache_read_tokens,cache_read_usd,cache_write_tokens,cache_write_usd,cost_usd,\
              time_s"
         );
@@ -7610,8 +8001,8 @@ mod tests {
     fn a_per_task_export_by_pipeline_writes_the_mockup_header() {
         assert_eq!(
             lane_export_columns(EvalBy::Pipeline, Figures::Average).join(","),
-            "project,pipeline,tasks,pass,blocks_per_task,ctx_avg_tokens,ctx_avg_pct,\
-             in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
+            "project,pipeline,tasks,pass,blocks_per_task,turns_per_task,ctx_avg_tokens,\
+             ctx_avg_pct,in_per_task,in_usd_per_task,out_per_task,out_usd_per_task,cache_read_per_task,\
              cache_read_usd_per_task,cache_write_per_task,cache_write_usd_per_task,cost_usd,\
              cost_per_task,time_per_task_s"
         );
@@ -7634,6 +8025,7 @@ mod tests {
         };
         a.ctx_peak = Some(12_000);
         a.wall_s = 2244;
+        a.complexity = Some(18);
         let entries = vec![a];
         let models = priced_models(100_000);
         let rows = rows_by_with(&entries, EvalBy::Task, &models);
@@ -9274,8 +9666,8 @@ mod screen_tests {
 
     /// The eval tab draws the same label and start time, and a terminal too
     /// narrow for the whole row still cuts it from the right: the figure
-    /// columns go first, and the naming columns, `WHEN` last among them,
-    /// stay whole for as long as they fit.
+    /// columns go first, and the naming columns, `WHEN` among them, stay
+    /// whole for as long as they fit.
     #[test]
     fn the_eval_tab_draws_a_routine_runs_label_and_cuts_figures_first() {
         let line = |task: &str, run: &str, routine: Option<&str>, ts: &str| Entry {
@@ -10781,8 +11173,8 @@ mod screen_tests {
     #[test]
     fn a_sort_survives_tab_refresh_and_a_new_by_and_each_table_keeps_its_own() {
         let (repo, _root_guard) = fixture_to_sort("screen-sort-survives");
-        // `USD` is the fourteenth column under `by pipeline`.
-        let to_usd = DOWN.repeat(14);
+        // `USD` is the fifteenth column under `by pipeline`.
+        let to_usd = DOWN.repeat(15);
         let text = screen(&repo, &format!("d{to_usd}\r\t\t\trf{RIGHT}\rq"));
         let all = frames(&text);
         let sorted = |f: &str| f.contains("▼USD");
@@ -10935,6 +11327,47 @@ mod screen_tests {
         );
         filters.figures = Figures::Average;
         assert!(header(&filters).contains("▲CTX PEAK"), "per task too");
+    }
+
+    /// The eval tab's task view draws `COMPLEXITY` as `--by task` does, a
+    /// run's estimate or `-` under it, and the pipeline view draws no such
+    /// column. Fails without the column: the task view's header lacks it.
+    #[test]
+    fn the_task_view_draws_each_runs_complexity() {
+        let mut hard = lane_entry("hard", "implement");
+        hard.ts = "2026-08-01T00:00:00+00:00".into();
+        hard.complexity = Some(64);
+        let mut plain = lane_entry("plain", "implement");
+        plain.ts = "2026-08-01T01:00:00+00:00".into();
+        let loaded = loaded(vec![hard, plain]);
+        let pipelines = Pipelines::builtin();
+        let mut filters = no_filters();
+        filters.by = EvalBy::Task;
+        // The header and the rows, each without the one-column marker drawn
+        // before it, so a column sits at the same offset in all of them.
+        let text = |filters: &Filters| {
+            view_lines(&loaded, filters, &pipelines, TableKind::Lanes)
+                .into_iter()
+                .filter_map(|line| match line {
+                    Line::Head(_, text) => Some(text),
+                    Line::Row(row) => Some(row.text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let lines = text(&filters);
+        let at = lines[0].find("COMPLEXITY").expect("{lines:?}");
+        let cell = |task: &str| {
+            let line = lines.iter().find(|l| l.contains(task)).unwrap();
+            line[at..at + "COMPLEXITY".len()].to_string()
+        };
+        assert_eq!(cell("hard"), "        64");
+        assert_eq!(cell("plain"), "         -");
+
+        filters.by = EvalBy::Pipeline;
+        let shown = &text(&filters)[0];
+        assert!(!shown.contains("COMPLEXITY"), "{shown}");
     }
 
     /// `e` writes the rows in the order the screen shows them, on both
@@ -11189,6 +11622,64 @@ mod screen_tests {
         for by in ["group", "task", "pipeline", "step", "version"] {
             let table = print(&repo, &["--by", by]).unwrap();
             assert!(table.contains("Command steps\n"), "--by {by}: {table}");
+        }
+    }
+
+    /// Under `--by task` the command steps table draws `COMPLEXITY` with the
+    /// lanes table's other naming columns, and `--json`'s `commands` rows
+    /// carry `complexity` as a number, or `null` for a task without one.
+    /// Under any other `by` they carry no such key. Fails without the
+    /// `commands_json` insert: the key is missing from every row.
+    #[test]
+    fn by_task_the_command_steps_table_carries_each_runs_complexity() {
+        use crate::usage::CommandEnd::Exited;
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-complexity");
+        let run = |task: &str, ts: &str, complexity: Option<u32>| Entry {
+            complexity,
+            ..command_line(task, "test", ts, Exited, Some(0), 10, false)
+        };
+        for line in [
+            run("hard", "2026-08-01T12:00:00+00:00", Some(42)),
+            run("plain", "2026-08-01T12:10:00+00:00", None),
+        ] {
+            crate::usage::append(&repo, &line).unwrap();
+        }
+
+        let table = print(&repo, &["--by", "task"]).unwrap();
+        let (_, commands) = table.split_once("Command steps\n").expect(&table);
+        let header = commands.lines().next().unwrap();
+        let at = header
+            .find(COMPLEXITY_HEADER)
+            .unwrap_or_else(|| panic!("{table}"));
+        let cell = |task: &str| {
+            let line = commands
+                .lines()
+                .find(|l| l.starts_with(task))
+                .unwrap_or_else(|| panic!("{table}"));
+            line[at..at + COMPLEXITY_HEADER.len()].to_string()
+        };
+        assert_eq!(cell("hard"), "        42");
+        assert_eq!(cell("plain"), "         -");
+
+        let json_by = |by: EvalBy| -> serde_json::Value {
+            let mut out = Vec::new();
+            let args = EvalArgs { by, ..no_args() };
+            run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        let json = json_by(EvalBy::Task);
+        let rows = json["commands"]["rows"].as_array().unwrap();
+        let row = |task: &str| rows.iter().find(|r| r["task"] == task).unwrap();
+        assert_eq!(row("hard").get("complexity"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            row("plain").get("complexity"),
+            Some(&serde_json::Value::Null),
+            "present and null, not left out"
+        );
+
+        let json = json_by(EvalBy::Step);
+        for row in json["commands"]["rows"].as_array().unwrap() {
+            assert!(row.get("complexity").is_none(), "{row}");
         }
     }
 
@@ -11807,8 +12298,8 @@ mod screen_tests {
     #[test]
     fn t_carries_the_sort_to_the_matching_column() {
         let (repo, _root_guard) = fixture_to_sort("screen-t-sort");
-        // default order, PIPELINE, TASKS, PASS, BLOCKS, CTX AVG, then IN.
-        let to_in = DOWN.repeat(6);
+        // default order, PIPELINE, TASKS, PASS, BLOCKS, TURNS, CTX AVG, then IN.
+        let to_in = DOWN.repeat(7);
         let text = screen(&repo, &format!("d{to_in}\rtq"));
         let last = last_frame(&text);
         assert!(header_of(last).contains(" ▼IN/TASK"), "{last}");
@@ -11823,7 +12314,7 @@ mod screen_tests {
         assert!(popup.contains("│    CACHE W USD/TASK"), "{popup}");
 
         // `IN USD` is the one after `IN`, in either view.
-        let to_in_usd = DOWN.repeat(7);
+        let to_in_usd = DOWN.repeat(8);
         let text = screen(&repo, &format!("d{to_in_usd}\rq"));
         let last = last_frame(&text);
         assert!(header_of(last).contains(" ▼IN USD "), "{last}");
@@ -11833,7 +12324,7 @@ mod screen_tests {
 
         // Per task, `USD/TASK` is nine further on than `IN/TASK`: each token
         // class has its cost beside it.
-        let to_usd_task = DOWN.repeat(15);
+        let to_usd_task = DOWN.repeat(16);
         let text = screen(&repo, &format!("td{to_usd_task}\r"));
         let last = last_frame(&text);
         assert!(header_of(last).contains("▼USD/TASK"), "{last}");

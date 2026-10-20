@@ -195,6 +195,29 @@ works "eval prices a line's tier_tokens at the tier's rates in the four class co
     .total | near(.in_usd; 0.26) and near(.out_usd; 0.9)
       and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
       and .cost_usd == 1.5"' "$SPOOLWAY"
+# A task's `complexity:` rides on its ledger line, and `eval --by task` hands
+# it back as a number, or `null` for a run whose lines carry none — the
+# tiered line above has none. `has` tells a `null` from a key left out, which
+# `.complexity == null` alone reads the same.
+printf '%s\n' '{"ts":"2026-10-09T09:20:00+00:00","task":"complexity-eval","step":"implement","pipeline":"tiered","agent":"pi","kind":"pi","model":"fake-tiered","session":"complexity-eval-s1","turns":1,"tokens":{"output":10},"run":"r-complexity-eval","complexity":18}' >>"$LEDGER"
+works "eval --by task --json carries a ledger line's complexity, and null where it has none" \
+  bash -c '"$0" eval --by task --pipeline tiered --json | jq -e "
+    (.rows | map(select(.task == \"complexity-eval\")) | .[0].complexity == 18)
+    and (.rows | map(select(.task == \"tiered-eval\"))
+      | length == 1 and (.[0] | has(\"complexity\") and .complexity == null))"' "$SPOOLWAY"
+# `turns` on a ledger line is summed into its row and the total, and divided by
+# the row's tasks under `--per-task`. Two tasks of their own pipeline take 5
+# and 8 turns, so the row and the total are 13, and 6.5 per task.
+printf '%s\n' \
+  '{"ts":"2026-10-09T09:30:00+00:00","task":"turns-a","step":"implement","pipeline":"turnscheck","agent":"pi","kind":"pi","model":"fake-tiered","session":"turns-a-s1","turns":5,"tokens":{"output":10},"run":"r-turns-a"}' \
+  '{"ts":"2026-10-09T09:40:00+00:00","task":"turns-b","step":"implement","pipeline":"turnscheck","agent":"pi","kind":"pi","model":"fake-tiered","session":"turns-b-s1","turns":8,"tokens":{"output":10},"run":"r-turns-b"}' \
+  >>"$LEDGER"
+works "eval --by pipeline --json sums each ledger line's turns into its row and the total" \
+  bash -c '"$0" eval --by pipeline --pipeline turnscheck --json | jq -e "
+    (.rows | length == 1) and .rows[0].turns == 13 and .total.turns == 13"' "$SPOOLWAY"
+works "eval --by pipeline --per-task --json divides the turns by the row's tasks" \
+  bash -c '"$0" eval --by pipeline --pipeline turnscheck --per-task --json | jq -e "
+    .rows[0].turns_per_task == 6.5 and .total.turns_per_task == 6.5"' "$SPOOLWAY"
 # A filter nothing matches leaves no rows. A script reading the output still
 # gets data: the object with empty rows, or the CSV header alone.
 works "eval --json with no rows prints the object with empty rows and nothing else" \

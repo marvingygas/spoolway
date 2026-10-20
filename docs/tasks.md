@@ -57,6 +57,7 @@ as JSON.
 | `plan` | you | The plan page's absolute path, whenever a page exists, with or without an issue. The `o` menu's `open plan` opens it in your default browser. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `labels` | you | Plain words for a hook to put on this task's own tracker issue and its group's. A label may hold no whitespace and no comma. |
+| `complexity` | the planner, or you | Experimental. The planner's estimate of how complex the task is, a whole number from 1 to 100, where 100 is extremely complex. Every ledger line the task banks carries it, and `spoolway eval --by task` shows it. Optional. See [A complexity outside 1 to 100](#a-complexity-outside-1-to-100). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `tracking` | the queue screen's checklist, `queue add --no-tracking`, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `stage` | the pipeline | The step the task is on. |
@@ -108,6 +109,17 @@ $ spoolway queue add --from mine.md
 mine.md: label `has space` may not hold whitespace or a comma — a hook reads every label
 comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot hold a space at all. Join the
 words with a hyphen instead, for example `needs-triage`.
+```
+
+### A complexity outside 1 to 100
+
+`spoolway queue add` and `spoolway task contract --from` refuse a `complexity:` that is not a whole
+number from 1 to 100. A quoted number, a fraction and a word are refused too. The message names the
+task and the value. A task without the key is accepted.
+
+```
+$ spoolway queue add --from mine.md
+mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. Set it to a whole number in that range, 100 being extremely complex, or remove the key.
 ```
 
 ### One constraint no key can express

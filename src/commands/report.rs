@@ -3302,11 +3302,12 @@ pub(crate) fn restart_with(
 /// Shared by `spoolway restart`'s own report and the board's `restart` panel,
 /// so the session a person confirms is the one the command says it abandoned.
 pub(crate) fn abandoned_session(repo: &Repo, step: &str, task: &Task) -> Option<AbandonedSession> {
-    let ledger = crate::usage::read(repo).unwrap_or_default();
+    let ledger =
+        crate::usage::LedgerTotals::read_at(&crate::usage::ledger_path(repo)).unwrap_or_default();
     let lane = crate::mux::lane_name(step, task);
     let key = crate::mux::run_key(step, task.id());
     let (_, session) = crate::dispatch::lane_session_in(repo, &ledger, &lane, &key)?;
-    let banked = ledger.iter().any(|entry| entry.session == session);
+    let banked = ledger.sessions().contains_key(&session);
     Some(AbandonedSession {
         id: session,
         banked,
@@ -3448,6 +3449,44 @@ fn resolve_task_id(explicit: Option<&str>) -> Result<String> {
 mod tests {
     use super::*;
     use crate::commands::testutil::*;
+
+    /// `abandoned_session` says `banked` from the ledger's totals. Checked
+    /// against the full list in both cases: the lane's session on the ledger,
+    /// and the lane's session known only from its record.
+    #[test]
+    fn an_abandoned_session_is_banked_exactly_when_the_ledger_holds_a_line_for_it() {
+        let (repo, _root_guard) = fixture("abandoned-banked");
+        add(&repo, "login", &[]);
+        let task = queued(&repo, "login");
+        let (lane, key) = (
+            crate::mux::lane_name("implement", &task),
+            crate::mux::run_key("implement", task.id()),
+        );
+        let line = crate::usage::Entry {
+            task: "login".into(),
+            step: "implement".into(),
+            session: "abandoned-1".into(),
+            ..crate::usage::Entry::neutral()
+        };
+        // The lane's record names the session; the ledger does not hold it yet.
+        let known = crate::usage::LedgerTotals::from_entries([&line]);
+        let record = crate::dispatch::LaneRecord::readopted(&repo, &lane, 0, &known);
+        crate::dispatch::save_lane_records(&repo, &[(lane.clone(), record)].into()).unwrap();
+
+        for banked in [false, true] {
+            if banked {
+                crate::usage::append(&repo, &line).unwrap();
+            }
+            let abandoned = abandoned_session(&repo, "implement", &task).expect("a session");
+            let in_full_list = crate::usage::read(&repo)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.session == abandoned.id);
+            assert_eq!(abandoned.id, "abandoned-1", "{key}");
+            assert_eq!(abandoned.banked, in_full_list);
+            assert_eq!(abandoned.banked, banked);
+        }
+    }
 
     /// Every choice a stop offers is printed key first, then the command
     /// that does the same thing, and no offered choice lacks a key —

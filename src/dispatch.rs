@@ -9,13 +9,16 @@
 //! - "is this a repeat failure"     -> a round counter in the task file
 //! - "is it blocked or hung"        -> whether its step declares a human gate
 //!
-//! A pass is safe to interrupt at any point: it derives all its state fresh
-//! from task files and the multiplexer, and never remembers anything.
+//! A pass is safe to interrupt at any point: it derives its decisions fresh
+//! from task files and the multiplexer. The one thing it carries from pass to
+//! pass is a [`PassMemory`] of what the multiplexer last said, which only
+//! saves it asking again; a dispatcher that starts without one asks everything
+//! once, so losing it costs one full sweep.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -589,7 +592,7 @@ impl LaneRecord {
         repo: &Repo,
         name: &str,
         now: i64,
-        ledger: &[crate::usage::Entry],
+        ledger: &crate::usage::LedgerTotals,
     ) -> LaneRecord {
         let tasks = repo.tasks().unwrap_or_default();
         let key = crate::mux::lane_key(name, &tasks);
@@ -599,14 +602,12 @@ impl LaneRecord {
         if let Some(task) = crate::mux::lane_owner(crate::mux::lane_task(name), &tasks) {
             record.task = task.id().to_string();
         }
-        if let Some(entry) = ledger.iter().rev().find(|entry| {
-            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
-        }) {
-            record.session = entry.session.clone();
-            record.kind = entry.kind.clone();
-            record.agent = entry.agent.clone();
-            record.model = entry.model.clone();
-            record.pipeline_version = entry.pipeline_version.clone();
+        if let Some(last) = ledger.last_lane(&key) {
+            record.session = last.session.clone();
+            record.kind = last.kind.clone();
+            record.agent = last.agent.clone();
+            record.model = last.model.clone();
+            record.pipeline_version = last.pipeline_version.clone();
         }
         record
     }
@@ -631,6 +632,79 @@ impl LaneRecord {
     }
 }
 
+/// How long the dispatcher goes without a full look at the multiplexer's
+/// workspaces, panes and tabs while its lanes stay as they are. A lane that
+/// starts or ends brings the look forward; this only bounds how long a tab
+/// the dispatcher did not expect (a person's, a crashed boot's) can sit
+/// unnoticed.
+pub const FULL_SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// What the dispatcher remembers of the multiplexer between passes.
+///
+/// A pass always asks for the lane list, which is how a lane that died is
+/// noticed. It asks for the workspace, pane and tab lists as well only when
+/// the lanes of this project differ from the ones the last full look saw, or
+/// when [`FULL_SWEEP_EVERY`] has gone by. Those lists cost one call per
+/// workspace on top of three, every pass, to learn nothing on a quiet
+/// project.
+///
+/// The same look tells the dispatcher what each tab is called, so a tab that
+/// already carries its label is not renamed again by a pass that has not
+/// looked.
+#[derive(Default)]
+pub struct PassMemory {
+    /// The `(name, pane)` of each of this project's lanes at the last full
+    /// look; `None` before there has been one.
+    lanes: Option<BTreeSet<(String, String)>>,
+    swept_at: Option<Instant>,
+    /// What each tab was called at the last full look, updated by each
+    /// rename since.
+    tab_labels: HashMap<String, String>,
+    /// The time a test says it is, standing in for the clock so that a test
+    /// can place a pass a minute after another without waiting for it; see
+    /// [`PassMemory::at`].
+    #[cfg(test)]
+    now: Option<Instant>,
+}
+
+impl PassMemory {
+    /// Whether this pass should look at everything, given the lanes it found.
+    fn sweep_due(&self, lanes: &BTreeSet<(String, String)>) -> bool {
+        let Some(seen) = &self.lanes else {
+            return true;
+        };
+        let age = self
+            .swept_at
+            .map(|at| self.now().saturating_duration_since(at));
+        seen != lanes || age.is_none_or(|age| age >= FULL_SWEEP_EVERY)
+    }
+
+    /// Record a full look that succeeded.
+    fn swept(&mut self, lanes: BTreeSet<(String, String)>, tabs: &[crate::mux::SweepTab]) {
+        self.lanes = Some(lanes);
+        self.swept_at = Some(self.now());
+        self.tab_labels = tabs
+            .iter()
+            .filter_map(|tab| Some((tab.tab_id.clone(), tab.label.clone()?)))
+            .collect();
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.now {
+            return now;
+        }
+        Instant::now()
+    }
+
+    /// Say what time it is, for the passes that follow.
+    #[cfg(test)]
+    pub(crate) fn at(mut self, now: Instant) -> Self {
+        self.now = Some(now);
+        self
+    }
+}
+
 pub struct Dispatcher<'a> {
     // `pub(crate)`: read and written directly by `crate::teardown`'s own
     // `impl Dispatcher` block, the same way every method here already does.
@@ -638,6 +712,10 @@ pub struct Dispatcher<'a> {
     pub(crate) pipelines: &'a Pipelines,
     pub(crate) mux: &'a dyn Mux,
     pub(crate) lanes: HashMap<String, LaneRecord>,
+    /// What the multiplexer was last asked, kept from one pass to the next;
+    /// see [`PassMemory`]. A dispatcher built for one pass alone starts with
+    /// none, so it asks everything.
+    memory: PassMemory,
     /// Whether this run stops for a person. Settled once when the run takes its
     /// lock and carried here rather than re-read per decision, so that one pass
     /// cannot make half its choices in each mode.
@@ -654,15 +732,19 @@ pub struct Dispatcher<'a> {
     /// tears nothing down never builds it. Populating it in
     /// [`Dispatcher::new`] unconditionally was the bug: every pass paid to
     /// parse the whole ledger whether or not it had anything to bank.
-    usage_banked: Option<HashMap<String, BankedTotals>>,
-    /// The whole ledger, parsed once on first use and shared for the rest of
-    /// the pass — see [`Dispatcher::ledger`]. The ceiling checks,
+    usage_banked: Option<HashMap<String, crate::usage::SessionBanked>>,
+    /// The ledger's totals, streamed once on first use and shared for the rest
+    /// of the pass — see [`Dispatcher::ledger`]; no line of it is kept. The ceiling checks,
     /// `carried_session`, `readopted` and `lane_session` all used to parse
     /// `usage.jsonl` end to end on their own (review finding 33); now they
     /// answer from this one snapshot, and `usage_banked` is folded out of it
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
-    ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
+    ledger: Option<std::sync::Arc<crate::usage::LedgerTotals>>,
+    /// What this run's lanes had spent when `ledger` was streamed, for the
+    /// unattended ceilings. Meaningful once [`Dispatcher::ledger`] has run,
+    /// which every ceiling check does first.
+    run_window: crate::usage::RunWindow,
     /// The lines this pass appended to the ledger after `ledger` was loaded.
     /// The unattended ceilings add them to the snapshot's sum, so the lane a
     /// pass has just banked counts toward the brake it may have crossed; every
@@ -797,6 +879,7 @@ fn bank_command_run(
         trial: task.front.trial.clone(),
         trial_group: task.front.trial_group.clone(),
         routine: task.front.routine.clone(),
+        complexity: task.complexity(),
         dir: None,
         hand: false,
         command: Some(crate::usage::CommandRun {
@@ -807,21 +890,6 @@ fn bank_command_run(
         project: String::new(),
     };
     crate::usage::bank_command_run(repo, &entry)
-}
-
-/// What one session has banked to the usage ledger so far — the running
-/// total [`Dispatcher::record_usage`] diffs a transcript's own cumulative
-/// reading against, so a resumed session is never counted twice.
-#[derive(Debug, Clone, Default)]
-struct BankedTotals {
-    tokens: crate::usage::Tokens,
-    /// The part of `tokens` already banked as over a price threshold.
-    tier_tokens: crate::usage::Tokens,
-    turns: u32,
-    cost_usd: f64,
-    /// The part of the session's reported total already banked — see
-    /// [`crate::usage::Entry::reported_usd`].
-    reported_usd: f64,
 }
 
 /// A task that wants a lane started for it, and the step to start.
@@ -1237,16 +1305,32 @@ impl<'a> Dispatcher<'a> {
             pipelines,
             mux,
             lanes: load_lane_records(repo),
+            memory: PassMemory::default(),
             // From the lock this run already holds, so the dispatcher and every
             // lane's own `spoolway report` answer the question the same way.
             unattended: repo.unattended(),
             usage_banked: None,
             ledger: None,
+            run_window: Default::default(),
             banked_this_pass: Vec::new(),
             file_seen: HashMap::new(),
             pending_command_forget: None,
             pending_command_result: None,
         }
+    }
+
+    /// Start from what an earlier dispatcher learned about the multiplexer,
+    /// so this pass can skip what that already settled; see [`PassMemory`].
+    /// The run loop builds a new dispatcher every pass and hands the memory
+    /// from one to the next.
+    pub fn with_memory(mut self, memory: PassMemory) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// What this dispatcher learned, for the next one to start from.
+    pub fn into_memory(self) -> PassMemory {
+        self.memory
     }
 
     /// Save `task`, but only under its per-task lock and only if nothing —
@@ -1276,33 +1360,44 @@ impl<'a> Dispatcher<'a> {
         persist_task(self.repo, task, &mut self.file_seen)
     }
 
-    /// The whole usage ledger, parsed once per pass and shared thereafter.
-    /// Deferred to first use — most passes tear nothing down and never read it
+    /// The usage ledger's totals, streamed once per pass and shared
+    /// thereafter. Deferred to first use — most passes tear nothing down and never read it
     /// — see [`Dispatcher::ledger`](Self::ledger)'s field doc.
-    pub(crate) fn ledger(&mut self) -> std::sync::Arc<Vec<crate::usage::Entry>> {
-        let repo = self.repo;
-        self.ledger
-            .get_or_insert_with(|| {
-                std::sync::Arc::new(crate::usage::read(repo).unwrap_or_default())
-            })
-            .clone()
+    pub(crate) fn ledger(&mut self) -> std::sync::Arc<crate::usage::LedgerTotals> {
+        if self.ledger.is_none() {
+            // Streamed into totals, so the pass holds what the ledger adds up
+            // to and not a copy of its lines. The run's start is read here,
+            // with the totals, so the ceilings sum the same lines the totals
+            // counted.
+            let start = crate::status::run_start(self.repo);
+            let (totals, window) = crate::usage::LedgerTotals::read_since(
+                &crate::usage::ledger_path(self.repo),
+                start.as_deref(),
+            )
+            .unwrap_or_default();
+            self.ledger = Some(std::sync::Arc::new(totals));
+            self.run_window = window;
+        }
+        self.ledger.clone().expect("just set")
     }
 
     /// This pass's own running total per session, folded out of
     /// [`Dispatcher::ledger`] on first use and kept for the rest of the pass.
     /// Updated in place as this pass banks more, so a second lane banked
     /// against the same carried session sees the first one's totals.
-    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+    fn usage_banked(&mut self) -> &mut HashMap<String, crate::usage::SessionBanked> {
         if self.usage_banked.is_none() {
             let ledger = self.ledger();
-            self.usage_banked = Some(banked_totals(&ledger));
+            self.usage_banked = Some(ledger.sessions().clone());
         }
         self.usage_banked.as_mut().expect("just set")
     }
 
-    /// Writes `lanes.json` now, logging rather than failing: a lane record
+    /// Saves the lane records, logging rather than failing: a lane record
     /// that did not reach disk is a problem for the next pass to correct, not
-    /// a reason to stop this one. `when` names the moment in the problem log.
+    /// a reason to stop this one. The file is written only when it differs
+    /// from the records — see [`save_lane_records`]. `when` names the moment
+    /// in the problem log.
     fn save_lanes(&self, when: &str) {
         if let Err(err) = save_lane_records(self.repo, &self.lanes) {
             crate::problem_log::append(
@@ -1349,12 +1444,13 @@ impl<'a> Dispatcher<'a> {
     /// {}`.
     pub fn pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
         let outcome = self.run_pass(tick);
-        // `lanes.json` is written whatever came of the pass — error paths
-        // included. A `?` partway through `run_pass` used to return before
-        // its final save, discarding every lane record built earlier in the
-        // same pass: the next pass re-adopted those lanes with a stale or
-        // blank session, and their spend was never banked. See review
-        // finding 8.
+        // The records are saved whatever came of the pass — error paths
+        // included; the write itself is skipped when the file already holds
+        // them, so a pass that changed nothing writes nothing. A `?` partway
+        // through `run_pass` used to return before its final save,
+        // discarding every lane record built earlier in the same pass: the
+        // next pass re-adopted those lanes with a stale or blank session, and
+        // their spend was never banked. See review finding 8.
         self.save_lanes("after this pass");
         outcome
     }
@@ -1420,7 +1516,7 @@ impl<'a> Dispatcher<'a> {
         // below: closing a tab here can leave that snapshot naming a pane in
         // a tab that no longer exists, which is why `sweep_anchor_tabs` never
         // closes a workspace's only tab — see its own doc.
-        self.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        self.sweep_anchor_tabs(&tasks, &mine, &all_lanes, &mut report);
         tick();
 
         // Only sessions we named, in a directory that is ours, are ours.
@@ -1554,16 +1650,37 @@ impl<'a> Dispatcher<'a> {
     /// within the four conditions as the task specifies them, and it heals
     /// itself — `ensure_workspace`'s `workspace_alive` check finds the
     /// recorded tab gone on the very next pass and reopens one.
-    fn sweep_anchor_tabs(&self, tasks: &[Task], mine: &HashSet<PathBuf>, report: &mut Report) {
+    ///
+    /// Looks only when [`PassMemory::sweep_due`] says to: a pass that finds
+    /// this project's lanes as the last look left them has nothing new to
+    /// find, and the look costs a call per workspace. A lane that has gone
+    /// shows in `lanes` on the very pass that notices it, so that pass looks.
+    fn sweep_anchor_tabs(
+        &mut self,
+        tasks: &[Task],
+        mine: &HashSet<PathBuf>,
+        lanes: &[Lane],
+        report: &mut Report,
+    ) {
+        let ours: BTreeSet<(String, String)> = lanes
+            .iter()
+            .filter(|lane| owns_cwd(mine, &lane.cwd))
+            .map(|lane| (lane.name.clone(), lane.pane_id.clone()))
+            .collect();
+        if !self.memory.sweep_due(&ours) {
+            return;
+        }
         let tabs = match self.mux.tabs_for_sweep() {
             Ok(tabs) => tabs,
             Err(err) => {
+                // Nothing is remembered, so the next pass asks again.
                 report
                     .problems
                     .push(format!("could not list tabs for the anchor sweep: {err:#}"));
                 return;
             }
         };
+        self.memory.swept(ours, &tabs);
         if tabs.is_empty() {
             return;
         }
@@ -3413,7 +3530,7 @@ impl<'a> Dispatcher<'a> {
         let banked_at = chrono::Utc::now();
         // Off the pass's snapshot, not a fresh read: a hand line for the
         // session is already in it, which is all the rule looks for.
-        let own_subagents = crate::usage::lane_owns_subagents(&self.ledger(), &record.session);
+        let own_subagents = self.ledger().lane_owns_subagents(&record.session);
         let Some(harvest) = crate::usage::harvest(
             &record.kind,
             &record.session,
@@ -3525,6 +3642,7 @@ impl<'a> Dispatcher<'a> {
             trial: task.and_then(|t| t.front.trial.clone()),
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
             routine: task.and_then(|t| t.front.routine.clone()),
+            complexity: task.and_then(Task::complexity),
             dir: None,
             hand: false,
             command: None,
@@ -3544,10 +3662,10 @@ impl<'a> Dispatcher<'a> {
         // or earlier in the pass, before this line existed, so the ceiling
         // checks would sum a ledger missing the very lane just banked and
         // start more lanes over a brake already passed. The line is kept in
-        // `banked_this_pass` for them rather than pushed into the snapshot:
-        // the snapshot is shared, and pushing would copy the whole ledger
-        // whenever a caller still held it, and would change which session a
-        // later start in this pass carries. Only when the write landed: a
+        // `banked_this_pass` for them rather than folded into the snapshot:
+        // the snapshot is shared, and folding would copy its totals whenever
+        // a caller still held it, and would change which session a later
+        // start in this pass carries. Only when the write landed: a
         // line that is not on disk is not in the next run's sum either.
         if appended {
             self.banked_this_pass.push(entry.clone());
@@ -5878,7 +5996,10 @@ impl<'a> Dispatcher<'a> {
     /// Name every tab a task's steps run in after its step, under
     /// `lane_layout = "tabs"`. Run on every pass, because herdr forgets a
     /// tab's label when it restarts, and a lane that outlives the restart
-    /// would show herdr's numeric one from then on.
+    /// would show herdr's numeric one from then on. A tab is renamed only
+    /// when its label is not already the one [`PassMemory`] holds for it,
+    /// which each full sweep reads off herdr's own tab list: a restart
+    /// changes the lanes, so the next pass sweeps and finds the labels gone.
     ///
     /// `lanes` is every lane of this project's tasks that still has a pane,
     /// running or kept, as the pass reads them. Each shown command's pane
@@ -5889,7 +6010,7 @@ impl<'a> Dispatcher<'a> {
     /// A failure to rename is reported and the pass goes on: the label is
     /// cosmetic.
     fn assert_tab_labels<'l>(
-        &self,
+        &mut self,
         tasks: &[Task],
         lanes: impl Iterator<Item = &'l (String, String, &'l Lane)>,
         report: &mut Report,
@@ -5930,10 +6051,16 @@ impl<'a> Dispatcher<'a> {
             .map(|task| (task.id(), task.display_name()))
             .collect();
         for (tab, label) in tab_labels(&on_tabs, &names) {
-            if let Err(err) = self.mux.rename_tab(&tab, &label) {
-                report
+            if self.memory.tab_labels.get(&tab) == Some(&label) {
+                continue;
+            }
+            match self.mux.rename_tab(&tab, &label) {
+                Ok(()) => {
+                    self.memory.tab_labels.insert(tab, label);
+                }
+                Err(err) => report
                     .problems
-                    .push(format!("could not name tab {tab}: {err:#}"));
+                    .push(format!("could not name tab {tab}: {err:#}")),
             }
         }
     }
@@ -6457,10 +6584,12 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let ledger = self.ledger();
-        let spent: u64 = ledger
+        let spent: u64 = {
+            self.ledger();
+            self.run_window.output
+        } + self
+            .banked_this_pass
             .iter()
-            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6468,7 +6597,7 @@ impl<'a> Dispatcher<'a> {
             })
             .filter(|entry| !entry.task.is_empty())
             .map(|entry| entry.tokens.output)
-            .sum();
+            .sum::<u64>();
         if spent < ceiling {
             return None;
         }
@@ -6503,10 +6632,12 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let ledger = self.ledger();
-        let spent: f64 = ledger
+        let spent: f64 = {
+            self.ledger();
+            self.run_window.cost_usd
+        } + self
+            .banked_this_pass
             .iter()
-            .chain(&self.banked_this_pass)
             .filter(|entry| {
                 start
                     .as_ref()
@@ -6514,7 +6645,7 @@ impl<'a> Dispatcher<'a> {
             })
             .filter(|entry| !entry.task.is_empty())
             .filter_map(|entry| entry.cost_usd)
-            .sum();
+            .sum::<f64>();
         if spent < ceiling {
             return None;
         }
@@ -7941,7 +8072,7 @@ fn prepare_boot(
     file_seen: &mut HashMap<String, u64>,
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
 ) -> Result<Boot> {
     let name = lane_name(&step.id, task);
     let key = crate::mux::run_key(&step.id, task.id());
@@ -8527,19 +8658,19 @@ pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
     let key = crate::mux::lane_key(lane, &repo.tasks().unwrap_or_default());
     lane_session_in(
         repo,
-        &crate::usage::read(repo).unwrap_or_default(),
+        &crate::usage::LedgerTotals::read_at(&crate::usage::ledger_path(repo)).unwrap_or_default(),
         lane,
         &key,
     )
 }
 
 /// `pub(crate)`, not private: `status::live_session` calls this directly with
-/// the ledger `render` already read through `usage::read_cached`, rather than
+/// the ledger totals `render` already read through `usage::totals`, rather than
 /// through `lane_session` above, which would read the whole ledger again,
 /// uncached, for every live lane on every frame.
 pub(crate) fn lane_session_in(
     repo: &Repo,
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
     lane: &str,
     key: &str,
 ) -> Option<(String, String)> {
@@ -8560,17 +8691,14 @@ pub(crate) fn lane_session_in(
         return Some((record.kind.clone(), record.session.clone()));
     }
 
-    // Composed with `run_key` rather than matched by hand, so a step id or a
-    // task id holding the separator still names the same lane both here and
-    // everywhere else one is built. The key, not `lane`: a routine's copies
-    // share one lane name, and an earlier copy's session is not this one's.
+    // Totals are filed under `run_key`, composed rather than matched by hand,
+    // so a step id or a task id holding the separator still names the same
+    // lane both here and everywhere else one is built. The key, not `lane`: a
+    // routine's copies share one lane name, and an earlier copy's session is
+    // not this one's.
     ledger
-        .iter()
-        .rev()
-        .find(|entry| {
-            crate::mux::run_key(&entry.step, &entry.task) == key && !entry.session.is_empty()
-        })
-        .map(|entry| (entry.kind.clone(), entry.session.clone()))
+        .last_lane(key)
+        .map(|last| (last.kind.clone(), last.session.clone()))
 }
 
 /// Why a `session:` step did not carry its prompt's conversation over, said
@@ -8641,19 +8769,18 @@ fn carried_session(
     step: &Step,
     profile: &AgentProfile,
     model: &str,
-    ledger: &[crate::usage::Entry],
+    ledger: &crate::usage::LedgerTotals,
 ) -> std::result::Result<(String, String), SessionMiss> {
     let prompt = step.prompt_name();
     let entry = ledger
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.task == task.front.id
-                && !entry.session.is_empty()
-                && pipeline
-                    .step(&entry.step)
-                    .is_some_and(|s| s.prompt_name() == prompt)
-        })
+        .last_lane_of(
+            &task.front.id,
+            pipeline
+                .steps
+                .iter()
+                .filter(|s| s.prompt_name() == prompt)
+                .map(|s| s.id.as_str()),
+        )
         .ok_or(SessionMiss::NotFound)?;
 
     let resolved = crate::models::resolve(&repo.config.models, model);
@@ -8949,29 +9076,21 @@ pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
     }
 }
 
+/// Write `lanes.json`, unless it already holds exactly these records.
+///
+/// Every pass saves, whatever came of it, so an idle one would otherwise
+/// write and sync a file that has not changed. The records are rendered in
+/// key order: a `HashMap` iterates in an order of its own per instance, and
+/// the pass rebuilds its map from the file each time, so two equal maps would
+/// otherwise render differently and never compare equal.
 pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>) -> Result<()> {
-    let rendered = serde_json::to_string_pretty(lanes)?;
-    crate::task::write_atomic(&lanes_path(repo), &rendered)
-}
-
-/// The usage ledger folded into a running total per session — what
-/// [`Dispatcher::record_usage`] used to recompute from scratch, by re-reading
-/// the whole file, for every lane a pass banked. Reads nothing itself now: the
-/// pass's one [`Dispatcher::ledger`] snapshot is folded here.
-fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals> {
-    let mut totals: HashMap<String, BankedTotals> = HashMap::new();
-    for entry in ledger {
-        if entry.session.is_empty() {
-            continue;
-        }
-        let banked = totals.entry(entry.session.clone()).or_default();
-        banked.tokens.add(&entry.tokens);
-        banked.tier_tokens.add(&entry.tier_tokens);
-        banked.turns += entry.turns;
-        banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
-        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
+    let sorted: std::collections::BTreeMap<&String, &LaneRecord> = lanes.iter().collect();
+    let rendered = serde_json::to_string_pretty(&sorted)?;
+    let path = lanes_path(repo);
+    if std::fs::read_to_string(&path).is_ok_and(|held| held == rendered) {
+        return Ok(());
     }
-    totals
+    crate::task::write_atomic(&path, &rendered)
 }
 
 pub(crate) fn now_secs() -> i64 {
@@ -9139,6 +9258,13 @@ mod tests {
         pane_tabs: Mutex<HashMap<String, crate::mux::PaneTab>>,
         /// Hands each `create_tab` a distinct tab id.
         tabs_opened: Mutex<usize>,
+        /// The questions the dispatcher asked, as `list_lanes` and
+        /// `tabs_for_sweep`, kept apart from `calls` because other tests
+        /// compare that log whole.
+        asked: Mutex<Vec<&'static str>>,
+        /// Make `list_lanes` fail, as a multiplexer that has gone away does:
+        /// the pass errors out before it does anything else.
+        list_fails: bool,
     }
 
     impl FakeMux {
@@ -9179,6 +9305,8 @@ mod tests {
                 sweep_tabs: Vec::new(),
                 pane_tabs: Mutex::new(HashMap::new()),
                 tabs_opened: Mutex::new(0),
+                asked: Mutex::new(Vec::new()),
+                list_fails: false,
             }
         }
         /// Place `pane` in `tab`, which holds `panes` panes, for
@@ -9373,6 +9501,10 @@ mod tests {
         fn clear_calls(&self) {
             self.calls.lock().unwrap().clear();
         }
+        /// What the dispatcher has asked since the last call, oldest first.
+        fn take_asked(&self) -> Vec<&'static str> {
+            std::mem::take(&mut *self.asked.lock().unwrap())
+        }
     }
 
     /// Whatever a test left running in a pane ends with the test, whether
@@ -9407,6 +9539,10 @@ mod tests {
             self.resident
         }
         fn list_lanes(&self) -> Result<Vec<Lane>> {
+            self.asked.lock().unwrap().push("list_lanes");
+            if self.list_fails {
+                anyhow::bail!("the fake multiplexer is gone");
+            }
             Ok(self.lanes.clone())
         }
         /// Answers `Some(true)` for a lane a test has marked with
@@ -9539,6 +9675,7 @@ mod tests {
             Ok(())
         }
         fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+            self.asked.lock().unwrap().push("tabs_for_sweep");
             Ok(self.sweep_tabs.clone())
         }
         fn create_tab(
@@ -13670,6 +13807,7 @@ mod tests {
             checkout_path: checkout.to_path_buf(),
             holds_agent: false,
             pane_ids: std::iter::once(format!("{tab_id}:p1")).collect(),
+            label: None,
         }
     }
 
@@ -13784,6 +13922,7 @@ mod tests {
             checkout_path: checkout.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+            label: None,
         };
         let holding_the_recorded_pane = SweepTab {
             workspace_id: "w1".into(),
@@ -13791,16 +13930,17 @@ mod tests {
             checkout_path: checkout,
             holds_agent: false,
             pane_ids: std::iter::once("w1:t1:p9".to_string()).collect(),
+            label: None,
         };
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![anchor, holding_the_recorded_pane]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
 
-        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &[], &mut report);
 
         assert_eq!(
             mux.did("close_tab"),
@@ -13828,6 +13968,7 @@ mod tests {
             checkout_path: repo.root.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t1:p1".to_string()).collect(),
+            label: None,
         };
         let dispatch = SweepTab {
             workspace_id: "w1".into(),
@@ -13835,16 +13976,17 @@ mod tests {
             checkout_path: repo.root.clone(),
             holds_agent: false,
             pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+            label: None,
         };
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![work, dispatch]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
 
-        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &[], &mut report);
 
         assert_eq!(
             mux.did("close_tab"),
@@ -14425,6 +14567,199 @@ mod tests {
         }
         save_lane_records(&repo, &records).unwrap();
         (repo, guard, FakeMux::new(lanes))
+    }
+
+    /// One pass of a dispatcher that starts from `memory`, handing back what
+    /// it learned for the next.
+    fn pass_remembering(repo: &Repo, mux: &FakeMux, memory: PassMemory) -> (Report, PassMemory) {
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(repo, &pipelines, mux).with_memory(memory);
+        let report = dispatcher.pass(&mut || {}).unwrap();
+        (report, dispatcher.into_memory())
+    }
+
+    /// A project with one running lane, in tab `w1:t1` under the tabs layout.
+    fn project_with_a_running_lane(name: &str) -> (Repo, FixtureRoot, FakeMux) {
+        let (mut repo, guard) = fixture(name);
+        repo.config.dispatch.lane_layout = crate::config::LaneLayout::Tabs;
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Working,
+            "w1:p7",
+        )]);
+        (repo, guard, mux)
+    }
+
+    /// A pass that finds this project's lanes as the last full look left them
+    /// asks the multiplexer for the lane list and nothing else, starts no
+    /// process, and names no tab that already carries its name.
+    ///
+    /// Fails before `PassMemory`: every pass listed the tabs again and
+    /// renamed the lane's tab again.
+    #[test]
+    fn an_idle_pass_asks_the_multiplexer_once_and_renames_nothing() {
+        let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-asks-once");
+
+        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default());
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+        assert_eq!(mux.did("rename_tab"), ["rename_tab w1:t1 implement"]);
+        mux.clear_calls();
+
+        let started = crate::repo::runs_under(&repo.root);
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
+        let (_, _memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes", "list_lanes"]);
+        assert_eq!(
+            crate::repo::runs_under(&repo.root),
+            started,
+            "an idle pass started a process"
+        );
+        assert!(
+            mux.did("rename_tab").is_empty(),
+            "a tab already named was named again: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// The full look comes back when a lane starts or ends, and once a
+    /// minute without either.
+    ///
+    /// Fails before `PassMemory`: there was no quiet pass to bring it back
+    /// from, and the dead-lane pass looked only because every pass did.
+    #[test]
+    fn a_lane_starting_or_ending_brings_the_full_look_forward_and_so_does_a_minute() {
+        let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-lane-change");
+        // Every pass here happens at a time this test names, so a slow run
+        // cannot move one across the minute.
+        let start = Instant::now();
+        let (_, memory) = pass_remembering(&repo, &mux, PassMemory::default().at(start));
+        mux.take_asked();
+
+        // The lane has gone: the lane list alone shows it, and that pass
+        // looks.
+        let gone = FakeMux::new(vec![]);
+        let (_, memory) = pass_remembering(&repo, &gone, memory);
+        assert_eq!(gone.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+
+        // A lane has started.
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+
+        let (_, memory) = pass_remembering(&repo, &mux, memory);
+        assert_eq!(mux.take_asked(), ["list_lanes"]);
+
+        let a_second_short = start + FULL_SWEEP_EVERY - Duration::from_secs(1);
+        let (_, memory) = pass_remembering(&repo, &mux, memory.at(a_second_short));
+        assert_eq!(
+            mux.take_asked(),
+            ["list_lanes"],
+            "a second short of a minute"
+        );
+
+        let (_, _memory) = pass_remembering(&repo, &mux, memory.at(start + FULL_SWEEP_EVERY));
+        assert_eq!(mux.take_asked(), ["list_lanes", "tabs_for_sweep"]);
+    }
+
+    /// A tab that herdr already shows under its name is left alone by the
+    /// pass that looks, and one it shows under another name is renamed.
+    ///
+    /// Fails before the label was read off the tab list: the lane's tab was
+    /// renamed whatever herdr called it.
+    #[test]
+    fn a_tab_is_renamed_only_when_herdr_shows_another_name() {
+        for (shown, renamed) in [("implement", false), ("2", true)] {
+            let (repo, _root_guard, mux) = project_with_a_running_lane("idle-pass-shown-label");
+            let mut tab = sweepable_tab("w1", "w1:t1", &repo.root);
+            tab.label = Some(shown.to_string());
+            let mux = mux.with_sweep_tabs(vec![tab]);
+
+            pass_remembering(&repo, &mux, PassMemory::default());
+
+            assert_eq!(
+                mux.did("rename_tab").len(),
+                usize::from(renamed),
+                "herdr showing {shown:?}: {:?}",
+                mux.calls()
+            );
+        }
+    }
+
+    /// `lanes.json` is written when its records change and not otherwise.
+    ///
+    /// Fails before the comparison: the file was rewritten, and so given a
+    /// new modified time, by every pass.
+    #[test]
+    fn lanes_json_is_written_only_when_its_records_change() {
+        let (repo, _root_guard) = fixture("lanes-json-unchanged");
+        let path = lanes_path(&repo);
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let backdate = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        };
+        let modified = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut records: HashMap<String, LaneRecord> = (0..8)
+            .map(|n| (format!("demo-{n} · implement"), LaneRecord::adopted(n)))
+            .collect();
+
+        save_lane_records(&repo, &records).unwrap();
+        backdate();
+        // A map built again from the file iterates in an order of its own.
+        let reloaded = load_lane_records(&repo);
+        save_lane_records(&repo, &reloaded).unwrap();
+        assert_eq!(modified(), long_ago, "equal records were written again");
+
+        records.insert("demo-9 · implement".into(), LaneRecord::adopted(9));
+        save_lane_records(&repo, &records).unwrap();
+        assert_ne!(modified(), long_ago, "changed records were not written");
+        assert_eq!(load_lane_records(&repo).len(), 9);
+    }
+
+    /// A pass that errors out still saves the records it changed, and one
+    /// that changed nothing leaves the file alone.
+    ///
+    /// Fails if the save on the error path is skipped along with the
+    /// unchanged one: the record added before the failure never reaches disk.
+    #[test]
+    fn a_failed_pass_still_saves_the_records_it_changed() {
+        let (repo, _root_guard) = fixture("lanes-json-failed-pass");
+        let mut mux = FakeMux::new(vec![]);
+        mux.list_fails = true;
+        let pipelines = Pipelines::builtin();
+
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        dispatcher
+            .lanes
+            .insert("demo · implement".into(), LaneRecord::adopted(1));
+        assert!(dispatcher.pass(&mut || {}).is_err());
+        assert!(load_lane_records(&repo).contains_key("demo · implement"));
+
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(lanes_path(&repo))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        assert!(
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(lanes_path(&repo))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            long_ago,
+            "a failed pass that changed nothing rewrote the file"
+        );
     }
 
     /// The first step takes the workspace's own first tab and names it, and
@@ -19015,6 +19350,55 @@ mod tests {
         assert_eq!(line.routine.as_deref(), Some("release"), "{banked:?}");
     }
 
+    /// A lane's own line carries its task's complexity, read off the task
+    /// beside `group:`. Fails while `record_usage` leaves it out: the line
+    /// has none.
+    #[test]
+    fn a_lanes_banked_line_carries_its_tasks_complexity() {
+        let (mut repo, _root_guard) = fixture("lane-banks-complexity");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "hard", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.extra
+                .insert("complexity".into(), serde_norway::Value::from(18u64));
+        }));
+
+        let session = "complex-lane";
+        let kind = local_kind(&repo);
+        write_entry(&repo, "hard", "implement", &kind, "priced-model", session);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "hard · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "hard · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .rfind(|e| e.session == session)
+            .expect("the finished lane's own bank");
+        assert_eq!(line.complexity, Some(18), "{banked:?}");
+    }
+
     /// A held lane's `wall_s` is a delta against what the hold-time line
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
@@ -21331,7 +21715,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         })
         .expect("an earlier session for this prompt");
@@ -21372,7 +21756,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap()
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap())
             ),
             Err(SessionMiss::NotFound)
         );
@@ -21394,7 +21778,7 @@ mod tests {
                 step,
                 &profile,
                 "test-model",
-                &crate::usage::read(&repo).unwrap()
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap())
             ),
             Err(SessionMiss::WindowUnset),
             "`test-model` is priced by neither table, so there is nothing to \
@@ -21421,7 +21805,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         });
         std::fs::remove_dir_all(&home).ok();
@@ -21456,7 +21840,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         });
         assert_eq!(result, Err(SessionMiss::Stale));
@@ -21476,7 +21860,7 @@ mod tests {
                 step,
                 &profile,
                 "priced-model",
-                &crate::usage::read(&repo).unwrap(),
+                &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
             )
         })
         .expect("a session with a zero horizon should resume however old its store");
@@ -21532,7 +21916,7 @@ mod tests {
                     step,
                     &profile,
                     model,
-                    &crate::usage::read(&repo).unwrap(),
+                    &crate::usage::LedgerTotals::from_entries(&crate::usage::read(&repo).unwrap()),
                 )
             });
             std::fs::remove_dir_all(&home).ok();
@@ -25633,6 +26017,7 @@ mod tests {
         assert_eq!(rows[0].outcome.as_deref(), Some("pass"));
         assert!(!rows[0].blocked);
         assert_eq!(rows[0].routine, None, "the task is no routine's copy");
+        assert_eq!(rows[0].complexity, None, "the task set no complexity");
     }
 
     /// A command step's row for a routine copy carries the routine's id, the
@@ -25652,6 +26037,28 @@ mod tests {
         let rows = command_rows(&repo);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].routine.as_deref(), Some("release"));
+    }
+
+    /// A command step's row carries its task's complexity, the same as a
+    /// lane's line does, and a task without one banks a row without it.
+    /// Fails while the builder leaves it out: the row has none.
+    #[test]
+    fn a_command_row_carries_its_tasks_complexity() {
+        let (repo, _root_guard) = fixture("command-ledger-complexity");
+        let path = add_task_with_worktree(&repo, "hard", "implement");
+        let mut task = reload(&path);
+        task.front
+            .extra
+            .insert("complexity".into(), serde_norway::Value::from(42u64));
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let rows = command_rows(&repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].complexity, Some(42));
     }
 
     /// A run's wall time is rounded to the nearest second, not cut down to

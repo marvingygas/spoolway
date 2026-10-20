@@ -16,6 +16,29 @@ The tests are split by the question they answer.
 Anything decidable from files and exit codes is a unit test. A suite needs a real git
 repository, a real detached process or a real forge. Anything only a screen can show is a plan.
 
+## Skill commands
+
+`cargo test` checks every `spoolway` command that a shipped skill names. The test is
+`install::tests::skills_name_real_commands` in `src/install.rs`. It reads the skill files of all
+three providers, `claude`, `codex` and `pi`.
+
+The test reads only code spans and fenced blocks. For each `spoolway` command it checks the
+subcommand path and the long flags against the CLI's own command tree. It does not check short
+flags, flag values or the prose around a command. A placeholder such as `<step>`, a pipe or a
+description after a run of spaces in a fenced block ends the command.
+
+A name the CLI lacks fails the test. The failure gives the file, the line and the name:
+
+```
+assets/skills/pi/spoolway-calibrate/SKILL.md:25
+  names `spoolway eval --every`, and `spoolway eval` has no `--every`.
+  Use a flag `spoolway eval --help` lists, or add the flag to the CLI
+  before the skill names it.
+```
+
+A skill that names a missing command on purpose goes in the `ALLOWED` list in the test, with
+the reason.
+
 ## Running the suites
 
 ```sh
@@ -117,7 +140,7 @@ with a `// covers:` line.
 |---|---|---|
 | `smoke` | flow | A person, by hand |
 | `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, upgrade, herdr-bind, remote-base, home-mode, kept-panes, lane-tabs, lane-orphans | The `suite` step of the pipelines, on the last task of a chain |
-| `nightly` | the `pr` suites plus `faults` | Daily CI and the release workflow |
+| `nightly` | the `pr` suites plus `faults` and `footprint` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
 
@@ -147,10 +170,11 @@ with a `// covers:` line.
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one. Also `config set` beside an active config layer |
 | `home-mode` | A checkout with no `.spoolway/`, run in a workspace under `~/.spoolway/`. It also covers the clone's id: a superproject moved on disk that finds its queue again, an `init` cancelled at its first question that leaves `.git` and `~/.spoolway/` as they were (needs util-linux `script`), and several first commands started at once in a fresh clone that agree on one home. It also runs a dispatcher in each of two clones over one shared project job and checks the job fires once for the workspace |
 | `kept-panes` | A two-step task driven through the herdr double: `spoolway lane` still lists the first step's lane while the second step runs, and both lanes are gone once the task is done. A second task with `dispatch.visible_lanes` set to `1` lists only the second step's lane while it runs. A four-step task with `dispatch.visible_lanes` set to `3` has closed the first lane once the fourth starts, and with `all` it closes none. A one-step command task opens no pane by default and opens one with `dispatch.hide_commands` set to `false`, and both runs write the same log file |
-| `lane-tabs` | With `dispatch.lane_layout` set to `tabs`, a four-step task driven through the herdr double opens each step in a tab labelled with the step. The first step takes the workspace's first tab and its pane is not renamed. At `dispatch.visible_lanes` 3 the fourth step closes the first step's tab. A step that fails back reuses its own tab and its new pane replaces the old one, also after the first tab has closed. At a limit of 1 the workspace survives every swap |
+| `lane-tabs` | With `dispatch.lane_layout` set to `tabs`, a four-step task driven through the herdr double opens each step in a tab labelled with the step. The first step takes the workspace's first tab and its pane is not renamed. At `dispatch.visible_lanes` 3 the fourth step closes the first step's tab. A step that fails back reuses its own tab and its new pane replaces the old one, also after the first tab has closed. At a limit of 1 the workspace survives every swap. A lane whose agent is removed from the double's agent list is found on a later pass and its task is blocked |
 | `lane-names` | Two tasks whose ids share a tag are driven through the same step on the herdr double, which refuses a name over 32 characters and a name a live agent holds. The first task's lane is `<step>-<tag>`. The second task's lane takes a four-character tag. A step that runs again keeps its three-character tag. When another task's agent holds that name, the agent keeps it and the step's tag grows to five characters. Archiving the first task removes its records from `lane_aliases.json` and leaves the second task's |
 | `lane-orphans` | A suite that ends or forgets a lane leaves none of that lane's processes running. The `forget` helpers of `disaster` and `faults` stop the lane's agent and not only its shell. The exit trap in `lib.sh` stops every lane under `headless/`, and never signals a pid file that holds `0`, a non-number or nothing |
 | `faults` | Faults injected where the stress test found bugs by hand. `SPOOLWAY_TEST_KILL_AT` makes a test dispatcher kill itself inside `git worktree add` and `git worktree remove` in a repository of ten thousand files. The suite also covers a command step's wrapper killed alone by `SIGKILL` and by `SIGTERM`, a dispatcher on a terminal while a cron job fires under an issue hook whose tool is missing, a base ask to `origin` over a stalled ssh transport, eight `config set` calls at once, and `resume` under a live unblocker. A case whose fix is not on `main` yet is marked expected-fail, and the suite prints a line once it passes. It takes about three and a half minutes, so it runs in `nightly` only |
+| `footprint` | The memory and process budget of the screen and the dispatcher, with five lanes held on the herdr double. The budget is a block of named constants at the top of the suite: the screen gets 30 MB plus 2 MB per lane, and the dispatcher gets 20 MB plus 1 MB per lane. Peak memory is `VmHWM` in `/proc`, so the suite runs on Linux only. Shims for `git`, `herdr`, `gh` and `tmux` log every call and run the real tool. An idle dispatcher pass starts no `git` and at most one herdr call, and an idle second of the screen starts no process. The suite then repeats the run with 5,000 transcripts for each agent kind and a 40 MB ledger. Peak memory and the processes per idle pass must each stay within 10% of the small run. The screen must also be back under its budget within 5 s of leaving the Eval tab. Each failed check prints what to look at next. It takes about three and a half minutes, so it runs in `nightly` only |
 | `upgrade` | Whether this binary still reads what the 0.6.0 release wrote. The 0.6.0 `.spoolway/` tree under `scripts/e2e/fixtures/` goes through a real `spoolway sync`: its `housekeeping.retention_days` survives, the prose around the pipeline file's key block comes back byte for byte, `spoolway pipeline check` loads the result, and a task queues against it. A dry run changes no file, and the files it lists are the files a real run reports and changes on disk. A sync that cannot remove one file writes nothing, `config.toml` included. Every other release's `.spoolway/` tree under `scripts/e2e/fixtures/` goes through `spoolway sync` too: none of its files comes back refused, and a second sync has nothing to do. After its sync, every release's `[dispatch]` table holds `priority`, `lane_child_ceiling`, `visible_lanes`, `hide_commands` and `lane_layout` |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. It ages sessions by waiting, so a run takes about ten minutes. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |

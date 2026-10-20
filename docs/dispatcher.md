@@ -153,6 +153,21 @@ from `base:`. A `starts_from:` set in the task file wins over both. When the bra
 exists nowhere, the task pauses instead, as
 [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse, or that holds an id another file holds, is skipped and named under the board. See [When it stops](#when-it-stops).
 
+### A quiet pass
+
+A pass in which nothing changed does little work. It starts no `git` process, and it asks herdr
+for the list of agents once.
+
+| Work | When the dispatcher does it |
+|---|---|
+| Load the config and write `dispatch-config.toml` | Only when `config.toml`, `overrides/config.toml` or `dispatch-config.toml` has changed |
+| Write `lanes.json` | Only when the lane records differ from the file. A pass that fails still saves the records it changed |
+| Ask herdr for workspaces, panes, agents and tabs | When a lane has started or ended, and at least once every 60 seconds. Every other pass asks only for the list of agents |
+| Rename a tab | Only when herdr shows a name other than the one the dispatcher wants |
+
+A lane that ends is noticed on the next pass, because the list of agents no longer shows it.
+That pass also asks herdr for workspaces, panes and tabs.
+
 ## What runs next
 
 When more tasks are ready than there are free slots, the pass sorts them:
@@ -702,7 +717,7 @@ shows what one lane is doing.
 
 ## Editing a pipeline while it runs
 
-The dispatcher reads the pipelines once, when it starts. Configuration is read every pass,
+The dispatcher reads the pipelines once, when it starts. Configuration is reloaded whenever its files change,
 with a few exceptions; see the end of this section. Right after it takes the project's
 lock, it writes a copy of what it loaded to `<home>/dispatch-pipelines.json`. A dispatcher
 that starts later replaces that copy.
@@ -738,12 +753,12 @@ $ spoolway pipeline check
 `spoolway queue add` refuses a task whose pipeline the running dispatcher did not load. It
 tells you to restart the dispatcher and try again.
 
-Configuration is the exception. The dispatcher reads `config.toml` and the config override again
-at the start of every pass, so a change such as a higher `agents.claude.concurrency` applies on
-the next pass with no restart. If the file stops parsing or goes missing, the dispatcher keeps
+Configuration is the exception. At the start of every pass the dispatcher checks `config.toml` and the config override, and
+loads them again when either has changed. A change such as a higher `agents.claude.concurrency`
+applies on the next pass with no restart. If the file stops parsing or goes missing, the dispatcher keeps
 running on the last good config. It prints the error once.
-It starts no lane beyond the `concurrency` caps of that config. It reads the file again every
-pass, so the error clears as soon as the file is valid.
+It starts no lane beyond the `concurrency` caps of that config. The error clears as soon as the
+file is valid.
 
 After each good load, the dispatcher writes the merged config to `<home>/dispatch-config.toml`.
 A lane's `spoolway report` runs on this record when `config.toml` or
@@ -1025,8 +1040,8 @@ no label of its own.
 
 The workspace's first tab becomes the first step's tab. Every step after it opens a new tab in the
 background, and never takes focus from the tab you are looking at. That is an agent step, or a
-command step when `dispatch.hide_commands` is `false`. The dispatcher names every step's tab again
-on each pass, because herdr forgets a tab's name when it restarts.
+command step when `dispatch.hide_commands` is `false`. The dispatcher renames a step's tab
+whenever herdr shows a different name for it, so a name herdr forgot when it restarted comes back.
 
 A step that comes back reuses its own tab. Its new pane replaces the old one inside that tab, so
 the tabs stay in the order the steps first ran.

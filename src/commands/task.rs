@@ -44,6 +44,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "starts_from",
     "group_description",
     "labels",
+    "complexity",
 ];
 
 /// The keys spoolway's own dispatcher machinery throws away unconditionally
@@ -246,6 +247,15 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          may hold no whitespace and no comma — refused, naming the task and \
          the label — since a hook reads the whole list comma-joined in \
          `SPOOLWAY_LABELS`.",
+    ),
+    (
+        "complexity",
+        "Experimental: the planner's estimate of how complex this task is, a \
+         whole number from 1 to 100, 100 being extremely complex. There is no \
+         rubric — weigh the task against the others cut beside it. Copied onto \
+         every ledger row the task banks, so `spoolway eval --by task` shows it \
+         beside what the run cost. Any other value is refused, naming the \
+         task; a task without it runs as any other does.",
     ),
 ];
 
@@ -669,6 +679,58 @@ mod tests {
             sentence.contains(&format!("{} characters", crate::config::TASK_ID_MAX)),
             "{sentence}"
         );
+    }
+
+    /// `complexity` is an optional key, and its sentence tells a planner it
+    /// is an experimental estimate on a scale whose top means extremely
+    /// complex. Fails without the key: it is in neither place.
+    #[test]
+    fn the_contract_lists_complexity_as_an_experimental_optional_key() {
+        let (repo, _root_guard) = fixture("contract-complexity");
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
+        assert!(contract.keys.optional.contains(&"complexity"));
+        let sentence = contract.fields["complexity"];
+        for words in [
+            "Experimental",
+            "estimate",
+            "1 to 100",
+            "100 being extremely complex",
+        ] {
+            assert!(sentence.contains(words), "{words}: {sentence}");
+        }
+    }
+
+    /// `task contract --from` refuses an out-of-range `complexity:` in the
+    /// words `queue add --from` uses, since both reach `parse_submission`.
+    /// Fails without the check: both accept it.
+    #[test]
+    fn from_refuses_a_complexity_out_of_range_the_same_way_add_does() {
+        let (repo, _root_guard) = fixture("check-complexity");
+        let text = task_text("hard", "group: demo\ncomplexity: 101\n", BODY);
+        let path = write_doc(&repo, "hard.md", &text);
+
+        let check_err = task_contract(
+            &repo,
+            &Pipelines::builtin(),
+            &contract_args(&[&path]),
+            &repo.root,
+        )
+        .unwrap_err();
+        let said = format!("{check_err:#}");
+        assert!(said.contains("hard.md"), "{said}");
+        assert!(said.contains("`complexity: 101`"), "{said}");
+        assert!(said.contains("from 1 to 100"), "{said}");
+
+        let add_err = super::super::queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(said, format!("{add_err:#}"));
+        assert!(!repo.queue_dir().join("hard.md").exists());
     }
 
     /// `task contract --from` refuses a `starts_from:` naming a branch that

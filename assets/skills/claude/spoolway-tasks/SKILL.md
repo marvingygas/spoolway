@@ -266,6 +266,14 @@ reading the file whole.
    - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
      plan's own words, or the source issue's own labels when this breakdown started at one.
      Dropped for a task that proposed none.
+   - `group_description` — the text of the parent issue that `issue_tracking.hook` opens for the group. Required
+     on one task per group when `issue_tracking.hook` is set. Otherwise left off.
+   - `starts_from` — the branch this task's worktree is cut from, when it is not the default.
+     Set it only when a dependency's branch no longer exists. Use a branch that exists; never make one up.
+   - `gate_at` — a step id. The task pauses once it passes that step. Set it only when the person
+     asked for that pause.
+   - `complexity` — a whole number from 1 to 100, 100 being extremely complex. Judge it against
+     the other tasks in the same cut. Set it on every task, once, and never revise it.
 
    **Link a source; never redraw it.** Whatever the shape came from as a file — the calling
    page, a screenshot, anything the person named or pasted — is linked from the task, never
@@ -312,13 +320,16 @@ reading the file whole.
    loud to the caller if you judged them safe beside each other on a shared file, and never
    tell them something downstream will check it; do not invent a section for it.
 
+   **Then check each group's first task.** It should carry the step marked
+   `first_of_chain` in step 1's contract, if the pipeline has one.
+
    **Then check each group's own last task carries a `last:` step.** A group's last task —
    the one nothing else in its own group depends on — is the task whose run of the
-   pipeline reaches a step marked `last-of-chain` in step 1's contract. When that task's own
+   pipeline reaches a step marked `last_of_chain` in step 1's contract. When that task's own
    routed pipeline carries none, the step still runs, but on the nearest task below it whose
    pipeline has one, so it checks a stack without the tasks above it. If the whole stack should
    pass it, re-route that last task to the first pipeline from step 1's gathering that carries a
-   `last-of-chain` step — there is no project default to prefer over the rest — and say the swap
+   `last_of_chain` step — there is no project default to prefer over the rest — and say the swap
    out loud to the caller instead of just writing a different `pipeline:` into its task.
 
 5. **Prove the tasks.** `spoolway task contract --from <home>/pending` —

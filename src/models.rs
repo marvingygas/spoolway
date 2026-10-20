@@ -15,12 +15,13 @@
 //! [`refresh`] is the only network edge: it shells out to curl, distils the
 //! answer completely, and only then atomically replaces one of those tables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -452,41 +453,109 @@ fn builtin() -> &'static BTreeMap<String, ModelPrice> {
 }
 
 struct RefreshedCache {
-    path: std::path::PathBuf,
+    /// What the file looked like when `file` was parsed from it; see
+    /// [`file_stamp`].
+    stamp: FileStamp,
+    /// Whether that stamp was old enough to vouch for the bytes. A stamp
+    /// taken while the file was younger cannot: a rewrite of the same length
+    /// inside one modified-time tick would leave it looking identical, even
+    /// once the file has since aged.
+    settled: bool,
     contents: Vec<u8>,
     file: Arc<BuiltinFile>,
 }
 
-/// Read the optional machine-wide table before consulting its parsed cache.
-/// The read has to come first: permissions can make an otherwise unchanged
-/// file unreadable, and serving its cached row then would defeat the silent
-/// built-in fallback promised for that failure. Comparing bytes still avoids
-/// reparsing an unchanged table on every frame of a long-running `status`.
-fn refreshed_file() -> Option<Arc<BuiltinFile>> {
-    let path = crate::mux::home().join(".spoolway/model-prices.json");
-    let contents = fs::read(&path).ok()?;
+/// What a stat says about the machine-wide table: the identity the screen's
+/// other caches use, plus the permission bits. Read permission can be taken
+/// away without moving the modified time or the length, so identity alone
+/// would go on serving a table the person can no longer read.
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    identity: crate::watch::Identity,
+    mode: u32,
+}
 
-    static CACHE: OnceLock<Mutex<Option<RefreshedCache>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+/// The stamp of `path`, and whether it is settled as of `now`: old enough to
+/// vouch for the bytes behind it. A file written within
+/// [`crate::watch::SETTLE`] may be written again inside the same modified-time
+/// tick with the same length. A modified time ahead of `now` is not settled
+/// either, since the file can be rewritten at that same time later.
+fn file_stamp(path: &Path, now: SystemTime) -> Option<(FileStamp, bool)> {
+    let meta = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
+    #[cfg(not(unix))]
+    let mode = 0;
+    let identity = crate::watch::Identity::from_metadata(&meta);
+    let settled = identity.settled_at(now);
+    Some((FileStamp { identity, mode }, settled))
+}
+
+/// The optional machine-wide table, parsed once per change of the file.
+///
+/// A stat that matches the one taken when the table was parsed, if that one
+/// was taken on a file old enough to trust, answers from the cache without
+/// reading the file:
+/// every lane of every pass asks, and the file is hundreds of kilobytes.
+/// Anything else reads first. That order is deliberate: permissions can make
+/// an otherwise unchanged file unreadable, and serving its cached row then
+/// would defeat the silent built-in fallback promised for that failure, which
+/// is why the mode is part of the stamp. Comparing bytes still avoids
+/// reparsing a table that was rewritten with the same contents.
+fn refreshed_file() -> Option<Arc<BuiltinFile>> {
+    refreshed_file_at(SystemTime::now())
+}
+
+/// [`refreshed_file`] judging how settled the file is against `now`, so a
+/// test can place the clock either side of the file's modified time.
+fn refreshed_file_at(now: SystemTime) -> Option<Arc<BuiltinFile>> {
+    let path = crate::mux::home().join(".spoolway/model-prices.json");
+    let (stamp, settled) = file_stamp(&path, now)?;
+
+    // One slot per path, so a caller that points `HOME` elsewhere (every test
+    // does) never evicts the table another is holding.
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, RefreshedCache>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let cached = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cached
-        .as_ref()
-        .is_some_and(|cached| cached.path == path && cached.contents == contents)
+    if let Some(held) = cached.get(&path)
+        && held.settled
+        && held.stamp == stamp
     {
-        return Some(Arc::clone(&cached.as_ref()?.file));
+        return Some(Arc::clone(&held.file));
+    }
+    drop(cached);
+
+    let contents = fs::read(&path).ok()?;
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(held) = cached
+        .get_mut(&path)
+        .filter(|held| held.contents == contents)
+    {
+        // Same bytes under a new stat (a `touch`, a permission change back):
+        // keep the parse, and remember the stat so the next call skips the read.
+        held.stamp = stamp;
+        held.settled = settled;
+        return Some(Arc::clone(&held.file));
     }
     drop(cached);
 
     let file = Arc::new(serde_json::from_slice::<BuiltinFile>(&contents).ok()?);
-    *cache
+    cache
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RefreshedCache {
-        path,
-        contents,
-        file: Arc::clone(&file),
-    });
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path,
+            RefreshedCache {
+                stamp,
+                settled,
+                contents,
+                file: Arc::clone(&file),
+            },
+        );
     Some(file)
 }
 
@@ -1655,6 +1724,14 @@ mod tests {
             serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
         );
         let path = home.join(".spoolway/model-prices.json");
+        // Old enough to be served from the stat alone. A file written this
+        // second is read on every call, which would pass without the mode.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
 
         crate::platform::test_home::with_home(&home, || {
             assert_eq!(
@@ -1665,6 +1742,114 @@ mod tests {
             assert_eq!(
                 resolve(&BTreeMap::new(), "claude-opus-5").source,
                 Source::Builtin
+            );
+        });
+    }
+
+    /// A table whose stat has not moved is not read again: the bytes are
+    /// swapped for others of the same length with the old modified time put
+    /// back, so only a read could notice. A moved modified time reads it.
+    #[test]
+    fn a_refreshed_file_with_an_unchanged_stat_is_served_without_a_read() {
+        let home = fixture_home("models-refreshed-stat-only");
+        let path = home.join(".spoolway/model-prices.json");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let set_mtime = |at: std::time::SystemTime| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        write_refreshed(
+            &home,
+            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
+        );
+        set_mtime(long_ago);
+
+        crate::platform::test_home::with_home(&home, || {
+            let input = || {
+                resolve(&BTreeMap::new(), "claude-opus-5")
+                    .price
+                    .unwrap()
+                    .input
+            };
+            assert_eq!(input(), 2.0);
+
+            write_refreshed(
+                &home,
+                serde_json::json!({ "claude-opus-5": { "input": 3.0 } }),
+            );
+            set_mtime(long_ago);
+            assert_eq!(input(), 2.0, "a stat that matches must not cost a read");
+
+            set_mtime(long_ago + std::time::Duration::from_secs(5));
+            assert_eq!(input(), 3.0, "a moved modified time reads the file");
+        });
+    }
+
+    /// Rewrite the fixture table in place with `input` as the one price and
+    /// put its modified time back to `at`, so the stat looks as it did before
+    /// the rewrite: same length, same time.
+    fn rewrite_in_place(home: &std::path::Path, input: f64, at: SystemTime) {
+        write_refreshed(
+            home,
+            serde_json::json!({ "claude-opus-5": { "input": input } }),
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(home.join(".spoolway/model-prices.json"))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn cached_input(now: SystemTime) -> f64 {
+        refreshed_file_at(now).unwrap().models["claude-opus-5"].input
+    }
+
+    /// A stat taken while the file was still young cannot vouch for it once
+    /// the file has aged: a rewrite of the same length inside one
+    /// modified-time tick looks identical, and the cache must read it anyway.
+    #[test]
+    fn a_stat_cached_while_the_file_was_young_is_not_trusted_once_it_ages() {
+        let home = fixture_home("models-refreshed-young-stat");
+        let written = SystemTime::now();
+        rewrite_in_place(&home, 2.0, written);
+
+        crate::platform::test_home::with_home(&home, || {
+            let young = written + crate::watch::SETTLE / 2;
+            assert_eq!(cached_input(young), 2.0);
+
+            rewrite_in_place(&home, 3.0, written);
+            let aged = written + crate::watch::SETTLE * 10;
+            assert_eq!(
+                cached_input(aged),
+                3.0,
+                "a young stamp vouched for an aged file"
+            );
+        });
+    }
+
+    /// A modified time ahead of the clock (skew, a copied file) is not
+    /// settled: the file can be rewritten at that same time later, so the
+    /// cache must keep reading it rather than trust the stamp.
+    #[test]
+    fn a_stat_with_a_modified_time_in_the_future_is_not_trusted() {
+        let home = fixture_home("models-refreshed-future-stat");
+        let written = SystemTime::now() + std::time::Duration::from_secs(3600);
+        rewrite_in_place(&home, 2.0, written);
+
+        crate::platform::test_home::with_home(&home, || {
+            let now = SystemTime::now();
+            assert_eq!(cached_input(now), 2.0);
+
+            rewrite_in_place(&home, 3.0, written);
+            assert_eq!(
+                cached_input(now),
+                3.0,
+                "a future stamp vouched for the file"
             );
         });
     }

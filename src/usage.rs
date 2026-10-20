@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -270,6 +271,16 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine: Option<String>,
 
+    /// The planner's complexity estimate for this line's task — see
+    /// [`crate::task::Task::complexity`]. Read off the task where
+    /// [`Entry::plan`] is, or carried beside it onto a catch-up line, so the
+    /// two on one line come from the same copy of the task. `spoolway eval
+    /// --by task` draws it as `COMPLEXITY`. Absent on a line whose task set
+    /// none, on every directory line, and on every line written before the
+    /// field existed: those read exactly as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<u32>,
+
     /// The watched root — see [`crate::config::Config::watch_roots`] — a
     /// session's `cwd` sat under, when this line was banked by
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
@@ -339,6 +350,7 @@ impl Entry {
             trial: None,
             trial_group: None,
             routine: None,
+            complexity: None,
             dir: None,
             hand: false,
             command: None,
@@ -1239,7 +1251,7 @@ pub struct Harvest {
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
 ///
 /// `own_subagents` says whether the session's subagents are part of this
-/// reading; see [`lane_owns_subagents`] for who decides.
+/// reading; see [`LedgerTotals::lane_owns_subagents`] for who decides.
 pub fn harvest(
     kind: &str,
     session: &str,
@@ -1254,36 +1266,34 @@ pub fn harvest(
     }
 }
 
-/// Whether a dispatched lane banks the subagent spend of `session`.
-///
-/// One rule for every reader of a lane's transcript: the subagents are the
-/// lane's unless the ledger holds a hand line for the session. A session a
-/// person ran by hand is banked by [`sweep_dirs`] with its subagents as lines
-/// of their own, and a dispatched lane can resume it, so folding the
-/// subagents into the lane's line as well would count them twice. The sweep
-/// applies the same test from its side: it banks a subagent exactly when the
-/// parent has a hand line.
-pub fn lane_owns_subagents(ledger: &[Entry], session: &str) -> bool {
-    !ledger
-        .iter()
-        .any(|entry| entry.session == session && entry.hand)
-}
-
 /// The last assistant turn a transcript records, in whichever of the two
 /// shapes this agent writes. See [`last_turn`], the public form built on it.
 ///
-/// The whole file is read, but one line is parsed at a time and dropped rather
-/// than collected into a `Vec<serde_json::Value>` — a 50MB transcript on a
-/// board tick is heavy enough without also holding every record of it in
-/// memory at once (review finding 48).
+/// One line is parsed at a time and dropped rather than collected into a
+/// `Vec<serde_json::Value>` — a 50MB transcript on a board tick is heavy
+/// enough without also holding every record of it in memory at once (review
+/// finding 48). Only the lines added since the previous read of the same file
+/// are parsed: the reading so far is kept in [`TAIL_READS`], and a file that
+/// shrank or was replaced is read again from its start.
 fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
     // The guard `records_at` used to apply: an unresolvable kind reads as
     // "nothing yet" rather than as a transcript at `path`.
     kind(kind_name)?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let mut last: Option<Turn> = None;
-    let mut announced = String::new();
-    for line in raw.lines() {
+    let meta = std::fs::metadata(path).ok()?;
+    let identity = FileIdentity::from_metadata(&meta);
+    let key = (kind_name.to_string(), path.to_path_buf());
+    let mut state = TAIL_READS
+        .lock()
+        .ok()
+        .and_then(|reads| reads.get(&key).cloned())
+        .filter(|state| state.identity.continues_as(&identity))
+        .unwrap_or_default();
+    if state.offset == identity.len && state.identity == identity {
+        return state.last;
+    }
+
+    let (text, whole) = new_whole_lines(path, state.offset)?;
+    for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -1291,12 +1301,12 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
         // its model beside the turn rather than on it, the turn alone does not
         // know what ran it.
         if let Some(model) = turn_model(kind_name, &value) {
-            announced = model;
+            state.announced = model;
             continue;
         }
         if let Some(mut turn) = read_turn(kind_name, &value) {
             if turn.model.is_empty() {
-                turn.model.clone_from(&announced);
+                turn.model.clone_from(&state.announced);
             }
             // A synthetic turn is not an answer — see [`SYNTHETIC_MODEL`] — so
             // it must not become "the last turn" a caller sizes the
@@ -1304,10 +1314,132 @@ fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
             if turn.model == SYNTHETIC_MODEL {
                 continue;
             }
-            last = Some(turn);
+            state.last = Some(turn);
         }
     }
+    state.offset += whole;
+    state.identity = identity;
+    let last = state.last.clone();
+    if let Ok(mut reads) = TAIL_READS.lock() {
+        if reads.len() >= MAX_REMEMBERED {
+            reads.clear();
+        }
+        reads.insert(key, state);
+    }
     last
+}
+
+/// Declares a process-wide memo: a `Mutex` around a map, read as
+/// `NAME.lock()`.
+///
+/// Under test every thread gets a map of its own behind the same `lock()`.
+/// The tests assert on what these memos hold, and a memo shared by the whole
+/// test process would let one test's reads fill or clear what another is
+/// looking at.
+macro_rules! process_memo {
+    ($(#[$doc:meta])* $name:ident, $map:ty) => {
+        $(#[$doc])*
+        #[cfg(not(test))]
+        static $name: Mutex<$map> = Mutex::new(BTreeMap::new());
+        $(#[$doc])*
+        #[cfg(test)]
+        static $name: PerThreadMemo<$map> = PerThreadMemo::new();
+    };
+}
+
+/// [`process_memo!`]'s stand-in under test: one leaked map per thread, so a
+/// guard can borrow `'static` like the real memo's does.
+#[cfg(test)]
+struct PerThreadMemo<M: 'static>(Mutex<Vec<(std::thread::ThreadId, &'static Mutex<M>)>>);
+
+#[cfg(test)]
+impl<M: Default + 'static> PerThreadMemo<M> {
+    const fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, M>> {
+        let me = std::thread::current().id();
+        let mut threads = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mine = match threads.iter().find(|(id, _)| *id == me) {
+            Some((_, memo)) => *memo,
+            None => {
+                let memo: &'static Mutex<M> = Box::leak(Box::new(Mutex::new(M::default())));
+                threads.push((me, memo));
+                memo
+            }
+        };
+        drop(threads);
+        mine.lock()
+    }
+}
+
+/// The whole lines of `path` from byte `offset` on, and how many bytes they
+/// took.
+///
+/// Only whole lines are returned. A line the agent is still writing has no
+/// newline yet, and parsing its half would drop the turn for good once the
+/// offset moved past it; the caller advances by the returned length, which
+/// ends at the last newline, so the next read starts that line over.
+fn new_whole_lines(path: &Path, offset: u64) -> Option<(String, u64)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset)).ok()?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut raw).ok()?;
+    let whole = raw
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    Some((
+        String::from_utf8_lossy(&raw[..whole]).into_owned(),
+        whole as u64,
+    ))
+}
+
+/// What [`last_turn_at`] knows about a transcript after reading it: how far it
+/// got and what it had found by then.
+#[derive(Clone, Default)]
+struct TailRead {
+    identity: FileIdentity,
+    /// The byte after the last whole line already parsed.
+    offset: u64,
+    last: Option<Turn>,
+    /// The model a kind announced beside its turns, carried across reads.
+    announced: String,
+}
+
+process_memo!(
+/// The reading of each transcript so far, by agent kind and path.
+    TAIL_READS, BTreeMap<(String, PathBuf), TailRead>);
+
+/// What a file looked like when it was last read — the one identity
+/// [`crate::watch`] also keeps for the screen's idle ticks.
+type FileIdentity = crate::watch::Identity;
+
+impl FileIdentity {
+    /// Whether a file now looking like `now` is this one with lines appended,
+    /// or not touched at all.
+    ///
+    /// A compacted or restarted session rewrites its transcript: the file is
+    /// shorter, or a new inode, or older than what was read. A saved offset
+    /// would then point past the end or into the middle of a line, so none of
+    /// those counts as a continuation. Neither does a file of the same length
+    /// with a newer modified time, which is a rewrite that happened to land on
+    /// the same size.
+    fn continues_as(&self, now: &Self) -> bool {
+        if self == now {
+            return true;
+        }
+        self.inode == now.inode
+            && self.len < now.len
+            && match (self.modified, now.modified) {
+                (Some(before), Some(after)) => before <= after,
+                _ => true,
+            }
+    }
 }
 
 /// What a conversation still in flight looks like from outside it.
@@ -1340,7 +1472,7 @@ pub struct Live {
 /// subtracts the ledger's banked lines from this reading, and those lines
 /// include the subagents' spend, so leaving them out would read as zero until
 /// the root alone passed what was banked. `own_subagents` is
-/// [`lane_owns_subagents`]'s answer. `context` stays the root's.
+/// [`LedgerTotals::lane_owns_subagents`]'s answer. `context` stays the root's.
 pub fn live_of(
     kind: &str,
     session: &str,
@@ -1632,7 +1764,7 @@ fn subagent_transcripts(path: &Path, session: &str) -> Vec<PathBuf> {
 /// A subagent's spend is the lane's — [`sweep_dirs`] leaves the subagents of
 /// a lane session alone, and a lane's live reading ([`live_of`]) sums them
 /// the same way. The exception is a session with a hand line, where the sweep
-/// banks them: see [`lane_owns_subagents`]. They are summed here, into the one
+/// banks them: see [`LedgerTotals::lane_owns_subagents`]. They are summed here, into the one
 /// reading the lane's ledger line is diffed against, so a subagent whose
 /// transcript grows after the lane was banked shows up as a delta on the
 /// lane's session like any later root turn.
@@ -1709,36 +1841,132 @@ struct Transcript {
 
 /// The totals of one transcript, deduped by request, with its cost summed
 /// turn by turn against `prices` — the project's `[models]` table.
+///
+/// A transcript written within [`KEEP_FOLD_FOR`] is not read again from its
+/// start: the fold over its lines so far is kept in [`TRANSCRIPT_FOLDS`], and
+/// only the whole lines appended since are fed to it. A quieter one is read
+/// whole each time it is read. A file that shrank or was replaced, or a
+/// `prices` table that changed, starts the fold over, since either makes the
+/// kept totals describe something else. So does a model that now resolves to
+/// another price, which is what `spoolway models refresh` mid-lane does to a
+/// model with no `[models]` row.
 fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Transcript {
     let none = Transcript {
         total: None,
         context: 0,
     };
-    let Some(values) = records_at(kind, path) else {
+    // The guard `records_at` used to apply: an unresolvable kind reads as
+    // "nothing yet" rather than as a transcript at `path`.
+    if self::kind(kind).is_none() {
+        return none;
+    }
+    let Some(identity) = std::fs::metadata(path)
+        .ok()
+        .map(|m| FileIdentity::from_metadata(&m))
+    else {
         return none;
     };
+    let key = (kind.to_string(), path.to_path_buf());
+    // Taken out of the map rather than cloned: its `seen` set is the size of
+    // the transcript.
+    let kept = TRANSCRIPT_FOLDS
+        .lock()
+        .ok()
+        .and_then(|mut folds| folds.remove(&key))
+        .filter(|kept| {
+            kept.identity.continues_as(&identity)
+                && kept.prices == *prices
+                && kept.fold.prices_still_resolve(prices)
+        });
+    let mut kept = kept.unwrap_or_else(|| KeptFold {
+        identity: FileIdentity::default(),
+        offset: 0,
+        prices: prices.clone(),
+        fold: TranscriptFold::default(),
+    });
+    if !(kept.offset == identity.len && kept.identity == identity) {
+        let Some((text, whole)) = new_whole_lines(path, kept.offset) else {
+            return none;
+        };
+        for line in text.lines() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                kept.fold.feed(kind, prices, &value);
+            }
+        }
+        kept.offset += whole;
+        kept.identity = identity;
+    }
+    let read = kept.fold.finish();
+    // Kept only for a transcript still being written. A settled session read
+    // once, as the eval tab's sweep does for all of history, would otherwise
+    // leave its request-id set behind for as long as the process lives.
+    if kept.identity.written_within(KEEP_FOLD_FOR)
+        && let Ok(mut folds) = TRANSCRIPT_FOLDS.lock()
+    {
+        // Folds of transcripts that have since gone quiet are let go here, so
+        // what is held follows the lanes running now rather than every lane
+        // that has run.
+        folds.retain(|_, other| other.identity.written_within(KEEP_FOLD_FOR));
+        if folds.len() >= MAX_KEPT_FOLDS {
+            folds.clear();
+        }
+        folds.insert(key, kept);
+    }
+    read.unwrap_or(none)
+}
 
-    let mut tokens = Tokens::default();
-    let mut tier_tokens = Tokens::default();
-    let mut model = String::new();
-    let mut turns = 0u32;
-    let mut context = 0u64;
+/// How long after its last write a transcript's fold is kept. Longer than a
+/// lane waits between turns for a person, so a live lane keeps tailing; a
+/// session older than this is read whole when it is read at all.
+const KEEP_FOLD_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How many folds are held at once, before they are dropped and rebuilt from
+/// the lanes still asking. A running lane and its subagents are a few each.
+const MAX_KEPT_FOLDS: usize = 64;
+
+/// A [`TranscriptFold`] and how far into its file it has read.
+struct KeptFold {
+    identity: FileIdentity,
+    /// The byte after the last whole line already fed to the fold.
+    offset: u64,
+    /// The price table the fold's cost was summed against.
+    prices: BTreeMap<String, ModelPrice>,
+    fold: TranscriptFold,
+}
+
+process_memo!(
+/// The fold of each recently written transcript read so far by
+/// [`read_transcript`], by agent kind and path.
+///
+/// Each holds the transcript's request-id set, so it is the size of the
+/// transcript's turn count rather than of a path and an offset.
+    TRANSCRIPT_FOLDS, BTreeMap<(String, PathBuf), KeptFold>);
+
+/// Everything [`read_transcript`] accumulates over a transcript's records, so
+/// that it can stop after any whole line and carry on from the next.
+#[derive(Default)]
+struct TranscriptFold {
+    tokens: Tokens,
+    tier_tokens: Tokens,
+    model: String,
+    turns: u32,
+    context: u64,
     // The running maximum of every deduped turn's own `context` reading,
     // alongside `context` itself — the last turn's alone can't tell a lane
     // that compacted after peaking close to its window from one that never
     // did. See [`Harvest::ctx_peak`].
-    let mut ctx_peak = 0u64;
-    let mut spent = 0.0f64;
+    ctx_peak: u64,
+    spent: f64,
     // Set by a turn that neither reports a cost nor has a price, which makes
     // the lane's cost unknown rather than the sum of the turns that did.
-    let mut any_unpriced = false;
-    let mut resolved: HashMap<String, Option<ModelPrice>> = HashMap::new();
+    any_unpriced: bool,
+    resolved: HashMap<String, Option<ModelPrice>>,
     // One request, several records: Claude Code writes an assistant line per
     // content block — text, thinking, each tool call — and repeats that
     // request's usage verbatim on every one of them. In a real transcript half
     // the assistant lines are such repeats, so counting them all roughly
     // doubles a lane's reported spend. Bank each request once.
-    let mut seen: HashSet<String> = HashSet::new();
+    seen: HashSet<String>,
     // The same repeat, from a kind whose format mints no id to bank a
     // request by at all — `seen` above has nothing to catch it on, and
     // without this every one of those repeats got counted as its own turn.
@@ -1747,56 +1975,63 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
     // turn. Only the immediately preceding turn is compared, not every turn
     // seen so far, because two *different* requests that happen to cost the
     // same are not the repeat this exists to catch.
-    let mut last_unidentified: Option<(String, Tokens, Option<f64>)> = None;
+    last_unidentified: Option<(String, Tokens, Option<f64>)>,
     // The model a kind announces beside its turns rather than on them.
-    let mut announced = String::new();
-    let mut reported = ReportedRuns::default();
+    announced: String,
+    reported: ReportedRuns,
+}
 
-    for value in values {
-        if let Some((total, models)) = reported_state(kind, &value) {
-            reported.observe(total, models);
-            continue;
+impl TranscriptFold {
+    fn feed(
+        &mut self,
+        kind: &str,
+        prices: &BTreeMap<String, ModelPrice>,
+        value: &serde_json::Value,
+    ) {
+        if let Some((total, models)) = reported_state(kind, value) {
+            self.reported.observe(total, models);
+            return;
         }
-        if let Some(model) = turn_model(kind, &value) {
-            announced = model;
-            continue;
+        if let Some(model) = turn_model(kind, value) {
+            self.announced = model;
+            return;
         }
-        let Some(mut turn) = read_turn(kind, &value) else {
-            continue;
+        let Some(mut turn) = read_turn(kind, value) else {
+            return;
         };
         if turn.model.is_empty() {
-            turn.model = announced.clone();
+            turn.model.clone_from(&self.announced);
         }
         // A synthetic turn — see [`SYNTHETIC_MODEL`] — names no model that
         // ever spent, and its all-zero usage is not the conversation's real
         // size. Drop it before it can overwrite `model` or `context` below.
         if turn.model == SYNTHETIC_MODEL {
-            continue;
+            return;
         }
         if let Some(id) = turn.id {
-            if !seen.insert(id) {
-                continue;
+            if !self.seen.insert(id) {
+                return;
             }
             // An identified turn breaks any run of fingerprint-matched
             // no-id turns before it — the comparison below only means
             // anything between genuinely consecutive records.
-            last_unidentified = None;
+            self.last_unidentified = None;
         } else {
             let fingerprint = (turn.model.clone(), turn.tokens, turn.cost);
-            if last_unidentified.as_ref() == Some(&fingerprint) {
-                continue;
+            if self.last_unidentified.as_ref() == Some(&fingerprint) {
+                return;
             }
-            last_unidentified = Some(fingerprint);
+            self.last_unidentified = Some(fingerprint);
         }
 
-        tokens.add(&turn.tokens);
-        turns += 1;
-        // Overwritten by every turn, so what survives the loop is the last
-        // one's — the only reading that means "how big has this got".
-        context = turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write();
-        ctx_peak = ctx_peak.max(context);
+        self.tokens.add(&turn.tokens);
+        self.turns += 1;
+        // Overwritten by every turn, so what survives is the last one's — the
+        // only reading that means "how big has this got".
+        self.context = turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write();
+        self.ctx_peak = self.ctx_peak.max(self.context);
         if !turn.model.is_empty() {
-            model = turn.model.clone();
+            self.model.clone_from(&turn.model);
         }
         // Priced one turn at a time because a tier depends on a single
         // request's prompt, which the summed tokens cannot show. The agent's
@@ -1805,38 +2040,54 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         // Resolved once per distinct model: a lookup for a model with no
         // `[models]` row reads the refreshed price file from disk, and a
         // transcript has hundreds of turns on one or two models.
-        let entry = *resolved
+        let entry = *self
+            .resolved
             .entry(turn.model.clone())
             .or_insert_with(|| crate::models::resolve(prices, &turn.model).price);
         // Banked whatever pays for the turn: `spoolway eval` re-prices the
         // token classes from today's table, so the split must not depend on
         // whether the agent reported its own cost.
         if entry.is_some_and(|price| price.tier_reached(&turn.tokens).is_some()) {
-            tier_tokens.add(&turn.tokens);
+            self.tier_tokens.add(&turn.tokens);
         }
         match turn.cost.or_else(|| Some(entry?.apply_turn(&turn.tokens))) {
-            Some(cost) => spent += cost,
-            None => any_unpriced = true,
+            Some(cost) => self.spent += cost,
+            None => self.any_unpriced = true,
         }
     }
 
-    if turns == 0 {
-        return none;
+    /// Whether every model priced so far still resolves to the price it was
+    /// priced at.
+    ///
+    /// `models::resolve` reads the machine's refreshed price file on each call,
+    /// so a full read of the same transcript would price with a refresh made
+    /// since. The kept totals are only equal to that read while this holds; the
+    /// file is compared by bytes there, so asking once per model is cheap.
+    fn prices_still_resolve(&self, prices: &BTreeMap<String, ModelPrice>) -> bool {
+        self.resolved
+            .iter()
+            .all(|(model, price)| crate::models::resolve(prices, model).price == *price)
     }
 
-    let (reported_usd, reported_models) = reported.finish();
-    Transcript {
-        total: Some(Harvest {
-            model,
-            tokens,
-            tier_tokens,
-            turns,
-            ctx_peak,
-            cost_usd: (!any_unpriced).then_some(spent),
-            reported_usd,
-            reported_models,
-        }),
-        context,
+    /// The reading so far; `None` while no assistant turn has been fed.
+    fn finish(&self) -> Option<Transcript> {
+        if self.turns == 0 {
+            return None;
+        }
+        let (reported_usd, reported_models) = self.reported.clone().finish();
+        Some(Transcript {
+            total: Some(Harvest {
+                model: self.model.clone(),
+                tokens: self.tokens,
+                tier_tokens: self.tier_tokens,
+                turns: self.turns,
+                ctx_peak: self.ctx_peak,
+                cost_usd: (!self.any_unpriced).then_some(self.spent),
+                reported_usd,
+                reported_models,
+            }),
+            context: self.context,
+        })
     }
 }
 
@@ -1882,7 +2133,7 @@ fn reported_state(
 /// marks a restart and the earlier run is closed at its last record. A restart
 /// that happens to open above where the last run ended looks like growth and
 /// is undercounted; the record offers nothing to tell the two apart.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ReportedRuns {
     closed: f64,
     closed_models: BTreeMap<String, f64>,
@@ -1916,6 +2167,7 @@ impl ReportedRuns {
     }
 }
 
+#[derive(Clone)]
 struct Turn {
     id: Option<String>,
     /// The record's own top-level `timestamp`, when it has one that parses.
@@ -2103,11 +2355,10 @@ fn turn_model(kind_name: &str, value: &serde_json::Value) -> Option<String> {
 
 /// Every record of one session, in file order.
 ///
-/// [`read_transcript`] and [`live_of`] work on the `Vec<Value>` this returns
-/// and never learn which [`Store`] it came out of. The last-record readers —
-/// [`last_turn_at`] and [`last_record`] — do not use this: they need one
-/// record, not every one, so they stream lines or seek to the tail rather
-/// than collect the whole file (review finding 48).
+/// Only [`transcript_tail`] collects every record this way. The readers that
+/// run on a timer never hold the whole file as values (review finding 48):
+/// [`read_transcript`] and [`last_turn_at`] parse only the lines added since
+/// their last read, and [`last_record`] reads a bounded tail.
 ///
 /// `None` means the store could not be read at all: no transcript yet, an
 /// agent still starting up. Absence is never an error here — see
@@ -2191,9 +2442,11 @@ fn session_file(kind: &str, session: &str) -> Option<PathBuf> {
 /// The same lookup, for a caller that wants to know whether the transcript has
 /// changed before paying to read it.
 ///
-/// The search itself is a directory walk over every session an agent has ever
-/// written, so a caller asking about once a second — the board — is
-/// expected to hold on to what this returns rather than ask again.
+/// For a kind whose transcripts share the agent's home, the first search is a
+/// directory walk over every session the agent has ever written. A found path
+/// is remembered, and later asks cost one existence check. A lane that has
+/// written nothing yet, and a kind with a home of its own, are looked up each
+/// time.
 pub fn session_path(kind: &str, session: &str) -> Option<PathBuf> {
     session_file(kind, session)
 }
@@ -2235,15 +2488,58 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
         }
     };
 
+    let key = (
+        home.to_path_buf(),
+        kind_name.to_string(),
+        session.to_string(),
+    );
+    let remembered = FOUND_TRANSCRIPTS
+        .lock()
+        .ok()
+        .and_then(|found| found.get(&key).cloned());
+    // Re-checked rather than trusted: a session that moved or was cleaned up
+    // leaves a path that no longer exists, and answering with it would read as
+    // "no transcript" for a lane that has one elsewhere. The remembered path
+    // wins for as long as it exists, so a newer file that later appears with
+    // the same id is not picked up; that is the price of not walking every
+    // pass, and the walk below is `newest_matching`'s only for the first ask.
+    if let Some(path) = remembered.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+
     // A full recursive walk rather than the project directory's own files,
     // because a subagent's transcript sits two levels deeper still, at
     // `<project-dir>/<parent-session>/subagents/agent-<id>.jsonl` — see
     // `dir_candidates`, which is what surfaces that id to callers in the
     // first place.
-    newest_matching(&home.join(agent.sessions_dir), |stem| {
+    let path = newest_matching(&home.join(agent.sessions_dir), |stem| {
         format!("{stem}.jsonl").ends_with(&suffix)
-    })
+    })?;
+    // Only a found path is remembered: a lane that has not written its first
+    // turn yet answers `None` and is looked for again on the next pass.
+    if let Ok(mut found) = FOUND_TRANSCRIPTS.lock() {
+        // Bounded so a long-lived dispatcher does not keep one entry per
+        // session it ever ran; a cleared map costs each live lane one walk.
+        if found.len() >= MAX_REMEMBERED {
+            found.clear();
+        }
+        found.insert(key, path.clone());
+    }
+    Some(path)
 }
+
+process_memo!(
+/// Where [`session_file_in`] last found each session's transcript, by home,
+/// agent kind and session id.
+///
+/// Finding a transcript walks every session an agent has ever written, which
+/// on a machine with a long Claude history is thousands of files. The
+/// dispatcher asks about every lane every pass, so the answer is remembered.
+    FOUND_TRANSCRIPTS, BTreeMap<(PathBuf, String, String), PathBuf>);
+
+/// How many remembered transcript paths and read positions are kept before
+/// the memory is dropped and rebuilt from the lanes still asking.
+const MAX_REMEMBERED: usize = 256;
 
 /// The session `session` is a subagent of, if it is one at all.
 ///
@@ -2299,6 +2595,9 @@ fn newest_transcript(root: &Path) -> Option<PathBuf> {
 /// each: under a home of spoolway's making every transcript is the session's,
 /// and in the agent's own home a session that outlives a rollover has more than
 /// one file carrying its id. The last thing written is the live one either way.
+/// That holds at the moment of the walk. [`session_file_in`] remembers the
+/// answer of the walk it makes for the shared-home kinds, so it does not hold
+/// again for them until the remembered file is gone.
 fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     transcripts_matching(root, keep, &mut |at, path| {
@@ -2496,12 +2795,7 @@ pub fn new_trial_id() -> String {
 /// same arm each bank their own row, and "kept usage rows for 3 trial
 /// tasks" (see the plan's own "Clean finish" mockup) counts arms.
 pub fn trial_task_count(repo: &Repo, trial: &str) -> usize {
-    read_cached(repo)
-        .iter()
-        .filter(|entry| entry.trial.as_deref() == Some(trial))
-        .map(|entry| entry.task.as_str())
-        .collect::<HashSet<_>>()
-        .len()
+    totals(repo).trials.get(trial).map_or(0, HashSet::len)
 }
 
 pub fn ledger_path(repo: &Repo) -> PathBuf {
@@ -2557,42 +2851,455 @@ pub fn bank_command_run(repo: &Repo, entry: &Entry) -> bool {
 
 /// Whether the ledger already holds a line for the command run with this id.
 pub fn command_run_banked(repo: &Repo, id: &str) -> bool {
-    read_cached(repo)
-        .iter()
-        .any(|line| line.command.as_ref().is_some_and(|c| c.id == id))
+    totals(repo).command_runs.contains(id)
 }
 
 /// Every entry, oldest first. A line that will not parse is skipped rather than
 /// fatal — one bad line must not cost you the rest of the history.
+///
+/// For a reader that needs every line: it streams the file, so the text of
+/// the ledger is never held beside the entries, and what it returns is the
+/// caller's to drop. A reader that asks a narrow question of the same file
+/// every second wants [`totals`] instead.
 pub fn read(repo: &Repo) -> Result<Vec<Entry>> {
     read_at(&ledger_path(repo))
 }
 
 pub fn read_at(path: &Path) -> Result<Vec<Entry>> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-    };
-    Ok(raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .collect())
+    let mut entries = Vec::new();
+    match stream_entries(path, 0, |entry| entries.push(entry)) {
+        Ok(_) => Ok(entries),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
-/// What [`read_cached`] last read: the entries it parsed, the byte offset the
-/// next call resumes from, and the file identity that offset is only valid
+/// Hand each entry `path` holds from byte `from` to `each`, one line at a
+/// time, and answer where the read stopped — measured from what was actually
+/// read rather than a separate `stat` taken first, so a writer appending
+/// mid-read can never be double-counted or skipped over. `Ok(None)` when the
+/// file is shorter than `from`: it was rotated or truncated out from under
+/// the offset, which tells [`totals`] to rebuild instead of trusting an offset
+/// that no longer means anything.
+///
+/// A line that will not parse is skipped, as [`read`] always did. Bytes that
+/// are not UTF-8 are an error, as they were when the file was read whole.
+fn stream_entries(
+    path: &Path,
+    from: u64,
+    mut each: impl FnMut(Entry),
+) -> std::io::Result<Option<u64>> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    if file.seek(SeekFrom::End(0))? < from {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(from))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut at = from;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(Some(at));
+        }
+        at += n as u64;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<Entry>(&line) {
+            each(entry);
+        }
+    }
+}
+
+/// What one task has banked at one step, every round of it summed.
+#[derive(Debug, Clone, Default)]
+struct StepSpend {
+    /// Whether a lane's line (not a command run's) was banked here. Decides
+    /// whether `output` and `wall_s` are answers or "never paid for".
+    lane: bool,
+    output: u64,
+    wall_s: i64,
+    /// `None` until a line carrying a price arrives — a lane nothing could
+    /// price adds nothing rather than zero.
+    cost_usd: Option<f64>,
+}
+
+/// What one task has banked under one group, lanes only.
+#[derive(Debug, Clone, Default)]
+pub struct GroupSpend {
+    pub output: u64,
+    pub wall_s: i64,
+    pub cost_usd: Option<f64>,
+}
+
+/// What one session has banked so far.
+///
+/// Both the dispatcher, diffing a transcript's cumulative reading against it,
+/// and the board, subtracting it from a live reading, ask this. A line with
+/// no session is not a lane's and is not kept.
+#[derive(Debug, Clone, Default)]
+pub struct SessionBanked {
+    pub tokens: Tokens,
+    /// The part of `tokens` already banked as over a price threshold.
+    pub tier_tokens: Tokens,
+    pub turns: u32,
+    pub cost_usd: f64,
+    /// The part of the session's reported total already banked — see
+    /// [`Entry::reported_usd`].
+    pub reported_usd: f64,
+    /// Whether a person's hand line is among them — see
+    /// [`LedgerTotals::lane_owns_subagents`].
+    pub hand: bool,
+}
+
+/// The newest line a run key or a (task, step) pair has banked under a
+/// session: enough to resume that session, or to adopt its lane.
+#[derive(Debug, Clone)]
+pub struct LastLane {
+    /// Position in the ledger, so the newest of several steps can be told.
+    seq: u64,
+    pub kind: String,
+    pub session: String,
+    pub agent: String,
+    pub model: String,
+    pub pipeline_version: String,
+}
+
+/// The ledger as running totals, built a line at a time and keeping no line.
+///
+/// Its size follows the number of tasks, steps and sessions the ledger
+/// names, never the number of lines: a ledger of a million lines for a
+/// hundred tasks costs a hundred tasks' worth of memory. Every question the
+/// board and the dispatcher's banking path ask of the ledger is answered
+/// here, so none of them scans it.
+///
+/// A line is counted by [`LedgerTotals::fold`] exactly once. [`totals`]
+/// folds only what was appended since its last read, and rebuilds from
+/// nothing whenever the file is not a plain append, so the totals cannot
+/// drift from the file by a line counted twice.
+#[derive(Debug, Clone, Default)]
+pub struct LedgerTotals {
+    lines: u64,
+    steps: HashMap<(String, String), StepSpend>,
+    groups: HashMap<(String, String), GroupSpend>,
+    sessions: HashMap<String, SessionBanked>,
+    /// By [`crate::mux::run_key`] of the line's step and task.
+    last_by_run_key: HashMap<String, LastLane>,
+    /// By task and step id, for the newest session a prompt already holds.
+    last_by_step: HashMap<(String, String), LastLane>,
+    command_runs: HashSet<String>,
+    trials: HashMap<String, HashSet<String>>,
+}
+
+/// What the lanes of one run have spent: output tokens and cost in dollars,
+/// summed over the lines stamped at or after the run's start.
+///
+/// The unattended ceilings are sums over this window. It moves with every
+/// run, so it cannot be a total kept per task, and it is not part of
+/// [`LedgerTotals`]: only [`LedgerTotals::read_since`] can answer it, and a
+/// caller that built its totals any other way has no window to ask.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunWindow {
+    pub output: u64,
+    pub cost_usd: f64,
+}
+
+impl LedgerTotals {
+    /// Count one line. The order lines arrive in is the order they were
+    /// banked, which "newest" below relies on.
+    pub fn fold(&mut self, entry: &Entry) {
+        self.lines += 1;
+        if let Some(run) = &entry.command {
+            self.command_runs.insert(run.id.clone());
+        }
+        if let Some(trial) = &entry.trial {
+            self.trials
+                .entry(trial.clone())
+                .or_default()
+                .insert(entry.task.clone());
+        }
+        let step = self
+            .steps
+            .entry((entry.task.clone(), entry.step.clone()))
+            .or_default();
+        // A command step's run is not a lane. It spent no tokens, and
+        // counting it would turn a step never paid for into `Some(0)`.
+        if entry.command.is_none() {
+            step.lane = true;
+            step.output += entry.tokens.output;
+            step.wall_s += entry.wall_s;
+        }
+        if let Some(usd) = entry.cost_usd {
+            *step.cost_usd.get_or_insert(0.0) += usd;
+        }
+        if let Some(group) = &entry.plan
+            && entry.command.is_none()
+        {
+            let spend = self
+                .groups
+                .entry((entry.task.clone(), group.clone()))
+                .or_default();
+            spend.output += entry.tokens.output;
+            spend.wall_s += entry.wall_s;
+            if let Some(usd) = entry.cost_usd {
+                *spend.cost_usd.get_or_insert(0.0) += usd;
+            }
+        }
+        if entry.session.is_empty() {
+            return;
+        }
+        let banked = self.sessions.entry(entry.session.clone()).or_default();
+        banked.tokens.add(&entry.tokens);
+        banked.tier_tokens.add(&entry.tier_tokens);
+        banked.turns += entry.turns;
+        banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
+        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
+        banked.hand |= entry.hand;
+        let last = LastLane {
+            seq: self.lines,
+            kind: entry.kind.clone(),
+            session: entry.session.clone(),
+            agent: entry.agent.clone(),
+            model: entry.model.clone(),
+            pipeline_version: entry.pipeline_version.clone(),
+        };
+        self.last_by_run_key
+            .insert(crate::mux::run_key(&entry.step, &entry.task), last.clone());
+        self.last_by_step
+            .insert((entry.task.clone(), entry.step.clone()), last);
+    }
+
+    /// Totals of exactly these lines, in this order.
+    #[cfg(test)]
+    pub fn from_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
+        let mut totals = Self::default();
+        for entry in entries {
+            totals.fold(entry);
+        }
+        totals
+    }
+
+    /// Totals of the ledger at `path`, streamed. A ledger that is not there is
+    /// nothing banked.
+    pub fn read_at(path: &Path) -> Result<Self> {
+        let mut totals = Self::default();
+        match stream_entries(path, 0, |entry| totals.fold(&entry)) {
+            Ok(_) => Ok(totals),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// [`LedgerTotals::read_at`], also summing the [`RunWindow`] of every line
+    /// stamped at or after `since` — all of them when it is `None`. Lines with
+    /// no task are a person's own sessions, not the run's, and are left out of
+    /// the window.
+    pub fn read_since(path: &Path, since: Option<&str>) -> Result<(Self, RunWindow)> {
+        let mut totals = Self::default();
+        let mut window = RunWindow::default();
+        match stream_entries(path, 0, |entry| {
+            if !entry.task.is_empty() && since.is_none_or(|since| entry.ts.as_str() >= since) {
+                window.output += entry.tokens.output;
+                window.cost_usd += entry.cost_usd.unwrap_or(0.0);
+            }
+            totals.fold(&entry);
+        }) {
+            Ok(_) => Ok((totals, window)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// Output tokens banked for `task` at `step`, every round of it summed, or
+    /// `None` where the step has never been paid for at all. A command step's
+    /// run is not counted.
+    pub fn spent_at(&self, task: &str, step: &str) -> Option<u64> {
+        let spend = self.step(task, step)?;
+        spend.lane.then_some(spend.output)
+    }
+
+    /// What `task` has cost at `step`, every round of it summed, or `None`
+    /// where nothing banked there carried a price.
+    pub fn cost_at(&self, task: &str, step: &str) -> Option<f64> {
+        self.step(task, step)?.cost_usd
+    }
+
+    /// Seconds the lanes of `task` were busy at `step`, every round of it
+    /// summed, or `None` where no lane ever banked there.
+    pub fn lane_time_at(&self, task: &str, step: &str) -> Option<i64> {
+        let spend = self.step(task, step)?;
+        spend.lane.then_some(spend.wall_s)
+    }
+
+    fn step(&self, task: &str, step: &str) -> Option<&StepSpend> {
+        // The pair is two owned strings in the map, so a borrowed lookup
+        // would need a key type of its own for no saving worth having here.
+        self.steps.get(&(task.to_string(), step.to_string()))
+    }
+
+    /// What `session` has banked, or nothing for a session never banked.
+    pub fn session(&self, session: &str) -> SessionBanked {
+        self.sessions.get(session).cloned().unwrap_or_default()
+    }
+
+    /// Every session banked, for a pass that diffs transcripts against them.
+    pub fn sessions(&self) -> &HashMap<String, SessionBanked> {
+        &self.sessions
+    }
+
+    /// Whether a dispatched lane banks the subagent spend of `session`.
+    ///
+    /// One rule for every reader of a lane's transcript: the subagents are the
+    /// lane's unless the ledger holds a hand line for the session. A session a
+    /// person ran by hand is banked by [`sweep_dirs`] with its subagents as
+    /// lines of their own, and a dispatched lane can resume it, so folding the
+    /// subagents into the lane's line as well would count them twice. The
+    /// sweep applies the same test from its side: it banks a subagent exactly
+    /// when the parent has a hand line.
+    pub fn lane_owns_subagents(&self, session: &str) -> bool {
+        !self.sessions.get(session).is_some_and(|banked| banked.hand)
+    }
+
+    /// The newest line banked under [`crate::mux::run_key`] `key` that named a
+    /// session.
+    pub fn last_lane(&self, key: &str) -> Option<&LastLane> {
+        self.last_by_run_key.get(key)
+    }
+
+    /// The newest line banked for `task` at any of `steps` that named a
+    /// session.
+    pub fn last_lane_of<'a>(
+        &self,
+        task: &str,
+        steps: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&LastLane> {
+        steps
+            .into_iter()
+            .filter_map(|step| self.last_by_step.get(&(task.to_string(), step.to_string())))
+            .max_by_key(|last| last.seq)
+    }
+
+    /// Lane spend by (task, group), for the board's group totals.
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &str, &GroupSpend)> {
+        self.groups
+            .iter()
+            .map(|((task, group), spend)| (task.as_str(), group.as_str(), spend))
+    }
+}
+
+/// The ledger's totals, cached process-wide and refreshed only past what was
+/// already read, exploiting the one thing [`append`] guarantees: the ledger
+/// only ever grows, one full line at a time. For a reader that asks the same
+/// question every frame — the board, above all — this turns most calls into
+/// "did the file get bigger" rather than a re-parse.
+///
+/// Nothing per line is kept, so the process holds memory that follows the
+/// number of tasks. A warm cache that found nothing new hands back a clone of
+/// the `Arc`. A call that finds the file grown folds the new lines into the
+/// totals in place whenever no caller still holds the previous answer, and
+/// into a copy of the totals (never of the lines) when one does.
+///
+/// Falls back to rebuilding from nothing for anything that is not a plain
+/// append: a shorter file (rotated, truncated, gone), an inode that changed
+/// under the path (rotated onto a fresh file), or a same-inode file whose
+/// length did not grow but whose mtime moved (rewritten in place — a person
+/// trimming bad lines while the board is up). That is what keeps a total
+/// from carrying a line the file no longer has. Errors read as nothing
+/// banked, the same as `read(..).unwrap_or_default()` every caller of this
+/// already wrote.
+///
+/// The one case left unguarded is a same-inode in-place rewrite that also
+/// nets *longer* — rare, since editors and `sed -i` write a new inode — and
+/// the inode check catches the common shape of it. On Windows there is no
+/// inode: [`file_ino`] returns `None`, so `ino == ino` is always true and
+/// only the length and mtime checks guard the cache there.
+pub fn totals(repo: &Repo) -> std::sync::Arc<LedgerTotals> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<LedgerCache>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let path = ledger_path(repo);
+    let (len_now, mtime_now, ino_now) = ledger_identity(&path);
+
+    let Ok(mut guard) = cache.lock() else {
+        return std::sync::Arc::new(LedgerTotals::read_at(&path).unwrap_or_default());
+    };
+    if let Some(cached) = guard.as_mut()
+        && cached.path == path
+        && cached.ino == ino_now
+    {
+        // Nothing moved: same length, same mtime. The existing `Arc` is still
+        // the right answer and cloning it costs nothing but a refcount — this
+        // is the common case a board sitting idle between passes takes.
+        if len_now == cached.len && mtime_now == cached.mtime {
+            return std::sync::Arc::clone(&cached.totals);
+        }
+        // A plain append: strictly longer, and no older than what was cached.
+        // The ledger only ever gains whole lines at its end, so every byte
+        // before `cached.len` is unchanged and the tail is all that is new.
+        if len_now > cached.len
+            && mtime_now
+                .zip(cached.mtime)
+                .is_none_or(|(now, was)| now >= was)
+        {
+            // Taken out of the cache so a caller that has let go of the
+            // previous answer leaves the totals unshared and they are folded
+            // in place. A read that fails halfway leaves lines counted that
+            // the offset does not cover; the rebuild below then replaces the
+            // whole entry rather than keeping them.
+            let mut grown = std::mem::take(&mut cached.totals);
+            let folded = stream_entries(&path, cached.len, |entry| {
+                std::sync::Arc::make_mut(&mut grown).fold(&entry)
+            });
+            if let Ok(Some(len)) = folded {
+                cached.totals = grown;
+                cached.len = len;
+                cached.mtime = mtime_now;
+                return std::sync::Arc::clone(&cached.totals);
+            }
+        }
+    }
+
+    // The length is what the read actually consumed, not the `stat` taken
+    // before it: a line the dispatcher appends while a multi-megabyte ledger
+    // is being parsed is in the totals already, and a shorter recorded
+    // length would have the next call fold it again as new tail and carry the
+    // duplicate for the life of the process (release review finding 4).
+    // The mtime stays the pre-read one — a write that lands between the two
+    // costs one full re-read, never a duplicate.
+    let mut built = LedgerTotals::default();
+    let len = stream_entries(&path, 0, |entry| built.fold(&entry))
+        .ok()
+        .flatten();
+    let (built, len) = match len {
+        Some(len) => (built, len),
+        None => (LedgerTotals::default(), 0),
+    };
+    let built = std::sync::Arc::new(built);
+    *guard = Some(LedgerCache {
+        path,
+        len,
+        mtime: mtime_now,
+        ino: ino_now,
+        totals: std::sync::Arc::clone(&built),
+    });
+    built
+}
+
+/// What [`totals`] last read: the totals it folded, the byte offset the next
+/// call resumes from, and the file identity that offset is only valid
 /// against — the inode and the modification time. A length that did not shrink
 /// is not proof the file only grew: it can also have been rewritten in place
-/// to the same or a greater length, which leaves the cached prefix wrong
+/// to the same or a greater length, which leaves the folded prefix wrong
 /// (review finding 41).
 struct LedgerCache {
     path: PathBuf,
     len: u64,
     mtime: Option<std::time::SystemTime>,
     ino: Option<u64>,
-    entries: std::sync::Arc<Vec<Entry>>,
+    totals: std::sync::Arc<LedgerTotals>,
 }
 
 /// The file's length, modification time and inode in one `stat` — `(0, None,
@@ -2609,122 +3316,6 @@ fn ledger_identity(path: &Path) -> (u64, Option<std::time::SystemTime>, Option<u
 fn file_ino(meta: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(meta.ino())
-}
-
-/// [`read`], cached process-wide and refreshed only past what was already
-/// read, exploiting the one thing [`append`] guarantees: the ledger only
-/// ever grows, one full line at a time. For a reader that asks the same
-/// question every frame — the board, above all, whose own comment used to
-/// call re-reading a 40MB ledger a second the most expensive thing in a pass
-/// that decides nothing — this turns most calls into "did the file get
-/// bigger" rather than a full re-parse.
-///
-/// Returns a shared handle rather than an owned `Vec`: a warm cache that
-/// found nothing new hands back a clone of the `Arc` — a refcount bump — not
-/// a copy of however many entries the ledger holds. Only a call that finds
-/// the file has actually grown pays to build a new `Vec`, and that cost is
-/// proportional to what changed, once, not to the whole history on every
-/// frame that finds nothing new.
-///
-/// A one-shot command is no worse off using this than calling [`read`]
-/// directly: the first call is a full read either way, and the cache dies
-/// with the process. `read` stays what banking and pricing logic reaches
-/// for, since a single pass wants one settled answer to diff its own writes
-/// against rather than a boundary that can move under it mid-pass.
-///
-/// Falls back to a full read for anything that is not a plain append: a
-/// shorter file (rotated, truncated, gone), an inode that changed under the
-/// path (rotated onto a fresh file), or a same-inode file whose length did not
-/// grow but whose mtime moved (rewritten in place — a person trimming bad
-/// lines while the board is up). Errors read as empty, the same as
-/// `read(..).unwrap_or_default()` every caller of this already wrote.
-///
-/// The one case left unguarded is a same-inode in-place rewrite that also
-/// nets *longer* — rare, since editors and `sed -i` write a new inode — and
-/// the inode check catches the common shape of it. On Windows there is no
-/// inode: [`file_ino`] returns `None`, so `ino == ino` is always true and
-/// only the length and mtime checks guard the cache there.
-pub fn read_cached(repo: &Repo) -> std::sync::Arc<Vec<Entry>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<LedgerCache>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    let path = ledger_path(repo);
-    let (len_now, mtime_now, ino_now) = ledger_identity(&path);
-
-    let Ok(mut guard) = cache.lock() else {
-        return std::sync::Arc::new(read_at(&path).unwrap_or_default());
-    };
-    if let Some(cached) = guard.as_mut()
-        && cached.path == path
-        && cached.ino == ino_now
-    {
-        // Nothing moved: same length, same mtime. The existing `Arc` is still
-        // the right answer and cloning it costs nothing but a refcount — this
-        // is the common case a board sitting idle between passes takes.
-        if len_now == cached.len && mtime_now == cached.mtime {
-            return std::sync::Arc::clone(&cached.entries);
-        }
-        // A plain append: strictly longer, and no older than what was cached.
-        // The ledger only ever gains whole lines at its end, so every byte
-        // before `cached.len` is unchanged and the tail is all that is new.
-        if len_now > cached.len
-            && mtime_now
-                .zip(cached.mtime)
-                .is_none_or(|(now, was)| now >= was)
-            && let Some((tail, len)) = read_tail(&path, cached.len)
-        {
-            if !tail.is_empty() {
-                let mut merged = (*cached.entries).clone();
-                merged.extend(tail);
-                cached.entries = std::sync::Arc::new(merged);
-            }
-            cached.len = len;
-            cached.mtime = mtime_now;
-            return std::sync::Arc::clone(&cached.entries);
-        }
-    }
-
-    // The length is what the read actually consumed, not the `stat` taken
-    // before it: a line the dispatcher appends while a multi-megabyte ledger
-    // is being parsed is in `entries` already, and a shorter recorded
-    // length would have the next call re-read it as new tail and carry the
-    // duplicate for the life of the process (release review finding 4).
-    // The mtime stays the pre-read one — a write that lands between the two
-    // costs one full re-read, never a duplicate.
-    let (entries, len) = read_tail(&path, 0).unwrap_or_default();
-    let entries = std::sync::Arc::new(entries);
-    *guard = Some(LedgerCache {
-        path,
-        len,
-        mtime: mtime_now,
-        ino: ino_now,
-        entries: std::sync::Arc::clone(&entries),
-    });
-    entries
-}
-
-/// The entries `path` has gained since byte `from`, and the file's length
-/// once the read finished — measured from what was actually read rather
-/// than a separate `stat` taken first, so a writer appending mid-read can
-/// never be double-counted or skipped over. `None` when the file is shorter
-/// than `from` — it was rotated or truncated out from under the offset —
-/// which tells [`read_cached`] to fall back to a full read instead of
-/// trusting an offset that no longer means anything.
-fn read_tail(path: &Path, from: u64) -> Option<(Vec<Entry>, u64)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    if file.seek(SeekFrom::End(0)).ok()? < from {
-        return None;
-    }
-    file.seek(SeekFrom::Start(from)).ok()?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw).ok()?;
-    let entries = raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .collect();
-    Some((entries, from + raw.len() as u64))
 }
 
 /// A half-open window `[from, until)` over the ledger.
@@ -3064,7 +3655,11 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let own_subagents = lane_owns_subagents(&read(repo).unwrap_or_default(), session);
+    // The same rule the dispatcher and the board ask, so a change to it
+    // reaches this path too.
+    let own_subagents = LedgerTotals::read_at(&ledger_path(repo))
+        .unwrap_or_default()
+        .lane_owns_subagents(session);
     let harvest = harvest(kind, session, &repo.config.models, own_subagents)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
@@ -3184,15 +3779,15 @@ pub(crate) fn reported_spend_moved(cost: Option<f64>, reported: Option<f64>) -> 
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial`, `trial_group`, `routine`, `round` and
+/// `plan`, `run`, `trial`, `trial_group`, `routine`, `complexity`, `round` and
 /// `pipeline_version` are copied onto the new line, so spend recovered by a
 /// sweep lands in the same `spoolway eval` row the lane's own turns did rather
 /// than in a pipeline-less one no group owns — and under the version the lane
 /// actually ran, not whatever a pipeline file says by the time the sweep runs.
 /// `None` for [`bank_lane`]'s caller — the headless interrupt has a lane name
 /// and a transcript, not a loaded pipeline — where those fields stay blank the
-/// way a line written before they existed carries them, bar `routine`, which
-/// is read off the task's own file.
+/// way a line written before they existed carries them, bar `routine` and
+/// `complexity`, which are read off the task's own file.
 #[allow(clippy::too_many_arguments)]
 fn bank_lane_at(
     repo: &Repo,
@@ -3206,6 +3801,12 @@ fn bank_lane_at(
     harvest: &Harvest,
 ) -> Option<Entry> {
     let delta = banked_delta(session, ledger, harvest)?;
+    // Only read with no line to carry from: see `routine` and `complexity`
+    // below.
+    let own = match carry {
+        Some(_) => None,
+        None => repo.task(task).ok(),
+    };
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -3245,7 +3846,15 @@ fn bank_lane_at(
         // already holds whatever the task's file would say.
         routine: match carry {
             Some(c) => c.routine.clone(),
-            None => repo.task(task).ok().and_then(|t| t.front.routine),
+            None => own.as_ref().and_then(|t| t.front.routine.clone()),
+        },
+        // Carried beside `plan`, so a catch-up line keeps the estimate its
+        // lane's own line banked. The headless interrupt's bank reads it off
+        // the task's file instead, as `routine` is, so that line is not the
+        // one row of the run without it.
+        complexity: match carry {
+            Some(c) => c.complexity,
+            None => own.as_ref().and_then(crate::task::Task::complexity),
         },
         dir: None,
         // Copied like the columns above: a catch-up of a hand session's own
@@ -3268,7 +3877,7 @@ struct LaneFacts<'a> {
     /// inherits.
     carry: Option<&'a Entry>,
     /// Whether any line for the session is a hand line — the negation of
-    /// [`lane_owns_subagents`].
+    /// [`LedgerTotals::lane_owns_subagents`].
     hand: bool,
 }
 
@@ -3352,7 +3961,7 @@ fn catch_up_with_facts(
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
     let carry = facts.carry?;
-    // See [`lane_owns_subagents`]: a hand session's subagents are the sweep's.
+    // See [`LedgerTotals::lane_owns_subagents`]: a hand session's subagents are the sweep's.
     let subagents_are_ours = !facts.hand;
     let touched = if subagents_are_ours {
         // A subagent can finish after the root transcript's last write, so its
@@ -4056,6 +4665,7 @@ fn bank_dir_session(
         trial: None,
         trial_group: None,
         routine: None,
+        complexity: None,
         dir: Some(dir.to_string()),
         hand: false,
         command: None,
@@ -4317,7 +4927,7 @@ pub fn read_session(kind: &str, session: &str) -> SessionRead {
 
 /// [`session_read_from_path`], cached process-wide and gated on the
 /// transcript's length and modification time — the same shape of problem
-/// [`read_cached`] solves for the ledger. `eval::load` calls [`read_sessions`]
+/// [`totals`] solves for the ledger. `eval::load` calls [`read_sessions`]
 /// fresh on every `[r]` and every filter-panel commit, over the very same
 /// transcripts each time, and a file that has not changed since the last
 /// call costs nothing to answer again here.
@@ -5384,6 +5994,363 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// One Claude assistant line whose context reads as `input` tokens.
+    fn claude_turn(id: &str, input: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"{id}","timestamp":"2026-08-04T06:14:44.000Z","message":{{"model":"claude-opus-5","usage":{{"input_tokens":{input},"output_tokens":1}}}}}}"#
+        ) + "\n"
+    }
+
+    /// The offset [`last_turn_at`] has saved for `path`, if it saved one.
+    fn saved_offset(path: &Path) -> Option<u64> {
+        TAIL_READS
+            .lock()
+            .unwrap()
+            .get(&("claude".to_string(), path.to_path_buf()))
+            .map(|state| state.offset)
+    }
+
+    /// The board and the dispatcher ask about the same lane over and over.
+    /// After the first lookup, none of those asks may walk the store again.
+    #[test]
+    fn a_found_transcript_is_not_searched_for_again() {
+        let session = "0198e2c0-5555-4000-8000-000000000001";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+
+        let first = session_file_in(&home, "claude", session).expect("not found");
+        let before = STORE_WALKS.with(|walks| walks.get());
+        for _ in 0..5 {
+            assert_eq!(
+                session_file_in(&home, "claude", session),
+                Some(first.clone())
+            );
+        }
+        assert_eq!(STORE_WALKS.with(|walks| walks.get()) - before, 0);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A remembered path that no longer exists must not be answered with: the
+    /// session may have moved, so one walk finds it again.
+    #[test]
+    fn a_remembered_transcript_that_moved_is_searched_for_once() {
+        let session = "0198e2c0-5555-4000-8000-000000000002";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let old = session_file_in(&home, "claude", session).expect("not found");
+        let moved = home
+            .join(".claude/projects/-home-someone-elsewhere")
+            .join(old.file_name().unwrap());
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&old, &moved).unwrap();
+
+        assert_eq!(session_file_in(&home, "claude", session), Some(moved));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Appended lines are the only ones read the second time, and the answer
+    /// is the one a read of the whole file gives.
+    #[test]
+    fn a_second_read_parses_only_the_appended_lines() {
+        let session = "0198e2c0-5555-4000-8000-000000000003";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+
+        let first = last_turn_at("claude", &path).unwrap();
+        assert_eq!(first.tokens.input, 10);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(saved_offset(&path), Some(first_len));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(claude_turn("r2", 20).as_bytes()).unwrap();
+        drop(file);
+        let second = last_turn_at("claude", &path).unwrap();
+        assert_eq!(second.tokens.input, 20);
+        assert_eq!(
+            saved_offset(&path),
+            Some(std::fs::metadata(&path).unwrap().len())
+        );
+
+        // The same file read from nothing: what a full read answers.
+        TAIL_READS
+            .lock()
+            .unwrap()
+            .remove(&("claude".to_string(), path.clone()));
+        let full = last_turn_at("claude", &path).unwrap();
+        assert_eq!(full.tokens, second.tokens);
+        assert_eq!(full.id, second.id);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A line the agent is half-way through writing is not parsed, and is
+    /// read whole once its newline lands.
+    #[test]
+    fn a_half_written_line_is_left_for_the_next_read() {
+        let session = "0198e2c0-5555-4000-8000-000000000004";
+        let first = claude_turn("r1", 10);
+        let home = home_with("claude", session, &first);
+        let path = session_file_in(&home, "claude", session).unwrap();
+        last_turn_at("claude", &path).unwrap();
+
+        let second = claude_turn("r2", 20);
+        let (head, tail) = second.split_at(second.len() / 2);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(head.as_bytes()).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 10);
+        assert_eq!(saved_offset(&path), Some(first.len() as u64));
+
+        file.write_all(tail.as_bytes()).unwrap();
+        drop(file);
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 20);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A rewritten transcript — shorter, as after a compaction — is read from
+    /// its start rather than from an offset that no longer means anything.
+    #[test]
+    fn a_shrunken_or_replaced_transcript_is_read_from_the_start() {
+        let session = "0198e2c0-5555-4000-8000-000000000005";
+        let long = claude_turn("r1", 10) + &claude_turn("r2", 20) + &claude_turn("r3", 30);
+        let home = home_with("claude", session, &long);
+        let path = session_file_in(&home, "claude", session).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 30);
+
+        std::fs::write(&path, claude_turn("n1", 7)).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 7);
+
+        // Replaced by a new file under the same name, longer than the offset
+        // the old one left, so only its identity says it is not a
+        // continuation. Renamed over the old file while a handle keeps the old
+        // inode alive, so the new one cannot be handed the same number; and
+        // its first line is longer than the one read before, so a read from
+        // the old offset would start inside it and keep the old file's turn.
+        let none = BTreeMap::new();
+        assert_eq!(read_transcript("claude", &path, &none).context, 7);
+        let keep_old_inode = std::fs::File::open(&path).unwrap();
+        let replacement = claude_turn("a-much-longer-request-id", 1)
+            + &claude_turn("m2", 2)
+            + &claude_turn("m3", 3)
+            + &claude_turn("m4", 4);
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, replacement).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 4);
+        // Summed, so the turn the old file held (7) cannot hide in the count.
+        let replaced = read_transcript("claude", &path, &none).total.unwrap();
+        assert_eq!((replaced.turns, replaced.tokens.input), (4, 1 + 2 + 3 + 4));
+        drop(keep_old_inode);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The board's live reading after an append equals a read of the whole
+    /// file, and the second read starts at the first one's end.
+    #[test]
+    fn a_second_live_read_matches_a_full_read_of_the_grown_file() {
+        let session = "0198e2c0-5555-4000-8000-000000000006";
+        // `r1` appears twice: the repeat of a request must still be banked once
+        // across the two reads.
+        let home = home_with(
+            "claude",
+            session,
+            &(claude_turn("r1", 10) + &claude_turn("r1", 10)),
+        );
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let prices = BTreeMap::new();
+        let first = read_transcript("claude", &path, &prices);
+        assert_eq!(first.total.as_ref().unwrap().turns, 1);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        let offset_of = |path: &Path| {
+            TRANSCRIPT_FOLDS
+                .lock()
+                .unwrap()
+                .get(&("claude".to_string(), path.to_path_buf()))
+                .map(|kept| kept.offset)
+        };
+        assert_eq!(offset_of(&path), Some(first_len));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for line in [
+            claude_turn("r1", 10),
+            claude_turn("r2", 20),
+            claude_turn("r3", 30),
+        ] {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+        drop(file);
+        let second = read_transcript("claude", &path, &prices);
+        assert_eq!(
+            offset_of(&path),
+            Some(std::fs::metadata(&path).unwrap().len())
+        );
+
+        TRANSCRIPT_FOLDS
+            .lock()
+            .unwrap()
+            .remove(&("claude".to_string(), path.clone()));
+        let full = read_transcript("claude", &path, &prices);
+        let (second, full) = (second.total.unwrap(), full.total.unwrap());
+        assert_eq!(second.turns, 3);
+        assert_eq!(second.turns, full.turns);
+        assert_eq!(second.tokens, full.tokens);
+        assert_eq!(second.ctx_peak, full.ctx_peak);
+        assert_eq!(second.cost_usd, full.cost_usd);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A transcript rewritten shorter, or priced by a different table, is
+    /// read from the start: the kept totals describe something else.
+    #[test]
+    fn a_live_read_starts_over_when_the_file_shrank_or_the_prices_changed() {
+        let session = "0198e2c0-5555-4000-8000-000000000007";
+        let home = home_with(
+            "claude",
+            session,
+            &(claude_turn("r1", 10) + &claude_turn("r2", 20) + &claude_turn("r3", 30)),
+        );
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        assert_eq!(
+            read_transcript("claude", &path, &none).total.unwrap().turns,
+            3
+        );
+
+        std::fs::write(&path, claude_turn("n1", 7)).unwrap();
+        let after = read_transcript("claude", &path, &none);
+        assert_eq!(after.total.unwrap().turns, 1);
+        assert_eq!(after.context, 7);
+
+        let priced = BTreeMap::from([(
+            "claude-opus-5".to_string(),
+            ModelPrice {
+                input: 1.0,
+                ..ModelPrice::default()
+            },
+        )]);
+        let before = read_transcript("claude", &path, &none).total.unwrap();
+        let with = read_transcript("claude", &path, &priced).total.unwrap();
+        assert_ne!(before.cost_usd, with.cost_usd);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A file that grew but carries an older modified time than the one read
+    /// was rewritten, not appended to, even though its inode is the same and
+    /// its offset still falls inside it.
+    #[test]
+    fn a_longer_file_with_an_older_modified_time_is_read_from_the_start() {
+        let session = "0198e2c0-5555-4000-8000-000000000008";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        read_transcript("claude", &path, &none);
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 10);
+
+        // The first line is longer than the one read, so a read from the old
+        // offset would begin inside it.
+        let rewritten = claude_turn("a-much-longer-request-id", 1000)
+            + &claude_turn("r2", 2000)
+            + &claude_turn("r3", 3000);
+        let handle = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut &handle, rewritten.as_bytes()).unwrap();
+        handle
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000))
+            .unwrap();
+        drop(handle);
+
+        assert_eq!(
+            read_transcript("claude", &path, &none).total.unwrap().turns,
+            3
+        );
+        assert_eq!(last_turn_at("claude", &path).unwrap().tokens.input, 3000);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `spoolway models refresh` mid-lane reprices the models a transcript
+    /// already used, and the next read answers as a full read would.
+    #[test]
+    fn a_live_read_follows_a_price_refresh_made_between_reads() {
+        let session = "0198e2c0-5555-4000-8000-000000000009";
+        let home = home_with("claude", session, &claude_turn("r1", 1_000_000));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let write_price = |input: f64| {
+            let table = serde_json::json!({
+                "source": "fixture",
+                "license": "MIT",
+                "generated": "2026-09-09",
+                "models": { "claude-opus-5": { "input": input } },
+            });
+            std::fs::create_dir_all(home.join(".spoolway")).unwrap();
+            std::fs::write(
+                home.join(".spoolway/model-prices.json"),
+                serde_json::to_vec(&table).unwrap(),
+            )
+            .unwrap();
+        };
+        crate::platform::test_home::with_home(&home, || {
+            let none = BTreeMap::new();
+            write_price(2.0);
+            let before = read_transcript("claude", &path, &none).total.unwrap();
+
+            write_price(9.0);
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(claude_turn("r2", 1_000_000).as_bytes())
+                .unwrap();
+            drop(file);
+            let kept = read_transcript("claude", &path, &none).total.unwrap();
+
+            TRANSCRIPT_FOLDS
+                .lock()
+                .unwrap()
+                .remove(&("claude".to_string(), path.clone()));
+            let full = read_transcript("claude", &path, &none).total.unwrap();
+            assert_eq!(kept.cost_usd, full.cost_usd);
+            assert_ne!(before.cost_usd, kept.cost_usd);
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A settled session read once — as the eval tab's sweep reads all of
+    /// history — leaves no fold behind, while one being written does.
+    #[test]
+    fn only_a_recently_written_transcript_keeps_its_fold() {
+        let session = "0198e2c0-5555-4000-8000-00000000000a";
+        let home = home_with("claude", session, &claude_turn("r1", 10));
+        let path = session_file_in(&home, "claude", session).unwrap();
+        let none = BTreeMap::new();
+        let key = ("claude".to_string(), path.clone());
+
+        read_transcript("claude", &path, &none);
+        assert!(TRANSCRIPT_FOLDS.lock().unwrap().contains_key(&key));
+
+        let handle = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        handle
+            .set_modified(std::time::SystemTime::now() - KEEP_FOLD_FOR * 2)
+            .unwrap();
+        drop(handle);
+        assert_eq!(read_transcript("claude", &path, &none).context, 10);
+        assert!(!TRANSCRIPT_FOLDS.lock().unwrap().contains_key(&key));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// A repro of the lookup this fixed: `session_file_in` used to read only
     /// the files directly inside a project directory, one level below
     /// `sessions_dir`, so nothing nested any deeper was ever found. This
@@ -5999,44 +6966,102 @@ mod tests {
         assert_eq!(entry.pipeline_version, "1.0");
     }
 
-    /// `read_cached` reads the ledger once and again only past what it has
-    /// already read — proven here by reading it, appending, and reading
-    /// again, rather than by reasoning about `append`'s own atomicity from a
-    /// distance.
+    /// A lane line that spent something, for the totals to tell apart.
+    fn spend_entry(task: &str, step: &str, output: u64, cost: f64, wall_s: i64) -> Entry {
+        Entry {
+            step: step.into(),
+            tokens: Tokens {
+                output,
+                ..Tokens::default()
+            },
+            cost_usd: Some(cost),
+            wall_s,
+            session: format!("{task}-{step}"),
+            ..minimal_entry(task)
+        }
+    }
+
+    /// Asserts that two totals give the same answer to every question the
+    /// board and the dispatcher ask about `tasks`, and counted the same lines.
+    fn same_answers(a: &LedgerTotals, b: &LedgerTotals, tasks: &[&str]) {
+        assert_eq!(a.lines, b.lines, "a line was counted twice or missed");
+        for task in tasks {
+            for step in ["implement", "review"] {
+                assert_eq!(
+                    a.spent_at(task, step),
+                    b.spent_at(task, step),
+                    "{task} {step}"
+                );
+                assert_eq!(
+                    a.cost_at(task, step),
+                    b.cost_at(task, step),
+                    "{task} {step}"
+                );
+                assert_eq!(
+                    a.lane_time_at(task, step),
+                    b.lane_time_at(task, step),
+                    "{task} {step}"
+                );
+            }
+            let session = format!("{task}-implement");
+            assert_eq!(
+                a.session(&session).tokens.output,
+                b.session(&session).tokens.output
+            );
+        }
+    }
+
+    /// `totals` reads the ledger once and folds in only what was appended
+    /// since. Proven by appending between reads and comparing the answer with
+    /// totals built from a full re-read: a line counted twice or missed shows
+    /// in the line count and in the sums.
     #[test]
-    fn read_cached_picks_up_only_what_was_appended_since() {
-        let (repo, _, _root_guard) = fixture("read-cached");
+    fn totals_pick_up_only_what_was_appended_since() {
+        let (repo, _, _root_guard) = fixture("totals-append");
+        append(&repo, &spend_entry("first", "implement", 10, 1.0, 5)).unwrap();
+        let after_first = totals(&repo);
+        assert_eq!(after_first.spent_at("first", "implement"), Some(10));
 
-        append(&repo, &minimal_entry("first")).unwrap();
-        let after_first = read_cached(&repo);
-        assert_eq!(after_first.iter().filter(|e| e.task == "first").count(), 1);
+        append(&repo, &spend_entry("second", "implement", 20, 2.0, 7)).unwrap();
+        append(&repo, &spend_entry("first", "implement", 3, 0.5, 1)).unwrap();
+        let after_second = totals(&repo);
+        assert_eq!(after_second.spent_at("second", "implement"), Some(20));
+        assert_eq!(after_second.spent_at("first", "implement"), Some(13));
+        assert_eq!(after_second.cost_at("first", "implement"), Some(1.5));
+        assert_eq!(after_second.lane_time_at("first", "implement"), Some(6));
 
-        append(&repo, &minimal_entry("second")).unwrap();
-        let after_second = read_cached(&repo);
-        assert_eq!(
-            after_second.iter().filter(|e| e.task == "second").count(),
-            1,
-            "the second call must see what was appended after the first"
-        );
-        assert_eq!(
-            after_second.iter().filter(|e| e.task == "first").count(),
-            1,
-            "and still carry what the first call already read"
-        );
+        let rebuilt = LedgerTotals::from_entries(&read(&repo).unwrap());
+        same_answers(&after_second, &rebuilt, &["first", "second"]);
+        // The handle a caller kept is a snapshot, not a view of later lines.
+        assert_eq!(after_first.spent_at("second", "implement"), None);
+    }
+
+    /// Many lines for one task are one entry in the totals, not many: nothing
+    /// the cache keeps grows with the number of ledger lines.
+    #[test]
+    fn totals_keep_one_entry_per_task_and_step_however_many_lines() {
+        let (repo, _, _root_guard) = fixture("totals-size");
+        for _ in 0..50 {
+            append(&repo, &spend_entry("busy", "implement", 1, 0.1, 1)).unwrap();
+        }
+        let held = totals(&repo);
+        assert_eq!(held.lines, 50);
+        assert_eq!(held.steps.len(), 1);
+        assert_eq!(held.sessions.len(), 1);
+        assert_eq!(held.last_by_run_key.len(), 1);
+        assert_eq!(held.spent_at("busy", "implement"), Some(50));
     }
 
     /// A ledger rewritten in place to the same byte length — a person trimming
-    /// a bad line out while the board reads through the cache — is re-read
-    /// whole rather than served from the stale prefix an offset-and-length
-    /// check would still trust (review finding 41).
+    /// a bad line out while the board reads through the cache — is rebuilt
+    /// rather than served from the stale prefix an offset-and-length check
+    /// would still trust (review finding 41).
     #[test]
-    fn read_cached_re_reads_a_ledger_rewritten_in_place() {
-        let (repo, _, _root_guard) = fixture("read-cached-rewrite");
-        append(&repo, &minimal_entry("keep")).unwrap();
-        append(&repo, &minimal_entry("drop")).unwrap();
-
-        let before = read_cached(&repo);
-        assert_eq!(before.iter().filter(|e| e.task == "drop").count(), 1);
+    fn totals_rebuild_after_a_ledger_is_rewritten_in_place() {
+        let (repo, _, _root_guard) = fixture("totals-rewrite");
+        append(&repo, &spend_entry("keep", "implement", 4, 1.0, 1)).unwrap();
+        append(&repo, &spend_entry("drop", "implement", 9, 1.0, 1)).unwrap();
+        assert_eq!(totals(&repo).spent_at("drop", "implement"), Some(9));
 
         // Same length, same inode, only the content and the mtime change. The
         // sleep is to make the mtime move by more than the filesystem's
@@ -6048,59 +7073,193 @@ mod tests {
             .replace("\"drop\"", "\"kept\"");
         std::fs::write(&path, &rewritten).unwrap();
 
-        let after = read_cached(&repo);
-        assert_eq!(
-            after.iter().filter(|e| e.task == "drop").count(),
-            0,
-            "the rewrite dropped `drop`, and the cache must not resurrect it"
+        let after = totals(&repo);
+        assert_eq!(after.spent_at("drop", "implement"), None);
+        assert_eq!(after.spent_at("kept", "implement"), Some(9));
+        same_answers(
+            &after,
+            &LedgerTotals::from_entries(&read(&repo).unwrap()),
+            &["keep", "kept", "drop"],
         );
-        assert_eq!(after.iter().filter(|e| e.task == "kept").count(), 1);
     }
 
-    /// `board-reads-changed-only`: `live_session` now resolves a lane through
-    /// `read_cached`'s ledger rather than a fresh `read`, on the strength of
-    /// the two agreeing — proven directly here rather than just assumed from
-    /// both being backed by the same file. Covers the plain-append case and
-    /// the in-place rewrite [`read_cached_re_reads_a_ledger_rewritten_in_place`]
-    /// already covers for `read_cached` alone, this time checked against what
-    /// `read` sees of the same file.
+    /// A ledger that shrinks — rotated or truncated out from under the
+    /// offset — is rebuilt from what is left, not added to.
     #[test]
-    fn read_cached_agrees_with_read_including_after_a_rewrite() {
-        let (repo, _, _root_guard) = fixture("read-cached-agrees-with-read");
-        append(&repo, &minimal_entry("first")).unwrap();
-        append(&repo, &minimal_entry("drop")).unwrap();
+    fn totals_rebuild_after_a_ledger_shrinks() {
+        let (repo, _, _root_guard) = fixture("totals-shrink");
+        append(&repo, &spend_entry("old", "implement", 4, 1.0, 1)).unwrap();
+        append(&repo, &spend_entry("old", "implement", 4, 1.0, 1)).unwrap();
+        assert_eq!(totals(&repo).spent_at("old", "implement"), Some(8));
 
-        // `Entry` carries no `PartialEq`, so the two are compared by their own
-        // serialised form rather than field by field.
-        let as_json = |entries: &[Entry]| -> Vec<String> {
-            entries
-                .iter()
-                .map(|e| serde_json::to_string(e).unwrap())
-                .collect()
-        };
-
-        assert_eq!(
-            as_json(&read_cached(&repo)),
-            as_json(&read(&repo).unwrap()),
-            "a plain append must read the same through either path"
-        );
-
-        // Same byte length, same inode — the in-place rewrite `read_cached`
-        // guards against (review finding 41), kept the same length here on
-        // purpose: see `read_cached`'s own doc comment for the one, longer
-        // shape of in-place rewrite it does not guard against.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Shortened in place, so the inode is the cached one and only the
+        // length says the offset no longer means anything.
         let path = ledger_path(&repo);
-        let rewritten = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("\"drop\"", "\"kept\"");
-        std::fs::write(&path, &rewritten).unwrap();
+        let mut line = serde_json::to_string(&spend_entry("new", "implement", 1, 1.0, 1)).unwrap();
+        line.push('\n');
+        assert!(line.len() < std::fs::metadata(&path).unwrap().len() as usize);
+        std::fs::write(&path, line).unwrap();
 
-        assert_eq!(
-            as_json(&read_cached(&repo)),
-            as_json(&read(&repo).unwrap()),
-            "a rewrite in place must still leave the two in agreement"
+        let after = totals(&repo);
+        assert_eq!(after.spent_at("old", "implement"), None);
+        assert_eq!(after.spent_at("new", "implement"), Some(1));
+        assert_eq!(after.lines, 1);
+    }
+
+    /// A command step's run is not a lane: it adds no output and no lane
+    /// time, so a step only ever run as a command reads as never paid for.
+    #[test]
+    fn a_command_run_is_not_counted_as_spend_but_is_remembered_by_id() {
+        let (repo, _, _root_guard) = fixture("totals-command");
+        let run = Entry {
+            step: "gate".into(),
+            wall_s: 90,
+            command: Some(CommandRun {
+                id: "run-1".into(),
+                ended: CommandEnd::Exited,
+                exit: Some(0),
+            }),
+            ..minimal_entry("login")
+        };
+        append(&repo, &run).unwrap();
+        let held = totals(&repo);
+        assert_eq!(held.spent_at("login", "gate"), None);
+        assert_eq!(held.lane_time_at("login", "gate"), None);
+        assert!(command_run_banked(&repo, "run-1"));
+        assert!(!command_run_banked(&repo, "run-2"));
+    }
+
+    /// A trial's task count is tasks, not rows: several steps of one arm each
+    /// bank their own line.
+    #[test]
+    fn trial_task_count_counts_tasks_not_lines() {
+        let (repo, _, _root_guard) = fixture("totals-trial");
+        for (task, step) in [("a", "implement"), ("a", "review"), ("b", "implement")] {
+            let line = Entry {
+                trial: Some("t1".into()),
+                ..spend_entry(task, step, 1, 0.1, 1)
+            };
+            append(&repo, &line).unwrap();
+        }
+        append(&repo, &spend_entry("c", "implement", 1, 0.1, 1)).unwrap();
+        assert_eq!(trial_task_count(&repo, "t1"), 2);
+        assert_eq!(trial_task_count(&repo, "other"), 0);
+    }
+
+    /// The unattended ceilings sum a window the totals are not kept per task
+    /// for. Streaming the window must give what summing the full list gives:
+    /// lines before the start and lines with no task are not the run's.
+    #[test]
+    fn read_since_sums_the_window_a_full_read_would() {
+        let (repo, _, _root_guard) = fixture("totals-since");
+        let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+        let lines = [
+            Entry {
+                ts: at(-300),
+                ..spend_entry("before", "implement", 100, 9.0, 1)
+            },
+            Entry {
+                ts: at(10),
+                ..spend_entry("in", "implement", 7, 0.5, 1)
+            },
+            Entry {
+                ts: at(20),
+                ..spend_entry("in", "review", 5, 0.25, 1)
+            },
+            Entry {
+                ts: at(30),
+                task: String::new(),
+                ..spend_entry("", "implement", 1000, 50.0, 1)
+            },
+        ];
+        for line in &lines {
+            append(&repo, line).unwrap();
+        }
+        let start = at(0);
+        let (_, streamed) = LedgerTotals::read_since(&ledger_path(&repo), Some(&start)).unwrap();
+
+        let all = read(&repo).unwrap();
+        let in_window = |entry: &&Entry| !entry.task.is_empty() && entry.ts >= start;
+        let output: u64 = all.iter().filter(in_window).map(|e| e.tokens.output).sum();
+        let cost: f64 = all
+            .iter()
+            .filter(in_window)
+            .filter_map(|e| e.cost_usd)
+            .sum();
+        assert_eq!((streamed.output, streamed.cost_usd), (output, cost));
+        assert_eq!((streamed.output, streamed.cost_usd), (12, 0.75));
+
+        let (totals, everything) = LedgerTotals::read_since(&ledger_path(&repo), None).unwrap();
+        assert_eq!(everything.output, 112);
+        // The totals streamed beside the window are the same ones `read_at`
+        // builds.
+        same_answers(
+            &totals,
+            &LedgerTotals::from_entries(&all),
+            &["in", "before"],
         );
+    }
+
+    /// What a session has banked, as the dispatcher diffs a transcript against
+    /// it and the board subtracts it from a live reading, is the sum of that
+    /// session's lines — checked against summing the full list.
+    #[test]
+    fn a_sessions_banked_totals_equal_the_sum_of_its_lines() {
+        let lines: Vec<Entry> = (1..=4)
+            .map(|n| Entry {
+                session: "shared".into(),
+                turns: n,
+                reported_usd: Some(0.5),
+                tier_tokens: Tokens {
+                    output: n as u64,
+                    ..Tokens::default()
+                },
+                ..spend_entry("login", "implement", n as u64 * 10, 0.25, 1)
+            })
+            .collect();
+        let held = LedgerTotals::from_entries(&lines);
+        let banked = held.session("shared");
+        assert_eq!(
+            banked.tokens.output,
+            lines.iter().map(|e| e.tokens.output).sum::<u64>()
+        );
+        assert_eq!(banked.tier_tokens.output, 10);
+        assert_eq!(banked.turns, 10);
+        assert_eq!(banked.cost_usd, 1.0);
+        assert_eq!(banked.reported_usd, 2.0);
+        assert_eq!(held.sessions().len(), 1);
+    }
+
+    /// The newest session wins across steps, a session with a hand line is
+    /// not owned by its lane, and a line with no session is nobody's.
+    #[test]
+    fn totals_answer_which_session_is_newest_and_who_owns_its_subagents() {
+        let older = Entry {
+            session: "s-old".into(),
+            ..spend_entry("login", "implement", 1, 0.1, 1)
+        };
+        let newer = Entry {
+            session: "s-new".into(),
+            ..spend_entry("login", "review", 1, 0.1, 1)
+        };
+        let hand = Entry {
+            hand: true,
+            session: "s-hand".into(),
+            ..spend_entry("login", "implement", 1, 0.1, 1)
+        };
+        let anonymous = Entry {
+            session: String::new(),
+            ..spend_entry("login", "review", 1, 0.1, 1)
+        };
+        let held = LedgerTotals::from_entries(&[older, newer, hand, anonymous]);
+        let last = held.last_lane_of("login", ["implement", "review"]).unwrap();
+        assert_eq!(last.session, "s-hand");
+        let last = held.last_lane_of("login", ["review"]).unwrap();
+        assert_eq!(last.session, "s-new");
+        assert!(held.last_lane_of("login", ["merge"]).is_none());
+        assert!(held.lane_owns_subagents("s-new"));
+        assert!(!held.lane_owns_subagents("s-hand"));
+        assert!(held.session("").tokens.is_zero());
     }
 
     /// A line written before runs existed has none, and must still parse —
@@ -7258,6 +8417,40 @@ mod tests {
         assert_eq!(line.outcome, None, "late turns were never judged");
     }
 
+    /// A catch-up line carries the complexity its lane's own line banked,
+    /// beside `plan`, and none where that line had none — so a run's rows
+    /// never disagree on it. Fails while the builder leaves it out: the
+    /// first line has no complexity.
+    #[test]
+    fn the_catch_up_line_carries_the_lanes_complexity() {
+        let (repo, path, _root_guard) = fixture("settled-lane-complexity");
+        let lane = |session: &str, complexity: Option<u32>| Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            plan: Some("epic".into()),
+            complexity,
+            session: session.into(),
+            tokens: Tokens {
+                output: 10,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &lane("s1", Some(18))).unwrap();
+        append(&repo, &lane("s2", None)).unwrap();
+        std::fs::write(&path, transcript(&[("", 10), ("", 7)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s1", &path, &ledger).expect("the catch-up line");
+        assert_eq!(line.complexity, Some(18));
+        let line = catch_up(&repo, "claude", "s2", &path, &ledger).expect("the catch-up line");
+        assert_eq!(line.complexity, None);
+        let written = std::fs::read_to_string(repo.usage_file()).unwrap();
+        let last = written.lines().last().unwrap();
+        assert!(!last.contains("complexity"), "{last}");
+    }
+
     /// The two requests of [`TIERED_TRANSCRIPT`], stamped with a working
     /// directory so the directory and worktree sweeps can place them.
     fn tiered_transcript_in(cwd: &Path) -> String {
@@ -7349,6 +8542,48 @@ mod tests {
         assert_eq!(line.tier_tokens, tiered_split());
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `bank_lane` streams the ledger for a hand line instead of reading it
+    /// whole. The subagents it banks must be those the full-list rule leaves to
+    /// the lane: in with no hand line, out with one.
+    #[test]
+    fn bank_lane_leaves_subagents_out_exactly_when_the_ledger_has_a_hand_line() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _, _root_guard) = fixture("bank-lane-hand");
+        for (session, hand, output) in [
+            ("0198e2c0-9999-4000-8000-000000000041", false, 100 + 30),
+            ("0198e2c0-9999-4000-8000-000000000042", true, 100),
+        ] {
+            if hand {
+                let line = Entry {
+                    task: "other".into(),
+                    step: "implement".into(),
+                    session: session.into(),
+                    hand: true,
+                    ..Entry::neutral()
+                };
+                append(&repo, &line).unwrap();
+            }
+            let home = home_with("claude", session, &transcript(&[("", 100)]));
+            let subagents = home
+                .join(".claude/projects/-home-someone-work")
+                .join(session)
+                .join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
+
+            let line = crate::platform::test_home::with_home(&home, || {
+                bank_lane(&repo, "claude", session, "demo", "implement")
+            })
+            .expect("a banked line");
+
+            let owns =
+                LedgerTotals::from_entries(&read(&repo).unwrap()).lane_owns_subagents(session);
+            assert_eq!(owns, !hand);
+            assert_eq!(line.tokens.output, output, "hand line: {hand}");
+            std::fs::remove_dir_all(&home).ok();
+        }
     }
 
     /// A session banked twice banks only what it had not banked before: the
@@ -7986,6 +9221,38 @@ mod tests {
         );
     }
 
+    /// With no line to carry from, the headless interrupt's line reads the
+    /// complexity off the task's own file, as it does the routine, so that
+    /// line is not the one row of the run without it. Fails while only a
+    /// carry could supply it: the line has none.
+    #[test]
+    fn a_line_banked_with_no_carry_reads_the_complexity_off_its_task() {
+        let (repo, path, _root_guard) = fixture("bank-no-carry-complexity");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("hard.md"),
+            "---\nid: hard\ncomplexity: 64\nstage: implement\n---\n## Goal\ndemo\n",
+        )
+        .unwrap();
+        std::fs::write(&path, transcript(&[("", 10)])).unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+
+        let bank = |task: &str, session: &str| {
+            bank_lane_from(
+                &repo,
+                "claude",
+                session,
+                task,
+                "implement",
+                chrono::Utc::now(),
+                &harvest,
+            )
+            .expect("a banked line")
+        };
+        assert_eq!(bank("hard", "s1").complexity, Some(64));
+        assert_eq!(bank("plain", "s2").complexity, None, "no task file");
+    }
+
     /// A reported total that lands after the lane was banked, with no new turn
     /// beside it, is picked up as a delta of its own — once.
     #[test]
@@ -8095,8 +9362,9 @@ mod tests {
         std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
 
         let ledger = read(&repo).unwrap();
-        assert!(!lane_owns_subagents(&ledger, "s"));
-        assert!(lane_owns_subagents(&ledger, "another"));
+        let totals = LedgerTotals::from_entries(&ledger);
+        assert!(!totals.lane_owns_subagents("s"));
+        assert!(totals.lane_owns_subagents("another"));
         let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("root moved");
         assert_eq!(line.tokens.output, 5, "the subagent's 30 is the sweep's");
     }
