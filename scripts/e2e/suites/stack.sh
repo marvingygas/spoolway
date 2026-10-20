@@ -750,4 +750,76 @@ else
   sed 's/^/        /' "$LIVE/stacks.repos" 2>/dev/null
 fi
 
+# ------------------------------------- only ever in a task's own worktree
+# `spoolway stack` commits, squashes and force-pushes whatever checkout it
+# runs in. Run by hand from the main checkout it would rewrite the person's own
+# branch and push it over the task's pull request branch, so it refuses there:
+# before any commit, squash or push, with exit 1. A dispatcher lane names its
+# worktree in `SPOOLWAY_WORKTREE`, and that keeps working from anywhere.
+must "handed's branch, off main" git branch task/handed main
+must "its worktree" git worktree add -q "$WORKTREES/handed" task/handed
+(
+  cd "$WORKTREES/handed" || exit 1
+  mkdir -p notes
+  echo "# handed" > notes/handed.md
+  git add -A
+  git commit -qm "wip(handed): implement"
+)
+queue_task handed "base: main" "branch: task/handed"
+
+must "the person's own branch" git checkout -q -b person-branch main
+echo one > person-one.txt; must "the person's first commit" git add person-one.txt
+must "the person's first commit" git commit -qm "person commit 1"
+echo two > person-two.txt; must "the person's second commit" git add person-two.txt
+must "the person's second commit" git commit -qm "person commit 2"
+echo "unsaved work" > person-dirty.txt
+
+person_head=$(git rev-parse HEAD)
+handed_remote=$(git ls-remote origin refs/heads/task/handed)
+handed_local=$(git rev-parse task/handed)
+
+stack_out=$("$SPOOLWAY" stack handed 2>&1)
+stack_status=$?
+if [ "$stack_status" -eq 1 ]; then ok "\`spoolway stack\` exits 1 from the main checkout"
+else bad "\`spoolway stack\` exits 1 from the main checkout (exit $stack_status)"; sed 's/^/        /' <<<"$stack_out"; fi
+if grep -qF 'Nothing was committed or pushed' <<<"$stack_out"; then
+  ok "and says nothing was committed or pushed"
+else
+  bad "and says nothing was committed or pushed"; sed 's/^/        /' <<<"$stack_out"
+fi
+if [ "$(git rev-parse HEAD)" = "$person_head" ] \
+   && [ "$(git rev-parse --abbrev-ref HEAD)" = person-branch ]; then
+  ok "the person's branch is where they left it"
+else
+  bad "the person's branch is where they left it"; git log --oneline -3 | sed 's/^/        /'
+fi
+if [ -f person-dirty.txt ] && git status --porcelain person-dirty.txt | grep -q '^??'; then
+  ok "their uncommitted file is still uncommitted"
+else
+  bad "their uncommitted file is still uncommitted"; git status --short | sed 's/^/        /'
+fi
+if [ "$(git ls-remote origin refs/heads/task/handed)" = "$handed_remote" ] \
+   && [ "$(git rev-parse task/handed)" = "$handed_local" ]; then
+  ok "the task's branch is untouched, here and on the remote"
+else
+  bad "the task's branch is untouched, here and on the remote"
+fi
+
+# The same command, with the worktree named the way a lane names it, from the
+# directory a lane's command step happens to run in.
+lane_out=$(SPOOLWAY_WORKTREE="$WORKTREES/handed" "$SPOOLWAY" stack handed 2>&1)
+if [ $? -eq 0 ]; then ok "with \`SPOOLWAY_WORKTREE\` naming the task's worktree it still hands over"
+else bad "with \`SPOOLWAY_WORKTREE\` naming the task's worktree it still hands over"; sed 's/^/        /' <<<"$lane_out"; fi
+if grep -ql '^head=task/handed$' "$LIVE/prs"/[0-9]* 2>/dev/null; then
+  ok "and its pull request is opened"
+else
+  bad "and its pull request is opened"
+fi
+if [ "$(git rev-parse HEAD)" = "$person_head" ]; then
+  ok "without touching the checkout it was run from"
+else
+  bad "without touching the checkout it was run from"
+fi
+must "back to main" git checkout -q -f main
+
 finish
