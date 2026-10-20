@@ -1975,3 +1975,17 @@ While a dispatcher runs, the route comes from the pipelines it loaded at start. 
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 See [Gates](pipelines.md#gates).
+
+### `spoolway stack [<task>]`
+
+Deprecated. Commits what is left in the task's worktree, squashes the branch to one commit and force-pushes it for the task's pull request. The task defaults to `$SPOOLWAY_TASK`.
+
+`stack` runs only in the task's own worktree. That is a linked worktree on the task's `branch:`, or on `task/<task>` when the task has no `branch:`. A step's worktree comes from `$SPOOLWAY_WORKTREE`. Run by hand, `stack` uses the current directory.
+
+From any other directory, `stack` exits 1 before it commits, squashes or pushes. The main checkout, your own worktree and another task's worktree are all refused. A worktree on a detached HEAD is refused with a message that says to check out the task's branch.
+
+```
+`stack` hands a task over from the task's own worktree, and this is not one.
+  Nothing was committed or pushed. Run it in r1's worktree,
+  or let r1's handover step run it.
+```
