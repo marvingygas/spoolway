@@ -747,7 +747,7 @@ because a home-mode project's whole setup is already private to the machine it r
   clashing file, since the main checkout and the dispatcher load those files even when the
   worktree's own checkout has never picked up the commit that added them. In home mode they
   write into the workspace's own `config/` instead, since there is no private layer to add
-  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
+  there. Both copy commands are refused in a dispatcher lane's worktree. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
   names and the skeleton its `task_template:` names (the pipeline's own name when it sets
   none) into `.spoolway/`, then
   deletes the private files. Run in a linked worktree on its own branch, it writes that

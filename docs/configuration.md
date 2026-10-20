@@ -292,7 +292,8 @@ patch only ever applies to a tracked file — but is named as waiting on `spoolw
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
 itself is left alone, except for one case: `spoolway sync` deletes a key on the [Retired
 keys](#retired-keys) list from `overrides/config.toml`, the same way it drops that key from
-the tracked file. A config patch key merely unknown to the tracked config, such as a typo,
+the tracked file. Run in a lane, `spoolway sync` leaves the layer as it is and reports the
+retired keys it left there. A config patch key merely unknown to the tracked config, such as a typo,
 stays in the override file for you to fix yourself.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
@@ -347,6 +348,22 @@ pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
+
+### Commands in a lane
+
+A dispatcher lane does not write the layer. In a task's worktree, these commands exit 1 and
+write nothing:
+
+| Command | What it would write |
+|---|---|
+| `spoolway override drop` | Removes the layer, or one entry of it. |
+| `spoolway pipeline override` | `overrides/pipelines/<name>.yml` |
+| `spoolway prompt override` | `overrides/prompts/<name>/PROMPT.md` |
+| `spoolway config override` | `overrides/config.toml` |
+| `spoolway pipeline copy`, `spoolway prompt copy` | The private `local/` folder. In home mode, the workspace's own setup. |
+
+The refusal tells the lane to write the change it wanted into its report, so a person makes it.
+`spoolway override promote` and `spoolway pipeline promote` refuse in a lane as well.
 
 ## `[dispatch]` — the run loop
 

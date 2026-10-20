@@ -1149,6 +1149,8 @@ names the private file a private pipeline came from, and is `null` for a tracked
 Patch one step's key in the [overrides layer](configuration.md#the-overrides-layer). The
 tracked file is not touched.
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 ```
 $ spoolway pipeline override impl --set implement.model=claude-opus-5
 
@@ -1191,6 +1193,8 @@ $ spoolway pipeline override strict --set implement.model=x
 ### `spoolway pipeline copy <from> <to>`
 
 Copy a pipeline into the private layer, along with a task skeleton to read from.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
 ```
 $ spoolway pipeline copy impl impl-strict
@@ -1319,6 +1323,8 @@ Print one prompt file.
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 `<name>` may also be a private prompt. The fork is written the same way, but it only starts
 applying once the pipeline that runs it is promoted. See [Private
 prompts](prompts.md#private-prompts).
@@ -1326,6 +1332,8 @@ prompts](prompts.md#private-prompts).
 ### `spoolway prompt copy <from> <to>`
 
 Copy a prompt into the private layer, along with any assets it uses.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
 ```
 $ spoolway prompt copy reviewer reviewer-strict
@@ -1458,6 +1466,8 @@ See [Configuration](configuration.md).
 Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vi`, creating it if needed. See the [overrides
 layer](configuration.md#the-overrides-layer).
 
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
 ### `spoolway override contract`
 
 Print the merge rule, what a pipeline, config or prompt patch may carry, and the four
@@ -1486,7 +1496,7 @@ and why. `--json` carries the same list under `ignored`.
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
 | `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
-| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse |
+| `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse. Refused in a dispatcher lane's worktree |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
@@ -1734,6 +1744,10 @@ It writes the checkout it runs in. In a linked worktree that is the worktree's o
 the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
 linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
 the main checkout.
+
+In a lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
+layer alone. If `overrides/config.toml` holds a retired key, the report names the key and says
+to run `spoolway sync` in the main checkout.
 
 ```
 spoolway sync --dry-run
