@@ -371,6 +371,11 @@ highlighted row's name:
 | `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
 | `open task` | A task in the tasks pane. | Open the task in your editor. |
 
+A task `id:` is unique across all routine folders. When two routine files hold one id, the
+routines tab shows a `Problem:` row beside the task. The row names both files and an id to give
+one of them. `spoolway doctor` and `spoolway pipeline check` fail with the same text. Give one of
+the files another `id:` to clear it.
+
 A routine folder that holds a `*.md` file that does not parse is not queued. The popup names each
 such file with a `spoolway task contract --from "<file>"` command that prints the reason, and
 nothing from the folder is queued.

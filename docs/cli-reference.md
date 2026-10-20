@@ -1103,6 +1103,9 @@ and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `park
 a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
 reported. Pending tasks and routines are not read.
 
+The check also fails when two routine files hold one task id. It prints `routines:` followed by the
+text of the `routines` row of `spoolway doctor`.
+
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
 ### `spoolway pipeline contract`
@@ -1913,6 +1916,13 @@ seconds, as below. The warnings screen shown before dispatching never runs it.
 A `FAIL` row labelled `queue ids are unique` names each queue file that holds an id another file
 holds. A `FAIL` row labelled `no queued task is named like a routine` names each queued task whose
 id is the name of a routine.
+
+A `FAIL` row labelled `routines` names each task id that two or more routine files hold, with
+every file and an id to give one of them:
+
+```
+  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. Give one of them another id:, such as backend-lint.
+```
 
 A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
 `task/<id>` branch that no queued task owns, with the commands that drop them and the rename
