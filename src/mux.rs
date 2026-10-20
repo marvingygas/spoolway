@@ -362,6 +362,15 @@ pub trait Mux: Sync {
         base: &str,
         label: &str,
     ) -> Result<Workspace>;
+    /// Cut a task's own worktree with git and open no workspace on it, for a
+    /// step that shows no pane. `Ok(None)` means this backend does not split
+    /// the two, and the caller falls back to [`Mux::create_workspace`]; that is
+    /// the default, and what headless answers, since it never has panes to
+    /// save. A checkout cut this way is later given its workspace by
+    /// [`Mux::reopen_owned_pane`].
+    fn cut_checkout(&self, _cwd: &Path, _branch: &str, _base: &str) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
     /// Remove a task's worktree, which takes its workspace with it. Never call
     /// this for a workspace that only borrowed an existing checkout: the
     /// checkout it would be asked to remove is the person's own.
@@ -400,9 +409,10 @@ pub trait Mux: Sync {
     /// of its own.
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace>;
     /// The same, but for a checkout this task cut for itself rather than
-    /// borrowed — [`crate::dispatch::ensure_workspace`]'s heal path, the only
-    /// caller, reaches for this instead of [`Mux::create_pane`] whenever
-    /// `!task.front.borrowed`.
+    /// borrowed. Two callers in [`crate::dispatch::ensure_checkout`] reach for
+    /// this instead of [`Mux::create_pane`] whenever `!task.front.borrowed`:
+    /// the heal path, and the arm that takes back a checkout this task cut,
+    /// including one cut bare by [`Mux::cut_checkout`] for a hidden step.
     ///
     /// A backend that marks ownership on the workspace or session itself
     /// rather than asking the multiplexer directly has to re-apply that mark
@@ -2024,6 +2034,10 @@ impl Mux for Herdr {
         // remove.
         let checkout = self.cut_task_worktree(branch, base)?;
         self.open_worktree_workspace(&checkout, label)
+    }
+
+    fn cut_checkout(&self, _cwd: &Path, branch: &str, base: &str) -> Result<Option<PathBuf>> {
+        self.cut_task_worktree(branch, base).map(Some)
     }
 
     fn remove_workspace(&self, workspace_id: &str) -> Result<()> {

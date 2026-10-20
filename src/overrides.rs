@@ -385,15 +385,15 @@ pub(crate) fn apply_pipeline_patch(
 /// `--set` against a cloned step before writing anything: refusing by the
 /// exact rule the merge itself would apply, rather than a second copy of it.
 ///
-/// Three keys are refused before the round-trip rather than by it. `id:` would
-/// rename the step, a change to the graph rather than a value on one. Next is
-/// `on_loop_max:`, retired, which the round-trip would otherwise swallow
-/// without a word: the field is `skip_serializing`, so the step that comes
-/// back out has lost it — a key accepted here, written into
+/// Four keys are refused before the round-trip rather than by it. `id:` would
+/// rename the step, a change to the graph rather than a value on one. Next are
+/// `on_loop_max:` and `headless:`, retired, which the round-trip would
+/// otherwise swallow without a word: each field is `skip_serializing`, so the
+/// step that comes back out has lost it — a key accepted here, written into
 /// `overrides/pipelines/<name>.yml`, and then silently doing nothing every
 /// time the pipelines are loaded after. `pipeline::refuse_retired_step_keys` is the
 /// same refusal for a tracked file, where the key survives long enough to be
-/// named; here it has to be caught before serde sees it. The third is
+/// named; here it has to be caught before serde sees it. The last is
 /// `description:` on `blocked`: that step's description is fixed, and a
 /// pipeline that declares one fails to load as a whole, so a patch setting it
 /// must be refused here rather than break every load after it.
@@ -414,6 +414,12 @@ pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) 
         bail!(
             "sets `on_loop_max:` — a spent loop budget now always parks on `blocked`, so the \
              key no longer chooses anything; drop it"
+        );
+    }
+    if fields.contains_key("headless") {
+        bail!(
+            "sets `headless:` — the key is now `hide:`; run `spoolway sync` to rename it, or \
+             write `hide: true` in its place"
         );
     }
     let mut value = serde_norway::to_value(&*step).context("serialising step for override")?;
@@ -1177,6 +1183,19 @@ pub(crate) fn promote_pipeline_patch(
              promote` only writes step keys; edit the tracked file for either of those by hand"
         );
     }
+    // `headless:` is no longer a step key. Copied across like any other, it
+    // would be reported as promoted and leave a tracked pipeline that
+    // refuses to load, so it is refused here as [`apply_step_patch`] refuses
+    // it when the patch is applied. Before anything is read or written.
+    for (step_id, fields) in &patch.steps {
+        if fields.contains_key("headless") {
+            bail!(
+                "step `{step_id}` of pipeline `{name}` sets `headless:` in its patch — the key \
+                 is now `hide:`; run `spoolway sync` to rename it there, or write `hide:` in \
+                 its place, then promote again"
+            );
+        }
+    }
     let path = crate::pipeline::Pipelines::file_in(root, name);
     let mut text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -1648,6 +1667,31 @@ agent: pi
         assert!(written.contains("- id: review\n    description: Check it.\n    agent: claude\n    model: claude-sonnet-5\n"));
     }
 
+    /// A patch still saying `headless:` is refused by promote, which would
+    /// otherwise copy the retired key into the tracked file and report
+    /// success, leaving a pipeline that refuses to load. Nothing is written.
+    #[test]
+    fn promote_pipeline_patch_refuses_the_retired_headless_key() {
+        let root = crate::scratch::root("overrides-promote-pipeline-headless");
+        let _ = std::fs::remove_dir_all(&root);
+        let original = pipeline_fixture();
+        let path = crate::pipeline::Pipelines::file_in(&root, "demo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let patch = one_step_patch("implement", "headless", "true");
+        let err = promote_pipeline_patch(&root, "demo", &patch)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("step `implement`"), "the step by name: {err}");
+        assert!(
+            err.contains("`headless:`") && err.contains("`hide:`"),
+            "{err}"
+        );
+        assert!(err.contains("spoolway sync"), "the way out: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
     /// A trailing `# comment` on the promoted line survives the edit — only
     /// the value between the key and the comment changes.
     #[test]
@@ -1821,7 +1865,7 @@ agent: pi
     /// A private layer written for an older release may still hold
     /// `dispatch.keep_finished_lanes`. It applies as the limit it stood for —
     /// `true` is `all`, `false` is 1 — and is not reported as ignored, or
-    /// `false` would quietly become the default 5. A `visible_lanes` in the
+    /// `false` would quietly become the default 3. A `visible_lanes` in the
     /// same layer wins, as it does in the tracked file.
     #[test]
     fn a_layer_keep_finished_lanes_applies_as_a_visible_lanes_limit() {
@@ -1832,8 +1876,8 @@ agent: pi
             ("keep_finished_lanes = true\n", VisibleLanes::All),
             ("keep_finished_lanes = false\n", VisibleLanes::Count(1)),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
-                VisibleLanes::Count(3),
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
+                VisibleLanes::Count(2),
             ),
         ] {
             std::fs::write(
@@ -1866,9 +1910,9 @@ agent: pi
                 Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
             ),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
                 Some(
-                    "the dispatch.visible_lanes = 3 beside it is the limit that loads. Run `spoolway sync` to drop",
+                    "the dispatch.visible_lanes = 2 beside it is the limit that loads. Run `spoolway sync` to drop",
                 ),
             ),
             (
@@ -1913,8 +1957,8 @@ agent: pi
             ),
             ("keep_finished_lanes = false\n", Some("visible_lanes = 1")),
             (
-                "keep_finished_lanes = false\nvisible_lanes = 3\n",
-                Some("visible_lanes = 3"),
+                "keep_finished_lanes = false\nvisible_lanes = 2\n",
+                Some("visible_lanes = 2"),
             ),
             // Not a boolean, so it stood for no limit: it is only dropped,
             // and named once, though it is both refused and on the layer.

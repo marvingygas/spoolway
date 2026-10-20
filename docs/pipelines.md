@@ -94,7 +94,7 @@ steps:
 | `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
-| `headless` | `false` | Command steps only. `true` runs the command with no pane, whatever `dispatch.hide_commands` says. |
+| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. The older `headless:` key no longer loads; `spoolway sync` renames it to `hide:`. See [Background and headless](#background-and-headless). |
 | `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
@@ -395,7 +395,7 @@ A background step is a sidecar with no verdict. Its run never moves the task, ho
 a non-zero exit, a timeout and a pass all leave the task where it is. A task that reaches `done`
 is archived without waiting for the run, and a run still going is stopped when the task is
 cleaned up. A run that ends is counted once in the ledger. If it has a pane, the pane closes
-unless `dispatch.hide_commands` is `false`.
+unless the step shows its command.
 
 A run that exits non-zero, or is stopped at its `timeout:`, leaves one line in the task's
 `## Status Log`. The line is saved even though the task does not move. A run that exits 0 leaves
@@ -410,13 +410,40 @@ A pipeline that gives a background step an `on_fail` does not load. The message 
 fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:
 the task then waits for the command, and its exit picks `on_pass` or `on_fail`.
 
-A command step runs detached with no pane. Its output goes to the log file under `commands/`.
-Set `dispatch.hide_commands = false` and the step runs in its own pane instead. The pane stays
-open after the command exits, counts toward `dispatch.visible_lanes`, and closes with the task or
-when the limit pushes it out. See [Commands are hidden by
-default](dispatcher.md#commands-are-hidden-by-default). `headless: true` runs the command with
-no pane under either setting. This step option is separate from the internal test-only
-dispatcher backend.
+A command step runs in a pane of its own by default, and its output also goes to the log file
+under `commands/`. Set `dispatch.hide_commands = true` and every command step runs detached with
+no pane instead. The `hide:` key overrides that project setting for one step in either direction.
+`hide: false` gives the step a pane while the project hides commands. `hide: true` keeps the step
+detached while the project shows them. Without `hide:`, the step follows `dispatch.hide_commands`.
+
+The older `headless:` key no longer loads. A step that still carries it, with any value, is refused
+by name, and the message says to run `spoolway sync` or to write `hide: true` in its place.
+`spoolway sync` renames the key to `hide:` on every step in three places: the checkout's pipeline
+files, the private patches under `overrides/pipelines/`, and the private pipelines under
+`local/pipelines/`. It prints a `wrote` line for each file with a note naming the pipeline and its
+steps. It changes no other line. This is the one edit `sync` makes to a step.
+
+A step that carries both `headless:` and `hide:` cannot be renamed without losing one of them. `sync`
+refuses that file, names the step and leaves the file as it was. Keep only `hide:` there and run
+`sync` again.
+
+A file whose key block `sync` refuses as hand-edited is not renamed either. `spoolway sync --replace
+<file>`, which that refusal names, swaps the block and makes the rename together.
+
+`sync` cannot rename a `headless:` written in flow style, such as `- {id: a, headless: true}`, with
+a quoted key, or with a `-` on a line of its own. It refuses that file and tells you to write
+`hide:` by hand. The same holds for a patch or a private pipeline.
+
+`spoolway pipeline override <name> --set <step>.headless=<value>` and `spoolway override promote`
+of a patch that sets `headless:` are refused. Use `--set <step>.hide=<value>` for the first. For the second, run `sync` to rename the key in the
+patch, then promote again.
+
+A shown command behaves the same whichever setting showed it. The pane stays open after the
+command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit
+pushes it out. So a `hide: false` step in a project that hides commands takes a lane slot and
+keeps its pane, even though every other command there is hidden. See [Commands are shown by
+default](dispatcher.md#commands-are-shown-by-default). `hide:` is separate from the internal
+test-only dispatcher backend, which has no panes and runs every command detached.
 
 A paned step's script is written to `<task> · <step>.sh` beside the log, readable by you alone,
 because it holds the step's environment. The pane is typed one short line that runs that file.

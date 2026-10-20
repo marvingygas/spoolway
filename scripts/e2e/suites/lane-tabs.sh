@@ -384,7 +384,7 @@ else bad "and its workspace is still open"; fi
 must "the fourth step reports" report_as one fourth
 if drive one gone 60; then ok "the task with a limit of 1 is done and archived"
 else bad "the task with a limit of 1 is done and archived"; fi
-must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 5
+must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 3
 
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 rm -f .spoolway/pipelines/fourstep.yml .spoolway/pipelines/loop.yml \

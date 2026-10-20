@@ -86,7 +86,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.visible_lanes",
         values: "<count>, all",
-        default: "5",
+        default: "3",
         sentence: "How many of a task's most recent lanes stay open; each new agent step \
                     or shown command closes the oldest finished ones. Older versions kept \
                     every lane.",
@@ -94,9 +94,9 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.hide_commands",
         values: "true, false",
-        default: "true",
-        sentence: "Whether a command step runs without a pane. Set to `false` and its pane \
-                    stays open after it exits, counting toward `visible_lanes`.",
+        default: "false",
+        sentence: "Whether a command step runs without a pane. Off, its pane stays open \
+                    after it exits, counting toward `visible_lanes`.",
     },
     Reference {
         key: "dispatch.lane_layout",
@@ -1458,24 +1458,20 @@ mod tests {
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 
-    /// `visible_lanes` is a count or `all`, written even while it is 5, and
+    /// `visible_lanes` is a count or `all`, written even while it is 3, and
     /// `0` is refused with the wording a person is told to act on.
     #[test]
     fn visible_lanes_is_readable_and_writable_at_its_default() {
         use crate::config::VisibleLanes;
         let config = Config::default();
-        assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "5");
+        assert_eq!(get(&config, "dispatch.visible_lanes").unwrap(), "3");
 
-        let three = set(&config, "dispatch.visible_lanes", "3").unwrap();
-        assert_eq!(three.dispatch.visible_lanes, VisibleLanes::Count(3));
-        assert_eq!(get(&three, "dispatch.visible_lanes").unwrap(), "3");
-        assert!(
-            toml::to_string(&three)
-                .unwrap()
-                .contains("visible_lanes = 3")
-        );
+        let two = set(&config, "dispatch.visible_lanes", "2").unwrap();
+        assert_eq!(two.dispatch.visible_lanes, VisibleLanes::Count(2));
+        assert_eq!(get(&two, "dispatch.visible_lanes").unwrap(), "2");
+        assert!(toml::to_string(&two).unwrap().contains("visible_lanes = 2"));
 
-        let all = set(&three, "dispatch.visible_lanes", "all").unwrap();
+        let all = set(&two, "dispatch.visible_lanes", "all").unwrap();
         assert_eq!(all.dispatch.visible_lanes, VisibleLanes::All);
         assert_eq!(get(&all, "dispatch.visible_lanes").unwrap(), "all");
         assert!(
@@ -1484,12 +1480,12 @@ mod tests {
                 .contains("visible_lanes = \"all\"")
         );
 
-        let back = set(&all, "dispatch.visible_lanes", "5").unwrap();
+        let back = set(&all, "dispatch.visible_lanes", "3").unwrap();
         assert_eq!(back.dispatch.visible_lanes, VisibleLanes::default());
         assert!(
             toml::to_string(&back)
                 .unwrap()
-                .contains("visible_lanes = 5")
+                .contains("visible_lanes = 3")
         );
 
         let err = format!(
@@ -1510,27 +1506,27 @@ mod tests {
         assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
     }
 
-    /// `hide_commands` is a bool, written even while it is `true`.
+    /// `hide_commands` is a bool, written even while it is `false`.
     #[test]
     fn hide_commands_is_readable_and_writable_at_its_default() {
         let config = Config::default();
-        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "true");
+        assert_eq!(get(&config, "dispatch.hide_commands").unwrap(), "false");
 
-        let shown = set(&config, "dispatch.hide_commands", "false").unwrap();
-        assert!(!shown.dispatch.hide_commands);
-        assert_eq!(get(&shown, "dispatch.hide_commands").unwrap(), "false");
+        let hidden = set(&config, "dispatch.hide_commands", "true").unwrap();
+        assert!(hidden.dispatch.hide_commands);
+        assert_eq!(get(&hidden, "dispatch.hide_commands").unwrap(), "true");
         assert!(
-            toml::to_string(&shown)
+            toml::to_string(&hidden)
                 .unwrap()
-                .contains("hide_commands = false")
+                .contains("hide_commands = true")
         );
 
-        let back = set(&shown, "dispatch.hide_commands", "true").unwrap();
-        assert!(back.dispatch.hide_commands);
+        let back = set(&hidden, "dispatch.hide_commands", "false").unwrap();
+        assert!(!back.dispatch.hide_commands);
         assert!(
             toml::to_string(&back)
                 .unwrap()
-                .contains("hide_commands = true")
+                .contains("hide_commands = false")
         );
         assert!(set(&config, "dispatch.hide_commands", "sometimes").is_err());
     }

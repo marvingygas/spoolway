@@ -102,7 +102,7 @@ HOLD="$LIVE/let-handed-through"
   printf '\n  - id: hold\n'
   printf '    description: Parks the task where this suite can wind its branch back.\n'
   printf "    run: until [ -e '%s' ]; do sleep 0.1; done\n" "$HOLD"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    timeout: 120s\n'
   printf '    on_pass: handover\n'
 } >> .spoolway/pipelines/default.yml

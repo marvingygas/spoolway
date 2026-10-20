@@ -12,7 +12,7 @@ steps:
     description: Go on to the review only when a Dependabot pull request has not been reviewed at its current head.
     run: scripts/dependabot-pending.sh
     timeout: 5m
-    headless: true
+    hide: true
     on_pass: review
     on_fail: done
 
@@ -30,5 +30,5 @@ steps:
     description: Re-check every approval, post each verdict as a comment, and turn on auto-merge for the approved pull requests.
     run: scripts/dependabot-merge.sh
     timeout: 15m
-    headless: true
+    hide: true
     on_pass: done

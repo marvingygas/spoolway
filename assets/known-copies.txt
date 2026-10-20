@@ -24,6 +24,9 @@ config-reference f5d9e2c1
 config-reference cbf36e35
 config-reference a25e2942
 config-reference 38ca1c81
+config-reference 356c3234
+config-reference a0363e5a
+config-reference ec4b1486
 pipeline-keys d685018b
 pipeline-keys 297a47f0
 pipeline-keys e26277c6
@@ -41,6 +44,8 @@ pipeline-keys 9e9723b9
 pipeline-keys 8b89361c
 pipeline-keys 371f0cdd
 pipeline-keys 32febd09
+pipeline-keys 1f53f0ab
+pipeline-keys 34c11bde
 skill claude/spoolway-calibrate/SKILL.md 31326562
 skill claude/spoolway-calibrate/SKILL.md 20d9730b
 skill claude/spoolway-calibrate/SKILL.md f631f87c

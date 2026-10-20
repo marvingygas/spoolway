@@ -1642,10 +1642,10 @@ mod tests {
             "an idle reload started a process"
         );
 
-        assert!(repo.config.dispatch.hide_commands);
-        std::fs::write(&config, "[dispatch]\nhide_commands = false\n").unwrap();
+        assert!(!repo.config.dispatch.hide_commands);
+        std::fs::write(&config, "[dispatch]\nhide_commands = true\n").unwrap();
         watch.reload(&mut repo, &mut reported, &mut record_reported);
-        assert!(!repo.config.dispatch.hide_commands, "an edit was not read");
+        assert!(repo.config.dispatch.hide_commands, "an edit was not read");
 
         // A record that cannot be written is tried again on every pass,
         // even while every file the watch stats stays exactly as it was.

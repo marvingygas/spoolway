@@ -570,6 +570,56 @@ works "and the layer entry is cleared" test ! -e "$LAYER"
 must "remove the worktree" git worktree remove --force "$LIVE/wt"
 must "and its branch" git branch -D feature/promote
 
+# ------------------------------------------- a patch that still says headless:
+# `headless:` is the retired name of `hide: true`. A patch naming it is left
+# out of the merge with a notice, like any key a step cannot take, so a private
+# override written before the rename would quietly stop applying. `sync`
+# renames it in the layer, writes only that file, and the patch applies again.
+# `review` is made a command step first, since `hide:` is a command step's key.
+must "review turns into a command step for the headless: case" \
+  sed -i '/- id: review/,/- id: document/ {
+    s/^    agent: claude/    run: echo hi/
+    /^    prompt:/d
+    /^    model:/d
+    /^    effort:/d
+    /^    session:/d
+  }' "$TRACKED"
+must "a hand-written patch that still says headless: on that step" \
+  bash -c 'mkdir -p "$(dirname "$1")" && printf "%s\n" "# headless: true, in a comment" "steps:" "  review:" "    headless: true" "    timeout: 5m" >"$1"' _ "$LAYER"
+says "the patch is left out of the merge, naming the retired key" \
+  "sets \`headless:\` — the key is now \`hide:\`" \
+  "$SPOOLWAY" pipeline check
+cp "$LAYER" "$LIVE/layer.before"
+cp "$TRACKED" "$LIVE/tracked.before-sync"
+
+says "sync --dry-run reports the rename as a write it would make" \
+  "would write" \
+  "$SPOOLWAY" sync --dry-run
+works "and the dry run left the patch as it was" cmp "$LAYER" "$LIVE/layer.before"
+
+says "sync names the patch it renamed and the step" \
+  "(migrated: default: \`headless:\` renamed to \`hide:\` on step review)" \
+  "$SPOOLWAY" sync
+works "the patch says hide: where it said headless:" \
+  grep -q '^    hide: true$' "$LAYER"
+works "and nothing else in the patch moved, comment and timeout included" \
+  cmp "$LAYER" <(sed 's/^    headless:/    hide:/' "$LIVE/layer.before")
+works "sync wrote no tracked step, since none carried the key" \
+  cmp "$TRACKED" "$LIVE/tracked.before-sync"
+silent_about "the patch applies again, with no override ignored" \
+  "override ignored" \
+  "$SPOOLWAY" pipeline check
+says "and a second sync has nothing left to rename" \
+  "Nothing updating." \
+  "$SPOOLWAY" sync
+
+must "clean up: drop the layer entry" \
+  "$SPOOLWAY" override drop pipelines/default.yml
+must "and restore the tracked step from the committed copy" \
+  git checkout -- "$TRACKED"
+# Not `git_clean`: the syncs above refreshed files of the checkout of their own.
+works "the tracked pipeline is back as committed" git diff --quiet -- "$TRACKED"
+
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
 # `install` before the rename has the old directory on disk, and `sync`

@@ -624,7 +624,7 @@ pub struct DispatchConfig {
     #[serde(with = "human_duration")]
     pub lane_child_ceiling: Duration,
 
-    /// How many of a task's lanes stay open in its tab, or `all`. Five by
+    /// How many of a task's lanes stay open in its tab, or `all`. Three by
     /// default. Each new agent step closes the task's oldest finished lanes
     /// until the tab, with the new lane in it, holds this many. It closes them
     /// before placing the new pane by the spiral split, so the oldest lane
@@ -634,14 +634,19 @@ pub struct DispatchConfig {
     pub visible_lanes: VisibleLanes,
 
     /// Whether a command step runs detached, with no pane, so it never takes
-    /// a place in its task's tab. On by default: a gate's pane used to close
-    /// the moment its exit code was read, so it only ever cost the lanes
-    /// beside it their room. Its output is in the run's log either way.
+    /// a place in its task's tab. Its output is in the run's log either way.
     ///
-    /// Off, a command opens a pane like an agent step's and keeps it after
-    /// the command exits. It then counts toward [`Self::visible_lanes`] and
-    /// closes oldest first like a finished agent lane. A pane whose command is
-    /// still running is never closed for the limit.
+    /// Off by default, so a failed gate's output stays on screen. A command
+    /// then opens a pane like an agent step's and keeps it after the command
+    /// exits. It counts toward [`Self::visible_lanes`] and closes oldest first
+    /// like a finished agent lane. A pane whose command is still running is
+    /// never closed for the limit.
+    ///
+    /// A config that already writes `hide_commands = true` keeps hiding: the
+    /// default only fills a key the file never names.
+    ///
+    /// A step's own `hide:` overrides this for that step, in either
+    /// direction; a step with no `hide:` follows it.
     pub hide_commands: bool,
 
     /// Where a task's lanes are placed in its workspace: as panes of one tab,
@@ -708,7 +713,7 @@ impl Default for DispatchConfig {
             auto_commit: true,
             priority: Priority::default(),
             visible_lanes: VisibleLanes::default(),
-            hide_commands: true,
+            hide_commands: false,
             lane_layout: LaneLayout::default(),
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
@@ -942,8 +947,8 @@ impl Backend {
 /// every one of them.
 ///
 /// The limit counts all of a task's lanes, kept and running, in whichever tab
-/// they stand. A command's pane is a lane while commands are shown, see
-/// [`DispatchConfig::hide_commands`]. Only a finished lane ever closes for
+/// they stand. A command's pane is a lane when its step shows its command,
+/// by `hide: false` or by [`DispatchConfig::hide_commands`] being off. Only a finished lane ever closes for
 /// it. A lane that is still running, and a pane held for a person on
 /// `blocked` or `paused`, stay whatever the count says, so a tab can sit over
 /// its limit until they end.
@@ -957,7 +962,7 @@ pub enum VisibleLanes {
 
 impl VisibleLanes {
     /// The count a key that is never set holds.
-    pub const DEFAULT_COUNT: u32 = 5;
+    pub const DEFAULT_COUNT: u32 = 3;
 
     /// Whether this is the default. [`Config::migrate`] and the
     /// `keep_finished_lanes` load note read it: a `visible_lanes` at its
@@ -2403,9 +2408,9 @@ impl Config {
         // A person who sets `visible_lanes` has made the choice the retired
         // `keep_finished_lanes` stood in for. Left in the file it would load
         // back over a value that holds the default — `migrate` cannot tell a
-        // `visible_lanes` of 5 from an absent key — and `agrees_with` would
+        // `visible_lanes` of 3 from an absent key — and `agrees_with` would
         // refuse the edit for it, so a project an older release set up could
-        // never choose 5.
+        // never choose 3.
         if key == "dispatch.visible_lanes" {
             edited = crate::confdoc::remove(&edited, &["dispatch", "keep_finished_lanes"])
                 .with_context(|| format!("editing {}", path.display()))?;
@@ -3995,22 +4000,23 @@ mod tests {
         );
     }
 
-    /// `hide_commands` is written while it is `true`, and when a person turns
-    /// it off.
+    /// `hide_commands` is written while it holds its default of `false`, a
+    /// config that never names it loads `false`, and a written `true` stays.
     #[test]
     fn hide_commands_is_written_in_a_defaulted_config() {
         let config = Config::default();
-        assert!(config.dispatch.hide_commands);
+        assert!(!config.dispatch.hide_commands);
         assert!(
             toml::to_string(&config)
                 .unwrap()
-                .contains("hide_commands = true")
+                .contains("hide_commands = false")
         );
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
-        assert!(absent.dispatch.hide_commands);
+        assert!(!absent.dispatch.hide_commands);
 
         let on: Config = toml::from_str("[dispatch]\nhide_commands = true\n").unwrap();
+        assert!(on.dispatch.hide_commands);
         assert!(
             toml::to_string(&on)
                 .unwrap()
@@ -4031,9 +4037,9 @@ mod tests {
     #[test]
     fn visible_lanes_is_written_in_a_defaulted_config() {
         let config = Config::default();
-        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(5));
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(3));
         let rendered = toml::to_string(&config).unwrap();
-        assert!(rendered.contains("visible_lanes = 5"), "{rendered}");
+        assert!(rendered.contains("visible_lanes = 3"), "{rendered}");
 
         let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
         assert_eq!(absent.dispatch.visible_lanes, VisibleLanes::default());
@@ -4120,15 +4126,15 @@ mod tests {
         std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
         std::fs::write(
             Config::path_in(&dir),
-            "[dispatch]\nkeep_finished_lanes = false\nvisible_lanes = 3\n",
+            "[dispatch]\nkeep_finished_lanes = false\nvisible_lanes = 2\n",
         )
         .unwrap();
         let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
-        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(3));
+        assert_eq!(config.dispatch.visible_lanes, VisibleLanes::Count(2));
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(
             notices[0].contains(
-                "is no longer read — the dispatch.visible_lanes = 3 beside it is the limit \
+                "is no longer read — the dispatch.visible_lanes = 2 beside it is the limit \
                  that loads. Run `spoolway sync` to drop the key."
             ),
             "{notices:?}"
@@ -4180,8 +4186,8 @@ mod tests {
         for line in [
             "priority = \"group\"",
             "lane_child_ceiling = \"1h\"",
-            "visible_lanes = 5",
-            "hide_commands = true",
+            "visible_lanes = 3",
+            "hide_commands = false",
             "lane_layout = \"panes\"",
         ] {
             assert!(body.contains(line), "{line} missing from {body}");
@@ -4191,13 +4197,13 @@ mod tests {
         let back: Config = toml::from_str(&rendered).unwrap();
         assert_eq!(back.dispatch.priority, Priority::Group);
         assert_eq!(back.dispatch.lane_child_ceiling, Duration::from_secs(3600));
-        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(5));
-        assert!(back.dispatch.hide_commands);
+        assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(3));
+        assert!(!back.dispatch.hide_commands);
         assert_eq!(back.dispatch.lane_layout, LaneLayout::Panes);
         config.agrees_with(&rendered).unwrap();
     }
 
-    /// Now that `visible_lanes = 5` is always written, the retired
+    /// Now that `visible_lanes = 3` is always written, the retired
     /// `keep_finished_lanes` must still lose its place in the same rewrite:
     /// a file holding only the old key renders `visible_lanes = "all"` and no
     /// longer names it.

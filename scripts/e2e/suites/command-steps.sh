@@ -737,8 +737,8 @@ rm -f "$NO_SETSID_RELEASE"
 add_command_step default hold \
   "for _ in \$(seq 1 1200); do [ -e \"$NO_SETSID_RELEASE\" ] && break; sleep 0.1; done" \
   review
-must "marking it headless: true" \
-  sed -i 's|^    background: true$|    background: true\n    headless: true|' \
+must "marking it hide: true" \
+  sed -i 's|^    background: true$|    background: true\n    hide: true|' \
   .spoolway/pipelines/default.yml
 works "a headless background command step checks out" "$SPOOLWAY" pipeline check
 
@@ -842,10 +842,11 @@ else bad "a command step is not confined to its worktree (at \`$(stage_of unconf
 works "and it really did write where no lane could" test -f "$OUTSIDE"
 
 # ------------------------------------------------------------------ a pane, or none
-# With `dispatch.hide_commands` set to `false`, a command step with no
-# `headless:` runs in a pane of its own, under a real multiplexer. By default,
-# and with `headless: true`, it runs silent and detached. Neither half is
-# provable against the headless backend the rest of this suite runs on — a
+# By default, and with `dispatch.hide_commands` set to `false`, a command step
+# with no `hide:` runs in a pane of its own, under a real multiplexer. With
+# `hide_commands = true`, and with `hide: true`, it runs silent and detached.
+# With `hide_commands = true`, a step with `hide: false` still gets its pane.
+# None of the three is provable against the headless backend the rest of this suite runs on — a
 # pane is the one thing only a real pane can be asked whether it opened — so
 # this switches to `herdr`, against `scripts/e2e/herdr-stub.sh`, for as long
 # as the case needs. Against the
@@ -860,9 +861,8 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-# Commands are hidden by default, which opens no pane; the cases below are
-# about the pane a shown one gets.
-must "commands shown" "$SPOOLWAY" config set dispatch.hide_commands false
+# Commands are shown by default, which opens a pane; the cases below are about
+# that pane, so they read the default and set nothing.
 
 # The pane gate itself, proven end to end rather than only by the unit tests
 # in src/commands/dispatch.rs — those already know the answer they are
@@ -939,7 +939,7 @@ must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
 # could already carry it: a false pass would mean nothing.
 export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 
-# The visible half: no `headless:` key, so the command gets a pane of its
+# The visible half: no `hide:` key, so the command gets a pane of its
 # own, and it stands until this suite lets it go.
 #
 # A made window, not a caught one — the same release-file shape the herdr
@@ -1012,9 +1012,9 @@ for _ in $(seq 1 1200); do
   sleep 0.1
 done
 if [ -n "$RECORDED" ]; then
-  ok "a command step with no headless: key runs in a pane of its own"
+  ok "a command step with no hide: key runs in a pane of its own"
 else
-  bad "a command step with no headless: key runs in a pane of its own"
+  bad "a command step with no hide: key runs in a pane of its own"
 fi
 
 # The task's own tab already names it, so the pane inside it
@@ -1103,7 +1103,7 @@ else
   ok "a shown command's pane is closed once its task is done"
 fi
 
-# The hidden half: the same shape, with `headless: true` added — today's
+# The hidden half: the same shape, with `hide: true` added — a
 # silent, detached run, and no pane ever asked for. Held open by a release
 # file of its own for the same reason the visible half is: its log is read
 # while it runs, and the archive reclaims that log the moment the one step
@@ -1116,24 +1116,24 @@ fi
 HIDDEN_RELEASE="$LIVE/hidden.release"
 rm -f "$HIDDEN_RELEASE"
 sed "s|@RELEASE@|$HIDDEN_RELEASE|" > .spoolway/pipelines/panehidden.yml <<'YML'
-description: One headless command step, for whether it ever opens a pane.
+description: One hidden command step, for whether it ever opens a pane.
 
 steps:
   - id: hidden
     description: Run detached, with no pane, until the suite has read its log.
     run: 'echo hidden-command-marker; for _ in $(seq 1 1200); do [ -e "@RELEASE@" ] && break; sleep 0.1; done'
-    headless: true
+    hide: true
     on_pass: done
     on_fail: blocked
 YML
-works "a pipeline naming headless: true checks out" "$SPOOLWAY" pipeline check
-says "and show marks it" "hidden     command   waits headless timeout=30m" \
+works "a pipeline naming hide: true checks out" "$SPOOLWAY" pipeline check
+says "and show marks it" "hidden     command   waits hide=true timeout=30m" \
   "$SPOOLWAY" pipeline show
 
 dispatcher_restart
 task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: hiddenc" \
   "pipeline: panehidden"
-must "a task through a headless command step" \
+must "a task through a hide: true command step" \
   "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
 # Read while the step is still held, ahead of the archive that reclaims
 # this log.
@@ -1141,13 +1141,150 @@ records "and its output is on the record just the same" "hidden-command-marker" 
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
 
 touch "$HIDDEN_RELEASE"
-if drive hiddenc gone 180; then ok "a headless command step still routes on its exit code"
-else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
+if drive hiddenc gone 180; then ok "a hide: true command step still routes on its exit code"
+else bad "a hide: true command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
 if [ -f "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.pane" ]; then
-  bad "headless: true never opened a pane at all"
+  bad "hide: true never opened a pane at all"
 else
-  ok "headless: true never opened a pane at all"
+  ok "hide: true never opened a pane at all"
 fi
+
+# The workspace half: a task opens its herdr workspace at the first step that
+# shows a pane, not before. A hidden command first, held by a release file,
+# leaves the double with no workspace and no pane while it runs. The agent step
+# after it then opens the workspace and runs in its first pane, with no second
+# pane split beside it.
+LAZY_RELEASE="$LIVE/lazy.release"
+rm -f "$LAZY_RELEASE"
+LAZY_MODEL=$(awk '/id: implement/ {found=1} found && /model:/ {print $2; exit}' \
+  .spoolway/pipelines/default.yml)
+sed -e "s|@RELEASE@|$LAZY_RELEASE|" -e "s|@MODEL@|$LAZY_MODEL|" \
+  > .spoolway/pipelines/panelazy.yml <<'YML'
+description: A hidden command, then an agent step, for when the workspace opens.
+
+steps:
+  - id: quiet
+    description: Run detached until the suite has looked at the double.
+    run: 'for _ in $(seq 1 1200); do [ -e "@RELEASE@" ] && break; sleep 0.1; done'
+    timeout: 120s
+    hide: true
+    on_pass: watched
+    on_fail: blocked
+  - id: watched
+    description: The first step that shows a pane.
+    agent: pi
+    prompt: builder
+    model: @MODEL@
+    on_pass: done
+YML
+works "a hidden command followed by an agent step checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/lazy.md" lazy "$BODY" "group: lazy" "pipeline: panelazy"
+must "a task whose first step is hidden" "$SPOOLWAY" queue add --from "$LIVE/lazy.md"
+lazy_worktree_cut() { [ -n "$(worktree_of lazy)" ]; }
+if poll_until 60 lazy_worktree_cut; then ok "a hidden first step still has a worktree to run in"
+else bad "a hidden first step still has a worktree to run in"; fi
+if [ -z "$(workspace_of lazy)" ] && [ -z "$(tab_of lazy)" ] \
+  && ! grep -q '^spare_pane:' "$SPOOLWAY_PROJECT_HOME/queue/lazy.md"; then
+  ok "and the task records no workspace, tab or spare pane"
+else
+  bad "and the task records no workspace, tab or spare pane"
+  sed 's/^/        /' "$SPOOLWAY_PROJECT_HOME/queue/lazy.md"
+fi
+LAZY_WORKTREE=$(worktree_of lazy)
+if ! awk -F'\t' -v c="$LAZY_WORKTREE" '$3 == c' "$HSTATE/workspaces" | grep -q .; then
+  ok "herdr holds no workspace on the task's worktree while the hidden step runs"
+else
+  bad "herdr holds no workspace on the task's worktree while the hidden step runs"
+  sed 's/^/        /' "$HSTATE/workspaces"
+fi
+
+touch "$LAZY_RELEASE"
+lazy_agent_started() { [ "$(stage_of lazy)" = watched ] && [ -n "$(workspace_of lazy)" ] \
+  && [ -s "$HSTATE/agents" ]; }
+if poll_until 90 lazy_agent_started; then ok "the workspace opens when the agent step starts"
+else bad "the workspace opens when the agent step starts (at \`$(stage_of lazy)\`)"; fi
+LAZY_WORKSPACE=$(workspace_of lazy)
+if [ "$(awk -F'\t' -v w="$LAZY_WORKSPACE" '$3 == w' "$HSTATE/panes" | wc -l | tr -d ' ')" -eq 1 ]; then
+  ok "and the agent runs in the workspace's first pane, with none split beside it"
+else
+  bad "and the agent runs in the workspace's first pane, with none split beside it"
+  sed 's/^/        /' "$HSTATE/panes" "$HSTATE/agents"
+fi
+must "the agent step reports" env SPOOLWAY_TASK=lazy SPOOLWAY_STEP=watched \
+  "$SPOOLWAY" report --pass -m "done with watched"
+if drive lazy gone 120; then ok "the task finishes and is archived"
+else bad "the task finishes and is archived (at \`$(stage_of lazy)\`)"; fi
+
+# The override half: commands are hidden for the project, and one step says
+# `hide: false`. That step gets a pane of its own, and the step after it, with
+# no `hide:` key, follows the project and opens none. Each is held by a release
+# file for the reason the visible half is: the pane file and the log are read
+# while the step runs, and the archive reclaims them.
+must "commands hidden" "$SPOOLWAY" config set dispatch.hide_commands true
+OVERRIDE_RELEASE="$LIVE/override.release"
+FOLLOW_RELEASE="$LIVE/follow.release"
+rm -f "$OVERRIDE_RELEASE" "$FOLLOW_RELEASE"
+sed -e "s|@RELEASE@|$OVERRIDE_RELEASE|" -e "s|@FOLLOW_RELEASE@|$FOLLOW_RELEASE|" \
+  > .spoolway/pipelines/paneoverride.yml <<'YML'
+description: One step that shows its command and one that follows the project, with commands hidden.
+
+steps:
+  - id: shown
+    description: Stand in a pane of its own although the project hides commands.
+    run: 'echo shown-override-marker; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    hide: false
+    on_pass: follows
+    on_fail: blocked
+  - id: follows
+    description: Say nothing about hide, so the project's setting hides it.
+    run: 'echo follows-project-marker; while [ ! -e "@FOLLOW_RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline naming hide: false checks out" "$SPOOLWAY" pipeline check
+says "and show marks it" "waits hide=false" \
+  "$SPOOLWAY" pipeline show
+
+dispatcher_restart
+task_doc "$LIVE/override.md" override "$BODY" "group: override" \
+  "pipeline: paneoverride"
+must "a task through a hide: false step under hidden commands" \
+  "$SPOOLWAY" queue add --from "$LIVE/override.md"
+OVERRIDE_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/override · shown.pane"
+OVERRIDE_RECORDED=""
+for _ in $(seq 1 1200); do
+  OVERRIDE_RECORDED=$(cat "$OVERRIDE_PANE_FILE" 2>/dev/null || true)
+  if [ -n "$OVERRIDE_RECORDED" ] && grep -q "^$OVERRIDE_RECORDED	" "$HSTATE/panes"; then
+    break
+  fi
+  OVERRIDE_RECORDED=""
+  sleep 0.1
+done
+if [ -n "$OVERRIDE_RECORDED" ]; then
+  ok "hide: false runs in a pane of its own while the project hides commands"
+else
+  bad "hide: false runs in a pane of its own while the project hides commands"
+fi
+# The pane file is written only after the pane exists, so a pane the next step
+# wrongly opened would show in the stub's own list first. Count it before and after.
+PANES_BEFORE=$(wc -l < "$HSTATE/panes")
+touch "$OVERRIDE_RELEASE"
+records "and the step after it follows the project, on the record" "follows-project-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/override · follows.log" override
+if [ -f "$SPOOLWAY_PROJECT_HOME/commands/override · follows.pane" ] \
+  || [ "$(wc -l < "$HSTATE/panes")" -gt "$PANES_BEFORE" ]; then
+  bad "a step with no hide: key opens no pane while the project hides commands"
+else
+  ok "a step with no hide: key opens no pane while the project hides commands"
+fi
+touch "$FOLLOW_RELEASE"
+if drive override gone 180; then ok "the task carries on through both steps"
+else bad "the task carries on through both steps (at \`$(stage_of override)\`)"; fi
+must "commands shown again" "$SPOOLWAY" config set dispatch.hide_commands false
 
 # A failing, shown command keeps its pane when the task leaves the step for
 # `blocked`, so the output of the failure is still on screen.
@@ -1197,7 +1334,7 @@ unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
-  .spoolway/pipelines/paneflaky.yml
+  .spoolway/pipelines/paneoverride.yml .spoolway/pipelines/paneflaky.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to
@@ -1403,8 +1540,8 @@ EXEC_RAN="$LIVE/exec-ran.txt"
 rm -f "$EXEC_RAN"
 add_command_step default execed \
   "exec sh -c 'echo ran >> $EXEC_RAN; exit 0'" review implement
-must "marking it headless: true" \
-  sed -i 's|^    run: exec sh .*$|&\n    headless: true|' .spoolway/pipelines/default.yml
+must "marking it hide: true" \
+  sed -i 's|^    run: exec sh .*$|&\n    hide: true|' .spoolway/pipelines/default.yml
 works "a command step whose line starts with exec checks out" "$SPOOLWAY" pipeline check
 
 task_doc "$LIVE/execed.md" execed "$BODY" "group: execed"
@@ -1439,7 +1576,7 @@ rm -f "$HELD_GATE" "$HELD_GO" "$HELD_RAN"
   printf '    description: Fails while its gate file is missing, and passes once it is there.\n'
   printf '    run: echo ran >> %s; while [ ! -f %s ]; do sleep 0.2; done; test -f %s\n' \
     "$HELD_RAN" "$HELD_GO" "$HELD_GATE"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: review\n    on_fail: blocked\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: held-c/" .spoolway/pipelines/default.yml
@@ -1491,12 +1628,12 @@ rm -f "$VISIT_MARK" "$VISIT_RAN"
   printf '\n  - id: visit-c\n'
   printf '    description: Counts its own runs, once per visit.\n'
   printf '    run: echo ran >> %s\n' "$VISIT_RAN"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: visit-d\n    on_fail: implement\n'
   printf '\n  - id: visit-d\n'
   printf '    description: Fails the first time and passes after that.\n'
   printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; exit 1\n' "$VISIT_MARK" "$VISIT_MARK"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: review\n    on_fail: implement\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: visit-c/" .spoolway/pipelines/default.yml

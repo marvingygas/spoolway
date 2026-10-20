@@ -665,7 +665,7 @@ impl Runs {
     /// not what keeps a revisit from routing on an old code. A background
     /// step's leftover code is never routed, so it is not forgotten here: the
     /// dispatcher rereads it on every pass to bank the run, and to close its
-    /// pane when commands are hidden, and cleanup clears it with the task.
+    /// pane when its step hides its command, and cleanup clears it with the task.
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.

@@ -46,7 +46,7 @@ struct StepShowJson {
     run: Option<String>,
     timeout_seconds: Option<u64>,
     background: bool,
-    headless: bool,
+    hide: Option<bool>,
     last: bool,
     first: bool,
     serial: bool,
@@ -110,7 +110,7 @@ fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
                             .is_some()
                             .then(|| step.command_timeout().as_secs()),
                         background: step.background,
-                        headless: step.headless,
+                        hide: step.hide,
                         last: step.last,
                         first: step.first,
                         serial: step.serial,
@@ -232,7 +232,7 @@ const STEP_KEYS: &[&str] = &[
     "run",
     "timeout",
     "background",
-    "headless",
+    "hide",
     "last",
     "first",
     "serial",
@@ -240,9 +240,10 @@ const STEP_KEYS: &[&str] = &[
 
 /// Keys a file may still name and be refused by name for: two retired
 /// spellings of `loop:`, the retired `cleanup:` and the retired
-/// `on_loop_max:`, and the retired `end:`, kept on [`Step`] only so a file
-/// still naming them gets a message pointing at the replacement — or, for
-/// `cleanup:` and `on_loop_max:`, saying why there is none — rather than serde's own
+/// `on_loop_max:`, the retired `end:`, and the retired `headless:`, kept on
+/// [`Step`] only so a file still naming them gets a message pointing at the
+/// replacement — or, for `cleanup:` and `on_loop_max:`, saying why there is
+/// none — rather than serde's own
 /// "unknown field", and three struct fields that answer a fact about where a
 /// `Pipeline` came from rather than something a file could ever set —
 /// [`Pipeline::name`], because the file name is the name;
@@ -259,6 +260,7 @@ const REFUSED_KEYS: &[&str] = &[
     "cleanup",
     "on_loop_max",
     "end",
+    "headless",
 ];
 
 /// One sentence per key a pipeline file may actually set — [`PIPELINE_KEYS`]
@@ -376,9 +378,11 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          `on_fail`, since nothing is left to route on once the task has gone.",
     ),
     (
-        "headless",
-        "Run the command detached, with no pane. Absent, a command step gets a \
-         pane of its own under the herdr backend.",
+        "hide",
+        "`true` runs the command detached, with no pane. `false` gives it a \
+         pane of its own under the herdr backend, even while \
+         `dispatch.hide_commands` hides commands. Absent follows \
+         `dispatch.hide_commands`.",
     ),
     (
         "last",
@@ -623,7 +627,7 @@ fn template() -> String {
          \x20\x20\x20\x20run: ./scripts/check.sh\n\
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
          \x20\x20\x20\x20# background: true         let the task move on; its exit never moves it\n\
-         \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
+         \x20\x20\x20\x20# hide: false                run in a pane even when dispatch.hide_commands hides commands\n\
          \x20\x20\x20\x20# last: true                only the highest task of a chain with a last step runs it\n\
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
@@ -717,11 +721,11 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
                 true => print!(" background"),
                 false => print!(" waits"),
             }
-            // Said only when true, like `last-of-chain` below: a pane is the
-            // default now, so a reader only needs telling about the step that
-            // opted out of one.
-            if step.headless {
-                print!(" headless");
+            // Said only when the step sets it, like `last-of-chain` below: a
+            // step that follows `dispatch.hide_commands` has nothing to
+            // tell.
+            if let Some(hide) = step.hide {
+                print!(" hide={hide}");
             }
             // Always, and resolved rather than only when written: a reader
             // asking what stops this hanging is asking about the default as
@@ -1228,6 +1232,15 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     let (step_id, key) = step_key
         .split_once('.')
         .with_context(|| format!("`--set {set}` — expected `<step>.<key>=<value>`"))?;
+    // Caught ahead of the probe below, whose refusal is the one a *written*
+    // patch gets at load and so tells the person to run `sync`. Nothing has
+    // been written here, so `sync` would have nothing to rename.
+    if key == "headless" {
+        bail!(
+            "`--set {set}` — `headless:` is no longer a step key; use `--set \
+             {step_id}.hide={raw_value}` instead"
+        );
+    }
 
     let tracked = Pipelines::load_tracked(&repo.checkout, &repo.config)
         .with_context(|| format!("reading the tracked pipeline `{name}`"))?;
@@ -4950,6 +4963,24 @@ mod tests {
             let message = format!("{err:#}");
             assert!(message.contains("`on_loop_max:`"), "{message}");
             assert!(message.contains("`blocked`"), "{message}");
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "a refused `--set` must leave no patch behind"
+            );
+        });
+    }
+
+    /// `--set <step>.headless=…` writes nothing, so `sync` has nothing to
+    /// rename: the refusal points at `--set <step>.hide=…` instead.
+    #[test]
+    fn pipeline_override_refuses_headless_and_names_hide_not_sync() {
+        with_repo_and_pipeline("retired-headless", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "demo", "implement.headless=true").unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("--set implement.hide=true"), "{message}");
+            assert!(!message.contains("spoolway sync"), "{message}");
             assert!(
                 crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
                     .unwrap()

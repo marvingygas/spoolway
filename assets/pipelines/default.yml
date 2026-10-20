@@ -44,8 +44,11 @@
 #                                        Absent: 30m.
 #   background        true               The task moves on; its exit moves nothing.
 #                     false <default>    The task waits for the command.
-#   headless          true               The command runs detached, with no pane.
-#                     false <default>    It runs in a pane of its own.
+#   hide              true               The command runs detached, with no pane.
+#                     false              It runs in a pane of its own, even
+#                                        when `dispatch.hide_commands` hides
+#                                        commands.
+#                                        Absent: follows `dispatch.hide_commands`.
 #   last              true               Only the last task of a chain runs this
 #                                        step; the rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
