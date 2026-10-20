@@ -218,6 +218,60 @@ reading the file whole.
    pull request for, names a pull request from a fork (`isCrossRepository` is true — its
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
+   **Before step 3 writes anything, confirm the whole breakdown when a pick changed.**
+   Ask one confirm ballot after the last task ballot when any pick was not the recommended
+   one. That is a non-recommended option on the group ballot or on any task ballot, or a split
+   typed into Other. When every pick was the recommended one, skip it and go straight to
+   step 3.
+
+   Print it and end the turn there, the same way the task ballot does. Open it with `Write this breakdown? You picked <n> tasks for
+   <group>, not the recommended <m>.` Name each pick that was not recommended. Then draw
+   every group on one line with its `base` or `after` part, and every task under it on one
+   row with its size and pipeline. Number the tasks once across the whole breakdown, not per
+   group. Draw no sentences:
+
+   ```
+   1  cart-core                    base  main
+      1  cart-totals      medium   impl
+      2  cart-discounts   small    impl_tdd
+
+   2  cart-empty                   base  main
+      3  cart-empty       small    bugfix
+   ```
+
+   Print the two answers under the breakdown, each with its description. Then say the
+   person answers with one of them:
+
+   ```
+   Write them     the tasks are written as drawn
+   Pick again     back to the split ballot
+   ```
+   `Write them` goes on to step 3. `Pick again` asks the group ballot again, and every ballot
+   after it.
+
+   **A note on the confirm ballot re-routes a task or moves a chain's base.** The person may
+   add a note after their answer. A note holds parts, comma-separated, such as
+   `2 to impl, 3 from #412`. A part is `<task> to <pipeline>` or `<task> from <branch or
+   #pr>`. `<task>` is a task's number or id from this ballot. A `to` part sets that task's
+   pipeline. A `from` part is checked and resolved the way the task ballot's note is, and is
+   refused for the same reasons.
+
+   Check every `to` part against the pipeline names in step 1's `spoolway task contract`.
+   When a `to` part names a pipeline that is not there, bring the confirm ballot back
+   unchanged. Open it with the notes line, such as `notes: 2 to bugfx`. Then say ``No
+   pipeline is named `bugfx`. This project has:`` and list every pipeline name. End with
+   `Pick again, with a note naming one of them.`
+
+   When a part names a task that is not on the ballot, bring the confirm ballot back
+   unchanged, with that problem named.
+
+   When every part is accepted, draw the confirm ballot again with the change in place.
+   Open it with the notes line, such as `notes: 2 to impl, 3 from #412`. Draw the same rows,
+   with each re-routed task's new pipeline and each moved chain's new `base`. Print it again and end the turn.
+   An answer with no note stands. A `to` part may move a group's last task onto a pipeline
+   with no `last_of_chain` step. Then say so on the redrawn ballot, the way step 4 says its
+   own swap.
+
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
    step 1's contract already printed for this task's own pipeline — same headings, same order
