@@ -224,6 +224,9 @@ It refuses a prompt that names a `spoolway` command or flag this release does no
 warns, without refusing, on a prompt that names `spoolway report` or one of its flags — the
 report contract spoolway already injects at launch.
 
+A command that ends a sentence passes. In `Report with spoolway report.` the check reads the
+command as `spoolway report`. The same holds for a closing `:`, `!` or `?`.
+
 The `spoolway-config` skill writes the prompt and the step together. To turn a whole workflow
 into steps and prompts, see
 [Converting a workflow you already run](pipelines.md#converting-a-workflow-you-already-run).

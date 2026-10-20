@@ -1106,10 +1106,23 @@ reported. It also fails, naming the task and the gate, when the task's `gate_at:
 pipeline does not have, including a reserved word such as `done`. A task at `done` is not
 reported. Pending tasks and routines are not read.
 
+It also fails, naming the task, the step and the pipeline, when a task's `skip:` names a step its
+pipeline does not have.
+
 ```
   problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
     Change `gate_at:` in the task to a step `default` has.
 ```
+
+Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
+another task in the queue is then a warning, and the check still exits 0. A task that names a
+pipeline the branch lacks reads:
+
+```
+  warning: live task `l2` names pipeline `newp`, which this branch does not have yet
+```
+
+Run anywhere else, the same finding is a failure and reads `which this project no longer defines`.
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
