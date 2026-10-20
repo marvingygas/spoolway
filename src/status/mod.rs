@@ -4648,15 +4648,13 @@ fn build_rows(
                     .map(|gate_at| crate::commands::stale_gate_line(task, pipeline, gate_at));
                 match (stale, hook, dependency) {
                     (Some(stale), _, _) => (State::Queued, stale, false),
-                    (None, hook, dependency) => match (hook, dependency) {
-                        (Some(hook), _) => (State::Queued, hook, false),
-                        (None, Some(d)) => (State::Queued, d, false),
-                        (None, None) => (
-                            State::Queued,
-                            "waiting for a worker slot to free up".to_string(),
-                            false,
-                        ),
-                    },
+                    (None, Some(hook), _) => (State::Queued, hook, false),
+                    (None, None, Some(d)) => (State::Queued, d, false),
+                    (None, None, None) => (
+                        State::Queued,
+                        "waiting for a worker slot to free up".to_string(),
+                        false,
+                    ),
                 }
             }
             _ if parked_on_blocked => {
