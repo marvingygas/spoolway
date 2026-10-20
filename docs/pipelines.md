@@ -94,7 +94,7 @@ steps:
 | `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
-| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. `headless: true` is the older name for `hide: true`, and a step may not carry both. |
+| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. The older `headless:` key no longer loads; `spoolway sync` renames it to `hide:`. See [Background and headless](#background-and-headless). |
 | `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
@@ -415,6 +415,15 @@ A command step runs detached with no pane by default. Its output goes to the log
 instead. The `hide:` key overrides that project setting for one step in either direction.
 `hide: false` gives the step a pane while the project hides commands. `hide: true` keeps the step
 detached while the project shows them. Without `hide:`, the step follows `dispatch.hide_commands`.
+
+The older `headless:` key no longer loads. A step that still carries it, with any value, is refused
+by name, and the message says to run `spoolway sync` or to write `hide: true` in its place.
+`spoolway sync` renames the key to `hide:` on every step in the checkout's pipeline files and in
+the private patches under `overrides/pipelines/`, and prints a `wrote` line for each file with a
+note naming the pipeline and its steps. It changes no other line. This is the one edit `sync` makes
+to a step. A step that carries both `headless:` and `hide:` cannot be renamed without losing one
+of them, so `sync` refuses that file, names the step and leaves the file as it was. Keep only
+`hide:` there and run `sync` again.
 
 A shown command behaves the same whichever setting showed it. The pane stays open after the
 command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit

@@ -47,7 +47,6 @@ struct StepShowJson {
     timeout_seconds: Option<u64>,
     background: bool,
     hide: Option<bool>,
-    headless: bool,
     last: bool,
     first: bool,
     serial: bool,
@@ -112,7 +111,6 @@ fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
                             .then(|| step.command_timeout().as_secs()),
                         background: step.background,
                         hide: step.hide,
-                        headless: step.headless.unwrap_or(false),
                         last: step.last,
                         first: step.first,
                         serial: step.serial,
@@ -235,7 +233,6 @@ const STEP_KEYS: &[&str] = &[
     "timeout",
     "background",
     "hide",
-    "headless",
     "last",
     "first",
     "serial",
@@ -243,9 +240,10 @@ const STEP_KEYS: &[&str] = &[
 
 /// Keys a file may still name and be refused by name for: two retired
 /// spellings of `loop:`, the retired `cleanup:` and the retired
-/// `on_loop_max:`, and the retired `end:`, kept on [`Step`] only so a file
-/// still naming them gets a message pointing at the replacement — or, for
-/// `cleanup:` and `on_loop_max:`, saying why there is none — rather than serde's own
+/// `on_loop_max:`, the retired `end:`, and the retired `headless:`, kept on
+/// [`Step`] only so a file still naming them gets a message pointing at the
+/// replacement — or, for `cleanup:` and `on_loop_max:`, saying why there is
+/// none — rather than serde's own
 /// "unknown field", and three struct fields that answer a fact about where a
 /// `Pipeline` came from rather than something a file could ever set —
 /// [`Pipeline::name`], because the file name is the name;
@@ -262,6 +260,7 @@ const REFUSED_KEYS: &[&str] = &[
     "cleanup",
     "on_loop_max",
     "end",
+    "headless",
 ];
 
 /// One sentence per key a pipeline file may actually set — [`PIPELINE_KEYS`]
@@ -384,11 +383,6 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          pane of its own under the herdr backend, even while \
          `dispatch.hide_commands` hides commands. Absent follows \
          `dispatch.hide_commands`.",
-    ),
-    (
-        "headless",
-        "The retired name of `hide: true`. Still read, and refused on a step \
-         that also carries `hide:`.",
     ),
     (
         "last",
@@ -634,7 +628,6 @@ fn template() -> String {
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
          \x20\x20\x20\x20# background: true         let the task move on; its exit never moves it\n\
          \x20\x20\x20\x20# hide: false                run in a pane even when dispatch.hide_commands hides commands\n\
-         \x20\x20\x20\x20# headless: true            retired: the old name of `hide: true`\n\
          \x20\x20\x20\x20# last: true                only the highest task of a chain with a last step runs it\n\
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
@@ -730,11 +723,9 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
             }
             // Said only when the step sets it, like `last-of-chain` below: a
             // step that follows `dispatch.hide_commands` has nothing to
-            // tell. The retired `headless: true` reads as `hide=true`.
-            match step.hide {
-                Some(hide) => print!(" hide={hide}"),
-                None if step.headless == Some(true) => print!(" hide=true"),
-                None => {}
+            // tell.
+            if let Some(hide) = step.hide {
+                print!(" hide={hide}");
             }
             // Always, and resolved rather than only when written: a reader
             // asking what stops this hanging is asking about the default as

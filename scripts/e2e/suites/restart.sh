@@ -160,7 +160,7 @@ steps:
   - id: adopted
     description: Counts its own runs, outside the worktree, and takes a few seconds.
     run: echo ran >> $ADOPT_COUNT; sleep 4
-    headless: true
+    hide: true
     on_pass: done
     on_fail: blocked
 YML
@@ -419,7 +419,7 @@ steps:
   - id: s
     description: Records its pid, then outlives the dispatcher.
     run: echo \$\$ > $KC_PIDFILE; exec sleep 120
-    headless: true
+    hide: true
     on_pass: done
     on_fail: blocked
 YML

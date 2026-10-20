@@ -49,7 +49,6 @@
 #                                        when `dispatch.hide_commands` hides
 #                                        commands.
 #                                        Absent: follows `dispatch.hide_commands`.
-#   headless          true               Retired: the old name of `hide: true`.
 #   last              true               Only the last task of a chain runs this
 #                                        step; the rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.

@@ -280,7 +280,7 @@ stack_handover() {
   - id: handover
     description: Open this task's pull request with `spoolway stack`.
     run: spoolway stack
-    headless: true
+    hide: true
     on_pass: done
 TAIL
   done

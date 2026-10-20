@@ -385,15 +385,15 @@ pub(crate) fn apply_pipeline_patch(
 /// `--set` against a cloned step before writing anything: refusing by the
 /// exact rule the merge itself would apply, rather than a second copy of it.
 ///
-/// Three keys are refused before the round-trip rather than by it. `id:` would
-/// rename the step, a change to the graph rather than a value on one. Next is
-/// `on_loop_max:`, retired, which the round-trip would otherwise swallow
-/// without a word: the field is `skip_serializing`, so the step that comes
-/// back out has lost it — a key accepted here, written into
+/// Four keys are refused before the round-trip rather than by it. `id:` would
+/// rename the step, a change to the graph rather than a value on one. Next are
+/// `on_loop_max:` and `headless:`, retired, which the round-trip would
+/// otherwise swallow without a word: each field is `skip_serializing`, so the
+/// step that comes back out has lost it — a key accepted here, written into
 /// `overrides/pipelines/<name>.yml`, and then silently doing nothing every
 /// time the pipelines are loaded after. `pipeline::refuse_retired_step_keys` is the
 /// same refusal for a tracked file, where the key survives long enough to be
-/// named; here it has to be caught before serde sees it. The third is
+/// named; here it has to be caught before serde sees it. The last is
 /// `description:` on `blocked`: that step's description is fixed, and a
 /// pipeline that declares one fails to load as a whole, so a patch setting it
 /// must be refused here rather than break every load after it.
@@ -414,6 +414,12 @@ pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) 
         bail!(
             "sets `on_loop_max:` — a spent loop budget now always parks on `blocked`, so the \
              key no longer chooses anything; drop it"
+        );
+    }
+    if fields.contains_key("headless") {
+        bail!(
+            "sets `headless:` — the key is now `hide:`; run `spoolway sync` to rename it, or \
+             write `hide: true` in its place"
         );
     }
     let mut value = serde_norway::to_value(&*step).context("serialising step for override")?;

@@ -592,11 +592,17 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hide: Option<bool>,
 
-    /// The retired name of `hide: true`, still read so a pipeline written
-    /// before `hide:` loads and behaves as it did. A step may not carry both
-    /// keys, whatever value `headless:` has: it is an `Option` so that a
-    /// written `headless: false` is told apart from an absent key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The retired name of `hide: true`, kept only so that a file still
+    /// naming it is refused by [`refuse_retired_step_keys`], which knows the
+    /// pipeline and the step the key is on, and `spoolway sync` can rename it.
+    /// An `Option` so that a written `headless: false` is refused too, and is
+    /// not mistaken for an absent key.
+    ///
+    /// `skip_serializing` for the reason [`Step::on_loop_max`] has it:
+    /// [`crate::overrides::apply_step_patch`] refuses the key on the override
+    /// layer by name, because the round trip through serde would otherwise
+    /// drop it unmentioned.
+    #[serde(default, skip_serializing)]
     pub headless: Option<bool>,
 
     /// Run this step only on the last task of a chain. Every other task walks
@@ -918,12 +924,10 @@ fn is_default_pipeline_version(value: &str) -> bool {
 
 impl Step {
     /// Whether this command step runs detached, with no pane. The step's own
-    /// `hide:` wins in either direction; the retired `headless: true` counts
-    /// as `hide: true`; otherwise the project's `dispatch.hide_commands`
-    /// decides.
+    /// The step's own `hide:` wins in either direction; otherwise the
+    /// project's `dispatch.hide_commands` decides.
     pub fn hides_command(&self, hide_commands: bool) -> bool {
-        self.hide
-            .unwrap_or(self.headless == Some(true) || hide_commands)
+        self.hide.unwrap_or(hide_commands)
     }
 
     /// What this step is, read off the keys it carries.
@@ -1105,7 +1109,7 @@ impl Pipeline {
 }
 
 // ---------------------------------------------------------------------------
-// The seven retired shapes' own messages, each written once: `validate` and
+// The eight retired shapes' own messages, each written once: `validate` and
 // `refuse_retired_step_keys` bail on the first with these, and
 // `Pipeline::retired_shape_problems` collects every one — the same wording
 // either way, since `scripts/e2e/suites/upgrade.sh` greps these exact
@@ -1171,6 +1175,15 @@ fn background_on_fail_message(step_id: &str) -> String {
          is a sidecar, and its exit never moves the task.\n  \
          keep it a sidecar:  delete `on_fail:`\n  \
          make it a check:    delete `background:`, and the step blocks"
+    )
+}
+
+/// A step still declaring the retired `headless:`, the old spelling of
+/// `hide: true`. `scripts/e2e/suites/upgrade.sh` greps this wording too.
+fn headless_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` declares `headless:` — the key is now `hide:`; run `spoolway sync` \
+         to rename it, or write `hide: true` in its place."
     )
 }
 
@@ -1487,18 +1500,6 @@ impl Pipeline {
                 }
             }
 
-            // `headless:` is the old spelling of `hide: true`. Both on one step
-            // could say opposite things, and the load cannot tell which the
-            // person meant. Refused whatever `headless:` says, since
-            // `headless: false` beside `hide: true` is such a pair too.
-            if step.headless.is_some() && step.hide.is_some() {
-                bail!(
-                    "step `{}` declares both `headless:` and `hide:` — they set the same \
-                     thing, and the two could disagree; keep only `hide:`",
-                    step.id
-                );
-            }
-
             // Everything below is a lane's, and a command step starts none.
             if kind != StepKind::Agent {
                 for (key, set) in [
@@ -1532,13 +1533,6 @@ impl Pipeline {
                     bail!(
                         "step `{}` declares `timeout:` but runs no command — only a `run:` is \
                          bounded that way",
-                        step.id
-                    );
-                }
-                if step.headless == Some(true) {
-                    bail!(
-                        "step `{}` declares `headless:` but runs no command — only a `run:` \
-                         has a pane to turn off",
                         step.id
                     );
                 }
@@ -1653,15 +1647,15 @@ impl Pipeline {
     /// Every occurrence of the six retired step shapes this pipeline's own
     /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step,
     /// `loop:` written as the old per-route map, `loop: 0`, which 0.7 ran
-    /// as no limit, `end: true`, and `on_pass: blocked` — each named by its step,
-    /// collected without stopping at the first the way [`Self::validate`]
-    /// must.
+    /// as no limit, `end: true`, `on_pass: blocked` and `headless:` — each
+    /// named by its step, collected without stopping at the first the way
+    /// [`Self::validate`] must.
     ///
     /// For `pipeline check` and `doctor`'s `pipelines load` row, which want
     /// the whole list in one pass rather than one refusal per run, and for
     /// `crate::sync`, which refuses a file carrying one rather than report an
     /// upgrade done over a pipeline that no longer loads. Scoped to
-    /// exactly these six shapes rather than
+    /// exactly these shapes rather than
     /// every way `validate` can refuse a pipeline: the rest of `validate`'s
     /// checks stay bail-at-the-first, which is what every other caller
     /// wants from a pipeline that genuinely cannot run.
@@ -1693,6 +1687,9 @@ impl Pipeline {
             }
             if step.background && step.on_fail.is_some() {
                 problems.push(background_on_fail_message(&step.id));
+            }
+            if step.headless.is_some() {
+                problems.push(headless_message(&step.id));
             }
         }
         problems
@@ -2036,6 +2033,11 @@ fn refuse_retired_step_keys(pipeline: &Pipeline) -> Result<()> {
     for step in &pipeline.steps {
         if step.on_loop_max.is_some() {
             bail!("{}: {}", pipeline.name, on_loop_max_message(&step.id));
+        }
+        // Any value: `headless: false` was the same key, and `sync` renames
+        // it to `hide: false`.
+        if step.headless.is_some() {
+            bail!("{}: {}", pipeline.name, headless_message(&step.id));
         }
     }
     Ok(())
@@ -2564,7 +2566,7 @@ impl Pipelines {
                 "id: handover\n\
                  description: Open this task's pull request with `spoolway stack`.\n\
                  run: spoolway stack\n\
-                 headless: true\n\
+                 hide: true\n\
                  on_pass: done\n",
             )
             .expect("the fixture's command step must parse");
@@ -3252,7 +3254,6 @@ mod tests {
             "timeout",
             "background",
             "hide",
-            "headless",
             "last",
             "first",
             "serial",
@@ -3334,22 +3335,8 @@ mod tests {
         Ok(pipeline)
     }
 
-    /// `headless:` is a command step's key, same as `background:` and
-    /// `timeout:` beside it — an agent step declaring it names a lane's
-    /// pane, which is not what this key turns off.
-    #[test]
-    fn headless_is_refused_on_a_step_that_runs_no_command() {
-        let err = parse(
-            "steps:\n  - id: a\n    agent: pi\n    headless: true\n    on_pass: z\n  \
-             - id: z\n    run: x\n    on_pass: done\n",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("step `a`"), "{err}");
-        assert!(err.to_string().contains("headless"), "{err}");
-    }
-
-    /// `hide:` is a command step's key like `headless:`; an agent step
-    /// declaring it has no command whose pane it could show or hide.
+    /// `hide:` is a command step's key; an agent step declaring it has no
+    /// command whose pane it could show or hide.
     #[test]
     fn hide_is_refused_on_a_step_that_runs_no_command() {
         let err = parse(
@@ -3361,24 +3348,50 @@ mod tests {
         assert!(err.to_string().contains("`hide:`"), "{err}");
     }
 
-    /// A step carrying the old and the new spelling is refused at load, and
-    /// the message says which to keep. Whatever value `headless:` is written
-    /// with: `headless: false` beside `hide: true` is as ambiguous a pair.
+    /// `headless:` no longer loads, whatever its value and wherever the step
+    /// sits, and the message names the pipeline, the step and both fixes.
+    /// `retired_shape_problems` words it the same way for `pipeline check`
+    /// and `sync`. Before the key was retired these steps loaded.
     #[test]
-    fn a_step_with_both_headless_and_hide_is_refused() {
-        for (headless, hide) in [("true", "false"), ("false", "true"), ("false", "false")] {
-            let err = parse(&format!(
-                "steps:\n  - id: a\n    run: x\n    headless: {headless}\n    \
-                 hide: {hide}\n    on_pass: done\n"
-            ))
-            .unwrap_err();
-            assert!(err.to_string().contains("step `a`"), "{err}");
-            assert!(err.to_string().contains("keep only `hide:`"), "{err}");
+    fn the_retired_headless_key_is_refused_by_name() {
+        for steps in [
+            "steps:\n  - id: a\n    run: x\n    headless: true\n    on_pass: done\n",
+            "steps:\n  - id: a\n    run: x\n    headless: false\n    on_pass: done\n",
+            "steps:\n  - id: a\n    run: x\n    headless: true\n    hide: true\n    \
+             on_pass: done\n",
+            "steps:\n  - id: a\n    agent: pi\n    headless: true\n    on_pass: done\n",
+        ] {
+            let err = Pipeline::parse("dependabot", steps)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                "dependabot: step `a` declares `headless:` — the key is now `hide:`; run \
+                 `spoolway sync` to rename it, or write `hide: true` in its place.",
+                "{steps}"
+            );
+            let pipeline: Pipeline = serde_norway::from_str(steps).unwrap();
+            assert_eq!(pipeline.retired_shape_problems().len(), 1, "{steps}");
         }
     }
 
-    /// The step's `hide:` beats the project default either way, `headless:`
-    /// reads as `hide: true`, and an absent key follows the project.
+    /// Every step carrying `headless:` is listed, not just the first.
+    #[test]
+    fn retired_shape_problems_lists_every_headless_step() {
+        let pipeline: Pipeline = serde_norway::from_str(
+            "steps:\n  - id: a\n    run: x\n    headless: true\n    on_pass: b\n  \
+             - id: b\n    run: x\n    hide: true\n    on_pass: c\n  \
+             - id: c\n    run: x\n    headless: false\n    on_pass: done\n",
+        )
+        .unwrap();
+        let problems = pipeline.retired_shape_problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("step `a`"), "{problems:?}");
+        assert!(problems[1].contains("step `c`"), "{problems:?}");
+    }
+
+    /// The step's `hide:` beats the project default either way, and an
+    /// absent key follows the project.
     #[test]
     fn hides_command_lets_the_step_override_the_project_default() {
         let step = |keys: &str| -> Step {
@@ -3393,7 +3406,6 @@ mod tests {
             assert_eq!(step("").hides_command(project), project);
             assert!(step("    hide: true\n").hides_command(project));
             assert!(!step("    hide: false\n").hides_command(project));
-            assert!(step("    headless: true\n").hides_command(project));
         }
     }
 

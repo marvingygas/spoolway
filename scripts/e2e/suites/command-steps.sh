@@ -737,8 +737,8 @@ rm -f "$NO_SETSID_RELEASE"
 add_command_step default hold \
   "for _ in \$(seq 1 1200); do [ -e \"$NO_SETSID_RELEASE\" ] && break; sleep 0.1; done" \
   review
-must "marking it headless: true" \
-  sed -i 's|^    background: true$|    background: true\n    headless: true|' \
+must "marking it hide: true" \
+  sed -i 's|^    background: true$|    background: true\n    hide: true|' \
   .spoolway/pipelines/default.yml
 works "a headless background command step checks out" "$SPOOLWAY" pipeline check
 
@@ -1473,8 +1473,8 @@ EXEC_RAN="$LIVE/exec-ran.txt"
 rm -f "$EXEC_RAN"
 add_command_step default execed \
   "exec sh -c 'echo ran >> $EXEC_RAN; exit 0'" review implement
-must "marking it headless: true" \
-  sed -i 's|^    run: exec sh .*$|&\n    headless: true|' .spoolway/pipelines/default.yml
+must "marking it hide: true" \
+  sed -i 's|^    run: exec sh .*$|&\n    hide: true|' .spoolway/pipelines/default.yml
 works "a command step whose line starts with exec checks out" "$SPOOLWAY" pipeline check
 
 task_doc "$LIVE/execed.md" execed "$BODY" "group: execed"
@@ -1509,7 +1509,7 @@ rm -f "$HELD_GATE" "$HELD_GO" "$HELD_RAN"
   printf '    description: Fails while its gate file is missing, and passes once it is there.\n'
   printf '    run: echo ran >> %s; while [ ! -f %s ]; do sleep 0.2; done; test -f %s\n' \
     "$HELD_RAN" "$HELD_GO" "$HELD_GATE"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: review\n    on_fail: blocked\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: held-c/" .spoolway/pipelines/default.yml
@@ -1561,12 +1561,12 @@ rm -f "$VISIT_MARK" "$VISIT_RAN"
   printf '\n  - id: visit-c\n'
   printf '    description: Counts its own runs, once per visit.\n'
   printf '    run: echo ran >> %s\n' "$VISIT_RAN"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: visit-d\n    on_fail: implement\n'
   printf '\n  - id: visit-d\n'
   printf '    description: Fails the first time and passes after that.\n'
   printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; exit 1\n' "$VISIT_MARK" "$VISIT_MARK"
-  printf '    headless: true\n'
+  printf '    hide: true\n'
   printf '    on_pass: review\n    on_fail: implement\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: visit-c/" .spoolway/pipelines/default.yml

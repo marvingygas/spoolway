@@ -5749,9 +5749,9 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
-                // A command runs in a pane unless its step's `hide:` (or the
-                // retired `headless:`), else `dispatch.hide_commands`, hides
-                // it. Otherwise it is detached, as the
+                // A command runs in a pane unless its step's `hide:`, else
+                // `dispatch.hide_commands`, hides it. Otherwise it is
+                // detached, as the
                 // headless backend runs every command: the same log, and the
                 // same named environment, with the dispatcher's own inherited
                 // directly. Counted as no lane, since it has no pane.
@@ -25895,7 +25895,7 @@ mod tests {
         );
     }
 
-    /// With `hide_commands = false`, a command step with no `headless:` key
+    /// With `hide_commands = false`, a command step with no `hide:` key
     /// runs in a pane of its own, split off the task's own tab, and the pane
     /// stays after the command exits.
     #[test]
@@ -26105,7 +26105,7 @@ mod tests {
         }
     }
 
-    /// `headless: true` is the escape hatch back to today's silent, detached
+    /// `hide: true` is the escape hatch back to today's silent, detached
     /// run — no pane is ever asked for.
     #[test]
     fn headless_true_never_asks_for_a_pane() {
@@ -26640,7 +26640,7 @@ mod tests {
         std::fs::write(
             dir.join("default.yml"),
             "steps:\n  \
-             - id: implement\n    run: exit 0\n    headless: true\n    gate: true\n    \
+             - id: implement\n    run: exit 0\n    hide: true\n    gate: true\n    \
                on_pass: finish\n  \
              - id: finish\n    run: x\n    on_pass: done\n",
         )

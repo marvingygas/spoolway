@@ -891,6 +891,7 @@ fn plan(repo: &Repo) -> Result<(Vec<Outcome>, Vec<Act>)> {
     retired_templates(repo, &mut outcomes, &mut acts)?;
     retired_markers(repo, &mut outcomes, &mut acts);
     pipelines(repo, &mut outcomes, &mut acts)?;
+    override_pipelines(repo, &mut outcomes, &mut acts);
     user_level(&mut outcomes, &mut acts)?;
     Ok((outcomes, acts))
 }
@@ -2371,9 +2372,12 @@ fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
 ///   would be this command helping, which is the one thing it must never do.
 ///   Pasting the two markers in is how a pipeline opts in.
 ///
-/// One check reads every file, markers or not: a step shape this release
-/// refuses to load — see [`crate::pipeline::Pipeline::retired_shape_problems`]
-/// — refuses the file, naming the step and the edit. Nothing is written to it.
+/// Two checks read every file, markers or not. The first is the one edit this
+/// command makes to a step: a `headless:` key is renamed to `hide:`, which is
+/// the same setting under its new name — see [`rename_headless`]. The second
+/// is a step shape this release refuses to load — see
+/// [`crate::pipeline::Pipeline::retired_shape_problems`] — which refuses the
+/// file, naming the step and the edit. Nothing is written to it.
 fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
@@ -2421,7 +2425,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 
     for path in paths {
         let shown = crate::platform::relative(&repo.checkout, &path);
-        let on_disk = match std::fs::read_to_string(&path) {
+        let mut on_disk = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) => {
                 outcomes.push(Outcome::blocked(
@@ -2432,11 +2436,31 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
             }
         };
 
+        // Before the shape check below, which would otherwise refuse a file
+        // for the one key this renames. Written only with the rest of the
+        // file's plan: a file refused further down is left exactly as it was.
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut renamed = None;
+        match rename_headless(&on_disk, Layout::Steps) {
+            Renamed::Nothing => {}
+            Renamed::Refused(ids) => {
+                outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
+                continue;
+            }
+            Renamed::Done { text, ids } => {
+                on_disk = text;
+                renamed = Some(ids);
+            }
+        }
+
         // A shape this release stopped loading — `loop: 0` is the one an
         // earlier release still ran — is refused by name, fenced or not, and
-        // the file is left as it is. `sync` never edits a step, but without
-        // this it would report the upgrade done
-        // over a pipeline the next command refuses to load.
+        // the file is left as it is. Apart from the `headless:` rename above,
+        // `sync` never edits a step, and without this it would report the
+        // upgrade done over a pipeline the next command refuses to load.
         if let Ok(pipeline) =
             serde_norway::from_str::<crate::pipeline::Pipeline>(crate::task::without_bom(&on_disk))
         {
@@ -2451,65 +2475,314 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         }
 
         let region = crate::pipeline::KEY_BLOCK;
-        if region.read(&on_disk).is_none() {
+        let mut changed = renamed.is_some();
+        match region.read(&on_disk) {
             // Half a fence is the one shape worth saying something about: the
             // lines under a start marker with no end could be anyone's, so
             // nothing is written and the missing marker is named. No markers
-            // at all means the file never opted in, so it is kept as it is —
-            // a retired shape in it was already refused above, never rewritten
-            // — see this function's own doc on why an unfenced file is never
-            // ours to touch.
-            let opened = on_disk
-                .lines()
-                .any(|line| line.trim() == crate::assets::PIPELINE_KEYS_BEGIN);
-            outcomes.push(match opened {
-                true => Outcome::blocked(
-                    &shown,
-                    format!(
-                        "spoolway's key reference starts with `{}` and never ends — restore the \
-                         `{}` marker, or delete the block and run this again",
-                        crate::assets::PIPELINE_KEYS_BEGIN,
-                        crate::assets::PIPELINE_KEYS_END
-                    ),
-                ),
-                false => Outcome::Kept,
-            });
-            continue;
-        }
-
-        let mut on_disk = on_disk;
-        let mut changed = false;
-        let found = region
-            .read(&on_disk)
-            .expect("the fence was just confirmed above");
-        match lookup(&Shipped::PipelineKeys, found) {
-            Known::Current => outcomes.push(Outcome::Kept),
-            // An older copy a release shipped: nothing in it is anyone's to
-            // have meant, so the whole block is swapped and no line of a
-            // person's is lost.
-            Known::Older => match region.replace(&on_disk, crate::pipeline::key_block()) {
-                Some(next) => {
-                    on_disk = next;
-                    changed = true;
-                    outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
+            // at all means the file never opted in, so its key reference is
+            // kept as it is — a retired shape in it was already refused
+            // above — see this function's own doc on why an unfenced file is
+            // never ours to touch.
+            None => {
+                let opened = on_disk
+                    .lines()
+                    .any(|line| line.trim() == crate::assets::PIPELINE_KEYS_BEGIN);
+                if opened {
+                    outcomes.push(Outcome::blocked(
+                        &shown,
+                        format!(
+                            "spoolway's key reference starts with `{}` and never ends — restore \
+                             the `{}` marker, or delete the block and run this again",
+                            crate::assets::PIPELINE_KEYS_BEGIN,
+                            crate::assets::PIPELINE_KEYS_END
+                        ),
+                    ));
+                    continue;
                 }
-                None => {
-                    outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
+                if renamed.is_none() {
+                    outcomes.push(Outcome::Kept);
+                }
+            }
+            Some(found) => match lookup(&Shipped::PipelineKeys, found) {
+                Known::Current => outcomes.push(Outcome::Kept),
+                // An older copy a release shipped: nothing in it is anyone's
+                // to have meant, so the whole block is swapped and no line of
+                // a person's is lost.
+                Known::Older => match region.replace(&on_disk, crate::pipeline::key_block()) {
+                    Some(next) => {
+                        on_disk = next;
+                        changed = true;
+                        outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
+                    }
+                    None => {
+                        outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
+                        continue;
+                    }
+                },
+                // No release shipped it: a newer spoolway wrote it, or
+                // somebody edited it. Rewriting would discard that, so the
+                // file is left exactly as it is, the rename above included.
+                Known::Unknown => {
+                    outcomes.push(Outcome::blocked(&shown, refusal(&shown)));
+                    continue;
                 }
             },
-            // No release shipped it: a newer spoolway wrote it, or somebody
-            // edited it. Rewriting would discard that, so the file is left
-            // exactly as it is.
-            Known::Unknown => {
-                outcomes.push(Outcome::blocked(&shown, refusal(&shown)));
-            }
         }
 
+        if let Some(ids) = renamed {
+            outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
+            outcomes.push(rename_note(&shown, &name, &ids));
+        }
         if changed {
             acts.push(Act::write(path, &shown, on_disk));
         }
     }
     Ok(())
+}
+
+/// The private layer's pipeline patches, renamed the same way [`pipelines`]
+/// renames the checkout's files.
+///
+/// A patch is `spoolway`'s own file and outside the checkout, but a
+/// `headless:` in it is refused just as the tracked one is: the override is
+/// skipped, with a notice, and the step runs as the tracked file says. So the
+/// rename is made here, or the person's private `hide` would stay switched
+/// off after the tracked files were fixed. A layer that cannot be found or
+/// read is skipped quietly, as [`config`] skips it, since `doctor` is what
+/// says an override is broken.
+fn override_pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) {
+    let Ok(overrides) = crate::overrides::dir_for(&repo.checkout) else {
+        return;
+    };
+    let Ok(names) = crate::overrides::list_pipeline_patches(&overrides) else {
+        return;
+    };
+    for name in names {
+        let path = crate::overrides::pipeline_patch_path(&overrides, &name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let shown = crate::platform::relative(&repo.checkout, &path);
+        match rename_headless(&text, Layout::Patch) {
+            Renamed::Nothing => {}
+            Renamed::Refused(ids) => {
+                outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
+            }
+            Renamed::Done { text, ids } => {
+                outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
+                outcomes.push(rename_note(&shown, &name, &ids));
+                acts.push(Act::write(path, &shown, text));
+            }
+        }
+    }
+}
+
+/// The note under a file whose steps [`rename_headless`] changed.
+fn rename_note(shown: &str, pipeline: &str, ids: &[String]) -> Outcome {
+    let (word, listed) = (
+        if ids.len() == 1 { "step" } else { "steps" },
+        ids.join(", "),
+    );
+    Outcome::migrated(
+        shown,
+        format!("migrated: {pipeline}: `headless:` renamed to `hide:` on {word} {listed}"),
+        format!("migrated: headless renamed to hide on {word} {listed}"),
+    )
+}
+
+/// Why a file with `headless:` and `hide:` on one step is left unwritten.
+/// Renaming one would leave two `hide:` lines, and dropping either would
+/// choose a value the person never chose between.
+fn both_keys_refusal(ids: &[String]) -> String {
+    let (word, listed) = (
+        if ids.len() == 1 { "step" } else { "steps" },
+        ids.iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    format!(
+        "{word} {listed} declare{} both `headless:` and `hide:` — they set the same thing and \
+         could disagree, so nothing was renamed; keep only `hide:`, then run this again",
+        if ids.len() == 1 { "s" } else { "" }
+    )
+}
+
+/// Which shape of file [`rename_headless`] reads.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// A pipeline file: `steps:` is a list, each item carrying its own `id:`.
+    Steps,
+    /// A patch under `overrides/pipelines/`: `steps:` is a map keyed by id.
+    Patch,
+}
+
+/// What [`rename_headless`] found.
+enum Renamed {
+    /// No step carries `headless:`.
+    Nothing,
+    /// These steps carry both `headless:` and `hide:`.
+    Refused(Vec<String>),
+    /// The text with the key renamed, and the ids of the steps it was on.
+    Done { text: String, ids: Vec<String> },
+}
+
+/// Rename the `headless:` key of every step in a pipeline file or patch to
+/// `hide:`, and change nothing else, not one other byte.
+///
+/// A line edit, not a re-serialisation, so comments, ordering, quoting and
+/// line endings survive, and it touches a line only when its key is exactly
+/// `headless:` at the indentation of the step's own keys. That excludes a
+/// `headless` inside a comment, a `description:` or a `run:` value, and the
+/// lines of a block scalar, which sit deeper than the key that opens them.
+/// A step written in flow style (`- {id: a, headless: true}`) has no such
+/// line and is left as it is; the pipeline then still names `headless:`, and
+/// the check that follows in [`pipelines`] refuses the file.
+fn rename_headless(text: &str, layout: Layout) -> Renamed {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    let content = |line: &str| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    };
+    let is_key = |rest: &str, key: &str| {
+        rest.strip_prefix(key)
+            .and_then(|after| after.strip_prefix(':'))
+            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '\r', '\n']))
+    };
+
+    // The span of `steps:`: from the line after it to the next top-level key.
+    let Some(start) = lines
+        .iter()
+        .position(|line| indent(line) == 0 && is_key(line.trim_start_matches('\u{feff}'), "steps"))
+    else {
+        return Renamed::Nothing;
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| content(line) && indent(line) == 0 && !line.starts_with('-'))
+        .map_or(lines.len(), |at| start + 1 + at);
+
+    // Each step is the lines from its opening line up to the next one. Its keys
+    // sit at `key_indent`: in a list, where the text after the dash starts;
+    // in a patch, where the line under the id starts.
+    struct Step {
+        id: String,
+        key_indent: usize,
+        from: usize,
+        to: usize,
+    }
+    let mut steps: Vec<Step> = Vec::new();
+    let body = start + 1..end;
+    let Some(first) = body.clone().find(|&at| content(lines[at])) else {
+        return Renamed::Nothing;
+    };
+    let top = indent(lines[first]);
+    for at in body.clone().filter(|&at| content(lines[at])) {
+        let line = lines[at];
+        if indent(line) != top {
+            continue;
+        }
+        let key_indent = match layout {
+            Layout::Steps => {
+                let Some(rest) = line[top..].strip_prefix('-') else {
+                    continue;
+                };
+                top + 1 + (rest.len() - rest.trim_start_matches(' ').len())
+            }
+            Layout::Patch => {
+                match body
+                    .clone()
+                    .filter(|&next| next > at)
+                    .find(|&n| content(lines[n]))
+                {
+                    Some(next) if indent(lines[next]) > top => indent(lines[next]),
+                    _ => continue,
+                }
+            }
+        };
+        let id = match layout {
+            Layout::Steps => String::new(),
+            Layout::Patch => line[top..]
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim_matches(['"', '\''])
+                .to_string(),
+        };
+        steps.push(Step {
+            id,
+            key_indent,
+            from: at,
+            to: end,
+        });
+    }
+    for pair in 0..steps.len().saturating_sub(1) {
+        steps[pair].to = steps[pair + 1].from;
+    }
+
+    let mut edits: Vec<usize> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    let mut both: Vec<String> = Vec::new();
+    for step in &steps {
+        let (mut headless, mut hide, mut id) = (None, false, step.id.clone());
+        for (at, line) in lines.iter().enumerate().take(step.to).skip(step.from) {
+            if !content(line) {
+                continue;
+            }
+            // The first line of a list item carries the dash before its key.
+            let column = step.key_indent;
+            let on_key = match at == step.from && matches!(layout, Layout::Steps) {
+                true => line.len() >= column && line.is_char_boundary(column),
+                false => indent(line) == column,
+            };
+            if !on_key {
+                continue;
+            }
+            let rest = &line[column..];
+            if is_key(rest, "headless") {
+                headless = Some(at);
+            } else if is_key(rest, "hide") {
+                hide = true;
+            } else if is_key(rest, "id") && matches!(layout, Layout::Steps) {
+                id = rest["id:".len()..]
+                    .split(" #")
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_string();
+            }
+        }
+        match (headless, hide) {
+            (Some(_), true) => both.push(id),
+            (Some(at), false) => {
+                edits.push(at);
+                ids.push(id);
+            }
+            (None, _) => {}
+        }
+    }
+    if !both.is_empty() {
+        return Renamed::Refused(both);
+    }
+    if edits.is_empty() {
+        return Renamed::Nothing;
+    }
+    let mut out = String::with_capacity(text.len());
+    for (at, line) in lines.iter().enumerate() {
+        match edits.contains(&at) {
+            true => {
+                let key = line.find("headless").expect("an edited line names the key");
+                out.push_str(&line[..key]);
+                out.push_str("hide");
+                out.push_str(&line[key + "headless".len()..]);
+            }
+            false => out.push_str(line),
+        }
+    }
+    Renamed::Done { text: out, ids }
 }
 
 // ---------------------------------------------------------------------------
@@ -4737,6 +5010,157 @@ mod tests {
         let refused = refusals(&outcomes);
         assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
         assert!(refused[0].1.starts_with("will not load"), "{refused:?}");
+    }
+
+    /// A pipeline file's `headless:` steps are renamed to `hide:`, fenced or
+    /// not, and every other byte stays: a `headless` in a comment, a
+    /// `description:` and a `run:` value, a step already on `hide:`, and the
+    /// file's stale key reference being refreshed in the same write. Each
+    /// file is named, and the note lists the steps. A file with nothing to
+    /// rename is not written, and a second run reports nothing.
+    #[test]
+    fn headless_steps_are_renamed_to_hide_and_nothing_else_is_touched() {
+        let (repo, _root_guard) = fixture("pipeline-headless-rename");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let steps = |key: &str, keep: &str| {
+            format!(
+                "# headless: true was the old spelling.\nsteps:\n  \
+                 - id: check\n    description: Runs headless: true, they said.\n    \
+                 run: echo headless: true\n    {key}: true\n    on_pass: merge\n  \
+                 - id: merge\n    run: |\n      echo run\n      headless: true\n    \
+                 {key}: false # keep\n    on_pass: done\n  \
+                 - id: other\n    run: x\n    {keep}: true\n    on_pass: done\n"
+            )
+        };
+        let stale = format!("{}\n", older_fence());
+        let fenced = dir.join("fenced.yml");
+        std::fs::write(&fenced, format!("{stale}{}", steps("headless", "hide"))).unwrap();
+        let unfenced = dir.join("unfenced.yml");
+        std::fs::write(&unfenced, steps("headless", "hide")).unwrap();
+        let clean = dir.join("clean.yml");
+        std::fs::write(&clean, steps("hide", "hide")).unwrap();
+        let clean_before = std::fs::read(&clean).unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        let fresh = crate::pipeline::key_block();
+        let fenced_now = std::fs::read_to_string(&fenced).unwrap();
+        assert!(fenced_now.contains(fresh), "{fenced_now}");
+        assert!(
+            fenced_now.ends_with(&steps("hide", "hide")),
+            "only the two key names change: {fenced_now}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&unfenced).unwrap(),
+            steps("hide", "hide")
+        );
+        assert_eq!(std::fs::read(&clean).unwrap(), clean_before);
+
+        let (wrote, _) = dedup_paths(&outcomes);
+        assert_eq!(wrote.len(), 2, "{wrote:?}");
+        assert!(wrote.iter().all(|path| !path.ends_with("clean.yml")));
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.contains(
+                &"migrated .spoolway/pipelines/unfenced.yml (migrated: unfenced: `headless:` \
+                  renamed to `hide:` on steps check, merge)"
+                    .to_string()
+            ),
+            "{lines:?}"
+        );
+
+        // Nothing is left to rename the second time.
+        let mut again = Vec::new();
+        pipelines(&repo, &args(), &mut again).unwrap();
+        let (wrote, _) = dedup_paths(&again);
+        assert!(wrote.is_empty(), "{:?}", outcome_lines(&again));
+        assert!(migration_notes(&again).is_empty());
+    }
+
+    /// A dry run reports the rename, as it reports every write, and writes
+    /// nothing.
+    #[test]
+    fn a_dry_run_reports_the_headless_rename_and_writes_nothing() {
+        let (repo, _root_guard) = fixture("pipeline-headless-dry-run");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.yml");
+        let before = "steps:\n  - id: a\n    run: x\n    headless: true\n    on_pass: done\n";
+        std::fs::write(&path, before).unwrap();
+
+        let mut outcomes = Vec::new();
+        let dry = SyncArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        pipelines(&repo, &dry, &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let (wrote, _) = dedup_paths(&outcomes);
+        assert_eq!(wrote.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert_eq!(migration_notes(&outcomes).len(), 1);
+    }
+
+    /// `headless:` and `hide:` on one step cannot be renamed without losing a
+    /// value. The file is refused, naming the step, with every other step in
+    /// it left as it was, and nothing is written.
+    #[test]
+    fn a_step_with_both_headless_and_hide_is_refused_and_the_file_left_alone() {
+        let (repo, _root_guard) = fixture("pipeline-headless-and-hide");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.yml");
+        let before = "steps:\n  - id: a\n    run: x\n    headless: true\n    on_pass: b\n  \
+                      - id: b\n    run: x\n    headless: false\n    hide: true\n    \
+                      on_pass: done\n";
+        std::fs::write(&path, before).unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert!(
+            refused[0].1.contains("step `b` declares both"),
+            "{refused:?}"
+        );
+        assert!(refused[0].1.contains("keep only `hide:`"), "{refused:?}");
+        let (wrote, _) = dedup_paths(&outcomes);
+        assert!(wrote.is_empty(), "{wrote:?}");
+    }
+
+    /// The renamer reads a patch as a map of ids, a list item whose `id:` is
+    /// not its first key, a Windows line ending and a byte order mark, and in
+    /// each renames only the step key.
+    #[test]
+    fn rename_headless_reads_patches_late_ids_and_line_endings() {
+        let patch = "# headless: true\nsteps:\n  check:\n    headless: true\n    \
+                     timeout: 5m\n  merge:\n    run: echo headless: true\n    hide: false\n";
+        let Renamed::Done { text, ids } = rename_headless(patch, Layout::Patch) else {
+            panic!("the patch names `headless:` on `check`");
+        };
+        assert_eq!(ids, ["check"]);
+        assert_eq!(
+            text,
+            patch.replacen("    headless: true\n", "    hide: true\n", 1)
+        );
+
+        let late = "\u{feff}steps:\r\n- run: x\r\n  headless: true\r\n  id: z\r\n  \
+                    on_pass: done\r\n";
+        let Renamed::Done { text, ids } = rename_headless(late, Layout::Steps) else {
+            panic!("the list item names `headless:`");
+        };
+        assert_eq!(ids, ["z"]);
+        assert_eq!(text, late.replace("headless", "hide"));
+
+        let none = "steps:\n  - id: a\n    run: x\n    on_pass: done\n";
+        assert!(matches!(
+            rename_headless(none, Layout::Steps),
+            Renamed::Nothing
+        ));
     }
 
     /// `end: true` and `on_pass: blocked` no longer load. A sync names each
