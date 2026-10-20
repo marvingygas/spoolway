@@ -4918,7 +4918,7 @@ fn issue_question_panel(
 }
 
 /// How wide [`issue_body`] holds the issue popups' text: room for the
-/// running line and a queued task id of some length, so the running and
+/// progress line and a queued task id of some length, so the running and
 /// result popups share one width for most batches.
 const ISSUE_BODY_WIDTH: usize = 54;
 
@@ -4972,23 +4972,30 @@ fn issue_question(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume
     })
 }
 
-/// [`TicketLog`] for the queue screen: while the hook runs, a `running
-/// hook` popup counting the tasks it has been called for, and `redraw` lays
-/// it over the tab again straight away — the hook runs on the screen's own
-/// thread, so nothing else draws until it returns. What the hook answers is
-/// left off: a hook may open no issue at all, or talk to a tracker whose
-/// words are not these, so the screen claims only that it ran — see
-/// [`queued_panel`].
+/// [`TicketLog`] for the queue screen: while the hook runs, an `issue
+/// tracking` popup with a progress bar of the calls that have returned, and
+/// `redraw` lays it over the tab again straight away — the hook runs on the
+/// screen's own thread, so nothing else draws until it returns. What the
+/// hook answers is left off: a hook may open no issue at all, or talk to a
+/// tracker whose words are not these, so the screen claims only that it ran
+/// — see [`queued_panel`].
 struct PopupHook<'a> {
     /// How many calls the hook has been handed so far, the one running
     /// included.
     called: usize,
+    /// How many of those calls have returned an answer.
+    finished: usize,
     /// The tasks the hook is called for at all: every one that neither
     /// opts out — a ticked group's tasks among them — nor already names its
     /// `ticket:`, which [`open_tickets`] reports `kept` without a call.
     total: usize,
     redraw: &'a mut dyn FnMut(&[String]),
 }
+
+/// Cells in the progress bar. With the `Progress: ` label, it fills the
+/// [`ISSUE_BODY_WIDTH`] row exactly, so the box keeps the width of the
+/// popups it is swapped with.
+const PROGRESS_BAR_CELLS: usize = 44;
 
 impl<'a> PopupHook<'a> {
     fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupHook<'a> {
@@ -4998,6 +5005,7 @@ impl<'a> PopupHook<'a> {
             .count();
         PopupHook {
             called: 0,
+            finished: 0,
             total,
             redraw,
         }
@@ -5012,13 +5020,27 @@ impl<'a> PopupHook<'a> {
 
     /// The popup while the hook is still answering.
     fn panel(&self) -> Vec<String> {
+        // `total` is zero only when the hook is never called, and then no
+        // panel is drawn; the guard keeps a zero total from dividing by
+        // zero. The clamp keeps `PROGRESS_BAR_CELLS - filled` below from
+        // underflowing if a row is ever counted twice.
+        let filled = (self.finished * PROGRESS_BAR_CELLS)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(PROGRESS_BAR_CELLS);
         crate::screen::boxed(
-            "running hook",
+            "issue tracking",
             &issue_body([format!(
-                "running the hook: {} of {} tasks",
-                self.called, self.total
+                "Progress: {}{}",
+                "█".repeat(filled),
+                "░".repeat(PROGRESS_BAR_CELLS - filled)
             )]),
         )
+    }
+
+    fn redraw_panel(&mut self) {
+        let panel = self.panel();
+        (self.redraw)(&panel);
     }
 }
 
@@ -5027,13 +5049,19 @@ impl TicketLog for PopupHook<'_> {
 
     fn waiting(&mut self, _id: &str) {
         self.called += 1;
-        let panel = self.panel();
-        (self.redraw)(&panel);
+        self.redraw_panel();
     }
 
-    /// Left off the popup, which counts calls and claims nothing about what
-    /// any of them created.
-    fn row(&mut self, _kind: &str, _status: &str, _ticket: &str, _name: &str) {}
+    /// Only a `task issue` row marked `created` is a call that returned: a
+    /// `group issue` row comes from the same answer as its task's row, so
+    /// counting it would run the bar ahead; `kept` was never called; and
+    /// `FAILED` stops the batch.
+    fn row(&mut self, kind: &str, status: &str, _ticket: &str, _name: &str) {
+        if kind == "task issue" && status == "created" {
+            self.finished += 1;
+            self.redraw_panel();
+        }
+    }
 
     /// Left off the popup too: the names-prefixed line comes after
     /// [`TicketLog::done`], once the popup is about to be replaced, and the
@@ -5934,11 +5962,11 @@ fn run_screen_from(
             Mode::IssueQuestion { then, checklist } => match key {
                 // The hook runs here, on this thread, for every group left
                 // unticked, and the tab under the question is held as it
-                // stands while it does — the `running hook` popup is laid
-                // over that frame as each call starts. Whatever was typed
-                // while the hook ran is thrown away once it returns: the
-                // result popup takes `enter` only once it is on screen, never
-                // an `enter` pressed while the hook was running.
+                // stands while it does — the `issue tracking` progress popup
+                // is laid over that frame as each call starts and returns.
+                // Whatever was typed while the hook ran is thrown away once it
+                // returns: the result popup takes `enter` only once it is on
+                // screen, never an `enter` pressed while the hook was running.
                 Key::Enter => {
                     let then = then.clone();
                     let tracking = Tracking::Open(checklist.ticked.clone());
@@ -6209,7 +6237,8 @@ fn resume(
 }
 
 /// The tab as it stood when the issue question was answered, with no popup
-/// on it — what the `running hook` popup is laid over while the hook runs.
+/// on it — what the `issue tracking` progress popup is laid over while the
+/// hook runs.
 /// Rendered once and owned, so drawing it again borrows nothing the submit
 /// itself is busy changing.
 struct Held {
@@ -8982,8 +9011,8 @@ fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> M
 /// it to build the batch, and a landed write clears its selection and gates
 /// right here, before the caller ever sees the resulting mode.
 ///
-/// `redraw` lays the `running hook` popup over the tab as each call to the
-/// hook starts — see [`PopupHook`].
+/// `redraw` lays the `issue tracking` progress popup over the tab as each call
+/// to the hook starts and returns — see [`PopupHook`].
 fn begin_submission(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -23744,6 +23773,16 @@ group_description: search
                     .collect()
             }
 
+            /// The progress row of a popup drawn with `filled` of the bar's
+            /// 44 cells full.
+            fn bar(filled: usize) -> String {
+                format!(
+                    "Progress: {}{}",
+                    "█".repeat(filled),
+                    "░".repeat(44 - filled)
+                )
+            }
+
             fn hook_calls(repo: &Repo) -> Vec<String> {
                 std::fs::read_to_string(repo.tracking_dir().join("calls.log"))
                     .unwrap_or_default()
@@ -23752,13 +23791,18 @@ group_description: search
                     .collect()
             }
 
-            /// The `running hook` popups in `drawn`, in the order they were
-            /// drawn, each cut down to its rows by [`popup_rows`].
+            /// The `issue tracking` progress popups in `drawn`, in the order
+            /// they were drawn, each cut down to its rows by [`popup_rows`].
+            /// The question carries the same title, so a frame counts only
+            /// when it holds the bar's `Progress: ` label.
             fn running_popups(drawn: &str) -> Vec<Vec<String>> {
                 drawn
                     .split("\x1b[?2026h\x1b[H")
-                    .filter(|frame| frame.contains(&format!("{TOP_LEFT}─ running hook ")))
-                    .map(|frame| popup_rows(frame, "running hook"))
+                    .filter(|frame| {
+                        frame.contains(&format!("{TOP_LEFT}─ issue tracking "))
+                            && frame.contains("Progress: ")
+                    })
+                    .map(|frame| popup_rows(frame, "issue tracking"))
                     .collect()
             }
 
@@ -23946,7 +23990,7 @@ ticket: \"#9\"
                 // The ticked group's task is no call the popup counts.
                 assert_eq!(
                     running_popups(&drawn).last().map(|rows| rows[1].as_str()),
-                    Some("running the hook: 2 of 2 tasks"),
+                    Some(bar(44).as_str()),
                     "{drawn}"
                 );
                 let search = queued(&repo, "search-box");
@@ -24088,8 +24132,9 @@ depends_on: [search-old]
                 assert_eq!(
                     running_popups(&drawn),
                     [
-                        ["", "running the hook: 1 of 2 tasks"],
-                        ["", "running the hook: 2 of 2 tasks"],
+                        ["", bar(0).as_str()],
+                        ["", bar(22).as_str()],
+                        ["", bar(44).as_str()],
                     ],
                     "{drawn}"
                 );
@@ -24143,11 +24188,39 @@ depends_on: [search-old]
                 assert!(!frame.contains("created"), "{frame}");
             }
 
+            /// A task that already names its `ticket:` is `kept` without a
+            /// call, so it is no call returning: the bar stays empty until
+            /// the one task that reaches the hook is answered.
+            #[test]
+            fn a_kept_task_does_not_advance_the_bar() {
+                let (repo, _root_guard) = cart("issue-question-kept");
+                write_pending(
+                    &repo,
+                    "cart-empty-state",
+                    &task_text(
+                        "cart-empty-state",
+                        "group: cart
+group_description: the cart
+ticket: \"#9\"
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(hook_calls(&repo), ["cart-totals"]);
+                assert_eq!(
+                    running_popups(&drawn),
+                    [["", bar(0).as_str()], ["", bar(44).as_str()]],
+                    "{drawn}"
+                );
+            }
+
             /// A hook answering `slug=` with `key_in_names` on prefixes the
             /// names, as the shipped `github.sh` does on every batch — and
             /// the result is still the `queued` popup: no names-prefixed
-            /// note, the box held to the issue popups' width, and the last
-            /// `running hook` frame counting the last call.
+            /// note, the box held to the issue popups' width, and the
+            /// `issue tracking` bar filling one call's share as each call
+            /// returns, the epic row counting for nothing.
             #[test]
             fn a_slug_answer_keeps_the_result_to_the_queued_popup() {
                 let (mut repo, _root_guard) = cart("issue-question-slug");
@@ -24165,10 +24238,17 @@ depends_on: [search-old]
                     queued(&repo, "cart-totals").front.group.as_deref(),
                     Some("gh-410-cart")
                 );
+                // The hook answers an epic on the first call; the epic row
+                // is no finished call, so the bar sits at half until the
+                // second call returns.
                 let running = running_popups(&drawn);
                 assert_eq!(
-                    running.last().map(|rows| rows[1].as_str()),
-                    Some("running the hook: 2 of 2 tasks"),
+                    running,
+                    [
+                        ["", bar(0).as_str()],
+                        ["", bar(22).as_str()],
+                        ["", bar(44).as_str()]
+                    ],
                     "{drawn}"
                 );
 
@@ -24305,7 +24385,7 @@ group_description: audit
                 // The same two popups the queue tab draws.
                 assert_eq!(
                     running_popups(&drawn),
-                    [["", "running the hook: 1 of 1 tasks"]],
+                    [["", bar(0).as_str()], ["", bar(44).as_str()]],
                     "{drawn}"
                 );
                 let frame = last_frame(&drawn);
