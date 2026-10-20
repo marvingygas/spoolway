@@ -4304,6 +4304,38 @@ mod tests {
         assert!(routine.contains("routine `nite`"), "{routine}");
     }
 
+    /// Two routine folders that each hold a task with the same `id:` fail a
+    /// row naming both files and the fix, because spoolway would count them
+    /// as one routine and one job would never fire. Routines whose ids
+    /// differ pass.
+    #[test]
+    fn a_task_id_held_by_two_routine_folders_fails_doctor_naming_both_files() {
+        let (repo, _scratch) = scratch_repo("routine-id-unique");
+        let doc = |id: &str| format!("---\nid: {id}\nstage: queued\n---\n## Goal\nok\n");
+        for (dir, id) in [("frontend", "lint"), ("backend", "lint"), ("docs", "spell")] {
+            let folder = repo.routines_dir().join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(format!("{id}.md")), doc(id)).unwrap();
+        }
+
+        let findings = queue_id_checks(&repo);
+
+        let failures: Vec<String> = findings
+            .iter()
+            .filter_map(|finding| match finding {
+                Finding::Check(_, Err(err)) => Some(format!("{err:#}")),
+                _ => None,
+            })
+            .collect();
+        let clash = failures
+            .iter()
+            .find(|why| why.contains("frontend/lint.md") && why.contains("backend/lint.md"))
+            .unwrap_or_else(|| panic!("no failed row names both files: {failures:?}"));
+        assert!(clash.contains("`lint`"), "{clash}");
+        assert!(clash.contains("another id"), "{clash}");
+        assert!(!clash.contains("spell"), "{clash}");
+    }
+
     /// A worktree on `task/<id>` that no queued task records fails its row
     /// and is named with its branch; a queued task's own checkout does not.
     #[test]
