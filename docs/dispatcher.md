@@ -1006,7 +1006,7 @@ the tab looks the same. The old run's transcript stays on disk under its session
 report stays in the task file. If the old lane is still mid-turn, its spend is banked first.
 
 A task's tab holds at most `dispatch.visible_lanes` lanes, three by default. Set it to a whole
-number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 3`. A `0` is
+number of 1 or more, or to `all`, with `spoolway config set dispatch.visible_lanes 2`. A `0` is
 refused.
 
 Each new agent step, and each shown command step, that would go over the limit first closes the
@@ -1021,8 +1021,7 @@ Some lanes are never closed by the limit. A lane that is still running stays, an
 held for you on `paused` or on a `blocked` step. A tab can therefore sit over its limit until they
 end. A step that comes back still replaces its own pane in place.
 
-Three is a new default, so a task that kept every pane keeps its three newest. To keep every pane
-until the task is done, set `visible_lanes = "all"`. The `keep_finished_lanes` key is retired.
+To keep every pane until the task is done, set `visible_lanes = "all"`. The `keep_finished_lanes` key is retired.
 `true` loads as `all` and `false` as `1`.
 
 A lane is banked when its step moves on, and again when the task is done. The second bank
