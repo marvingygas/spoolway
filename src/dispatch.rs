@@ -5716,8 +5716,12 @@ impl<'a> Dispatcher<'a> {
                 // Read before `ensure_workspace`, which can cut the task a new
                 // workspace: see the same read in `prepare_boot`.
                 let placement = task.front.workspace_id.clone();
+                // Decided ahead of the checkout, because a hidden command
+                // needs the worktree but not a workspace: see
+                // `ensure_checkout`.
+                let shown = !step.hides_command(self.repo.config.dispatch.hide_commands);
                 let worktree =
-                    match ensure_workspace(self.repo, self.mux, task, &mut self.file_seen) {
+                    match ensure_checkout(self.repo, self.mux, task, &mut self.file_seen, shown) {
                         Ok(opened) => opened,
                         Err(err) => {
                             let destination = self.note_launch_failure(
@@ -5750,12 +5754,11 @@ impl<'a> Dispatcher<'a> {
                     ),
                 ]);
                 // A command runs in a pane unless its step's `hide:`, else
-                // `dispatch.hide_commands`, hides it. Otherwise it is
-                // detached, as the
-                // headless backend runs every command: the same log, and the
-                // same named environment, with the dispatcher's own inherited
-                // directly. Counted as no lane, since it has no pane.
-                let shown = !step.hides_command(self.repo.config.dispatch.hide_commands);
+                // `dispatch.hide_commands`, hides it (`shown`, above).
+                // Otherwise it is detached, as the headless backend runs
+                // every command: the same log, and the same named
+                // environment, with the dispatcher's own inherited directly.
+                // Counted as no lane, since it has no pane.
                 // A pane an earlier arrival left standing — a run the
                 // `Running` arm's own timeout stopped without touching its
                 // pane, most often — is replaced rather than piled onto. A
@@ -6837,10 +6840,15 @@ fn take_back_fresh_cut(
     if stage_before != crate::pipeline::QUEUED || task.front.borrowed {
         return;
     }
-    let Some(workspace) = task.front.workspace_id.as_deref() else {
-        return;
-    };
-    if mux.remove_workspace(workspace).is_err() {
+    // A task whose first step was a hidden command has a checkout and no
+    // workspace yet, so there is no workspace to remove: the checkout goes by
+    // itself, the way a failed `remove_workspace` falls back to it below.
+    let removed_with_workspace = task
+        .front
+        .workspace_id
+        .as_deref()
+        .is_some_and(|workspace| mux.remove_workspace(workspace).is_ok());
+    if !removed_with_workspace {
         if let Some(path) = task.front.worktree_path.as_deref()
             && let Err(err) = mux.remove_checkout(path)
         {
@@ -6852,7 +6860,9 @@ fn take_back_fresh_cut(
                 crate::mux::remove_by_hand_command(&repo.root, path)
             ));
         }
-        let _ = mux.close_workspace(workspace);
+        if let Some(workspace) = task.front.workspace_id.as_deref() {
+            let _ = mux.close_workspace(workspace);
+        }
     }
     if let (Some(branch), Some(base_commit)) = (
         task.front.branch.as_deref(),
@@ -7141,6 +7151,28 @@ fn ensure_workspace(
     task: &mut Task,
     file_seen: &mut HashMap<String, u64>,
 ) -> Result<(PathBuf, Option<String>)> {
+    ensure_checkout(repo, mux, task, file_seen, true)
+}
+
+/// [`ensure_workspace`], for a step that may not need a pane.
+///
+/// With `want_pane` false, a backend that can cut a checkout on its own
+/// ([`Mux::cut_checkout`]) cuts the task's worktree and opens no workspace on
+/// it, so a task of hidden commands never holds the empty shell pane a
+/// workspace comes with. The workspace opens on the first call with
+/// `want_pane` true, through the same path that takes back a checkout cut
+/// earlier, and the pane it hands back is the first one.
+///
+/// Only a task with no workspace on record is left alone when `want_pane` is
+/// false. A recorded workspace is still checked against the live multiplexer
+/// and healed, exactly as before.
+fn ensure_checkout(
+    repo: &Repo,
+    mux: &dyn Mux,
+    task: &mut Task,
+    file_seen: &mut HashMap<String, u64>,
+    want_pane: bool,
+) -> Result<(PathBuf, Option<String>)> {
     // Whether anything has set up a checkout for this task before, cut or
     // borrowed. Read ahead of the block below that clears `worktree_path`,
     // because a re-cut has to be told apart from a first cut once that field
@@ -7340,7 +7372,11 @@ fn ensure_workspace(
         .clone()
         .unwrap_or_else(|| crate::task::default_branch(task.id()));
 
-    if task.front.workspace_id.is_none() {
+    // A hidden command with a checkout already cut has nothing to set up. The
+    // block below would read a task with no workspace as one that needs its
+    // first, and open the very workspace this call is meant to leave closed.
+    let nothing_to_open = !want_pane && task.front.worktree_path.is_some();
+    if task.front.workspace_id.is_none() && !nothing_to_open {
         let mut found = repo.worktree_for(&branch)?;
         // A checkout of this task's branch inside spoolway's own `worktrees/`
         // folder, found for a task that has set up a checkout before, is the
@@ -7507,21 +7543,37 @@ fn ensure_workspace(
                 task.front.base_commit = base_commit;
                 persist_task(repo, task, file_seen)?;
                 crate::fault::kill_at(&repo.root, crate::fault::CUT_BEFORE_ADD);
-                let workspace = mux.create_workspace(
-                    &repo.root,
-                    &branch,
-                    &starts_from,
-                    &format!("spoolway/{}", task.display_name()),
-                )?;
-                crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
-                task.front.workspace_id = Some(workspace.workspace_id);
-                task.front.pane_id = Some(workspace.pane_id.clone());
-                // Only for a workspace with a tab: see the same line above.
-                task.front.spare_pane =
-                    workspace.tab_id.as_ref().map(|_| workspace.pane_id.clone());
-                task.front.tab_id = workspace.tab_id;
-                task.front.worktree_path = Some(workspace.checkout_path);
-                fresh_pane = Some(workspace.pane_id);
+                // A step with no pane to show cuts the checkout alone, on a
+                // backend that can. The workspace is opened later, at the
+                // first step that shows a pane, onto this checkout.
+                let bare = match want_pane {
+                    true => None,
+                    false => mux.cut_checkout(&repo.root, &branch, &starts_from)?,
+                };
+                match bare {
+                    Some(checkout) => {
+                        crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
+                        task.front.worktree_path = Some(checkout);
+                    }
+                    None => {
+                        let workspace = mux.create_workspace(
+                            &repo.root,
+                            &branch,
+                            &starts_from,
+                            &format!("spoolway/{}", task.display_name()),
+                        )?;
+                        crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
+                        task.front.workspace_id = Some(workspace.workspace_id);
+                        task.front.pane_id = Some(workspace.pane_id.clone());
+                        // Only for a workspace with a tab: see the same line
+                        // above.
+                        task.front.spare_pane =
+                            workspace.tab_id.as_ref().map(|_| workspace.pane_id.clone());
+                        task.front.tab_id = workspace.tab_id;
+                        task.front.worktree_path = Some(workspace.checkout_path);
+                        fresh_pane = Some(workspace.pane_id);
+                    }
+                }
 
                 task.front.borrowed = false;
                 task.front.branch = Some(branch);
@@ -9222,6 +9274,9 @@ mod tests {
         refuse_start: bool,
         /// Whether `create_workspace` answers no tab, as headless does.
         tabless: bool,
+        /// Whether `cut_checkout` cuts a worktree alone, as herdr does,
+        /// instead of declining as headless does.
+        cuts_checkout_alone: bool,
         /// Make `agent start` refuse the way herdr does when the pane it was
         /// asked to start in has not yet reached its shell prompt — transient,
         /// and carrying [`crate::mux::PaneBusy`] rather than an ordinary
@@ -9363,6 +9418,7 @@ mod tests {
                 splits: Mutex::new(0),
                 refuse_start: false,
                 tabless: false,
+                cuts_checkout_alone: false,
                 refuse_start_pane_busy: false,
                 refuse_start_mid_turn: false,
                 refuse_prompt: false,
@@ -9488,6 +9544,12 @@ mod tests {
             self.tabless = true;
             self
         }
+        /// A multiplexer that can cut a checkout without opening a workspace
+        /// on it: what herdr does for a step that shows no pane.
+        fn cutting_checkouts_alone(mut self) -> FakeMux {
+            self.cuts_checkout_alone = true;
+            self
+        }
         fn refusing_to_start(mut self) -> FakeMux {
             self.refuse_start = true;
             self
@@ -9568,6 +9630,46 @@ mod tests {
         fn forgetting(self, id: &str) -> FakeMux {
             self.forgotten.lock().unwrap().insert(id.to_string());
             self
+        }
+        /// The cut `create_workspace` and `cut_checkout` share: the checkout,
+        /// plus the ids a workspace opened on it would carry.
+        fn cut(&self, cwd: &Path, branch: &str, base: &str) -> Result<Workspace> {
+            if let Some(path) = self.unqueue_on_create.lock().unwrap().take() {
+                unqueue_file(&path);
+            }
+            if self.dies_mid_cut {
+                crate::repo::run(cwd, "git", &["branch", branch, base])?;
+                anyhow::bail!("killed mid-cut");
+            }
+            if let Some(root) = &self.cuts_real_worktrees {
+                let path = root.join(crate::mux::branch_slug(branch));
+                crate::mux::cut_worktree(cwd, &path, branch, base)?;
+                return Ok(Workspace {
+                    workspace_id: "w9".into(),
+                    pane_id: "w9:p1".into(),
+                    tab_id: Some("w9:t1".into()),
+                    checkout_path: path,
+                });
+            }
+            let checkout_path = PathBuf::from("/tmp/spoolway-fake-worktree");
+            // A real (if minimal) git repo, not just a path: a launch now
+            // resolves `{git_dir}` by asking git from inside the checkout,
+            // and this constant stands in for a cut worktree everywhere the
+            // fake mux is used for one. Guarded on `.git` already existing,
+            // rather than run unconditionally, because every dispatch test
+            // shares this one path and runs concurrently with the others —
+            // two racing `git init`s on the same directory each fail trying
+            // to lock the other's half-written `config`.
+            if !checkout_path.join(".git").exists() {
+                std::fs::create_dir_all(&checkout_path).unwrap();
+                let _ = crate::repo::run(&checkout_path, "git", &["init", "-q"]);
+            }
+            Ok(Workspace {
+                workspace_id: "w9".into(),
+                pane_id: "w9:p1".into(),
+                tab_id: (!self.tabless).then(|| "w9:t1".to_string()),
+                checkout_path,
+            })
         }
         fn log(&self, call: String) {
             self.calls.lock().unwrap().push(call);
@@ -9711,42 +9813,14 @@ mod tests {
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
-            if let Some(path) = self.unqueue_on_create.lock().unwrap().take() {
-                unqueue_file(&path);
+            self.cut(cwd, branch, base)
+        }
+        fn cut_checkout(&self, cwd: &Path, branch: &str, base: &str) -> Result<Option<PathBuf>> {
+            if !self.cuts_checkout_alone {
+                return Ok(None);
             }
-            if self.dies_mid_cut {
-                crate::repo::run(cwd, "git", &["branch", branch, base])?;
-                anyhow::bail!("killed mid-cut");
-            }
-            if let Some(root) = &self.cuts_real_worktrees {
-                let path = root.join(crate::mux::branch_slug(branch));
-                crate::mux::cut_worktree(cwd, &path, branch, base)?;
-                return Ok(Workspace {
-                    workspace_id: "w9".into(),
-                    pane_id: "w9:p1".into(),
-                    tab_id: Some("w9:t1".into()),
-                    checkout_path: path,
-                });
-            }
-            let checkout_path = PathBuf::from("/tmp/spoolway-fake-worktree");
-            // A real (if minimal) git repo, not just a path: a launch now
-            // resolves `{git_dir}` by asking git from inside the checkout,
-            // and this constant stands in for a cut worktree everywhere the
-            // fake mux is used for one. Guarded on `.git` already existing,
-            // rather than run unconditionally, because every dispatch test
-            // shares this one path and runs concurrently with the others —
-            // two racing `git init`s on the same directory each fail trying
-            // to lock the other's half-written `config`.
-            if !checkout_path.join(".git").exists() {
-                std::fs::create_dir_all(&checkout_path).unwrap();
-                let _ = crate::repo::run(&checkout_path, "git", &["init", "-q"]);
-            }
-            Ok(Workspace {
-                workspace_id: "w9".into(),
-                pane_id: "w9:p1".into(),
-                tab_id: (!self.tabless).then(|| "w9:t1".to_string()),
-                checkout_path,
-            })
+            self.log(format!("cut_checkout on {branch} from {base}"));
+            Ok(Some(self.cut(cwd, branch, base)?.checkout_path))
         }
         fn close_workspace(&self, id: &str) -> Result<()> {
             self.log(format!("close_workspace {id}"));
@@ -25302,6 +25376,124 @@ mod tests {
             mux.calls()
         );
         assert!(reload(&path).front.spare_pane.is_none());
+    }
+
+    /// A task whose first step is a hidden command has a worktree and no
+    /// workspace, tab or spare pane while it runs. When it reaches an agent
+    /// step the workspace opens then, and the agent runs in its first pane
+    /// instead of a split beside it.
+    ///
+    /// Fails before `ensure_checkout`: the command step cut the workspace
+    /// along with the worktree, so `workspace_id` was set after the first
+    /// step and no workspace was opened for the agent.
+    #[test]
+    fn a_hidden_first_step_opens_no_workspace_until_an_agent_step_needs_one() {
+        let (repo, _root_guard) = fixture("lazy-workspace-hidden-then-agent");
+        assert!(repo.config.dispatch.hide_commands);
+        let path = add_task(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![])
+            .offering_panes()
+            .cutting_checkouts_alone()
+            // Real worktrees, so the second step finds the first one's
+            // checkout through git, as it does under herdr.
+            .cutting_real_worktrees(repo.worktree_root());
+        let pipelines = pipelines_running("true", false);
+
+        // Stopped on the command step itself: the pass that starts it is the
+        // one that cuts the checkout.
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let front = reload(&path).front;
+        assert!(
+            front.worktree_path.is_some(),
+            "the command needs a worktree"
+        );
+        assert_eq!(
+            (&front.workspace_id, &front.pane_id, &front.tab_id),
+            (&None, &None, &None)
+        );
+        assert!(front.spare_pane.is_none());
+        assert!(
+            mux.did("create_workspace").is_empty() && mux.did("create_pane").is_empty(),
+            "a hidden command opened a workspace: {:?}",
+            mux.calls()
+        );
+        assert_eq!(mux.did("cut_checkout").len(), 1, "{:?}", mux.calls());
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(mux.did("create_pane").len(), 1, "{:?}", mux.calls());
+        assert!(
+            mux.did("launch demo · review pane=w0:p9").len() == 1,
+            "the review lane must start in the workspace's first pane: {:?}",
+            mux.calls()
+        );
+        assert!(
+            pane_openings(&mux).is_empty(),
+            "no pane may be opened beside the first: {:?}",
+            mux.calls()
+        );
+        let front = reload(&path).front;
+        assert_eq!(front.workspace_id.as_deref(), Some("w0"));
+        assert!(front.spare_pane.is_none());
+        assert!(!front.borrowed, "the checkout is still the task's own cut");
+    }
+
+    /// A hidden command on a task that has a worktree and no workspace leaves
+    /// it that way and asks the multiplexer nothing: a dispatcher restarted
+    /// in the middle of such a run must not read the missing workspace as a
+    /// stale one and heal it.
+    ///
+    /// Fails before `ensure_checkout`'s `want_pane`: the call opened a
+    /// workspace for the task, as it does for every step.
+    #[test]
+    fn a_hidden_command_with_no_workspace_recorded_is_left_alone() {
+        let (repo, _root_guard) = fixture("lazy-workspace-left-alone");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = Task::load(&path).unwrap();
+        task.front.workspace_id = None;
+        task.front.pane_id = None;
+        task.front.tab_id = None;
+        let mux = FakeMux::new(vec![])
+            .offering_panes()
+            .cutting_checkouts_alone();
+
+        let (worktree, fresh) =
+            ensure_checkout(&repo, &mux, &mut task, &mut Default::default(), false).unwrap();
+
+        assert_eq!(Some(worktree), task.front.worktree_path);
+        assert_eq!(fresh, None);
+        assert_eq!(task.front.workspace_id, None);
+        assert!(mux.calls().is_empty(), "{:?}", mux.calls());
+    }
+
+    /// Unqueueing a task whose first step was a hidden command takes back the
+    /// checkout it cut, though there is no workspace to remove.
+    ///
+    /// Fails before `take_back_fresh_cut` handled a missing workspace: it
+    /// returned at once and left the worktree and its branch standing.
+    #[test]
+    fn taking_back_a_cut_with_no_workspace_removes_the_checkout() {
+        let (repo, _root_guard) = fixture("lazy-workspace-take-back");
+        let path = add_task_with_worktree(&repo, "demo", crate::pipeline::QUEUED);
+        let mut task = Task::load(&path).unwrap();
+        task.front.workspace_id = None;
+        let mux = FakeMux::new(vec![]);
+
+        take_back_fresh_cut(
+            &mux,
+            &repo,
+            &task,
+            crate::pipeline::QUEUED,
+            &mut Report::default(),
+        );
+
+        assert_eq!(mux.did("remove_workspace"), Vec::<String>::new());
+        assert_eq!(mux.did("remove_checkout").len(), 1, "{:?}", mux.calls());
     }
 
     /// A task whose workspace has an idle first pane nothing has used yet, and

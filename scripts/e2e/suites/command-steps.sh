@@ -1150,6 +1150,74 @@ else
   ok "hide: true never opened a pane at all"
 fi
 
+# The workspace half: a task opens its herdr workspace at the first step that
+# shows a pane, not before. A hidden command first, held by a release file,
+# leaves the double with no workspace and no pane while it runs. The agent step
+# after it then opens the workspace and runs in its first pane, with no second
+# pane split beside it.
+LAZY_RELEASE="$LIVE/lazy.release"
+rm -f "$LAZY_RELEASE"
+LAZY_MODEL=$(awk '/id: implement/ {found=1} found && /model:/ {print $2; exit}' \
+  .spoolway/pipelines/default.yml)
+sed -e "s|@RELEASE@|$LAZY_RELEASE|" -e "s|@MODEL@|$LAZY_MODEL|" \
+  > .spoolway/pipelines/panelazy.yml <<'YML'
+description: A hidden command, then an agent step, for when the workspace opens.
+
+steps:
+  - id: quiet
+    description: Run detached until the suite has looked at the double.
+    run: 'for _ in $(seq 1 1200); do [ -e "@RELEASE@" ] && break; sleep 0.1; done'
+    timeout: 120s
+    hide: true
+    on_pass: watched
+    on_fail: blocked
+  - id: watched
+    description: The first step that shows a pane.
+    agent: pi
+    prompt: builder
+    model: @MODEL@
+    on_pass: done
+YML
+works "a hidden command followed by an agent step checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/lazy.md" lazy "$BODY" "group: lazy" "pipeline: panelazy"
+must "a task whose first step is hidden" "$SPOOLWAY" queue add --from "$LIVE/lazy.md"
+lazy_worktree_cut() { [ -n "$(worktree_of lazy)" ]; }
+if poll_until 60 lazy_worktree_cut; then ok "a hidden first step still has a worktree to run in"
+else bad "a hidden first step still has a worktree to run in"; fi
+if [ -z "$(workspace_of lazy)" ] && [ -z "$(tab_of lazy)" ] \
+  && ! grep -q '^spare_pane:' "$SPOOLWAY_PROJECT_HOME/queue/lazy.md"; then
+  ok "and the task records no workspace, tab or spare pane"
+else
+  bad "and the task records no workspace, tab or spare pane"
+  sed 's/^/        /' "$SPOOLWAY_PROJECT_HOME/queue/lazy.md"
+fi
+LAZY_WORKTREE=$(worktree_of lazy)
+if ! awk -F'\t' -v c="$LAZY_WORKTREE" '$3 == c' "$HSTATE/workspaces" | grep -q .; then
+  ok "herdr holds no workspace on the task's worktree while the hidden step runs"
+else
+  bad "herdr holds no workspace on the task's worktree while the hidden step runs"
+  sed 's/^/        /' "$HSTATE/workspaces"
+fi
+
+touch "$LAZY_RELEASE"
+lazy_agent_started() { [ "$(stage_of lazy)" = watched ] && [ -n "$(workspace_of lazy)" ] \
+  && [ -s "$HSTATE/agents" ]; }
+if poll_until 90 lazy_agent_started; then ok "the workspace opens when the agent step starts"
+else bad "the workspace opens when the agent step starts (at \`$(stage_of lazy)\`)"; fi
+LAZY_WORKSPACE=$(workspace_of lazy)
+if [ "$(awk -F'\t' -v w="$LAZY_WORKSPACE" '$3 == w' "$HSTATE/panes" | wc -l | tr -d ' ')" -eq 1 ]; then
+  ok "and the agent runs in the workspace's first pane, with none split beside it"
+else
+  bad "and the agent runs in the workspace's first pane, with none split beside it"
+  sed 's/^/        /' "$HSTATE/panes" "$HSTATE/agents"
+fi
+must "the agent step reports" env SPOOLWAY_TASK=lazy SPOOLWAY_STEP=watched \
+  "$SPOOLWAY" report --pass -m "done with watched"
+if drive lazy gone 120; then ok "the task finishes and is archived"
+else bad "the task finishes and is archived (at \`$(stage_of lazy)\`)"; fi
+
 # The override half: commands are hidden for the project, and one step says
 # `hide: false`. That step gets a pane of its own, and the step after it, with
 # no `hide:` key, follows the project and opens none. Each is held by a release

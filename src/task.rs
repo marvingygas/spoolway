@@ -519,7 +519,10 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<PathBuf>,
 
-    /// Workspace holding the task's worktree, torn down at cleanup.
+    /// Workspace holding the task's worktree, torn down at cleanup. Absent
+    /// while every step so far has been a hidden command, which needs the
+    /// worktree but no pane: the workspace opens at the first step that shows
+    /// one. Headless is the exception and records one from the first cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 
@@ -553,11 +556,12 @@ pub struct Frontmatter {
     /// a step that shows a pane runs in it, or whenever the task's workspace
     /// ids are cleared.
     ///
-    /// A command step that is hidden runs without a pane, so it leaves the
-    /// pane empty. Recording it here is what lets a later pass hand it to the
-    /// next agent step, or the next shown command step, instead of splitting
-    /// a new pane beside an empty shell. It is taken only while nothing runs
-    /// in it: see `Mux::pane_is_idle`.
+    /// The workspace opens at the first step that shows a pane, and that
+    /// step takes the pane at once. The record outlives that only when the
+    /// step's launch fails: the pane is left empty, and recording it here is
+    /// what lets the next pass hand it over instead of splitting a new pane
+    /// beside an empty shell. It is taken only while nothing runs in it: see
+    /// `Mux::pane_is_idle`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spare_pane: Option<String>,
 
