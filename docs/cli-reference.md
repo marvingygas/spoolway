@@ -429,6 +429,14 @@ reads `tasks` as task files should skip a row with no `pipeline`.
 nite-1   queued   ○ queued   opening ticket 13s (stopped at 1m)
 ```
 
+While a task's worktree is being cut, its NEXT reads `cutting worktree 24s (stopped at 10m)`.
+The cut stops after 10 minutes. See [Git hooks in a
+cut](dispatcher.md#git-hooks-in-a-cut).
+
+```
+hang3    quick   queued   ◌ starting   cutting worktree 24s (stopped at 10m)
+```
+
 A file in the queue that does not parse has no row. A file that holds an id another file holds,
 such as `dd1 - Copy.md` beside `dd1.md`, has no row either. The dispatcher skips both. Under the
 table, the text output lists the files that do not parse under one heading, and the files that
