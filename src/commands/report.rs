@@ -305,12 +305,14 @@ pub fn report(
     // The lap bound's park is the one arrival whose note is not an arrival
     // line: it is an entry of its own, two lines long, and `set_stage` would
     // prefix it with the arrow and flatten the second line into the first.
-    // The arrival is written bare and the note follows it as drawn.
+    // The arrival is written bare, with neither the note nor the lane's `-m`
+    // on it, and the note follows it as drawn. The `-m` still lands once,
+    // credited to `current`, below.
     let arrival = crate::dispatch::with_walk_note(
         pause_note
             .as_deref()
-            .filter(|_| !lap_limited)
-            .or(args.message.as_deref()),
+            .or(args.message.as_deref())
+            .filter(|_| !lap_limited),
         routed.walked_past,
     );
     task.set_stage(&destination, arrival.as_deref());
@@ -7228,6 +7230,12 @@ mod tests {
             !log.contains("→ `paused`: `work`"),
             "the note is not an arrival line: {log}"
         );
+        assert_eq!(
+            log.matches("test").count(),
+            1,
+            "the lane's own message is written once: {log}"
+        );
+        assert!(log.contains("→ `paused`\n"), "the arrival is bare: {log}");
     }
 
     /// Releasing a pass that `gate_at: blocked` held is a person stepping in
