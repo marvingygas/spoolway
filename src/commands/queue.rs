@@ -2070,9 +2070,20 @@ fn task_branch(task: &Task) -> String {
         .unwrap_or_else(|| crate::task::default_branch(task.id()))
 }
 
-/// Whether `task/<id>` is a local branch.
+/// Whether `task/<id>` is a local branch, or a remote-tracking branch of any
+/// remote. A trial arm runs `create-pr` unless the person ticked it off, so an
+/// earlier arm's branch can sit on `origin` after the local one is cleaned up.
+/// An id minted over it would block on that branch and its pull request.
 fn branch_exists(repo: &Repo, id: &str) -> bool {
-    ref_exists(repo, &crate::task::default_branch(id))
+    let branch = crate::task::default_branch(id);
+    ref_exists(repo, &branch)
+        || repo
+            .git(&[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/remotes/*/{branch}"),
+            ])
+            .is_ok_and(|refs| !refs.trim().is_empty())
 }
 
 /// Whether `branch` is a local branch.
@@ -19524,6 +19535,21 @@ mod tests {
         );
         // The id the routine's own copies are minted under is still free.
         assert_eq!(mint_id(&repo, "nite", &Default::default()), "nite-1");
+    }
+
+    /// An earlier trial arm pushed `task/ping-1` and its local branch has
+    /// since been cleaned up, so only `origin/task/ping-1` is left. Minting
+    /// `ping-1` again blocked the new arm on that branch and its pull request.
+    #[test]
+    fn a_minted_id_skips_one_whose_branch_is_only_on_a_remote() {
+        let (repo, _root_guard) = fixture("mint-id-remote-branch");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["update-ref", "refs/remotes/origin/task/ping-1", "HEAD"]);
+
+        assert_eq!(mint_id(&repo, "ping", &Default::default()), "ping-2");
     }
 
     /// Archive retention removes `archive/ping-1.md` and keeps the branch

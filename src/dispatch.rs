@@ -24770,9 +24770,9 @@ mod tests {
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
-        // Never pushed, unlike the ordinary-task version of this test — a
-        // trial arm's branch is never pushed at all, so this is the shape
-        // that actually occurs.
+        // Never pushed, unlike the ordinary-task version of this test — an arm
+        // whose picker ticked its publishing steps to skip never pushes its
+        // branch, and this is that shape.
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());

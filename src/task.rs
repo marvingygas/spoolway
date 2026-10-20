@@ -482,7 +482,8 @@ pub struct Frontmatter {
     /// is kept only so an old task file written under it still parses and
     /// round-trips. Its one writer now is the queue screen's trial picker,
     /// which stamps a trial arm's own ticked steps here so a throwaway run
-    /// never pushes a branch or opens a pull request — see
+    /// can keep a publishing step from pushing a branch or opening a pull
+    /// request — see
     /// `commands::queue::build_trial_arm`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<String>,

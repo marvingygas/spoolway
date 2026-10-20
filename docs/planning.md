@@ -337,7 +337,8 @@ fails validation, a task still holding its skeleton's `[[…]]` placeholder text
 `gate_at:` names a step that a ticked pipeline lacks. The `gate_at:` refusal names the task and
 tells you to untick that pipeline or to change `gate_at:` in the task.
 
-An arm never pushes a branch or opens a pull request. Compare the arms with
+An arm runs every step you leave in. A step that pushes or opens a pull request,
+such as `create-pr`, does so for the arm too: tick it to skip it. Compare the arms with
 `spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.
 Only the source group and the ledger rows remain. `spoolway eval --discard <id>` removes a
 trial early. See [Trial arms](dispatcher.md#trial-arms).

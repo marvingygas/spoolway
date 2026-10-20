@@ -1344,7 +1344,11 @@ every task in every copy an arm under one shared `trial:` id. See [Trials](plann
 An arm is a disposable copy:
 
 - Its `queued`, `started` and `done` events never fire the `[issue_tracking]` hook.
-- The deprecated stack command is a no-op for it, so it opens no pull request.
+- The deprecated stack command is a no-op for it.
+- It runs every step the person left in, so a step such as `create-pr` still pushes its branch and
+  opens a pull request. Tick that step to skip it in the trial picker.
+- A new trial mints arm ids that no local or remote branch holds, so a pushed arm never blocks the
+  next trial.
 - Its branch is deleted at cleanup whether or not a remote has it.
 - It carries `trial_group:`, the source group a person tried. Every ledger line it banks stores
   that source group beside `trial:`. The field is absent on an ordinary task's lines.
