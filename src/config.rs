@@ -423,11 +423,14 @@ pub struct HousekeepingConfig {
     /// no longer reaches this folder.
     pub archive_retention_days: u64,
 
-    /// How old the shared model-price table may be before `spoolway doctor`
-    /// notes it. `0` turns the note off without changing which table answers
-    /// model lookups. Refreshing remains the explicit `spoolway models
-    /// refresh` command however old the active table becomes.
-    pub price_max_age_days: u64,
+    /// Retired: how old the shared model-price table could be before
+    /// `spoolway doctor` noted it. Doctor no longer says anything about the
+    /// table's age; `spoolway models` prints it in its footer. Kept, whatever
+    /// value it holds, only so an existing config still parses — the key sat
+    /// in every scaffolded config, and `deny_unknown_fields` would refuse the
+    /// file. Dropped unconditionally on the next save.
+    #[serde(skip_serializing)]
+    pub(crate) price_max_age_days: Option<toml::Value>,
 }
 
 impl Default for HousekeepingConfig {
@@ -447,7 +450,7 @@ impl Default for HousekeepingConfig {
             retention_days: 30,
             // Off: see the field's own doc.
             archive_retention_days: 0,
-            price_max_age_days: 30,
+            price_max_age_days: None,
         }
     }
 }
@@ -1602,6 +1605,7 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
     ("dispatch", "worktree_root"),
     ("dispatch", "tear_lanes_on_stop"),
     ("dispatch", "cleanup_on_stop"),
+    ("housekeeping", "price_max_age_days"),
     ("unattended", "skip_blocked_lane"),
     ("issue_tracking", "on_fail"),
     ("agents.*", "args"),
@@ -3027,7 +3031,6 @@ mod tests {
         // Every model your pipelines name is already covered by the built-in
         // table once it exists; nothing here is a guess spoolway made for you.
         assert!(parsed.models.is_empty());
-        assert_eq!(parsed.housekeeping.price_max_age_days, 30);
     }
 
     /// `[issue_tracking]` sits directly under `[watch]` now — above every
@@ -3050,17 +3053,19 @@ mod tests {
         );
     }
 
+    /// A config whose `[housekeeping]` table still holds the retired
+    /// `price_max_age_days` parses, and neither a plain serialisation nor
+    /// `render` writes the key back out.
     #[test]
-    fn written_config_explains_the_price_age_key_and_round_trips_it() {
-        let mut config = Config::default();
-        config.housekeeping.price_max_age_days = 7;
+    fn the_retired_price_max_age_days_key_parses_and_drops() {
+        let config: Config = toml::from_str("[housekeeping]\nprice_max_age_days = 30\n")
+            .expect("a retired price_max_age_days must still parse");
+        assert!(config.housekeeping.price_max_age_days.is_some());
         let rendered = config.render().unwrap();
-        assert!(rendered.contains("housekeeping.price_max_age_days"));
-        assert!(rendered.contains("before `spoolway doctor` says so"));
-        assert!(rendered.contains("price_max_age_days = 7"));
-
-        let parsed: Config = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed.housekeeping.price_max_age_days, 7);
+        assert!(!rendered.contains("price_max_age_days"), "{rendered}");
+        let plain = toml::to_string(&config).unwrap();
+        assert!(!plain.contains("price_max_age_days"), "{plain}");
+        assert!(Config::default().housekeeping.price_max_age_days.is_none());
     }
 
     #[test]

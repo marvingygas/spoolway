@@ -27,7 +27,6 @@
 # moved there whole; the two left below were never theirs.
 #
 # covers: housekeeping.retention_days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
-# covers: housekeeping.price_max_age_days — doctor notes only a table older than the configured limit; 0 is covered by the unit boundary test
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -258,22 +257,6 @@ else
   bad "models closes with the active table's date, whole-day age, and refresh command"
   printf '        %s\n' "$MODELS_FOOTER"
 fi
-
-# Rewrite only the fixture header: the same valid refreshed table continues
-# answering model lookup, while doctor sees each side of the configured age
-# boundary without a network call or a clock-dependent sleep.
-PRICE_TABLE="$HOME/.spoolway/model-prices.json"
-jq '.generated = "2000-01-01"' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
-mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
-must "price age limit is set for the doctor boundary" \
-  "$SPOOLWAY" config set housekeeping.price_max_age_days 30
-says "doctor notes a refreshed table past the age limit" \
-  'past the 30 in `housekeeping.price_max_age_days`' "$SPOOLWAY" doctor
-
-jq --arg today "$(date -u +%F)" '.generated = $today' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
-mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
-silent_about "doctor stays quiet for a refreshed table inside the age limit" \
-  'past the 30 in `housekeeping.price_max_age_days`' "$SPOOLWAY" doctor
 
 BODY="$LIVE/body.md"
 task_body "$BODY"

@@ -250,7 +250,7 @@ know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-mo
 A model in none of them has an unknown cost, not a free one. A project row that sets only
 `prompt_cache_ttl` does not price a model. A model that no table knows stays unpriced under it. `spoolway models` lists every
 model the pipelines name, its window, its rates, which table answered, and how old that table
-is. `spoolway doctor` notes a table older than `housekeeping.price_max_age_days`.
+is.
 
 A tiered model's higher rates print on an indented row under it:
 

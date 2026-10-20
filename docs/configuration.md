@@ -413,7 +413,6 @@ update_check = true
 calibrate_window = "14d"
 retention_days = 30
 archive_retention_days = 0
-price_max_age_days = 30
 ```
 
 | Key | Default | What it controls |
@@ -422,7 +421,6 @@ price_max_age_days = 30
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
 | `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/` or `tracking/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
 | `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on` or holds its id. The sweep skips `archive/` while a file in `queue/` does not parse, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
-| `price_max_age_days` | `30` | Days before `spoolway doctor` notes that the price table is old. `0` turns the note off. Refresh with `spoolway models refresh`. See [Pricing](cost.md#pricing). |
 
 Archiving a task removes its files under `tracking/`, `commands/` and its session home at
 once. Moving a task back to the pending directory stops its running hooks and removes its files
