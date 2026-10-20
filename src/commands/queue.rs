@@ -870,6 +870,11 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
 /// teardown keeps for unpushed commits is named by the teardown's own line
 /// on standard error, which is all this road says about it.
 ///
+/// Refused too while the worktree is off its task's branch or midway through
+/// a rebase, merge, cherry-pick or revert — see [`crate::teardown::off_branch`]
+/// — before anything is interrupted, since the sweep commit would land where
+/// the work cannot be found.
+///
 /// Refused while a live dispatcher holds the run lock: it re-reads the
 /// queue every pass, and a checkout this tears down out from under it is
 /// the same corruption the lock exists to prevent. Checked first, before a
@@ -925,6 +930,23 @@ fn queue_unqueue_forced(
         .iter()
         .position(|t| t.id() == id)
         .with_context(|| format!("no queued task `{id}` — it left the queue while this ran"))?;
+
+    // Before the lane is interrupted or anything is committed: the sweep below
+    // runs `git add -A` and `git commit` wherever HEAD is, so on a detached
+    // HEAD, another branch or mid-operation the commit would land off
+    // `task/<id>` and the worktree removal would then delete the only
+    // checkout that shows it. Teardown holds a task for the same reason.
+    if let Some(worktree) = checkout
+        && let Some(off) = crate::teardown::off_branch(&tasks[idx], worktree)
+    {
+        bail!(
+            "did not unqueue `{id}`: {} ({}) — committing and removing it would lose the \
+             work. Put it back on the task's branch, or finish or abort the operation, \
+             then run this again. Nothing was interrupted, committed or torn down.",
+            off.found,
+            worktree.display()
+        );
+    }
 
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
@@ -12736,6 +12758,47 @@ mod tests {
         let said = format!("{err:#}");
         assert!(!said.contains("--force\n"), "{said}");
         assert!(said.contains("Unqueue `child` first"), "{said}");
+    }
+
+    /// A forced unqueue sweeps the worktree's leftovers into a commit before it
+    /// removes the checkout, so on a detached HEAD that commit would land on
+    /// no branch. It refuses, touching nothing, and names what it found.
+    #[test]
+    fn a_forced_unqueue_refuses_a_worktree_on_a_detached_head() {
+        let (repo, _root_guard) = fixture("unqueue-forced-detached");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let worktree = crate::scratch::root("unqueue-forced-detached-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| crate::repo::run(&worktree, "git", args).unwrap();
+        git(&["init", "-q", "-b", "task/solo"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(worktree.join("a.txt"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        git(&["checkout", "-q", "--detach"]);
+        std::fs::write(worktree.join("left.txt"), "unrecorded").unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.front.branch = Some("task/solo".into());
+        task.save().unwrap();
+
+        let err = queue_unqueue_forced(&repo, &pipelines, "solo", "implement", Some(&worktree))
+            .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("detached HEAD, not `task/solo`"), "{said}");
+        assert!(said.contains("Nothing was interrupted, committed or torn down"));
+        assert!(worktree.join("left.txt").exists());
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            head,
+            "nothing may be committed"
+        );
+        assert!(repo.task("solo").is_ok(), "the task must stay queued");
     }
 
     /// A forced unqueue brings the worktree down, so a process a finished

@@ -21,9 +21,11 @@
 //! archiving a task whose worktree is still registered or on disk.
 //!
 //! Nothing is committed or removed while the worktree is off its task's
-//! branch — a detached HEAD, a rebase or merge in progress, or another branch
-//! checked out. [`Dispatcher::clean_up`] holds the task on `blocked` instead,
-//! since a commit made there lands on no branch a dependent is cut from.
+//! branch — a detached HEAD or another branch checked out — or midway through
+//! a rebase, merge, cherry-pick or revert. [`Dispatcher::clean_up`] holds the
+//! task on `blocked` instead. A commit made on a detached HEAD or another
+//! branch lands where a dependent is not cut from, and one made mid-merge
+//! concludes it with its conflict markers on the task's own branch.
 //!
 //! The other is [`discard_trial`], called from `spoolway eval --discard` for
 //! a trial arm that has not finished and never will: a person has seen
@@ -68,11 +70,87 @@ pub(crate) fn removal_marker(repo: &crate::repo::Repo, task_id: &str) -> PathBuf
 }
 
 /// What teardown found when a worktree is off its task's branch.
-struct OffBranch {
+pub(crate) struct OffBranch {
     /// The clause for the dispatcher's problem line and the status log.
-    found: String,
+    pub(crate) found: String,
     /// The hold's own reason, which the board's NEXT column shows.
-    reason: String,
+    pub(crate) reason: String,
+}
+
+/// The branch `task`'s worktree is meant to be on.
+fn task_branch(task: &Task) -> String {
+    task.front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(task.id()))
+}
+
+/// What is wrong with `worktree`'s git state, or `None` when it is on the
+/// task's branch with no rebase, merge, cherry-pick or revert under way.
+/// Shared by teardown and `spoolway queue unqueue --force`, the two roads that
+/// commit a worktree's leftovers and then remove it. An operation is named
+/// before the branch: a rebase also leaves HEAD detached, and "rebase in
+/// progress" is the more useful half.
+///
+/// A conflicted merge, cherry-pick or revert is refused even on the right
+/// branch, because the sweep's `git add -A` and `git commit` would conclude it
+/// with its conflict markers committed onto `task/<id>`, which a dependent is
+/// then cut from.
+///
+/// A borrowed checkout is never refused: it is a person's own, so what it has
+/// out is theirs to choose, and it is never removed here anyway.
+///
+/// A git failure reads as `None`. A worktree git cannot read has nothing to
+/// commit on any branch, and refusing here would hold a task whose checkout is
+/// already gone for a reason nobody can act on.
+pub(crate) fn off_branch(task: &Task, worktree: &Path) -> Option<OffBranch> {
+    if task.front.borrowed {
+        return None;
+    }
+    let git_dir = crate::repo::worktree_git_dir(worktree).ok()?;
+    let off = |found: &str, reason: &str| {
+        Some(OffBranch {
+            found: found.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        return off(
+            "a rebase is in progress in the worktree",
+            "rebase in progress in the worktree",
+        );
+    }
+    if git_dir.join("MERGE_HEAD").exists() {
+        return off(
+            "a merge is in progress in the worktree",
+            "merge in progress in the worktree",
+        );
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() || git_dir.join("sequencer").exists() {
+        return off(
+            "a cherry-pick is in progress in the worktree",
+            "cherry-pick in progress in the worktree",
+        );
+    }
+    if git_dir.join("REVERT_HEAD").exists() {
+        return off(
+            "a revert is in progress in the worktree",
+            "revert in progress in the worktree",
+        );
+    }
+    let expected = task_branch(task);
+    let on = crate::repo::current_branch_at(worktree).ok()?;
+    match on {
+        Some(branch) if branch == expected => None,
+        Some(branch) => off(
+            &format!("the worktree is on `{branch}`, not `{expected}`"),
+            &format!("worktree on `{branch}`, not `{expected}`"),
+        ),
+        None => off(
+            &format!("the worktree is on a detached HEAD, not `{expected}`"),
+            &format!("worktree on a detached HEAD, not `{expected}`"),
+        ),
+    }
 }
 
 impl<'a> Dispatcher<'a> {
@@ -201,17 +279,12 @@ impl<'a> Dispatcher<'a> {
                 .map(|r| r.step.clone())
                 .unwrap_or_else(|| task.stage().to_string());
             // Before anything is committed: `auto_commit` runs `git add -A` and
-            // `git commit` wherever HEAD is. On a detached HEAD, mid-rebase or
-            // on another branch that commit lands off `task/<id>`, the removal
-            // below then deletes the only checkout that shows it, and the
-            // branch a dependent is cut from comes out without the work. The
+            // `git commit` wherever HEAD is. Off `task/<id>` that commit lands
+            // where the branch a dependent is cut from never sees it, and the
+            // removal below then deletes the only checkout that shows it. The
             // check sits here and not inside `auto_commit` because `spoolway
             // report` shares that, and a step may legitimately report mid-way.
-            // A borrowed checkout is a person's own, so what it has out is
-            // theirs to choose.
-            if !task.front.borrowed
-                && let Some(off) = self.off_branch(task, Path::new(&worktree))
-            {
+            if let Some(off) = off_branch(task, Path::new(&worktree)) {
                 let found = &off.found;
                 self.hold_before_cleanup(
                     task,
@@ -230,7 +303,7 @@ impl<'a> Dispatcher<'a> {
                      spoolway resume {id}",
                     id = task.id(),
                     blocked = crate::pipeline::BLOCKED,
-                    branch = self.task_branch(task),
+                    branch = task_branch(task),
                     worktree = worktree.display(),
                 ));
                 return Ok(false);
@@ -774,60 +847,12 @@ impl<'a> Dispatcher<'a> {
         true
     }
 
-    /// The branch this task's worktree is meant to be on.
-    fn task_branch(&self, task: &Task) -> String {
-        task.front
-            .branch
-            .clone()
-            .unwrap_or_else(|| crate::task::default_branch(task.id()))
-    }
-
-    /// What is wrong with `worktree`'s git state, or `None` when it is on the
-    /// task's branch with no rebase or merge under way. A rebase or merge is
-    /// named before the branch: a rebase also leaves HEAD detached, and
-    /// "rebase in progress" is the more useful half.
-    ///
-    /// A git failure reads as `None`. A worktree git cannot read has nothing
-    /// to commit on any branch, and refusing here would hold a task whose
-    /// checkout is already gone for a reason nobody can act on.
-    fn off_branch(&self, task: &Task, worktree: &Path) -> Option<OffBranch> {
-        let git_dir = crate::repo::worktree_git_dir(worktree).ok()?;
-        let off = |found: &str, reason: &str| {
-            Some(OffBranch {
-                found: found.to_string(),
-                reason: reason.to_string(),
-            })
-        };
-        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-            return off(
-                "a rebase is in progress in the worktree",
-                "rebase in progress in the worktree",
-            );
-        }
-        if git_dir.join("MERGE_HEAD").exists() {
-            return off(
-                "a merge is in progress in the worktree",
-                "merge in progress in the worktree",
-            );
-        }
-        let expected = self.task_branch(task);
-        let on = crate::repo::current_branch_at(worktree).ok()?;
-        match on {
-            Some(branch) if branch == expected => None,
-            Some(branch) => off(
-                &format!("the worktree is on `{branch}`, not `{expected}`"),
-                &format!("worktree on `{branch}`, not `{expected}`"),
-            ),
-            None => off(
-                &format!("the worktree is on a detached HEAD, not `{expected}`"),
-                &format!("worktree on a detached HEAD, not `{expected}`"),
-            ),
-        }
-    }
-
-    /// Park the task on `blocked`, resumable at the step it came from, because
-    /// cleanup found something it must not tear down over. The log line goes
-    /// in the status log and `reason` is the stage change's own.
+    /// Park the task on `blocked`, resumable at [`crate::commands::resume_target`]'s
+    /// answer, because cleanup found something it must not tear down over.
+    /// That is the step the task last reported from, or the pipeline's entry
+    /// when the steps that carried it to `done` were commands, which report
+    /// nothing. The log line goes in the status log and `reason` is the stage
+    /// change's own.
     fn hold_before_cleanup(&self, task: &mut Task, log: &str, reason: &str) -> Result<()> {
         let back = self
             .pipelines

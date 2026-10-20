@@ -11646,7 +11646,7 @@ mod tests {
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
+        task.front.worktree_path = Some(repo.root.join("never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11660,7 +11660,10 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-never-cut-worktree"],
+            [format!(
+                "remove_checkout {}",
+                repo.root.join("never-cut-worktree").display()
+            )],
             "the worktree goes with git when the multiplexer will not take it"
         );
         assert_eq!(
@@ -11682,7 +11685,7 @@ mod tests {
         let (repo, _root_guard) = fixture("stop-no-workspace");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
+        task.front.worktree_path = Some(repo.root.join("never-cut-worktree"));
         task.front.branch = Some("task/demo".into());
         task.save().unwrap();
 
@@ -11695,7 +11698,10 @@ mod tests {
         assert!(archived);
         assert_eq!(
             mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-never-cut-worktree"]
+            [format!(
+                "remove_checkout {}",
+                repo.root.join("never-cut-worktree").display()
+            )]
         );
     }
 
@@ -12960,7 +12966,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
+                f.worktree_path = Some(repo.root.join("never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -13007,7 +13013,7 @@ mod tests {
                 f.workspace_id = Some("wD".into());
                 f.tab_id = Some("wD:t7".into());
                 f.pane_id = Some("wD:p3".into());
-                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-never-cut-worktree"));
+                f.worktree_path = Some(repo.root.join("never-cut-worktree"));
                 f.branch = Some("task/demo".into());
                 f.borrowed = borrowed;
             });
@@ -24810,6 +24816,48 @@ mod tests {
             std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40)).unwrap();
         });
         assert_held_for(&task, "a merge is in progress");
+    }
+
+    // covers: teardown holds a task with a cherry-pick or revert in progress
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_mid_cherry_pick_or_revert() {
+        for (marker, clause) in [
+            ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
+            ("sequencer", "a cherry-pick is in progress"),
+            ("REVERT_HEAD", "a revert is in progress"),
+        ] {
+            let task = off_branch_cleanup(&format!("cleanup-{marker}"), |wt| {
+                let git_dir = crate::repo::worktree_git_dir(wt).unwrap();
+                match marker {
+                    "sequencer" => std::fs::create_dir_all(git_dir.join(marker)).unwrap(),
+                    _ => std::fs::write(git_dir.join(marker), "0".repeat(40)).unwrap(),
+                }
+            });
+            assert_held_for(&task, clause);
+        }
+    }
+
+    // covers: a borrowed checkout is never held for being off the task's branch
+    #[test]
+    fn a_cleanup_terminal_does_not_hold_a_borrowed_checkout_on_another_branch() {
+        let (repo, _root_guard) = fixture("cleanup-borrowed-off-branch");
+        let worktree = crate::scratch::root("dispatch-cleanup-borrowed-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "somebody-elses"]).unwrap();
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.borrowed = true;
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(!path.exists(), "a borrowed checkout must not hold the task");
+        assert!(repo.archive_dir().join("demo.md").exists());
+        assert!(worktree.exists(), "a borrowed checkout is never removed");
     }
 
     // covers: teardown holds a task whose worktree is on another branch

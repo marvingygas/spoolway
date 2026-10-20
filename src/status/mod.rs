@@ -4853,6 +4853,11 @@ fn build_rows(
                 .map(|launched| (chrono::Utc::now().timestamp() - launched).max(0)),
             false => None,
         };
+        let held_by_teardown = parked_on_blocked && teardown_hold(task).is_some();
+        let row_stage = match held_by_teardown {
+            true => crate::pipeline::BLOCKED,
+            false => shown_stage,
+        };
         rows.push(Row {
             id: task.id().to_string(),
             routine: task.routine().map(str::to_string),
@@ -4860,13 +4865,15 @@ fn build_rows(
             issue_url: issue_url_of(task),
             after: stacked_after(repo, tasks, task),
             // A task teardown held reads `blocked`, since the step it came
-            // from is not where the work stands: it is in the worktree.
-            // Arrivals and the ledger figures stay with that step.
-            stage: match parked_on_blocked && teardown_hold(task).is_some() {
-                true => crate::pipeline::BLOCKED.to_string(),
-                false => shown_stage.to_string(),
+            // from is not where the work stands: it is in the worktree. The
+            // arrival count follows the stage drawn beside it, as
+            // [`Row::arrivals`] promises; the ledger figures stay with the
+            // step that spent them.
+            stage: row_stage.to_string(),
+            arrivals: match held_by_teardown {
+                true => task.rounds_at(row_stage),
+                false => arrivals,
             },
-            arrivals,
             pipeline: pipeline.name.clone(),
             state,
             depth: graph.depth(task.id()),
@@ -13584,6 +13591,7 @@ mod tests {
             add_to(&repo, id, &[], Some(from), Some(id));
             let mut task = repo.task(id).unwrap();
             task.front.blocked_from = Some("handover".into());
+            task.front.arrivals.insert("handover".into(), 4);
             task.set_stage(
                 crate::pipeline::BLOCKED,
                 Some("worktree on a detached HEAD, not `task/t3`"),
@@ -13591,9 +13599,15 @@ mod tests {
             task.save().unwrap();
         }
         let rows = rows(&repo, &pipelines).unwrap();
-        let stage_of = |id: &str| rows.iter().find(|r| r.id == id).unwrap().stage.clone();
-        assert_eq!(stage_of("t3"), "blocked");
-        assert_eq!(stage_of("t5"), "handover");
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row("t3").stage, "blocked");
+        assert_eq!(row("t5").stage, "handover");
+        assert_eq!(row("t5").arrivals, 4);
+        assert_ne!(
+            row("t3").arrivals,
+            4,
+            "the count belongs to the stage drawn beside it, not the step it came from"
+        );
     }
 
     /// A plain resume refuses a task whose recorded step the pipeline no
