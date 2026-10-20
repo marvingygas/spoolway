@@ -420,6 +420,40 @@ refuses "an open hook that never exits fails the add once its limit is up" \
   "$SPOOLWAY" queue add --from "$LIVE/open-hangs.md"
 works "and nothing was queued" \
   bash -c '! test -e "$1/queue/open-hangs.md"' _ "$SPOOLWAY_PROJECT_HOME"
+
+# A `queue add` stopped while its `open` hook runs leaves the hook running. The
+# next `queue add` of the same id adopts that run instead of starting a second
+# hook, so one ticket opens. The hook counts its starts and holds on a release
+# file the suite writes once the first `queue add` is gone.
+cat > .spoolway/hooks/open-adopt.sh <<'EOF'
+#!/bin/sh
+[ "$SPOOLWAY_EVENT" = open ] || exit 0
+dir=$(dirname "$SPOOLWAY_OUT")
+echo started >>"$dir/adopt.starts"
+n=0
+while [ ! -e "$dir/adopt.release" ] && [ "$n" -lt 300 ]; do sleep 0.1; n=$((n + 1)); done
+echo "ticket=acme/app#77" >"$SPOOLWAY_OUT"
+EOF
+chmod +x .spoolway/hooks/open-adopt.sh
+must "the hook is switched to one that waits for a release file" \
+  "$SPOOLWAY" config set issue_tracking.hook open-adopt.sh
+task_doc "$LIVE/open-adopt.md" open-adopt "$BODY" "group: open-adopt" \
+  "group_description: a task whose queue add is stopped mid-hook"
+rm -f "$SPOOLWAY_PROJECT_HOME/tracking/adopt.release" "$SPOOLWAY_PROJECT_HOME/tracking/adopt.starts"
+"$SPOOLWAY" queue add --from "$LIVE/open-adopt.md" >"$LIVE/open-adopt-1.out" 2>&1 &
+ADOPT_PID=$!
+poll_until 10 test -s "$SPOOLWAY_PROJECT_HOME/tracking/adopt.starts" \
+  && ok "the open hook started under the first queue add" \
+  || bad "the open hook never started under the first queue add"
+kill -TERM "$ADOPT_PID" 2>/dev/null
+wait "$ADOPT_PID" 2>/dev/null
+touch "$SPOOLWAY_PROJECT_HOME/tracking/adopt.release"
+must "a second queue add of the same id adopts the hook and queues it" \
+  "$SPOOLWAY" queue add --from "$LIVE/open-adopt.md"
+works "the hook was started once, not once per queue add" \
+  test "$(wc -l <"$SPOOLWAY_PROJECT_HOME/tracking/adopt.starts")" -eq 1
+must "the hook is switched back to the one that only answers open" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
 must "the hook is switched back to the one that only answers open" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
