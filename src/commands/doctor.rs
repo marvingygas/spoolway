@@ -2606,7 +2606,7 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 /// each other's panes. Queueing one is refused, but a routine added after
 /// the task was queued is only caught here. The third is two files that are
 /// one routine as far as the dispatcher can tell, so one of their jobs is
-/// skipped every minute while the other's copy is queued.
+/// skipped each time it is due while the other's copy is queued.
 fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     let (tasks, problems) = repo.tasks_and_problems().unwrap_or_default();
 

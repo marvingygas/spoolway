@@ -7977,7 +7977,9 @@ fn routine_folder_lines(
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
 /// pending task, minus the `Gate:` row a routine has no gate picker to set
 /// and the `Starts from:` and `Lands in:` rows, which this pane has never
-/// drawn. Comes back with
+/// drawn, plus a `Problem:` row under any task whose id another routine
+/// file also holds. That row is why this takes every folder and
+/// `routines_dir`, not only the highlighted one. Comes back with
 /// each task's start and the highlighted one's range, the same as
 /// [`tasks_pane_lines`].
 fn routine_task_lines(
