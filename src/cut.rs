@@ -139,7 +139,8 @@ fn shown_note(runs: &Runs, key: &str) -> std::path::PathBuf {
 /// The note kept beside a run holding the branch on its first line and the
 /// checkout's path after it, so [`stop_and_reclaim`] can take the checkout
 /// away without the caller knowing which backend cut it. It exists from the
-/// start of a cut until its answer is read.
+/// start of a cut until the run's answer is read or the run is found
+/// vanished, and is cleared with the other notes then.
 fn where_note(runs: &Runs, key: &str) -> std::path::PathBuf {
     runs.log_path(key).with_extension("where")
 }
@@ -243,6 +244,11 @@ fn poll_within(
             // Stops what the wrapper left running and clears its files, and
             // keeps the count: `forget` would reset it.
             runs.discard(&key)?;
+            // The run has no answer, but its notes are over with it. Left,
+            // they would tell [`stop_and_reclaim`] this task's checkout is
+            // still half cut, when a cut killed during its hook has left a
+            // complete one that the caller adopts.
+            clear_notes(&runs, &key);
             if kills >= MAX_CUT_KILLS {
                 runs.forget(&key)?;
                 bail!(
@@ -465,35 +471,38 @@ fn tidy(repo: &Repo, task_id: &str, path: &Path) -> Result<()> {
 /// what the cut made or half made: the checkout, and the branch if the cut
 /// created it.
 ///
-/// Does nothing for a task whose cut has been answered, or never ran. The
-/// checkout of a cut that was answered belongs to the task, and its teardown
-/// removes it.
+/// Acts only on a run that is going or has an answer nobody has read yet. A
+/// task with no run on record has nothing of the cut's to remove: its
+/// checkout is the task's own, whether the cut was answered, was adopted
+/// after the run vanished, or was never needed, and its teardown removes it.
 ///
-/// The error is the removal's own, and names the command to remove the
-/// checkout by hand. The checkout is then locked as `initializing`, so a later
-/// queue of the same task removes it, or says it cannot, instead of running
-/// in it.
-pub(crate) fn stop_and_reclaim(repo: &Repo, task_id: &str) -> Result<()> {
+/// `next` finishes the advice "Run `<command>`, then ..." in the error, so
+/// each caller says what its person does after removing the checkout. The
+/// error is the removal's own and names the command to remove the checkout by
+/// hand. The checkout is then locked as `initializing`, so a later queue of
+/// the same task removes it, or says it cannot, instead of running in it.
+pub(crate) fn stop_and_reclaim(repo: &Repo, task_id: &str, next: &str) -> Result<()> {
     let runs = runs(repo);
     let key = key(task_id);
     let cut = std::fs::read_to_string(where_note(&runs, &key)).ok();
     let made = made_note(&runs, &key).exists();
+    let answered_or_none = runs.state(&key) == RunState::Fresh;
     // The group is signalled and waited for here, before the checkout is
     // taken away: a hook still running would write into a folder that is
     // being removed.
     runs.stop(&key);
     let undone = match cut.as_deref().and_then(|text| text.split_once('\n')) {
-        Some((branch, path)) => crate::mux::undo_stopped_cut(
+        Some((branch, path)) if !answered_or_none => crate::mux::undo_stopped_cut(
             &repo.root,
             Path::new(path),
             branch,
             !made,
             &format!(
-                "{task_id}: the cut of its worktree was stopped because the task left the queue."
+                "{task_id}: the cut of its worktree is stopped because the task is leaving the queue."
             ),
-            "queue the task again",
+            next,
         ),
-        None => Ok(()),
+        _ => Ok(()),
     };
     clear_notes(&runs, &key);
     reclaim(repo, task_id);
@@ -780,7 +789,7 @@ mod tests {
         }
         assert!(running(&repo, "t1").is_some());
 
-        stop_and_reclaim(&repo, "t1").unwrap();
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
 
         let child: u32 = std::fs::read_to_string(&child)
             .unwrap()
@@ -822,7 +831,7 @@ mod tests {
         );
         settle(&repo);
 
-        stop_and_reclaim(&repo, "t1").unwrap();
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
 
         assert!(!path.exists(), "the finished checkout was left standing");
         assert!(!branch_exists(&repo, "task/t1"), "the branch was left");
@@ -849,7 +858,7 @@ mod tests {
         );
         settle(&repo);
 
-        stop_and_reclaim(&repo, "t1").unwrap();
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
 
         assert!(!path.exists());
         assert!(
@@ -858,13 +867,64 @@ mod tests {
         );
     }
 
+    /// A cut killed while its hook runs leaves a finished checkout that the
+    /// caller adopts as the task's own. When the task later leaves, that
+    /// checkout and its branch are the task's work and must not be taken away
+    /// as if the cut were still going.
+    #[test]
+    fn a_checkout_adopted_after_a_vanished_run_survives_its_task_leaving() {
+        let (repo, _guard) = fixture("adopted");
+        hook(
+            &repo,
+            "echo started >>\"$(dirname \"$0\")/../../hook-ran\"; sleep 30",
+        );
+        let path = target(&repo);
+        let _ = begin_within(
+            &repo,
+            "t1",
+            &path,
+            "task/t1",
+            "main",
+            Duration::from_secs(60),
+            Duration::ZERO,
+        );
+        let began = Instant::now();
+        while !repo.root.join("hook-ran").exists() {
+            assert!(began.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The whole group at once, wrapper included, so the run leaves no
+        // exit code: the machine going down looks the same.
+        let runs = runs(&repo);
+        let group = runs.read_pid(&key("t1")).expect("the run has a pid");
+        // SAFETY: a plain signal to the process group this test started.
+        unsafe { libc::kill(-(group as libc::pid_t), libc::SIGKILL) };
+        while runs.state(&key("t1")) != RunState::Interrupted {
+            assert!(began.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(poll(&repo, "t1", &path, "task/t1").unwrap(), Poll::Idle);
+        assert!(crate::mux::cut_is_finished(&repo.root, &path, "task/t1"));
+
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
+
+        assert!(
+            path.join(".git").exists(),
+            "the adopted checkout was removed"
+        );
+        assert!(
+            branch_exists(&repo, "task/t1"),
+            "the adopted checkout's branch was deleted"
+        );
+    }
+
     /// A task with no cut has nothing to stop, and asking twice is harmless.
     #[test]
     fn stopping_the_cut_of_a_task_that_never_had_one_does_nothing() {
         let (repo, _guard) = fixture("never");
 
-        stop_and_reclaim(&repo, "t1").unwrap();
-        stop_and_reclaim(&repo, "t1").unwrap();
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
+        stop_and_reclaim(&repo, "t1", "go on").unwrap();
     }
 
     /// A stop note an earlier queue of the task left behind is not the failure

@@ -161,7 +161,11 @@ impl<'a> Dispatcher<'a> {
 
         // A worktree cut that is still going is a run of the same kind, and
         // it is writing the checkout about to be removed.
-        if let Err(e) = crate::cut::stop_and_reclaim(self.repo, task.id()) {
+        if let Err(e) = crate::cut::stop_and_reclaim(
+            self.repo,
+            task.id(),
+            "carry on, because the task is archived either way",
+        ) {
             report.problems.push(format!("{e:#}"));
         }
 
@@ -1133,7 +1137,11 @@ impl<'a> Dispatcher<'a> {
 
         // A worktree cut that is still going is a run of the same kind, and
         // it is writing the checkout about to be removed.
-        if let Err(e) = crate::cut::stop_and_reclaim(self.repo, task.id()) {
+        if let Err(e) = crate::cut::stop_and_reclaim(
+            self.repo,
+            task.id(),
+            "carry on, because the arm is discarded either way",
+        ) {
             report.problems.push(format!("{e:#}"));
         }
 

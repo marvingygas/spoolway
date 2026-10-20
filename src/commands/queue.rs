@@ -950,7 +950,11 @@ fn queue_unqueue_forced(
     }
     // A worktree cut left running is one of these too, and writes the
     // checkout that comes down below.
-    crate::cut::stop_and_reclaim(repo, id)?;
+    crate::cut::stop_and_reclaim(
+        repo,
+        id,
+        &format!("run `spoolway queue unqueue {id} --force` again"),
+    )?;
 
     let mut task = repo.task(id)?;
 

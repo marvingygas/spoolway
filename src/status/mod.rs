@@ -2797,7 +2797,7 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
     // the task leaves: afterwards the dispatcher's sweep no longer reaches
     // it, and a cut that finished on its own would leave a checkout and a
     // branch for the next queue of this task to trip over.
-    crate::cut::stop_and_reclaim(repo, id)?;
+    crate::cut::stop_and_reclaim(repo, id, "unqueue it again")?;
     if let Some(routine_file) = deleted_on_unqueue(repo, &task, drafted) {
         std::fs::remove_file(&task.path)
             .with_context(|| format!("removing {}", task.path.display()))?;
