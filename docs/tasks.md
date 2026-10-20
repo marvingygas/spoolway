@@ -130,8 +130,21 @@ mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. Set i
 `spoolway queue add` and `spoolway task contract --from` refuse any other value, naming the task
 and the steps it may name. `spoolway task contract` lists the steps of each pipeline under
 `.pipelines.<name>.gate_at`.
-A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
-[Trials](planning.md#trials).
+A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. It also refuses
+a copy that would never run the gated step. See [Trials](planning.md#trials).
+
+A `gate_at` can stop naming a step after the task is queued, when an edit to the pipeline renames
+or removes that step. The dispatcher then parks the task on `paused` before its first step and
+logs the gate with the fix:
+
+```
+t2: queued task `t2` has `gate_at: review`, which pipeline `default` does not define. Change `gate_at:` in the task to a step `default` has.
+```
+
+`spoolway pipeline check`, `spoolway doctor` and the task's row on the board and in
+`spoolway queue list` report the same line. A task at `done` is not reported. Resuming the task
+sends it back to `queued`, and the dispatcher parks it again until `gate_at:` names a step the
+pipeline has.
 
 `spoolway queue add` also refuses a `gate_at` on a step the task [walks
 past](pipelines.md#steps-a-task-walks-past), because that gate would never fire. An example is the
