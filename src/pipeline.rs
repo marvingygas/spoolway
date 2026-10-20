@@ -577,19 +577,23 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
 
-    /// Run this step's command detached, with no pane, exactly the way every
-    /// command step used to run.
+    /// Whether this step's command runs detached, with no pane, overriding
+    /// `dispatch.hide_commands` for this one step in either direction.
     ///
-    /// `false`, the default, gives the command a pane of its own — split off
-    /// the task's own tab, under the herdr backend — so a long suite like
-    /// `scripts/e2e-pr.sh` is something a person can look at while it
-    /// runs. A backend with no pane to offer, headless, runs it detached
-    /// either way: this key only ever turns a pane *off*, never demands one
-    /// a backend cannot give.
+    /// `true` runs the command detached. `false` gives it a pane of its own,
+    /// split off the task's own tab under the herdr backend, even while the
+    /// project hides commands. Absent follows `dispatch.hide_commands`. A
+    /// shown command behaves as it does with `hide_commands = false`: it
+    /// takes a lane slot and keeps its pane after it exits. A backend with
+    /// no pane to offer, headless, runs the command detached either way.
     ///
     /// A different axis from [`Step::background`]: that says whether the task
-    /// waits, this says whether a person can watch. The two combine — a
-    /// background command may still stand in a visible pane until it ends.
+    /// waits, this says whether a person can watch. The two combine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide: Option<bool>,
+
+    /// The retired name of `hide: true`, still read so a pipeline written
+    /// before `hide:` loads and behaves as it did. A step may not carry both.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub headless: bool,
 
@@ -911,6 +915,14 @@ fn is_default_pipeline_version(value: &str) -> bool {
 }
 
 impl Step {
+    /// Whether this command step runs detached, with no pane. The step's own
+    /// `hide:` wins in either direction; the retired `headless: true` counts
+    /// as `hide: true`; otherwise the project's `dispatch.hide_commands`
+    /// decides.
+    pub fn hides_command(&self, hide_commands: bool) -> bool {
+        self.hide.unwrap_or(self.headless || hide_commands)
+    }
+
     /// What this step is, read off the keys it carries.
     ///
     pub fn kind(&self) -> StepKind {
@@ -1472,6 +1484,17 @@ impl Pipeline {
                 }
             }
 
+            // `headless:` is the old spelling of `hide: true`. Both on one step
+            // could say opposite things, and the load cannot tell which the
+            // person meant.
+            if step.headless && step.hide.is_some() {
+                bail!(
+                    "step `{}` declares both `headless:` and `hide:` — they set the same \
+                     thing, and the two could disagree; keep only `hide:`",
+                    step.id
+                );
+            }
+
             // Everything below is a lane's, and a command step starts none.
             if kind != StepKind::Agent {
                 for (key, set) in [
@@ -1512,6 +1535,13 @@ impl Pipeline {
                     bail!(
                         "step `{}` declares `headless:` but runs no command — only a `run:` \
                          has a pane to turn off",
+                        step.id
+                    );
+                }
+                if step.hide.is_some() {
+                    bail!(
+                        "step `{}` declares `hide:` but runs no command — only a `run:` \
+                         has a pane to show or hide",
                         step.id
                     );
                 }
@@ -2048,6 +2078,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         run: None,
         timeout: None,
         background: false,
+        hide: None,
         headless: false,
         last: false,
         first: false,
@@ -3216,6 +3247,7 @@ mod tests {
             "loop",
             "timeout",
             "background",
+            "hide",
             "headless",
             "last",
             "first",
@@ -3310,6 +3342,49 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("step `a`"), "{err}");
         assert!(err.to_string().contains("headless"), "{err}");
+    }
+
+    /// `hide:` is a command step's key like `headless:`; an agent step
+    /// declaring it has no command whose pane it could show or hide.
+    #[test]
+    fn hide_is_refused_on_a_step_that_runs_no_command() {
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    hide: false\n    on_pass: z\n  \
+             - id: z\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("step `a`"), "{err}");
+        assert!(err.to_string().contains("`hide:`"), "{err}");
+    }
+
+    /// A step carrying the old and the new spelling is refused at load, and
+    /// the message says which to keep.
+    #[test]
+    fn a_step_with_both_headless_and_hide_is_refused() {
+        let err = parse("steps:\n  - id: a\n    run: x\n    headless: true\n    hide: false\n    on_pass: done\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("step `a`"), "{err}");
+        assert!(err.to_string().contains("keep only `hide:`"), "{err}");
+    }
+
+    /// The step's `hide:` beats the project default either way, `headless:`
+    /// reads as `hide: true`, and an absent key follows the project.
+    #[test]
+    fn hides_command_lets_the_step_override_the_project_default() {
+        let step = |keys: &str| -> Step {
+            parse(&format!(
+                "steps:\n  - id: a\n    run: x\n    on_pass: done\n{keys}"
+            ))
+            .unwrap()
+            .steps
+            .remove(0)
+        };
+        for project in [true, false] {
+            assert_eq!(step("").hides_command(project), project);
+            assert!(step("    hide: true\n").hides_command(project));
+            assert!(!step("    hide: false\n").hides_command(project));
+            assert!(step("    headless: true\n").hides_command(project));
+        }
     }
 
     /// A pipeline may declare `blocked` as an ordinary agent step, and one

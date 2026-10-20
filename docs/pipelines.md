@@ -94,7 +94,7 @@ steps:
 | `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
-| `headless` | `false` | Command steps only. `true` runs the command with no pane, whatever `dispatch.hide_commands` says. |
+| `hide` | `dispatch.hide_commands` | Command steps only. `true` runs the command detached with no pane. `false` gives it a pane of its own even while `dispatch.hide_commands` hides commands. Absent follows `dispatch.hide_commands`. `headless: true` is the older name for `hide: true`, and a step may not carry both. |
 | `last` | `false` | `true` runs the step only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | `true` runs the step only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 | `serial` | `false` | Command steps only. `true` runs it for one task at a time across every pipeline in the project, and one pipeline marking the step id is enough. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
@@ -410,13 +410,18 @@ A pipeline that gives a background step an `on_fail` does not load. The message 
 fixes. Delete `on_fail:` to keep the step a sidecar. Delete `background:` to make it a check:
 the task then waits for the command, and its exit picks `on_pass` or `on_fail`.
 
-A command step runs detached with no pane. Its output goes to the log file under `commands/`.
-Set `dispatch.hide_commands = false` and the step runs in its own pane instead. The pane stays
-open after the command exits, counts toward `dispatch.visible_lanes`, and closes with the task or
-when the limit pushes it out. See [Commands are hidden by
-default](dispatcher.md#commands-are-hidden-by-default). `headless: true` runs the command with
-no pane under either setting. This step option is separate from the internal test-only
-dispatcher backend.
+A command step runs detached with no pane by default. Its output goes to the log file under
+`commands/`. Set `dispatch.hide_commands = false` and every command step runs in its own pane
+instead. The `hide:` key overrides that project setting for one step in either direction.
+`hide: false` gives the step a pane while the project hides commands. `hide: true` keeps the step
+detached while the project shows them. Without `hide:`, the step follows `dispatch.hide_commands`.
+
+A shown command behaves the same whichever setting showed it. The pane stays open after the
+command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit
+pushes it out. So a `hide: false` step in a project that hides commands takes a lane slot and
+keeps its pane, even though every other command there is hidden. See [Commands are hidden by
+default](dispatcher.md#commands-are-hidden-by-default). `hide:` is separate from the internal
+test-only dispatcher backend, which has no panes and runs every command detached.
 
 A paned step's script is written to `<task> · <step>.sh` beside the log, readable by you alone,
 because it holds the step's environment. The pane is typed one short line that runs that file.

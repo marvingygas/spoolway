@@ -843,8 +843,9 @@ works "and it really did write where no lane could" test -f "$OUTSIDE"
 
 # ------------------------------------------------------------------ a pane, or none
 # With `dispatch.hide_commands` set to `false`, a command step with no
-# `headless:` runs in a pane of its own, under a real multiplexer. By default,
-# and with `headless: true`, it runs silent and detached. Neither half is
+# `hide:` runs in a pane of its own, under a real multiplexer. By default,
+# and with `hide: true`, it runs silent and detached. With
+# `hide_commands = true`, a step with `hide: false` still gets its pane. Neither half is
 # provable against the headless backend the rest of this suite runs on — a
 # pane is the one thing only a real pane can be asked whether it opened — so
 # this switches to `herdr`, against `scripts/e2e/herdr-stub.sh`, for as long
@@ -939,7 +940,7 @@ must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
 # could already carry it: a false pass would mean nothing.
 export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 
-# The visible half: no `headless:` key, so the command gets a pane of its
+# The visible half: no `hide:` key, so the command gets a pane of its
 # own, and it stands until this suite lets it go.
 #
 # A made window, not a caught one — the same release-file shape the herdr
@@ -1012,9 +1013,9 @@ for _ in $(seq 1 1200); do
   sleep 0.1
 done
 if [ -n "$RECORDED" ]; then
-  ok "a command step with no headless: key runs in a pane of its own"
+  ok "a command step with no hide: key runs in a pane of its own"
 else
-  bad "a command step with no headless: key runs in a pane of its own"
+  bad "a command step with no hide: key runs in a pane of its own"
 fi
 
 # The task's own tab already names it, so the pane inside it
@@ -1103,7 +1104,7 @@ else
   ok "a shown command's pane is closed once its task is done"
 fi
 
-# The hidden half: the same shape, with `headless: true` added — today's
+# The hidden half: the same shape, with `hide: true` added — today's
 # silent, detached run, and no pane ever asked for. Held open by a release
 # file of its own for the same reason the visible half is: its log is read
 # while it runs, and the archive reclaims that log the moment the one step
@@ -1116,24 +1117,24 @@ fi
 HIDDEN_RELEASE="$LIVE/hidden.release"
 rm -f "$HIDDEN_RELEASE"
 sed "s|@RELEASE@|$HIDDEN_RELEASE|" > .spoolway/pipelines/panehidden.yml <<'YML'
-description: One headless command step, for whether it ever opens a pane.
+description: One hidden command step, for whether it ever opens a pane.
 
 steps:
   - id: hidden
     description: Run detached, with no pane, until the suite has read its log.
     run: 'echo hidden-command-marker; for _ in $(seq 1 1200); do [ -e "@RELEASE@" ] && break; sleep 0.1; done'
-    headless: true
+    hide: true
     on_pass: done
     on_fail: blocked
 YML
-works "a pipeline naming headless: true checks out" "$SPOOLWAY" pipeline check
-says "and show marks it" "hidden     command   waits headless timeout=30m" \
+works "a pipeline naming hide: true checks out" "$SPOOLWAY" pipeline check
+says "and show marks it" "hidden     command   waits hide=true timeout=30m" \
   "$SPOOLWAY" pipeline show
 
 dispatcher_restart
 task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: hiddenc" \
   "pipeline: panehidden"
-must "a task through a headless command step" \
+must "a task through a hide: true command step" \
   "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
 # Read while the step is still held, ahead of the archive that reclaims
 # this log.
@@ -1141,13 +1142,78 @@ records "and its output is on the record just the same" "hidden-command-marker" 
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
 
 touch "$HIDDEN_RELEASE"
-if drive hiddenc gone 180; then ok "a headless command step still routes on its exit code"
-else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
+if drive hiddenc gone 180; then ok "a hide: true command step still routes on its exit code"
+else bad "a hide: true command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
 if [ -f "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.pane" ]; then
-  bad "headless: true never opened a pane at all"
+  bad "hide: true never opened a pane at all"
 else
-  ok "headless: true never opened a pane at all"
+  ok "hide: true never opened a pane at all"
 fi
+
+# The override half: commands are hidden for the project, and one step says
+# `hide: false`. That step gets a pane of its own, and the step after it, with
+# no `hide:` key, follows the project and opens none. Each is held by a release
+# file for the reason the visible half is: the pane file and the log are read
+# while the step runs, and the archive reclaims them.
+must "commands hidden again" "$SPOOLWAY" config set dispatch.hide_commands true
+OVERRIDE_RELEASE="$LIVE/override.release"
+FOLLOW_RELEASE="$LIVE/follow.release"
+rm -f "$OVERRIDE_RELEASE" "$FOLLOW_RELEASE"
+sed -e "s|@RELEASE@|$OVERRIDE_RELEASE|" -e "s|@FOLLOW_RELEASE@|$FOLLOW_RELEASE|" \
+  > .spoolway/pipelines/paneoverride.yml <<'YML'
+description: One step that shows its command and one that follows the project, with commands hidden.
+
+steps:
+  - id: shown
+    description: Stand in a pane of its own although the project hides commands.
+    run: 'echo shown-override-marker; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    hide: false
+    on_pass: follows
+    on_fail: blocked
+  - id: follows
+    description: Say nothing about hide, so the project's setting hides it.
+    run: 'echo follows-project-marker; while [ ! -e "@FOLLOW_RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline naming hide: false checks out" "$SPOOLWAY" pipeline check
+says "and show marks it" "waits hide=false" \
+  "$SPOOLWAY" pipeline show
+
+dispatcher_restart
+task_doc "$LIVE/override.md" override "$BODY" "group: override" \
+  "pipeline: paneoverride"
+must "a task through a hide: false step under hidden commands" \
+  "$SPOOLWAY" queue add --from "$LIVE/override.md"
+OVERRIDE_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/override · shown.pane"
+OVERRIDE_RECORDED=""
+for _ in $(seq 1 1200); do
+  OVERRIDE_RECORDED=$(cat "$OVERRIDE_PANE_FILE" 2>/dev/null || true)
+  if [ -n "$OVERRIDE_RECORDED" ] && grep -q "^$OVERRIDE_RECORDED	" "$HSTATE/panes"; then
+    break
+  fi
+  OVERRIDE_RECORDED=""
+  sleep 0.1
+done
+if [ -n "$OVERRIDE_RECORDED" ]; then
+  ok "hide: false runs in a pane of its own while the project hides commands"
+else
+  bad "hide: false runs in a pane of its own while the project hides commands"
+fi
+touch "$OVERRIDE_RELEASE"
+records "and the step after it follows the project, on the record" "follows-project-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/override · follows.log" override
+if [ -f "$SPOOLWAY_PROJECT_HOME/commands/override · follows.pane" ]; then
+  bad "a step with no hide: key opens no pane while the project hides commands"
+else
+  ok "a step with no hide: key opens no pane while the project hides commands"
+fi
+touch "$FOLLOW_RELEASE"
+if drive override gone 180; then ok "the task carries on through both steps"
+else bad "the task carries on through both steps (at \`$(stage_of override)\`)"; fi
+must "commands shown again" "$SPOOLWAY" config set dispatch.hide_commands false
 
 # A failing, shown command keeps its pane when the task leaves the step for
 # `blocked`, so the output of the failure is still on screen.
@@ -1197,7 +1263,7 @@ unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
-  .spoolway/pipelines/paneflaky.yml
+  .spoolway/pipelines/paneoverride.yml .spoolway/pipelines/paneflaky.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to

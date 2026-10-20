@@ -46,6 +46,7 @@ struct StepShowJson {
     run: Option<String>,
     timeout_seconds: Option<u64>,
     background: bool,
+    hide: Option<bool>,
     headless: bool,
     last: bool,
     first: bool,
@@ -110,6 +111,7 @@ fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
                             .is_some()
                             .then(|| step.command_timeout().as_secs()),
                         background: step.background,
+                        hide: step.hide,
                         headless: step.headless,
                         last: step.last,
                         first: step.first,
@@ -232,6 +234,7 @@ const STEP_KEYS: &[&str] = &[
     "run",
     "timeout",
     "background",
+    "hide",
     "headless",
     "last",
     "first",
@@ -376,9 +379,16 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          `on_fail`, since nothing is left to route on once the task has gone.",
     ),
     (
+        "hide",
+        "`true` runs the command detached, with no pane. `false` gives it a \
+         pane of its own under the herdr backend, even while \
+         `dispatch.hide_commands` hides commands. Absent follows \
+         `dispatch.hide_commands`.",
+    ),
+    (
         "headless",
-        "Run the command detached, with no pane. Absent, a command step gets a \
-         pane of its own under the herdr backend.",
+        "The retired name of `hide: true`. Still read, and refused on a step \
+         that also carries `hide:`.",
     ),
     (
         "last",
@@ -623,7 +633,8 @@ fn template() -> String {
          \x20\x20\x20\x20run: ./scripts/check.sh\n\
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
          \x20\x20\x20\x20# background: true         let the task move on; its exit never moves it\n\
-         \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
+         \x20\x20\x20\x20# hide: false                run in a pane even when dispatch.hide_commands hides commands\n\
+         \x20\x20\x20\x20# headless: true            retired: the old name of `hide: true`\n\
          \x20\x20\x20\x20# last: true                only the highest task of a chain with a last step runs it\n\
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
@@ -717,11 +728,13 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
                 true => print!(" background"),
                 false => print!(" waits"),
             }
-            // Said only when true, like `last-of-chain` below: a pane is the
-            // default now, so a reader only needs telling about the step that
-            // opted out of one.
-            if step.headless {
-                print!(" headless");
+            // Said only when the step sets it, like `last-of-chain` below: a
+            // step that follows `dispatch.hide_commands` has nothing to
+            // tell. The retired `headless: true` reads as `hide=true`.
+            match step.hide {
+                Some(hide) => print!(" hide={hide}"),
+                None if step.headless => print!(" hide=true"),
+                None => {}
             }
             // Always, and resolved rather than only when written: a reader
             // asking what stops this hanging is asking about the default as

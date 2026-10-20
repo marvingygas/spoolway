@@ -639,6 +639,9 @@ pub struct DispatchConfig {
     /// the command exits. It then counts toward [`Self::visible_lanes`] and
     /// closes oldest first like a finished agent lane. A pane whose command is
     /// still running is never closed for the limit.
+    ///
+    /// A step's own `hide:` overrides this for that step, in either
+    /// direction; a step with no `hide:` follows it.
     pub hide_commands: bool,
 
     /// Where a task's lanes are placed in its workspace: as panes of one tab,

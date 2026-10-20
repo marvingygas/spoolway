@@ -5557,7 +5557,7 @@ impl<'a> Dispatcher<'a> {
                 // earlier setting left. The `Fresh` arm below replaces a pane
                 // it finds recorded, for a run the `Running` arm's own
                 // timeout stopped without touching its pane.
-                self.close_hidden_command_pane(&runs, &key);
+                self.close_hidden_command_pane(&runs, step, &key);
                 // A worktree deleted while the command ran. The step's
                 // exit code describes a tree that is gone, and routing it
                 // would carry on as if its work had survived. A worktree
@@ -5749,18 +5749,19 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
-                // A command runs in a pane only when commands are shown and the
-                // step is not `headless:`. Otherwise it is detached, as the
+                // A command runs in a pane unless its step's `hide:` (or the
+                // retired `headless:`), else `dispatch.hide_commands`, hides
+                // it. Otherwise it is detached, as the
                 // headless backend runs every command: the same log, and the
                 // same named environment, with the dispatcher's own inherited
                 // directly. Counted as no lane, since it has no pane.
-                let shown = !step.headless && !self.repo.config.dispatch.hide_commands;
+                let shown = !step.hides_command(self.repo.config.dispatch.hide_commands);
                 // A pane an earlier arrival left standing — a run the
                 // `Running` arm's own timeout stopped without touching its
                 // pane, most often — is replaced rather than piled onto. A
                 // shown run replaces it in place, below. One that will not
                 // run in a pane is closed here, whether or not it did before:
-                // a step edited to `headless: true`, or commands hidden, must
+                // a step edited to `hide: true`, or commands hidden, must
                 // not leave the old pane standing forever.
                 if !shown && let Some(old_pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&old_pane);
@@ -5862,7 +5863,7 @@ impl<'a> Dispatcher<'a> {
                         step.id,
                         runs.log_path(&key).display()
                     ),
-                    // `headless: true`, or a backend with no pane to offer —
+                    // A hidden command, or a backend with no pane to offer —
                     // see [`crate::mux::Mux::run_in_pane`]. Naming the log
                     // here is the only notice anybody gets that this step is
                     // doing something: its pane shows whatever the last
@@ -5880,11 +5881,11 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Close the pane of a command run that has ended, when commands are
-    /// hidden: a shown run's pane stays until the limit or the end of the
-    /// task closes it. A run with no recorded pane is left alone.
-    fn close_hidden_command_pane(&self, runs: &crate::command_step::Runs, key: &str) {
-        if !self.repo.config.dispatch.hide_commands {
+    /// Close the pane of a command run that has ended, when its step hides
+    /// its command: a shown run's pane stays until the limit or the end of
+    /// the task closes it. A run with no recorded pane is left alone.
+    fn close_hidden_command_pane(&self, runs: &crate::command_step::Runs, step: &Step, key: &str) {
+        if !step.hides_command(self.repo.config.dispatch.hide_commands) {
             return;
         }
         if let Some(pane) = runs.pane(key) {
@@ -6026,23 +6027,21 @@ impl<'a> Dispatcher<'a> {
                 step: step.clone(),
             })
             .collect();
-        if !self.repo.config.dispatch.hide_commands {
-            let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
-            for task in tasks.iter().filter(|task| self.lane_tabs(task)) {
-                let Ok(pipeline) = self.pipelines.for_task(task) else {
+        let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+        for task in tasks.iter().filter(|task| self.lane_tabs(task)) {
+            let Ok(pipeline) = self.pipelines.for_task(task) else {
+                continue;
+            };
+            for command in self.command_panes_of(&runs, task) {
+                let Some((step, _)) = run_step(pipeline, task.id(), &command.key) else {
                     continue;
                 };
-                for command in command_panes(&runs, task) {
-                    let Some((step, _)) = run_step(pipeline, task.id(), &command.key) else {
-                        continue;
-                    };
-                    if let Ok(Some(tab)) = self.mux.pane_tab(&command.pane) {
-                        on_tabs.push(TabLane {
-                            tab: tab.tab_id,
-                            task: task.id().to_string(),
-                            step: step.to_string(),
-                        });
-                    }
+                if let Ok(Some(tab)) = self.mux.pane_tab(&command.pane) {
+                    on_tabs.push(TabLane {
+                        tab: tab.tab_id,
+                        task: task.id().to_string(),
+                        step: step.to_string(),
+                    });
                 }
             }
         }
@@ -6070,16 +6069,25 @@ impl<'a> Dispatcher<'a> {
         lane_tabs(self.repo, task)
     }
 
-    /// The panes of `task`'s command runs that count toward its lane limit.
-    /// None while commands are hidden: a hidden run has no pane, and one a
-    /// shown run left before the setting was turned on is closed by
-    /// `reap_stale_runs` once its task has left the step, or where its exit
-    /// is read.
+    /// The panes of `task`'s command runs that count toward its lane limit:
+    /// those of steps that show their command, whether by `hide: false` or by
+    /// the project's `dispatch.hide_commands = false`. A hidden run has no
+    /// pane, and one a shown run left before its step or the setting began
+    /// hiding is closed by `reap_stale_runs` once its task has left the step,
+    /// or where its exit is read. A pane whose step the pipeline no longer
+    /// defines follows the project default.
     fn command_panes_of(&self, runs: &crate::command_step::Runs, task: &Task) -> Vec<CommandPane> {
-        match self.repo.config.dispatch.hide_commands {
-            true => Vec::new(),
-            false => command_panes(runs, task),
-        }
+        let hide_commands = self.repo.config.dispatch.hide_commands;
+        let pipeline = self.pipelines.for_task(task).ok();
+        command_panes(runs, task)
+            .into_iter()
+            .filter(|command| {
+                let step = pipeline
+                    .and_then(|pipeline| run_step(pipeline, task.id(), &command.key))
+                    .map(|(_, step)| step);
+                !step.map_or(hide_commands, |step| step.hides_command(hide_commands))
+            })
+            .collect()
     }
 
     /// Choose the lanes of `task` that close to make room for `lane`, a new
@@ -6338,7 +6346,7 @@ impl<'a> Dispatcher<'a> {
             // drag the task off a later step, even one an agent is mid-turn
             // on.
             if !step.background {
-                self.close_hidden_command_pane(&runs, key);
+                self.close_hidden_command_pane(&runs, step, key);
                 // A shown run's pane outlives its routed exit, so the key is
                 // listed for its `.pane` alone once the run is forgotten.
                 // Stopping it then would kill the `.group` a `run:` line left
@@ -6394,7 +6402,7 @@ impl<'a> Dispatcher<'a> {
                 crate::command_step::RunState::Exited(code) => {
                     // A shown background run's pane stays, like a foreground
                     // one's: see the `Exited` arm of `run_command`.
-                    self.close_hidden_command_pane(&runs, key);
+                    self.close_hidden_command_pane(&runs, step, key);
                     // Banked on the first read, and then skipped on every
                     // later one: the code stays on disk and is read again
                     // each pass, and the run's own id keeps it to one line.
@@ -26072,6 +26080,50 @@ mod tests {
             "a headless step must never split a pane: {:?}",
             mux.calls()
         );
+    }
+
+    /// `implement` of the built-in pipeline, as a command step with `hide:`
+    /// set to `hide`, on a project whose `dispatch.hide_commands` is
+    /// `hide_commands`. Returns how many panes `run_in_pane` was asked for.
+    fn pane_requests_with(name: &str, hide_commands: bool, hide: Option<bool>) -> usize {
+        let (mut repo, _root_guard) = fixture(name);
+        repo.config.dispatch.hide_commands = hide_commands;
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let mut pipelines = pipelines_running("echo hi", false);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .hide = hide;
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        mux.did("run_in_pane").len()
+    }
+
+    /// `hide: false` shows one command although the project hides them, and
+    /// leaves a step with no `hide:` hidden. Fails before the key existed,
+    /// when no step could ask for a pane while commands were hidden.
+    #[test]
+    fn hide_false_shows_a_command_while_the_project_hides_commands() {
+        assert!(pane_requests_with("command-hide-false", true, Some(false)) > 0);
+        assert_eq!(pane_requests_with("command-hide-absent", true, None), 0);
+    }
+
+    /// `hide: true` hides one command although the project shows them, and
+    /// leaves a step with no `hide:` shown.
+    #[test]
+    fn hide_true_hides_a_command_while_the_project_shows_commands() {
+        assert_eq!(
+            pane_requests_with("command-hide-true", false, Some(true)),
+            0
+        );
+        assert!(pane_requests_with("command-hide-shown", false, None) > 0);
     }
 
     /// A failing shown command's pane stays after the task leaves the step,
