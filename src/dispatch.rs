@@ -24813,6 +24813,46 @@ mod tests {
         );
     }
 
+    /// A leftover `unblocked_from` does not replace the step cleanup's hold
+    /// reads from a `last_report` that names a real step.
+    #[test]
+    fn a_stale_unblocked_from_does_not_override_the_cleanup_holds_step() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, _root_guard) = fixture("cleanup-stale-unblocked");
+        let worktree = crate::scratch::root("dispatch-cleanup-stale-unblocked-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
+        let hooks = worktree.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(
+            hooks.join("pre-commit"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("left.txt"), "work that never got recorded").unwrap();
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.unblocked_from = Some("document".into());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                ..crate::task::LastReport::neutral()
+            });
+        });
+
+        run_pass(&repo, &FakeMux::new(vec![]));
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert_eq!(task.front.unblocked_from, None);
+    }
+
     // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
     #[test]
     fn reaching_the_done_stage_tears_down_and_archives() {

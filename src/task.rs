@@ -828,8 +828,8 @@ pub struct Frontmatter {
     /// `blocked_from`, which is the `on_pass` of the step the task stopped at.
     /// A `--stage` the unblocker named is written nowhere else, so the resume
     /// would skip the step it asked for. Read by `held_pass_target` in
-    /// `src/commands/report.rs`, and cleared with `blocked_from` when the
-    /// task leaves the hold.
+    /// `src/commands/report.rs`. Cleared by `resume_at` when the hold is
+    /// released, and written afresh by the next pass from `blocked`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_pass_to: Option<String>,
 
@@ -840,7 +840,8 @@ pub struct Frontmatter {
     /// `blocked` for work it could not commit, nothing else says where the
     /// task had stopped, and the next unblocker would be told the pipeline's
     /// entry. That hold, in `report` or in cleanup, puts it back as
-    /// `blocked_from` and drops this.
+    /// `blocked_from` and drops this, but only when the report it follows was
+    /// filed from `blocked`. A restart clears it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unblocked_from: Option<String>,
 

@@ -289,9 +289,12 @@ pub fn report(
         destination = crate::pipeline::BLOCKED.to_string();
         set_blocked_from(&mut task, &current);
         // An unblocker's own pass leaves `current` as `blocked`, which the
-        // line above refuses to record.
-        if let Some(stopped) = task.front.unblocked_from.take() {
-            task.front.blocked_from = Some(stopped);
+        // line above refuses to record. Any other step's report has a record
+        // of its own to keep, and a leftover `unblocked_from` describes
+        // nothing it did.
+        let stopped = task.front.unblocked_from.take();
+        if current == crate::pipeline::BLOCKED && stopped.is_some() {
+            task.front.blocked_from = stopped;
         }
     }
 
@@ -822,8 +825,9 @@ pub fn route(
         // entry's `on_pass` whatever step the task actually stopped at.
         let held_here = task.front.gate_at.as_deref() == Some(crate::pipeline::BLOCKED);
         // The hold's resume cannot work the target out again: a `--stage` is
-        // written nowhere else. Set on every pass from `blocked`, so a value
-        // left by an earlier hold never outlives it.
+        // written nowhere else. Set on every pass from `blocked` that the lap
+        // bound does not park, so a value left by an earlier hold never
+        // reaches a later one's resume.
         task.front.held_pass_to =
             (gated_at.is_none() && routed_target == target && held_here).then(|| target.clone());
         if gated_at.is_none() && routed_target == target && !held_here {
@@ -3297,6 +3301,9 @@ pub(crate) fn restart_with(
     if step != crate::pipeline::BLOCKED {
         task.mark_blocker_cleared();
         task.front.blocked_from = None;
+        // Both describe an unblocker's pass, which this fresh run supersedes.
+        task.front.held_pass_to = None;
+        task.front.unblocked_from = None;
     }
     task.front.escalated = false;
     // `restart` supersedes `resume`: both set would name a continuation and an
@@ -4759,6 +4766,53 @@ mod tests {
                 .contains("could not be committed"),
             "the record must say why the pass did not land"
         );
+    }
+
+    /// A leftover `unblocked_from` does not replace the step a dirty hold
+    /// records for a report from any step other than `blocked`.
+    #[test]
+    fn a_stale_unblocked_from_does_not_override_a_dirty_holds_step() {
+        let (mut repo, _root_guard) = fixture("held-dirty-stale");
+        repo.config.dispatch.auto_commit = false;
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.root.join("tracked"), "as committed").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-q", "-m", "root"]);
+        add(&repo, "stale", &[]);
+        let pipelines = work_pipelines();
+
+        let mut task = queued(&repo, "stale");
+        task.set_stage("work", None);
+        task.front.unblocked_from = Some("document".into());
+        task.save().unwrap();
+
+        std::fs::write(repo.root.join("tracked"), "uncommitted").unwrap();
+        let worktree = repo.root.to_str().unwrap().to_string();
+        crate::platform::test_env::with_env("SPOOLWAY_WORKTREE", &worktree, || {
+            report(
+                &repo,
+                &pipelines,
+                &ReportArgs {
+                    task: Some("stale".into()),
+                    stage: None,
+                    pass: true,
+                    fail: false,
+                    block: false,
+                    pause: false,
+                    message: None,
+                    handoff: vec![],
+                },
+                Some("work"),
+            )
+        })
+        .unwrap();
+
+        let task = queued(&repo, "stale");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("work"));
+        assert_eq!(task.front.unblocked_from, None);
     }
 
     /// An unblocker's pass that goes to `done` while the worktree holds work

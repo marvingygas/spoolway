@@ -204,9 +204,17 @@ impl<'a> Dispatcher<'a> {
                 // A pass from `blocked` that came here left no `blocked_from`
                 // and a `last_report` filed from `blocked`, which `back` can
                 // only answer with the pipeline's entry. It kept the step it
-                // stood in for.
-                if let Some(stopped) = task.front.unblocked_from.take() {
-                    task.front.blocked_from = Some(stopped);
+                // stood in for. A `last_report` from any other step makes
+                // `back` the right answer, and a leftover record is dropped.
+                let stopped = task.front.unblocked_from.take();
+                if task
+                    .front
+                    .last_report
+                    .as_ref()
+                    .is_some_and(|r| r.step == crate::pipeline::BLOCKED)
+                    && stopped.is_some()
+                {
+                    task.front.blocked_from = stopped;
                 }
                 task.log_status(&format!(
                     "reached `{}` with work that could not be committed — held at `{}` \
