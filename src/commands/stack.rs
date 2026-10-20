@@ -78,7 +78,24 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // inside one.
     let worktree = match std::env::var("SPOOLWAY_WORKTREE") {
         Ok(path) => PathBuf::from(path),
-        Err(_) => std::env::current_dir().context("resolving the current directory")?,
+        Err(_) => {
+            let cwd = std::env::current_dir().context("resolving the current directory")?;
+            // Everything below commits, squashes and force-pushes whatever
+            // checkout this is. In the main checkout that rewrites the
+            // person's own branch and pushes it over the task's pull request
+            // branch, so refuse before anything is touched. A dispatcher
+            // lane names its worktree in `SPOOLWAY_WORKTREE` and never gets
+            // here; the check is for a person running this by hand.
+            if !crate::repo::is_linked_worktree(&cwd) {
+                bail!(
+                    "`spoolway stack` hands a task over from the task's own worktree, and {} is \
+                     not one. Nothing was committed or pushed. Run it in {id}'s worktree, or \
+                     let {id}'s handover step run it.",
+                    cwd.display()
+                );
+            }
+            cwd
+        }
     };
     let step = std::env::var(crate::dispatch::ENV_STEP).unwrap_or_else(|_| "stack".to_string());
     // Empty, always: `SPOOLWAY_HEAD` is where a branch stood when an *agent*
