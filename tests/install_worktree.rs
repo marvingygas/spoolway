@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A project with a committed `init` scaffold, in a directory of its own.
+/// The directory sits inside a base folder that also holds the project's
+/// linked worktrees, so dropping the project removes them even when a test
+/// panics before it can run `git worktree remove`.
 struct Project(PathBuf);
 
 impl Project {
@@ -10,10 +13,12 @@ impl Project {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock is after the epoch")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "spoolway-install-worktree-{label}-{}-{nonce}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir()
+            .join(format!(
+                "spoolway-install-worktree-{label}-{}-{nonce}",
+                std::process::id()
+            ))
+            .join("project");
         std::fs::create_dir_all(&root).expect("create project");
         let project = Self(root);
         project.git(&project.0, &["init", "-q", "-b", "main"]);
@@ -66,10 +71,7 @@ impl Project {
     /// removed so that anything found there afterwards was written by the
     /// command under test.
     fn worktree_without_skills(&self, label: &str, borrowed: bool) -> PathBuf {
-        let wt = self.0.parent().unwrap().join(format!(
-            "{}-{label}",
-            self.0.file_name().unwrap().to_string_lossy()
-        ));
+        let wt = self.0.parent().unwrap().join(label);
         self.git(
             &self.0,
             &[
@@ -91,7 +93,7 @@ impl Project {
 
 impl Drop for Project {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
     }
 }
 
@@ -108,8 +110,8 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// What the main checkout holds, with one shipped skill file changed by hand
-/// so an install that reaches it either overwrites the edit or refuses.
+/// The text written over one shipped skill file in the main checkout, so an
+/// install that reaches it either overwrites the edit or refuses.
 const EDITED: &str = "edited in the main checkout\n";
 
 fn edit_main_skill(project: &Project) -> PathBuf {
