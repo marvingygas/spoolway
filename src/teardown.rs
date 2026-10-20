@@ -67,6 +67,14 @@ pub(crate) fn removal_marker(repo: &crate::repo::Repo, task_id: &str) -> PathBuf
     repo.home().join("removing").join(task_id)
 }
 
+/// What teardown found when a worktree is off its task's branch.
+struct OffBranch {
+    /// The clause for the dispatcher's problem line and the status log.
+    found: String,
+    /// The hold's own reason, which the board's NEXT column shows.
+    reason: String,
+}
+
 impl<'a> Dispatcher<'a> {
     /// Stop a lane, drop its record and bank what it spent, returning the
     /// record so its session home can be reclaimed once the task is archived.
@@ -202,8 +210,9 @@ impl<'a> Dispatcher<'a> {
             // A borrowed checkout is a person's own, so what it has out is
             // theirs to choose.
             if !task.front.borrowed
-                && let Some(found) = self.off_branch(task, Path::new(&worktree))
+                && let Some(off) = self.off_branch(task, Path::new(&worktree))
             {
+                let found = &off.found;
                 self.hold_before_cleanup(
                     task,
                     &format!(
@@ -213,7 +222,7 @@ impl<'a> Dispatcher<'a> {
                         worktree.display(),
                         crate::pipeline::BLOCKED,
                     ),
-                    "the worktree is off its task branch",
+                    &off.reason,
                 )?;
                 report.problems.push(format!(
                     "{id}: {found} — held on `{blocked}`.\n    Nothing was committed or \
@@ -773,30 +782,46 @@ impl<'a> Dispatcher<'a> {
             .unwrap_or_else(|| crate::task::default_branch(task.id()))
     }
 
-    /// What is wrong with `worktree`'s git state, as a clause for the problem
-    /// line, or `None` when it is on the task's branch with no rebase or merge
-    /// under way. A rebase or merge is named before the branch: a rebase also
-    /// leaves HEAD detached, and "rebase in progress" is the more useful half.
+    /// What is wrong with `worktree`'s git state, or `None` when it is on the
+    /// task's branch with no rebase or merge under way. A rebase or merge is
+    /// named before the branch: a rebase also leaves HEAD detached, and
+    /// "rebase in progress" is the more useful half.
     ///
     /// A git failure reads as `None`. A worktree git cannot read has nothing
     /// to commit on any branch, and refusing here would hold a task whose
     /// checkout is already gone for a reason nobody can act on.
-    fn off_branch(&self, task: &Task, worktree: &Path) -> Option<String> {
+    fn off_branch(&self, task: &Task, worktree: &Path) -> Option<OffBranch> {
         let git_dir = crate::repo::worktree_git_dir(worktree).ok()?;
+        let off = |found: &str, reason: &str| {
+            Some(OffBranch {
+                found: found.to_string(),
+                reason: reason.to_string(),
+            })
+        };
         if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-            return Some("a rebase is in progress in the worktree".to_string());
+            return off(
+                "a rebase is in progress in the worktree",
+                "rebase in progress in the worktree",
+            );
         }
         if git_dir.join("MERGE_HEAD").exists() {
-            return Some("a merge is in progress in the worktree".to_string());
+            return off(
+                "a merge is in progress in the worktree",
+                "merge in progress in the worktree",
+            );
         }
         let expected = self.task_branch(task);
         let on = crate::repo::current_branch_at(worktree).ok()?;
         match on {
             Some(branch) if branch == expected => None,
-            Some(branch) => Some(format!("the worktree is on `{branch}`, not `{expected}`")),
-            None => Some(format!(
-                "the worktree is on a detached HEAD, not `{expected}`"
-            )),
+            Some(branch) => off(
+                &format!("the worktree is on `{branch}`, not `{expected}`"),
+                &format!("worktree on `{branch}`, not `{expected}`"),
+            ),
+            None => off(
+                &format!("the worktree is on a detached HEAD, not `{expected}`"),
+                &format!("worktree on a detached HEAD, not `{expected}`"),
+            ),
         }
     }
 
@@ -804,11 +829,17 @@ impl<'a> Dispatcher<'a> {
     /// cleanup found something it must not tear down over. The log line goes
     /// in the status log and `reason` is the stage change's own.
     fn hold_before_cleanup(&self, task: &mut Task, log: &str, reason: &str) -> Result<()> {
-        let back = self
-            .pipelines
-            .for_task(task)
-            .ok()
-            .map(|pipeline| crate::commands::resume_target(task, pipeline))
+        // The step that carried the task to `done`, so a resume runs only
+        // that one again and comes back here. `resume_target` alone answers
+        // the pipeline's entry for a task whose last steps were commands,
+        // which report nothing, and a resume would rerun every passed step.
+        let pipeline = self.pipelines.for_task(task).ok();
+        let back = task
+            .front
+            .arrived_from
+            .clone()
+            .filter(|from| pipeline.is_some_and(|p| p.step(from).is_some()))
+            .or_else(|| pipeline.map(|p| crate::commands::resume_target(task, p)))
             .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
             .unwrap_or_else(|| task.stage().to_string());
         crate::commands::set_blocked_from(task, &back);

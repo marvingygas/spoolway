@@ -24748,6 +24748,9 @@ mod tests {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
             f.worktree_path = Some(worktree.to_path_buf());
+            // `handover` carried it to `done`; `implement` reported last,
+            // as a command step's report would leave it.
+            f.arrived_from = Some("handover".into());
             f.last_report = Some(crate::task::LastReport {
                 step: "implement".into(),
                 ..crate::task::LastReport::neutral()
@@ -24773,7 +24776,11 @@ mod tests {
 
     fn assert_held_for(task: &Task, clause: &str) {
         assert_eq!(task.stage(), crate::pipeline::BLOCKED);
-        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("handover"),
+            "a resume reruns only the step that reached `done`"
+        );
         let log = task.section("## Status Log").unwrap_or_default();
         assert!(
             log.contains(clause),

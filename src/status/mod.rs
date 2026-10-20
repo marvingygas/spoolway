@@ -4255,6 +4255,26 @@ fn landed(
     crate::dispatch::land_past_hidden(pipeline, task, destination, dependents).destination
 }
 
+/// Why teardown held `task` on `blocked` rather than archive it, when it did:
+/// the task moved there from `done`, which nothing but teardown's hold does,
+/// so the latest `→ `blocked`` line in its status log carries the reason.
+fn teardown_hold(task: &crate::task::Task) -> Option<String> {
+    if task.stage() != crate::pipeline::BLOCKED
+        || task.front.arrived_from.as_deref() != Some(crate::pipeline::DONE)
+    {
+        return None;
+    }
+    let marker = format!("→ `{}`: ", crate::pipeline::BLOCKED);
+    task.section("## Status Log")?
+        .lines()
+        .rev()
+        .find_map(|line| {
+            line.split_once(&marker)
+                .map(|(_, reason)| reason.trim().to_string())
+        })
+        .filter(|reason| !reason.is_empty())
+}
+
 /// The NEXT column of a blocked row parked for a person, prefixed for the
 /// column. Normally `resume_target`, the step `spoolway resume` sends the task
 /// back to, and the only way off a parked block — so the row names one step
@@ -4273,12 +4293,23 @@ fn landed(
 ///
 /// The step named is where the resume lands, past any step the task walks
 /// past — see [`landed`].
+///
+/// A task teardown held on its way out of `done` names the hold's reason
+/// instead, such as `worktree on a detached HEAD, not `task/t3``. Its
+/// remedy is in the worktree, not in picking a step, and the resume that
+/// follows only reruns the step that reached `done`.
 fn blocked_next(
     task: &crate::task::Task,
     pipeline: &crate::pipeline::Pipeline,
     resumable: bool,
     dependents: usize,
 ) -> String {
+    if let Some(reason) = teardown_hold(task) {
+        return match resumable {
+            true => format!("[r] {reason}"),
+            false => reason,
+        };
+    }
     if let Some(missing) = crate::commands::stranded_step(task, pipeline) {
         let note = format!("pick a step — `{missing}` is gone");
         return match resumable {
@@ -13502,6 +13533,39 @@ mod tests {
         assert_eq!(
             picker_header(&task, &pipeline, Some("deploy")),
             format!("{} at deploy — it passed", task.stage())
+        );
+    }
+
+    /// A task teardown held on its way out of `done` names the hold's reason
+    /// where a block names its resume step, the way the plan's morning draws
+    /// it. A block reached any other way still names the step.
+    #[test]
+    fn the_next_column_names_why_teardown_held_a_task() {
+        let (repo, _root_guard) = fixture("teardown-held-next-column");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        add(&repo, "t3", &[], Some("done"));
+        let mut task = repo.task("t3").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-never-cut-worktree".into());
+        task.front.blocked_from = Some("handover".into());
+        task.set_stage(
+            crate::pipeline::BLOCKED,
+            Some("worktree on a detached HEAD, not `task/t3`"),
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] worktree on a detached HEAD, not `task/t3`"
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, false, 0),
+            "worktree on a detached HEAD, not `task/t3`"
+        );
+
+        task.front.arrived_from = Some("handover".into());
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] → handover",
+            "a block from a step is not teardown's hold"
         );
     }
 
