@@ -588,9 +588,22 @@ has no file of its own, such as a `queue add --from -` stream entry. The hook bu
 whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's own
 `## Context` and `## Acceptance criteria` sections; spoolway renders nothing into it.
 
-An `open` hook that is still running after 60 seconds is stopped. The whole `queue add` fails
-and nothing is queued. When a job firing calls the hook, that minute's firing fails and the
-dispatcher's pass goes on.
+An `open` hook that is still running after 60 seconds is stopped, together with every process
+it started. The whole `queue add` fails and nothing is queued.
+
+A job firing runs the hook in the background. The dispatcher's pass goes on at once, asks for the
+answer again on each pass, and queues the routine's tasks when the hook has answered. A hook
+that is still running after 60 seconds is stopped, and that minute's firing fails. See
+[A firing waiting on its `open` hook](jobs.md#a-firing-waiting-on-its-open-hook).
+
+A hook that is still running is never started a second time for the same task. When a
+`queue add` is stopped while its hook runs, the hook keeps running. The next `queue add` of the
+same task, or the next job firing, picks up that run and uses its answer. A hook left behind
+that nothing asks about is stopped by the dispatcher after 60 seconds, with this problem line:
+
+```
+! the open hook for `hx2` was still running after 1m and was stopped — nothing was queued for it. Run `spoolway queue add` again, or let the job that fired it run again, to open it.
+```
 
 The submission is refused, naming the group, when no task in a group sets
 `group_description:`. A group whose tasks in the submission all set `tracking: off` and name

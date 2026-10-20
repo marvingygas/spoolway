@@ -55,7 +55,7 @@ job nightly · due now · skipped, audit is still in the queue, at step queued
 ```
 
 A firing that fails is recorded for its minute and is not tried again on every pass. This covers
-a failing `open` hook and a routine that cannot be queued, such as one with a `gate_at:` that
+a failing `open` hook, one that is stopped after 60 seconds, and a routine that cannot be queued, such as one with a `gate_at:` that
 names no step. The dispatcher names the failure once for that minute. Only an `origin` that
 cannot be reached, or a routine that is being queued at that moment, leaves the minute open.
 
@@ -75,6 +75,33 @@ A job whose table holds any other key, such as `enable = false`, never fires. Th
 names the job and the key once per matching minute. Remove or correct the key and the job fires
 again.
 
+### A firing waiting on its `open` hook
+
+A job runs the issue hook's `open` event in the background. The pass does not wait for it, so a
+hook that hangs holds up only its own routine. Every other task keeps moving.
+
+```mermaid
+flowchart LR
+  A[job fires] --> B[open hook starts<br/>in the background]
+  B --> C{hook answered?}
+  C -- not yet --> D[next pass asks again<br/>routine is not fired again]
+  D --> C
+  C -- yes --> E[queue the routine's tasks]
+  C -- after 60s --> F[stop the hook and its processes,<br/>record the firing as failed]
+```
+
+The dispatcher says `job <name> · fired · opening ticket for <task>` once, on the pass that
+starts the hook. While the hook runs, `spoolway queue list` shows the task as
+`opening ticket`, and the routine is not fired again for a later window. A hook that is stopped
+at 60 seconds gives this line, and nothing is queued:
+
+```
+! job nightly: the open hook was still running after 1m and was stopped for `nite-1` — nothing was queued.
+```
+
+A dispatcher started after another one was killed adopts the running hook. It starts no second
+`open` for that task and reads the answer of the first.
+
 ### A project job in a home-mode workspace
 
 A project job fires once per window for the whole workspace, however many clones run a
@@ -84,6 +111,10 @@ a firing.
 
 The record names the clone that holds the job's copy. While that copy is still queued in any
 clone, the next window is skipped.
+
+While one clone's firing waits on its `open` hook, the other clones skip that window and start
+no second hook. The record names the waiting clone. When that clone stops asking for 2 minutes,
+the other clones fire the job again.
 
 The first time the workspace record is read, it copies each project job's latest firing from the
 clones' own `jobs.state.json` files. A job that already fired in its window does not fire again.
@@ -100,8 +131,8 @@ User jobs are not affected. They keep their record in `~/.spoolway/<project>/job
 
 ### The resident dispatcher
 
-While any job is enabled, an empty queue does not stop the run. A job store that will not
-parse keeps the run up too, and the dispatcher names the parse error on every pass. It fires
+While any job is enabled, an empty queue does not stop the run. A running `open` hook keeps it
+up too, until the hook answers or is stopped. A job store that will not parse keeps the run up too, and the dispatcher names the parse error on every pass. It fires
 jobs again once the file parses. The plain run prints once:
 
 ```

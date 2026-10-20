@@ -63,6 +63,16 @@ pass names the file until it is fixed or moved out of the queue. While any job i
 queue and prints when the next job fires. A job store that will not parse keeps the run up too.
 See [Jobs](jobs.md).
 
+An `open` hook that is still running also keeps the run up on an empty queue. The plain run
+prints:
+
+```
+nothing queued
+an open hook is still running — staying up to stop it at 1m if it hangs
+```
+
+The run ends on its next empty pass, once the hook has answered or been stopped.
+
 ### A dependency with no task
 
 A queued task that names a dependency in `depends_on` with no task in the queue and none in the
