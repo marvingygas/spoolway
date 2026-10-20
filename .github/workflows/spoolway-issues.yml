@@ -118,17 +118,24 @@ jobs:
               );
               if (!stillOpen.length || stillOpen.some(child => child.state !== 'closed')) return;
 
-              // The group's comment names a pull request from its own
-              // children: the triggering one may belong to another group.
-              // Children closed in an earlier run are read again here, so
-              // the group still closes when this run closed none of them.
+              // The group's comment names a merged pull request from its
+              // own children: the triggering one may belong to another
+              // group. A child closed by hand may name a pull request that
+              // never merged, so each is checked and the next child is
+              // tried. Children closed in an earlier run are read again
+              // here, so the group still closes when this run closed none.
               let groupPr;
               for (const child of stillOpen.reverse()) {
-                groupPr = await mergedReviewPr(child.number);
-                if (groupPr) break;
+                const named = await mergedReviewPr(child.number);
+                if (!named) continue;
+                const pr = await github.rest.pulls.get({owner, repo, pull_number: named});
+                if (pr.data.merged) {
+                  groupPr = named;
+                  break;
+                }
               }
               if (!groupPr) {
-                core.notice(`#${groupNumber}'s children name no pull request — leaving it open`);
+                core.notice(`#${groupNumber}'s children name no merged pull request — leaving it open`);
                 return;
               }
               await closeIssue(groupNumber, groupPr);
