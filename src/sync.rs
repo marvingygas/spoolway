@@ -1837,6 +1837,9 @@ enum Scope {
     /// The key block, and `headless:` renamed to `hide:` on the steps that
     /// had it. Every other line is kept.
     KeyBlockRenamed,
+    /// As [`Scope::KeyBlockRenamed`], and a `headless: false` line deleted on
+    /// at least one step. Every other line is kept.
+    KeyBlockRenamedDropped,
     /// `config.toml`, rewritten as `sync` does: values kept, the table and
     /// comments spoolway's.
     Config,
@@ -1847,7 +1850,10 @@ impl Scope {
     fn dry_run(self, discarded: usize) -> String {
         match self {
             Scope::Whole => format!("whole file, discarding {discarded} line(s)"),
-            Scope::KeyBlock | Scope::KeyBlockRenamed | Scope::Config => self.wrote().to_string(),
+            Scope::KeyBlock
+            | Scope::KeyBlockRenamed
+            | Scope::KeyBlockRenamedDropped
+            | Scope::Config => self.wrote().to_string(),
         }
     }
 
@@ -1858,6 +1864,10 @@ impl Scope {
             Scope::KeyBlock => "key block only, every other line kept",
             Scope::KeyBlockRenamed => {
                 "key block, and `headless:` renamed to `hide:`; every other line kept"
+            }
+            Scope::KeyBlockRenamedDropped => {
+                "key block, and `headless:` renamed to `hide:`, or removed where it was `false`; \
+                 every other line kept"
             }
             Scope::Config => "rewritten as sync does, your values kept",
         }
@@ -1923,7 +1933,13 @@ fn replacement_for(
         // makes the rename too, or the file would still not load after it.
         return match rename_headless(&swapped, Layout::Steps) {
             Renamed::Nothing => Ok((swapped, Scope::KeyBlock)),
-            Renamed::Done { text, .. } => Ok((text, Scope::KeyBlockRenamed)),
+            Renamed::Done { text, dropped, .. } => {
+                let scope = match dropped.is_empty() {
+                    true => Scope::KeyBlockRenamed,
+                    false => Scope::KeyBlockRenamedDropped,
+                };
+                Ok((text, scope))
+            }
             Renamed::Refused(ids) => Err(both_keys_refusal(&ids)),
         };
     }
@@ -2380,16 +2396,17 @@ fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
 ///   binary does, so nothing in it is a project's to have meant. One that
 ///   matches no shipped copy was written by a newer spoolway or edited by hand,
 ///   so it is refused, naming the file and `spoolway sync --replace <path>`,
-///   which swaps the block, renames `headless:` as below, and keeps every
-///   other line.
+///   which swaps the block, renames or removes `headless:` as below, and keeps
+///   every other line.
 /// - A file with no markers is never written, and is reported only by the
 ///   check below. Writing a block into a pipeline somebody wrote themselves
 ///   would be this command helping, which is the one thing it must never do.
 ///   Pasting the two markers in is how a pipeline opts in.
 ///
 /// Two checks read every file, markers or not. The first is the one edit this
-/// command makes to a step: a `headless:` key is renamed to `hide:`, which is
-/// the same setting under its new name — see [`rename_headless`]. The second
+/// command makes to a step: `headless: true` is renamed to `hide: true`, the
+/// same setting under its new name, and `headless: false` is deleted, since
+/// `hide: false` would force a pane — see [`rename_headless`]. The second
 /// is a step shape this release refuses to load — see
 /// [`crate::pipeline::Pipeline::retired_shape_problems`] — which refuses the
 /// file, naming the step and the edit. Nothing is written to it.
@@ -2473,7 +2490,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 
         // A shape this release stopped loading — `loop: 0` is the one an
         // earlier release still ran — is refused by name, fenced or not, and
-        // the file is left as it is. Apart from the `headless:` rename above,
+        // the file is left as it is. Apart from the `headless:` edit above,
         // `sync` never edits a step, and without this it would report the
         // upgrade done over a pipeline the next command refuses to load.
         if let Ok(pipeline) =
@@ -3026,7 +3043,7 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
             out.push_str(&line[top + 1..]);
             continue;
         }
-        match edits.iter().find(|(edit, _)| *edit == at) {
+        match edits.iter().find(|(line, _)| *line == at) {
             Some((_, Edit::Drop | Edit::DropOpening { .. })) => {}
             Some((_, Edit::Rename)) => {
                 let key = line.find("headless").expect("an edited line names the key");
@@ -5510,6 +5527,14 @@ mod tests {
             format!("{notes:?}").contains("removed from step a"),
             "{notes:?}"
         );
+        // Nothing was renamed, so the `wrote` line must not say so.
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with("(`headless: false` removed)")),
+            "{lines:?}"
+        );
     }
 
     /// `end: true` and `on_pass: blocked` no longer load. A sync names each
@@ -5911,6 +5936,25 @@ mod tests {
             "{:?}",
             outcome_lines(&again)
         );
+    }
+
+    /// `--replace` deletes a `headless: false` and says so, rather than
+    /// reporting a rename that did not happen.
+    #[test]
+    fn replace_removes_headless_false_and_says_it_removed_it() {
+        let (repo, _root_guard) = fixture("replace-pipeline-headless-false");
+        let edited = crate::pipeline::key_block().replace("Absent: 30m.", "Absent: forever.");
+        let path = pipeline_file(&repo, "default", &edited);
+        let before = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("    run: x\n", "    run: x\n    headless: false\n");
+        std::fs::write(&path, &before).unwrap();
+
+        let (shipped, scope) = replacement_for(&repo, &path, &before).unwrap();
+        assert!(matches!(scope, Scope::KeyBlockRenamedDropped));
+        assert!(!shipped.contains("headless: false"));
+        assert!(!shipped.contains("hide: false"));
+        assert!(scope.wrote().contains("removed"), "{}", scope.wrote());
     }
 
     /// `--replace` on a pipeline with `headless:` and `hide:` on one step
