@@ -1415,9 +1415,11 @@ fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
     }
 }
 
-/// Refuse `name` as a `<to>` that already names a pipeline — tracked in
+/// Refuse `name` as a destination that already names a pipeline — tracked in
 /// either the checkout a lane runs from or the main checkout, or private,
-/// `.yml` or `.yaml`.
+/// `.yml` or `.yaml`. `arg` is the argument the person typed it as, `<to>`
+/// for `pipeline copy` and `<new>` for `pipeline rename`, so the advice to
+/// choose another names an argument that command has.
 ///
 /// A linked worktree reads the same private `local/` as the main checkout,
 /// but its own tracked `.spoolway/` can sit on an older or newer branch.
@@ -1427,13 +1429,13 @@ fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
 /// files and may not have the clashing commit at all. For example: `extra`
 /// committed to `.spoolway/pipelines/` on `main`, then `pipeline copy
 /// default extra` run from a worktree that has never fetched that commit.
-fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
+fn refuse_pipeline_clash(repo: &Repo, name: &str, arg: &str) -> Result<()> {
     if let Some(path) = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), name)
         .or_else(|| pipeline_file_in(&Pipelines::dir_in(&repo.root), name))
     {
         bail!(
             "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
-             different `<to>`",
+             different `{arg}`",
             path.display()
         );
     }
@@ -1442,7 +1444,7 @@ fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
     {
         bail!(
             "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
-             different `<to>`",
+             different `{arg}`",
             path.display()
         );
     }
@@ -1461,7 +1463,7 @@ fn tracked_skeleton_path_in(root: &Path, name: &str) -> PathBuf {
     .join(format!("{name}.md"))
 }
 
-/// Refuse `name` as a `<to>` whose skeleton already exists — tracked
+/// Refuse `name` as a destination whose skeleton already exists — tracked
 /// `<name>.md`, checked in both the checkout a lane runs from and the main
 /// checkout (see [`refuse_pipeline_clash`] for why), or, in repo mode, a
 /// private `local/templates/tasks/<name>.md` — the clash
@@ -1469,8 +1471,9 @@ fn tracked_skeleton_path_in(root: &Path, name: &str) -> PathBuf {
 /// that can exist with no pipeline of that name at all (the task's own
 /// repro: `echo MINE > local/templates/tasks/foo.md` with no `foo` pipeline
 /// anywhere). Checked before `pipeline_copy` writes anything, so a person's
-/// skeleton is never silently replaced.
-fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
+/// skeleton is never silently replaced. `arg` is as for
+/// [`refuse_pipeline_clash`].
+fn refuse_skeleton_clash(repo: &Repo, name: &str, arg: &str) -> Result<()> {
     let tracked = repo.task_templates_dir().join(format!("{name}.md"));
     let tracked = if tracked.is_file() {
         Some(tracked)
@@ -1480,7 +1483,7 @@ fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
     };
     if let Some(tracked) = tracked {
         bail!(
-            "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+            "a skeleton for `{name}` already exists — {} — choose a different `{arg}`",
             tracked.display()
         );
     }
@@ -1489,7 +1492,7 @@ fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
             crate::local::task_templates_dir(&repo.local_dir()).join(format!("{name}.md"));
         if private.is_file() {
             bail!(
-                "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+                "a skeleton for `{name}` already exists — {} — choose a different `{arg}`",
                 private.display()
             );
         }
@@ -1618,9 +1621,9 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
     // comment above.
     let shares_skeleton = from_pipeline.task_template.is_some();
 
-    refuse_pipeline_clash(repo, to)?;
+    refuse_pipeline_clash(repo, to, "<to>")?;
     if !shares_skeleton {
-        refuse_skeleton_clash(repo, to)?;
+        refuse_skeleton_clash(repo, to, "<to>")?;
     }
 
     let (pipelines_dir, templates_dir) = copy_target_dirs(repo);
@@ -1689,7 +1692,7 @@ pub fn pipeline_rename(repo: &Repo, old: &str, new: &str, json: bool) -> Result<
             local_pipelines.display()
         )
     })?;
-    refuse_pipeline_clash(repo, new)?;
+    refuse_pipeline_clash(repo, new, "<new>")?;
 
     let raw = std::fs::read_to_string(&source)
         .with_context(|| format!("reading {}", source.display()))?;
@@ -1700,7 +1703,7 @@ pub fn pipeline_rename(repo: &Repo, old: &str, new: &str, json: bool) -> Result<
         crate::local::task_templates_dir(&repo.local_dir()).join(format!("{old}.md"));
     let moves_skeleton = pipeline.task_template.is_none() && skeleton_from.is_file();
     if moves_skeleton {
-        refuse_skeleton_clash(repo, new)?;
+        refuse_skeleton_clash(repo, new, "<new>")?;
     }
 
     let on_it: Vec<String> = repo
@@ -2655,6 +2658,10 @@ mod tests {
 
         let err = pipeline_copy(&repo, "default", "default", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("choose a different `<to>`"),
+            "{err:#}"
+        );
 
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
         let err = pipeline_copy(&repo, "default", "default-strict", false).unwrap_err();
@@ -3933,8 +3940,24 @@ mod tests {
 
         for taken in ["default", "yours"] {
             let err = pipeline_rename(&repo, "mine", taken, false).unwrap_err();
-            assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+            let said = format!("{err:#}");
+            assert!(said.contains("already exists"), "{said}");
+            assert!(
+                said.contains("choose a different `<new>`") && !said.contains("<to>"),
+                "rename has no `<to>` argument: {said}"
+            );
         }
+
+        let templates = crate::local::task_templates_dir(&repo.local_dir());
+        std::fs::write(templates.join("fresh.md"), "MINE\n").unwrap();
+        let said = format!(
+            "{:#}",
+            pipeline_rename(&repo, "mine", "fresh", false).unwrap_err()
+        );
+        assert!(
+            said.contains("choose a different `<new>`") && !said.contains("<to>"),
+            "{said}"
+        );
 
         assert!(
             crate::local::pipelines_dir(&repo.local_dir())
