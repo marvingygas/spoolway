@@ -15230,16 +15230,16 @@ mod tests {
         );
         repo.config.dispatch.hide_commands = true;
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("document", "demo");
+        let key = crate::command_step::Runs::key("implement", "demo");
         runs.record_pane(&key, "w1:p9").unwrap();
         let mux = mux.with_pane_in_tab("w1:p9", "w1:t3", 1);
-        let pipelines = pipelines_with_hide("document", Some(false));
+        let pipelines = pipelines_with_hide(Some(false));
 
         run_pass_with(&repo, &mux, &pipelines);
 
         assert!(
             mux.did("rename_tab")
-                .contains(&"rename_tab w1:t3 document".to_string()),
+                .contains(&"rename_tab w1:t3 implement".to_string()),
             "{:?}",
             mux.calls()
         );
@@ -16221,7 +16221,7 @@ mod tests {
         let key = crate::command_step::Runs::key("implement", "demo");
         runs.record_pane(&key, "w1:p9").unwrap();
         let mux = FakeMux::new(vec![]);
-        let pipelines = pipelines_with_hide("implement", Some(false));
+        let pipelines = pipelines_with_hide(Some(false));
 
         run_pass_with(&repo, &mux, &pipelines);
 
@@ -26176,16 +26176,18 @@ mod tests {
         assert!(pane_requests_with("command-hide-shown", false, None) > 0);
     }
 
-    /// The built-in pipelines with `step`'s `hide:` set to `hide`.
-    fn pipelines_with_hide(step: &str, hide: Option<bool>) -> Pipelines {
-        let mut pipelines = Pipelines::builtin();
+    /// The built-in pipelines with `implement` turned into a command step, as
+    /// [`pipelines_running`] does, and its `hide:` set to `hide`. Built as a
+    /// command step because `hide:` on any other step does not load.
+    fn pipelines_with_hide(hide: Option<bool>) -> Pipelines {
+        let mut pipelines = pipelines_running("echo hi", false);
         pipelines
             .pipelines
             .get_mut("default")
             .unwrap()
             .steps
             .iter_mut()
-            .find(|s| s.id == step)
+            .find(|s| s.id == "implement")
             .unwrap()
             .hide = hide;
         pipelines
