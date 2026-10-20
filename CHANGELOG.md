@@ -13,9 +13,22 @@ the following contract so the binary can parse and replay them:
 - The last line is `Release: https://github.com/marvingygas/spoolway/releases/tag/vX.Y.Z`.
 - Versions are unique. File order is not significant; commands sort releases by
   version and print ranges oldest first.
+- Changes that have no version yet collect in a `## Unreleased` section above
+  the newest release, with `### Changed` and `### Removed` bullets. The binary
+  skips it, and the release commit renames it to the new `## X.Y.Z` and fits it
+  to this contract.
 
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
+
+## Unreleased
+
+### Changed
+- A step's `headless:` key is now `hide:` (#1127). This spoolway refuses `headless:`, naming the step: run `spoolway sync` to rename it, or write `hide:` yourself. `sync` renames `headless: true` to `hide: true` and deletes `headless: false`, because `hide: false` forces a pane where `headless: false` only spelled out the default and followed `dispatch.hide_commands`. Older spoolway binaries refuse `hide:`, so CI and teammates must upgrade once the repo is synced.
+- `dispatch.visible_lanes` now defaults to 3, and `dispatch.hide_commands` to false.
+
+### Removed
+- `housekeeping.price_max_age_days`.
 
 ## 0.13.0
 

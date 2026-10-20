@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.13.0 to the next release | A step's `headless:` key is now `hide:`; `dispatch.visible_lanes` defaults to 3 and `dispatch.hide_commands` to false; `housekeeping.price_max_age_days` is retired. | Run `spoolway sync` and commit what it writes, upgrade CI and teammates to the same release, and delete `housekeeping.price_max_age_days`. |
 | 0.12.0 to 0.13.0 | The shipped pipelines end at a `create-pr` agent step and `spoolway stack` is deprecated; the shipped tracker hooks close a ticket with no pull request; a failing issue hook stops its task on `hook_failed` instead of `paused`; `eval --per-run` is `--per-task` and its export keys and columns change; unqueuing a routine copy deletes it; `sync` writes every `[dispatch]` key. | Run `spoolway sync` and `spoolway sync --replace` on your tracker hook, replace each `spoolway stack` step with a `create-pr` agent step, and update scripts that read `eval` exports, `--per-run`, held tasks' `state` or unqueued routine drafts. |
 | 0.11.0 to 0.12.0 | A model with no `prompt_cache_ttl` has no age limit; a task keeps its five newest lanes and `keep_finished_lanes` is retired; command steps run without a pane; herdr lanes are named `<step>-<tag>`; step ids are limited to 26 characters; resuming a caught `--fail` goes down `on_fail`; issue and git hooks have fixed time limits; `queue add` refuses misspelt keys, placeholders, ids in use and unreachable `gate_at:`; four commands refuse `--json`; `queue list --json` `stage` names the stopped step; deleting `dispatch.pid` stops the dispatcher; `doctor` fails more settings. | Run `spoolway sync`, set `prompt_cache_ttl`, rename long step ids and quoted `[models]` tables, set `visible_lanes` or `hide_commands` to taste, add `# spoolway-login:` to tracker hooks, update scripts that read lane names, `--json` or `stage`, and clear what `spoolway doctor` fails. |
 | 0.10.0 to 0.11.0 | A background step with `on_fail` is refused when the pipeline loads and its exit never moves the task; `sync`, `init` and `install` refuse a file that matches no copy spoolway has shipped and delete the version marker; the issue question is a checklist of groups and its popups changed; `queue add` calls no `open` hook for a `tracking: off` task; a routine runs one copy at a time and reads by its name on the board, the lane, the workspace and `eval`; `routine:` is refused in a task file; `eval --by task` writes WHEN with the time; `open` reads `~/.spoolway/editor.toml` and falls back to `vim`. | Fix every background step with `on_fail`, run `spoolway sync` and `spoolway sync --replace` for each refused file, commit the deleted marker, update scripts that drive the issue popups, find routine panes by id or read `eval`'s `when`, and rename a `routine:` key of your own. |
@@ -53,6 +54,24 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.13.0 to the next release
+
+Run `spoolway sync` in each project and commit what it writes.
+
+- A step's `headless:` key is now `hide:`. The new release refuses `headless:` with any value,
+  naming the step. `spoolway sync` renames `headless: true` to `hide: true` in the checkout's
+  pipeline files, the private patches and the private pipelines. It deletes `headless: false`
+  and writes no `hide:`. `hide: false` forces a pane even when `dispatch.hide_commands` is true,
+  while `headless: false` only spelled out the default and followed that setting. A step that
+  carries both keys, or a `headless:` in flow style, is refused and left as it is. See
+  [Background and headless](pipelines.md#background-and-headless).
+- Older spoolway binaries refuse `hide:`. Once a repo is synced, every machine and CI job that
+  runs it needs the new release, or its pipelines will not load.
+- `dispatch.visible_lanes` now defaults to 3 and `dispatch.hide_commands` to false. Set either one
+  in `config.toml` if you relied on the old defaults.
+- `housekeeping.price_max_age_days` is retired. The next save of `config.toml` drops it, so delete
+  it when you see the note.
 
 ## 0.12.0 to 0.13.0
 

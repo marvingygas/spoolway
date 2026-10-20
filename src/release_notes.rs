@@ -64,6 +64,9 @@ pub struct Release {
     url: String,
 }
 
+/// The heading of the section that collects changes before a release.
+const UNRELEASED: &str = "Unreleased";
+
 /// Parse and validate the embedded record. Results are always oldest first,
 /// even though maintainers may keep the newest Markdown section at the top.
 pub fn parse(text: &str) -> Result<Vec<Release>> {
@@ -80,6 +83,14 @@ pub fn parse(text: &str) -> Result<Vec<Release>> {
     let lines: Vec<&str> = text.lines().collect();
     let mut releases = Vec::new();
     for (position, (start, heading)) in starts.iter().enumerate() {
+        // `## Unreleased` collects changes before a release has a version.
+        // No binary has it yet, so it is not replayed by `whats-new` or the
+        // update digest, and it is not held to a shipped section's contract.
+        // It still ends at the next `## ` heading, so it is skipped here,
+        // after every heading has been found.
+        if heading.trim() == UNRELEASED {
+            continue;
+        }
         let end = starts
             .get(position + 1)
             .map(|(next, _)| *next)
@@ -390,6 +401,26 @@ mod tests {
             ["0.1.0", "0.2.0"]
         );
         assert_eq!(releases[1].migrations, ["Rename old to new."]);
+    }
+
+    // Fails before the change: `Unreleased` is not a version, so the whole
+    // record was refused.
+    #[test]
+    fn an_unreleased_section_is_left_out_of_the_record() {
+        let text = TWO.replace(
+            "## 0.2.0",
+            "## Unreleased\n\n### Changed\n- Not yet shipped.\n\n## 0.2.0",
+        );
+        let releases = parse(&text).unwrap();
+        assert_eq!(
+            releases
+                .iter()
+                .map(|r| r.version.to_string())
+                .collect::<Vec<_>>(),
+            ["0.1.0", "0.2.0"]
+        );
+        assert_eq!(releases[1].migrations, ["Rename old to new."]);
+        assert!(parse(&TWO.replace("## 0.2.0", "## Next")).is_err());
     }
 
     #[test]
