@@ -632,7 +632,19 @@ fn run() -> Result<()> {
                     let installed = if crate::repo::workspace_clone(&repo.root).is_some() {
                         crate::install::install_user(args.provider, args.force)?
                     } else {
-                        crate::install::install(&repo.root, args.provider, args.force)?
+                        // `repo.root` is the main checkout even from inside a
+                        // linked worktree, so writing there would change the
+                        // person's main checkout and leave the worktree the
+                        // command ran in untouched. A linked worktree asks
+                        // git for its own top level instead, which also
+                        // covers one that borrows the main checkout's
+                        // `.spoolway/`.
+                        let root = if crate::repo::is_linked_worktree(&cwd) {
+                            crate::repo::toplevel_raw(&cwd)?
+                        } else {
+                            repo.root.clone()
+                        };
+                        crate::install::install(&root, args.provider, args.force)?
                     };
                     crate::install::report(installed);
                     Ok(())
