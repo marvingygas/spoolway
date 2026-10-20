@@ -849,7 +849,8 @@ lists the rows least literal first, each with the values it supplies:
   rows: *haiku* (window, slots, compact_ctx) · claude-* (prompt_cache_ttl)
 ```
 
-`spoolway models --json` carries the same list in a `rows` array on that model.
+`spoolway models --json` carries the same list in a `rows` array on that model. Each entry has a
+`row` and the `sets` it supplies.
 
 A bare name also matches `vendor/name`, but only when no row matches the full name. Once one does,
 bare-name rows are not merged in.
