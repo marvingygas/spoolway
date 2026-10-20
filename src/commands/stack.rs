@@ -71,7 +71,6 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     if task.front.title.trim().is_empty() {
         bail!("task `{id}` has no `title:` to make the squashed commit's subject from");
     }
-    println!("{id}\n");
 
     // The worktree a command step runs in — see docs/pipelines.md — falls
     // back to the current directory so a person can run this by hand from
@@ -81,22 +80,33 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         Err(_) => {
             let cwd = std::env::current_dir().context("resolving the current directory")?;
             // Everything below commits, squashes and force-pushes whatever
-            // checkout this is. In the main checkout that rewrites the
-            // person's own branch and pushes it over the task's pull request
-            // branch, so refuse before anything is touched. A dispatcher
-            // lane names its worktree in `SPOOLWAY_WORKTREE` and never gets
-            // here; the check is for a person running this by hand.
-            if !crate::repo::is_linked_worktree(&cwd) {
+            // checkout this is. In the main checkout, or in a worktree on
+            // some other branch, that rewrites a branch the task does not
+            // own and pushes it over the task's pull request branch, so
+            // refuse before anything is touched. The refusal comes before
+            // the task's header line is printed so it stands alone. A
+            // dispatcher lane names its worktree in `SPOOLWAY_WORKTREE` and
+            // never gets here; the check is for a person running this by
+            // hand. A task with no recorded `branch:` is held only to being
+            // in a linked worktree, as there is no branch to compare.
+            let own = crate::repo::is_linked_worktree(&cwd)
+                && match task.front.branch.as_deref() {
+                    Some(branch) => {
+                        crate::repo::current_branch_at(&cwd)?.as_deref() == Some(branch)
+                    }
+                    None => true,
+                };
+            if !own {
                 bail!(
-                    "`spoolway stack` hands a task over from the task's own worktree, and {} is \
-                     not one. Nothing was committed or pushed. Run it in {id}'s worktree, or \
-                     let {id}'s handover step run it.",
-                    cwd.display()
+                    "`stack` hands a task over from the task's own worktree, and this is not \
+                     one.\n  Nothing was committed or pushed. Run it in {id}'s worktree,\n  or let \
+                     {id}'s handover step run it."
                 );
             }
             cwd
         }
     };
+    println!("{id}\n");
     let step = std::env::var(crate::dispatch::ENV_STEP).unwrap_or_else(|_| "stack".to_string());
     // Empty, always: `SPOOLWAY_HEAD` is where a branch stood when an *agent*
     // lane's turn began, and a command step's env carries no such thing —

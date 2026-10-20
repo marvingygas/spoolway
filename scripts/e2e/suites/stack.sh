@@ -805,6 +805,26 @@ else
   bad "the task's branch is untouched, here and on the remote"
 fi
 
+# A linked worktree is not enough: it must be this task's own. The person's
+# own side checkout, on a branch of their own, gets the same refusal.
+must "a side worktree of the person's" git worktree add -q -b person-wt "$WORKTREES/person-wt" main
+echo side > "$WORKTREES/person-wt/side.txt"
+side_head=$(git -C "$WORKTREES/person-wt" rev-parse HEAD)
+side_out=$(cd "$WORKTREES/person-wt" && "$SPOOLWAY" stack handed 2>&1)
+side_status=$?
+if [ "$side_status" -eq 1 ] && grep -qF 'Nothing was committed or pushed' <<<"$side_out"; then
+  ok "\`spoolway stack\` refuses from a linked worktree on another branch"
+else
+  bad "\`spoolway stack\` refuses from a linked worktree on another branch (exit $side_status)"; sed 's/^/        /' <<<"$side_out"
+fi
+if [ "$(git -C "$WORKTREES/person-wt" rev-parse HEAD)" = "$side_head" ] \
+   && [ "$(git ls-remote origin refs/heads/task/handed)" = "$handed_remote" ] \
+   && [ "$(git rev-parse task/handed)" = "$handed_local" ]; then
+  ok "and leaves that branch and the task's branch alone"
+else
+  bad "and leaves that branch and the task's branch alone"
+fi
+
 # The same command, with the worktree named the way a lane names it, from the
 # directory a lane's command step happens to run in.
 lane_out=$(SPOOLWAY_WORKTREE="$WORKTREES/handed" "$SPOOLWAY" stack handed 2>&1)
