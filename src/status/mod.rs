@@ -210,7 +210,7 @@ pub struct Row {
     /// STATE already says the row is paused or blocked, so this repeats it
     /// only where nothing records the step the stop came from: a task
     /// paused from the board before it started, or an old or hand-edited
-    /// file.
+    /// file. A task teardown held on its way out of `done` reads `blocked`.
     pub stage: String,
     /// How many times this task has arrived at the step [`Self::stage`] names —
     /// [`crate::task::Frontmatter::arrivals`]'s own entry for it,
@@ -4296,8 +4296,7 @@ fn teardown_hold(task: &crate::task::Task) -> Option<String> {
 ///
 /// A task teardown held on its way out of `done` names the hold's reason
 /// instead, such as `worktree on a detached HEAD, not `task/t3``. Its
-/// remedy is in the worktree, not in picking a step, and the resume that
-/// follows only reruns the step that reached `done`.
+/// remedy is in the worktree, not in picking a step.
 fn blocked_next(
     task: &crate::task::Task,
     pipeline: &crate::pipeline::Pipeline,
@@ -4860,7 +4859,13 @@ fn build_rows(
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
             after: stacked_after(repo, tasks, task),
-            stage: shown_stage.to_string(),
+            // A task teardown held reads `blocked`, since the step it came
+            // from is not where the work stands: it is in the worktree.
+            // Arrivals and the ledger figures stay with that step.
+            stage: match parked_on_blocked && teardown_hold(task).is_some() {
+                true => crate::pipeline::BLOCKED.to_string(),
+                false => shown_stage.to_string(),
+            },
             arrivals,
             pipeline: pipeline.name.clone(),
             state,
@@ -13567,6 +13572,28 @@ mod tests {
             "[r] → handover",
             "a block from a step is not teardown's hold"
         );
+    }
+
+    /// The STEP column of a task teardown held reads `blocked`, as the plan's
+    /// morning draws it, while a block reached from a step still names it.
+    #[test]
+    fn the_step_column_reads_blocked_for_a_teardown_hold() {
+        let (repo, _root_guard) = fixture("teardown-held-step-column");
+        let pipelines = Pipelines::builtin();
+        for (id, from) in [("t3", "done"), ("t5", "handover")] {
+            add_to(&repo, id, &[], Some(from), Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.front.blocked_from = Some("handover".into());
+            task.set_stage(
+                crate::pipeline::BLOCKED,
+                Some("worktree on a detached HEAD, not `task/t3`"),
+            );
+            task.save().unwrap();
+        }
+        let rows = rows(&repo, &pipelines).unwrap();
+        let stage_of = |id: &str| rows.iter().find(|r| r.id == id).unwrap().stage.clone();
+        assert_eq!(stage_of("t3"), "blocked");
+        assert_eq!(stage_of("t5"), "handover");
     }
 
     /// A plain resume refuses a task whose recorded step the pipeline no

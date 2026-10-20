@@ -829,17 +829,11 @@ impl<'a> Dispatcher<'a> {
     /// cleanup found something it must not tear down over. The log line goes
     /// in the status log and `reason` is the stage change's own.
     fn hold_before_cleanup(&self, task: &mut Task, log: &str, reason: &str) -> Result<()> {
-        // The step that carried the task to `done`, so a resume runs only
-        // that one again and comes back here. `resume_target` alone answers
-        // the pipeline's entry for a task whose last steps were commands,
-        // which report nothing, and a resume would rerun every passed step.
-        let pipeline = self.pipelines.for_task(task).ok();
-        let back = task
-            .front
-            .arrived_from
-            .clone()
-            .filter(|from| pipeline.is_some_and(|p| p.step(from).is_some()))
-            .or_else(|| pipeline.map(|p| crate::commands::resume_target(task, p)))
+        let back = self
+            .pipelines
+            .for_task(task)
+            .ok()
+            .map(|pipeline| crate::commands::resume_target(task, pipeline))
             .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
             .unwrap_or_else(|| task.stage().to_string());
         crate::commands::set_blocked_from(task, &back);
