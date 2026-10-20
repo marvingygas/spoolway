@@ -341,6 +341,14 @@ else
   bad "and it says so exactly once (said it $HERDR_NOTES times)"
 fi
 
+# 0.6.0's command step carries `headless: true`, a key this release stopped
+# loading. Before the sync the pipelines are refused by name, with both ways out;
+# the sync below renames it and says so. The wording is `Pipeline`'s own, which
+# `headless_message` in `src/pipeline.rs` keeps in step with this.
+has "the 0.6.0 fixture's headless: key is refused by name before the sync" \
+  "default.yml: step \`handover\` declares \`headless:\` — the key is now \`hide:\`; run \`spoolway sync\` to rename it, or write \`hide: true\` in its place." \
+  "$WORK/0.6.0/check-before.out"
+
 # The dry run first, then the real run, each against a snapshot of every file in
 # the project. Nothing here is mocked: the project is the one 0.6.0 itself
 # scaffolded, so this is where the dry run's list is held against the files a
@@ -381,11 +389,14 @@ lacks "sync refused no file of the 0.6.0 project as a copy it does not know" \
   "refused " "$WORK/0.6.0/real.out"
 
 # Both of 0.6.0's pipelines end in `spoolway stack`, so sync names the step to
-# change, in a dry run and a real one alike, and the note adds no file to the
-# lists compared above.
-has "the 0.6.0 dry run names the deprecated spoolway stack" \
-  "\`spoolway stack\` is deprecated" "$WORK/0.6.0/dry.out"
-has "and the real run names it too" \
+# change, and the note adds no file to the lists compared above. Only the real
+# run can: the note is read from the loaded pipelines, and 0.6.0's `headless:`
+# keeps them from loading until the sync has renamed it. A dry run writes
+# nothing, so it reports the rename instead, and says nothing about the stack.
+has "the 0.6.0 dry run reports the headless: rename it would make" \
+  "(migrated: default: \`headless:\` renamed to \`hide:\` on step handover)" \
+  "$WORK/0.6.0/dry.out"
+has "and the real run names the deprecated spoolway stack" \
   "\`spoolway stack\` is deprecated" "$WORK/0.6.0/real.out"
 has "naming the step that still runs it, pipeline first" \
   "Still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
@@ -425,9 +436,18 @@ works "sync removed the 0.6.0 fixture's tracking epic template" \
 works "and its tracking ticket template, text and all" \
   test ! -e .spoolway/templates/tracking/ticket.md
 
+# The rename of `headless:` to `hide:` is the one change outside the block, so
+# the expected file is the old one with that key renamed and nothing else.
+sed 's/^    headless:/    hide:/' "$WORK/0.6.0/before-default.yml" \
+  >"$WORK/0.6.0/expected-default.yml"
 byte_for_byte_outside_block \
-  "the prose around the key block came back byte for byte — nothing in it changed" \
-  "$WORK/0.6.0/before-default.yml" "$PIPELINE"
+  "the prose around the key block came back byte for byte, bar the renamed headless: key" \
+  "$WORK/0.6.0/expected-default.yml" "$PIPELINE"
+has "the 0.6.0 sync says it renamed headless: to hide:, naming the step" \
+  "(migrated: default: \`headless:\` renamed to \`hide:\` on step handover)" \
+  "$WORK/0.6.0/real.out"
+lacks "and the renamed 0.6.0 pipeline no longer carries headless:" \
+  "    headless:" "$PIPELINE"
 
 # The project loads clean, with nothing left for `pipeline check` to refuse —
 # the fixture configures no agents, so the one thing left to say is the same
@@ -542,6 +562,18 @@ for fixture_dir in "$FIXTURES"/*/; do
       "dispatch.lane_layout" "$WORK/$version/real.out"
   fi
   assert_dispatch_keys_written "$version"
+  # Every fixture's shipped command step carried `headless: true`, so the sync
+  # renames it, once per file it was in, and the project's pipelines load.
+  if grep -rq '^    headless:' "$fixture_dir/.spoolway/pipelines"; then
+    has "the $version sync renames headless: to hide:" \
+      "\`headless:\` renamed to \`hide:\` on step" "$WORK/$version/real.out"
+    for renamed in .spoolway/pipelines/*.yml; do
+      lacks "and $renamed of the $version project carries no headless: step afterwards" \
+        "    headless:" "$renamed"
+    done
+  fi
+  silent_about "and the $version project's pipelines are not refused for headless:" \
+    "declares \`headless:\`" "$SPOOLWAY" pipeline check
   # Only a pipeline that still runs `spoolway stack` earns the warning.
   if grep -rq 'spoolway stack' "$fixture_dir/.spoolway/pipelines"; then
     has "sync names the deprecated spoolway stack in the $version project" \

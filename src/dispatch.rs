@@ -25706,7 +25706,7 @@ mod tests {
         let mut pipelines = pipelines_running("sleep 60", false);
         for step in &mut pipelines.pipelines.get_mut("default").unwrap().steps {
             if step.id == "implement" {
-                step.headless = Some(true);
+                step.hide = Some(true);
             }
         }
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
