@@ -4788,6 +4788,9 @@ mod tests {
         let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
         assert_eq!(pi_lines.len(), 1, "{lines:#?}");
         assert_eq!(pi_lines[0].matches("1/1").count(), 1, "{lines:#?}");
+        // Keyed on the most literal row, `claude-haiku-4-5` would draw a pool
+        // of its own, `0/1`, beside `claude-haiku-5-5`'s.
+        assert!(!pi_lines[0].contains("claude-haiku-4-5"), "{lines:#?}");
     }
 
     /// Two spellings of one model reached only through the suffix fallback —

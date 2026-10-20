@@ -9282,7 +9282,10 @@ mod tests {
             (
                 "claude-haiku-5-5".to_string(),
                 crate::usage::ModelPrice {
-                    context_window: 1,
+                    tier: Some(crate::usage::PriceTier {
+                        above_k: 100,
+                        rates: Default::default(),
+                    }),
                     ..Default::default()
                 },
             ),
