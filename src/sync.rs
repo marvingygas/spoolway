@@ -3755,6 +3755,7 @@ mod tests {
         let pipelines = crate::pipeline::Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         let sentences = crate::commands::stack_deprecation(&pipelines).unwrap();
         assert_eq!(

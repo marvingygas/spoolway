@@ -2163,6 +2163,46 @@ pub struct Pipelines {
     /// checkout — empty for [`Pipelines::load_tracked`], which never merges
     /// anything at all. See [`crate::overrides::Ignored`].
     pub(crate) ignored_overrides: Vec<crate::overrides::Ignored>,
+    /// Every name a private pipeline and a tracked one both claim, left out
+    /// of [`Pipelines::pipelines`] entirely: neither file is the one a task
+    /// naming it meant, so a task on it is held rather than run on the
+    /// wrong steps. Everything else loads and runs as usual. Empty for
+    /// [`Pipelines::load_tracked`], which never reads the private layer.
+    pub clashes: BTreeMap<String, Clash>,
+}
+
+/// A pipeline name claimed by both a tracked file and a private one.
+///
+/// The two files are kept as paths only. Neither is parsed further, since
+/// there is no telling which one a task naming this pipeline was queued
+/// against, and `pipeline rename` is what settles it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Clash {
+    pub tracked: PathBuf,
+    pub private: PathBuf,
+}
+
+impl Clash {
+    /// The short line a held task carries, on the board and in `queue list`:
+    /// what is wrong and the one command that settles it.
+    pub fn held_line(&self, name: &str) -> String {
+        format!(
+            "private `{name}` clashes with the tracked one: spoolway pipeline rename {name} \
+             <new-name>"
+        )
+    }
+
+    /// The full sentence `doctor` and `pipeline check` print: both files,
+    /// and what the clash costs until it is settled.
+    pub fn refusal(&self, name: &str) -> String {
+        format!(
+            "private pipeline `{name}` clashes with the tracked one — both {} and {} name \
+             `{name}`; run `spoolway pipeline rename {name} <new-name>` to rename the private \
+             file. Tasks on `{name}` are held until then, and every other task runs",
+            self.tracked.display(),
+            self.private.display(),
+        )
+    }
 }
 
 impl Pipelines {
@@ -2414,10 +2454,11 @@ impl Pipelines {
         // `local/` to read. See `crate::local`.
         let mut private_dir = None;
         let mut private_prompt_names = None;
+        let mut clashes = BTreeMap::new();
         if overrides.is_some() && crate::local::is_repo_mode(root) {
             let local = crate::local::dir_for(root)?;
             private_dir = Some(crate::local::pipelines_dir(&local));
-            private_prompt_names = Some(merge_private(root, &mut pipelines)?);
+            private_prompt_names = Some(merge_private(root, &mut pipelines, &mut clashes)?);
         }
 
         // A patch naming a pipeline the checkout no longer has is never
@@ -2436,6 +2477,9 @@ impl Pipelines {
                         ignored.push(crate::overrides::Ignored::private_pipeline(&name));
                     }
                     Some(_) => {}
+                    // Held by a name clash: the pipeline is there, twice, and
+                    // is not one the patch can be said to have lost.
+                    None if clashes.contains_key(&name) => {}
                     None => ignored.push(crate::overrides::Ignored::missing_pipeline(&name)),
                 }
             }
@@ -2447,14 +2491,22 @@ impl Pipelines {
         // own `pipeline \`{name}\`` context) can just as well be a private
         // pipeline's, and pointing only at `dir` there would send a person
         // to a file that was never the problem.
-        let set = Pipelines::assemble(pipelines, config, ignored, require_nonempty).with_context(
-            || match &private_dir {
-                Some(private_dir) => {
-                    format!("in {} or {}", dir.display(), private_dir.display())
-                }
-                None => format!("in {}", dir.display()),
-            },
-        )?;
+        //
+        // A project whose only tracked pipeline is the clashing one is not
+        // empty: it has a pipeline that is held, which `validate` names.
+        let mut set = Pipelines::assemble(
+            pipelines,
+            config,
+            ignored,
+            require_nonempty && clashes.is_empty(),
+        )
+        .with_context(|| match &private_dir {
+            Some(private_dir) => {
+                format!("in {} or {}", dir.display(), private_dir.display())
+            }
+            None => format!("in {}", dir.display()),
+        })?;
+        set.clashes = clashes;
 
         // Run only now, against the steps `set` will actually dispatch —
         // including a `blocked` step `assemble` has just materialised from
@@ -2505,6 +2557,7 @@ impl Pipelines {
         let mut set = Pipelines {
             pipelines,
             ignored_overrides,
+            clashes: BTreeMap::new(),
         };
         set.validate_impl(require_nonempty)?;
 
@@ -2599,6 +2652,9 @@ impl Pipelines {
 
     /// Look up a pipeline by name, with an error listing the defined ones.
     pub fn get(&self, name: &str) -> Result<&Pipeline> {
+        if let Some(clash) = self.clashes.get(name) {
+            bail!("{}", clash.held_line(name));
+        }
         self.pipelines.get(name).with_context(|| {
             format!(
                 "no pipeline `{name}` (defined: {})",
@@ -2617,6 +2673,11 @@ impl Pipelines {
             .pipeline
             .as_deref()
             .with_context(|| format!("task `{}` has no `pipeline:`", task.id()))?;
+        // A clash is no missing pipeline: the name is defined twice, and the
+        // line must send the person to the command that settles it.
+        if let Some(clash) = self.clashes.get(name) {
+            bail!("task `{}` is held — {}", task.id(), clash.held_line(name));
+        }
         self.get(name)
             .with_context(|| format!("task `{}` names a pipeline that does not exist", task.id()))
     }
@@ -2650,7 +2711,18 @@ impl Pipelines {
         map
     }
 
+    /// [`Pipelines::validate_impl`], plus a failure for every name clash.
+    /// A clash does not stop the load, so this is the one place `doctor`
+    /// and `pipeline check` hear of it.
     pub fn validate(&self) -> Result<()> {
+        if !self.clashes.is_empty() {
+            let lines: Vec<String> = self
+                .clashes
+                .iter()
+                .map(|(name, clash)| clash.refusal(name))
+                .collect();
+            bail!("{}", lines.join("\n"));
+        }
         self.validate_impl(true)
     }
 
@@ -2700,6 +2772,7 @@ impl Pipelines {
 fn merge_private(
     root: &Path,
     pipelines: &mut BTreeMap<String, Pipeline>,
+    clashes: &mut BTreeMap<String, Clash>,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let local = crate::local::dir_for(root)?;
     let local_pipelines_dir = crate::local::pipelines_dir(&local);
@@ -2729,16 +2802,27 @@ fn merge_private(
 
     if let Some(files) = read_pipeline_dir(&local_pipelines_dir)? {
         for (name, file, raw) in files {
+            // A name already clashed by an earlier private file is a second
+            // private file of the same name (`foo.yml` and `foo.yaml`), not
+            // a second clash: the tracked pipeline was taken out of
+            // `pipelines` by the first, so the lookup below cannot see it.
+            if let Some(first) = clashes.get(&name) {
+                bail!(
+                    "two private files name the pipeline `{name}` — both {} and {}; keep one \
+                     and rename or delete the other",
+                    first.private.display(),
+                    file.display(),
+                );
+            }
             if let Some(existing) = pipelines.get(&name) {
                 // Two entries can reach this one name two ways: a genuine
                 // clash with the tracked file, or two private files of the
-                // same name under different extensions (`foo.yml` and
-                // `foo.yaml`) — `read_pipeline_dir` returns both, and the
-                // second one to land here would otherwise be blamed on the
-                // tracked file it never touched, naming a tracked path that
-                // does not even exist. `private_file` tells the two apart:
-                // set only once this loop has already inserted one of this
-                // pair, never by the tracked-parsing loop above it.
+                // same name under different extensions — and the second one
+                // to land here would otherwise be blamed on the tracked file
+                // it never touched, naming a tracked path that does not even
+                // exist. `private_file` tells the two apart: set only once
+                // this loop has already inserted one of this pair, never by
+                // the tracked-parsing loop above it.
                 if let Some(other_private) = &existing.private_file {
                     bail!(
                         "two private files name the pipeline `{name}` — both {} and {}; keep \
@@ -2756,12 +2840,18 @@ fn merge_private(
                 } else {
                     Pipelines::dir_in(root).join(format!("{name}.yaml"))
                 };
-                bail!(
-                    "private pipeline `{name}` clashes with the tracked one — both {} and {} \
-                     name `{name}`; rename the private file",
-                    tracked_file.display(),
-                    file.display(),
+                // Neither file runs: the tracked pipeline leaves the set too,
+                // so a task naming it is held rather than run on steps it was
+                // not queued against. Every other pipeline is untouched.
+                pipelines.remove(&name);
+                clashes.insert(
+                    name,
+                    Clash {
+                        tracked: tracked_file,
+                        private: file,
+                    },
                 );
+                continue;
             }
             let mut pipeline =
                 parse_unchecked(&name, &raw).with_context(|| format!("in {}", file.display()))?;
@@ -5031,9 +5121,10 @@ mod tests {
     }
 
     /// A private pipeline whose name already belongs to a tracked one is
-    /// refused outright, naming both files — never silently shadowed.
+    /// never silently shadowed, and does not stop the load: the name leaves
+    /// the set, is recorded with both files, and every other pipeline loads.
     #[test]
-    fn a_private_pipeline_naming_a_tracked_pipeline_is_refused() {
+    fn a_private_pipeline_naming_a_tracked_pipeline_is_held_not_refused() {
         with_override_fixture("private-pipeline-clash", |root| {
             let local = crate::local::dir_for(root).unwrap();
             let dir = crate::local::pipelines_dir(&local);
@@ -5043,9 +5134,32 @@ mod tests {
                 "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
             )
             .unwrap();
+            std::fs::write(
+                dir.join("extra.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
 
-            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            let message = format!("{err:#}");
+            let set = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            let clash = set.clashes.get("impl").expect("the clash is recorded");
+            assert_eq!(clash.tracked, Pipelines::file_in(root, "impl"));
+            assert_eq!(clash.private, dir.join("impl.yml"));
+            assert!(
+                !set.pipelines.contains_key("impl"),
+                "neither file may run under the clashing name"
+            );
+            assert!(
+                set.pipelines.contains_key("extra"),
+                "another pipeline loads"
+            );
+
+            let held = format!("{:#}", set.get("impl").unwrap_err());
+            assert!(
+                held.contains("spoolway pipeline rename impl <new-name>"),
+                "{held}"
+            );
+
+            let message = format!("{:#}", set.validate().unwrap_err());
             assert!(
                 message.contains(&Pipelines::file_in(root, "impl").display().to_string()),
                 "{message}"
@@ -5236,7 +5350,7 @@ mod tests {
         });
     }
 
-    /// The clash refusal names the private file as it is on disk, `.yaml`
+    /// The recorded clash names the private file as it is on disk, `.yaml`
     /// included, so the person is sent to a file that exists.
     #[test]
     fn a_private_yaml_pipeline_clashing_with_a_tracked_one_names_the_yaml_file() {
@@ -5250,16 +5364,12 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            let message = format!("{err:#}");
-            assert!(
-                message.contains(&dir.join("impl.yaml").display().to_string()),
-                "{message}"
-            );
+            let set = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert_eq!(set.clashes["impl"].private, dir.join("impl.yaml"));
         });
     }
 
-    /// The clash refusal names a tracked `.yaml` file as it is on disk too,
+    /// The recorded clash names a tracked `.yaml` file as it is on disk too,
     /// not the `.yml` spelling `Pipelines::file_in` would give it.
     #[test]
     fn a_private_pipeline_clashing_with_a_tracked_yaml_file_names_the_tracked_yaml() {
@@ -5277,11 +5387,33 @@ mod tests {
             )
             .unwrap();
 
+            let set = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert_eq!(set.clashes["impl"].tracked, tracked_yaml);
+        });
+    }
+
+    /// A tracked pipeline and two private files of its name are still two
+    /// private files for one name: the second must not be read as a fresh
+    /// private pipeline now that the first has taken the tracked one out of
+    /// the set.
+    #[test]
+    fn a_clash_with_two_private_files_still_reports_the_two_private_files() {
+        with_override_fixture("private-clash-two-private", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            for file in ["impl.yml", "impl.yaml"] {
+                std::fs::write(
+                    dir.join(file),
+                    "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+                )
+                .unwrap();
+            }
+
             let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            let message = format!("{err:#}");
             assert!(
-                message.contains(&tracked_yaml.display().to_string()),
-                "{message}"
+                format!("{err:#}").contains("two private files name the pipeline `impl`"),
+                "{err:#}"
             );
         });
     }

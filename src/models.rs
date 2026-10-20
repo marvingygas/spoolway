@@ -2236,6 +2236,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         assert_eq!(unrouted(&pipelines, &config), vec!["Qwen3.6-35B-A3B"]);

@@ -185,6 +185,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Prompt => "prompt",
         Queued => "queued",
         Waiting => "waiting",
+        Held => "held",
         Done => "done",
     }
 }

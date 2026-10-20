@@ -35,7 +35,7 @@ object, written to stderr so that stdout stays one JSON value a script can parse
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
+override`, `pipeline copy`, `pipeline rename`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
 `config show`, `config list`, `config get`, `config path`, `config override`, `doctor`, `jobs
 list` and `sync`.
 
@@ -1218,6 +1218,42 @@ has never picked up the commit that added them. In home mode, where the whole se
 private, this writes into the workspace's own `config/` instead. `--json` prints
 `{"wrote": [<path>, ...]}`, with each path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
+
+### `spoolway pipeline rename <old> <new>`
+
+Rename a private pipeline, and move the tasks naming it onto the new name. This is how a name
+clash with a tracked pipeline is settled.
+
+Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
+
+```
+$ spoolway pipeline rename hotfix hotfix-mine
+renamed local/pipelines/hotfix.yml → local/pipelines/hotfix-mine.yml
+moved 1 queued task onto `hotfix-mine`: q1
+```
+
+While a private `hotfix` and a tracked `hotfix` both exist, neither runs. Every other pipeline
+loads and every other task runs. A task on `hotfix` is held: `queue list` and the board show it
+as `held`, with this line:
+
+```
+private `hotfix` clashes with the tracked one: spoolway pipeline rename hotfix <new-name>
+```
+
+`doctor` and `pipeline check` still report the clash, naming both files.
+
+The rename keeps each task on the steps it was queued with: every task naming `<old>` is
+rewritten to name `<new>`, and `<new>` is the private pipeline's file. The private task skeleton
+`<old>.md` moves with it, unless the pipeline names its own `task_template:`. The tracked
+pipeline keeps the old name. A running dispatcher loaded the old name, so it prints a line
+saying to restart the dispatcher before the tasks run on `<new>`.
+
+Both names must be one plain name, as for `pipeline copy`. Refused when `<old>` names no private
+pipeline, when `<new>` already names a pipeline or a skeleton, tracked or private, and in home
+mode, where the whole setup is already private and no name can clash. Refused, with nothing
+changed, while a task naming `<old>` is on a step, since a lane may be working it: only tasks
+that are queued, paused, blocked or hook-failed are moved. `--json` prints
+`{"renamed": {"from", "to"}, "moved": [<id>, ...], "left": [<id>, ...]}`.
 
 ### `spoolway pipeline promote <name>`
 

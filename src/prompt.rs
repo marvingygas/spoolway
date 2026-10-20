@@ -1666,6 +1666,7 @@ mod tests {
         let pipelines = crate::pipeline::Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
 
         let findings = lint_warnings(&repo, &pipelines).unwrap();

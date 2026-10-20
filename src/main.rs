@@ -549,6 +549,9 @@ fn run() -> Result<()> {
                 Command::Pipeline(PipelineCommand::Copy(args)) => {
                     commands::pipeline_copy(&repo, &args.from, &args.to, cli.json)
                 }
+                Command::Pipeline(PipelineCommand::Rename(args)) => {
+                    commands::pipeline_rename(&repo, &args.old, &args.new, cli.json)
+                }
                 Command::Pipeline(PipelineCommand::Promote(args)) => {
                     commands::pipeline_promote(&repo, &args.name, cli.json)
                 }

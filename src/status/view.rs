@@ -147,6 +147,7 @@ impl State {
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
             State::Waiting => "○ waiting",
+            State::Held => "○ held",
             State::Done => "● done",
         }
     }
@@ -185,6 +186,7 @@ impl State {
             State::Prompt => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
             State::Waiting => format!("{DIM}{word}{RESET}"),
+            State::Held => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }

@@ -149,6 +149,12 @@ pub enum State {
     /// waits on is one named run, not a slot or a dependency — the NEXT
     /// column names that task.
     Waiting,
+    /// The task's pipeline name is claimed by both a tracked and a private
+    /// pipeline, so the dispatcher starts nothing for it. Apart from
+    /// `Unknown` because the pipeline exists: one command, named in the NEXT
+    /// column, settles it, and the task then keeps the steps it was queued
+    /// with.
+    Held,
     /// Archived — its pipeline finished and its file moved to the project's
     /// own `archive/`. Kept on the board, dimmed, for as long as its
     /// group still has a task in the queue: see [`rows_for_board`].
@@ -4500,6 +4506,12 @@ fn build_rows(
             // keeps the row drawn, saying why.
             Err(_) => {
                 let name = task.front.pipeline.as_deref().unwrap_or("");
+                if let Some(clash) = pipelines.clashes.get(name) {
+                    let mut row = unroutable_row(repo, tasks, graph, task, &clash.held_line(name));
+                    row.state = State::Held;
+                    rows.push(row);
+                    continue;
+                }
                 let why = match name.is_empty() {
                     true => "has no pipeline — set `pipeline:` in the task file".to_string(),
                     false => format!(
@@ -6512,6 +6524,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("impl_ui".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         add(&repo, "login", &[], Some("implement"));
         let mut login = repo.task("login").unwrap();
@@ -12397,6 +12410,41 @@ mod tests {
         );
     }
 
+    /// A task on a clashing pipeline name is drawn `held`, with the one
+    /// command that settles it, and every other task is still drawn on its
+    /// own state.
+    #[test]
+    fn a_task_on_a_clashing_pipeline_is_held_and_the_rest_still_run() {
+        let (repo, _root_guard) = fixture("row-clash-held");
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.remove("bugfix").unwrap();
+        pipelines.clashes.insert(
+            "bugfix".into(),
+            crate::pipeline::Clash {
+                tracked: "tracked/bugfix.yml".into(),
+                private: "local/bugfix.yml".into(),
+            },
+        );
+        add_to(&repo, "fine", &[], Some("implement"), Some("fine"));
+        add_to(&repo, "stuck", &[], Some("queued"), Some("stuck"));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.pipeline = Some("bugfix".into());
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let fine = rows.iter().find(|r| r.id == "fine").unwrap();
+        assert!(!matches!(fine.state, State::Held));
+        let stuck = rows.iter().find(|r| r.id == "stuck").unwrap();
+        assert!(matches!(stuck.state, State::Held));
+        assert_eq!(stuck.state.word(), "○ held");
+        assert_eq!(
+            stuck.next,
+            "private `bugfix` clashes with the tracked one: spoolway pipeline rename bugfix \
+             <new-name>"
+        );
+        assert!(!stuck.resumable);
+    }
+
     /// A command step whose non-zero exit is waiting to land is drawn going
     /// to its `on_fail` destination. The default pipeline's `handover` has
     /// none, so that is `blocked`; before, the row said `done`.
@@ -15011,6 +15059,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines: [("long".to_string(), pipeline)].into_iter().collect(),
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         add(&repo, "tall", &[], Some("s12"));
         let mut task = repo.task("tall").unwrap();

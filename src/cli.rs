@@ -1561,6 +1561,16 @@ pub enum PipelineCommand {
     /// where the setup is already private and there is nothing to promote
     /// into.
     Promote(PipelinePromoteArgs),
+
+    /// Rename a private pipeline and move the tasks naming it onto the new
+    /// name — how a name clash with a tracked pipeline is settled.
+    ///
+    /// Renames `local/pipelines/<old>.yml`, and its private skeleton with it
+    /// when it has one. Every task naming `<old>` is rewritten to name
+    /// `<new>`, so each keeps the steps it was queued with. Refused when
+    /// `<new>` already names a pipeline, tracked or private, when `<old>` is
+    /// not private, in a lane, and while a task on `<old>` is on a step.
+    Rename(PipelineRenameArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1581,6 +1591,16 @@ pub struct PipelineCopyArgs {
     /// The new pipeline's name. Refused if it already exists, tracked or
     /// private.
     pub to: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineRenameArgs {
+    /// The private pipeline to rename.
+    pub old: String,
+
+    /// Its new name. Refused if it already names a pipeline, tracked or
+    /// private.
+    pub new: String,
 }
 
 #[derive(Debug, Args)]

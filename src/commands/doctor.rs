@@ -4246,6 +4246,7 @@ mod tests {
         Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         }
     }
 

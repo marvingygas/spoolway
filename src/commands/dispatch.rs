@@ -1517,6 +1517,9 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
                  {choices}.\n\nNothing was dispatched.",
                 task.id()
             ),
+            // A name clash holds only the tasks on it, once the run is going;
+            // refusing the start here would stop every other task too.
+            Some(name) if pipelines.clashes.contains_key(name) => {}
             Some(name) if pipelines.get(name).is_err() => bail!(
                 "refusing to start: task `{}` names a pipeline that does not exist: `{name}`\n  \
                  Set `pipeline:` to one of: {choices}.\n\nNothing was dispatched.",
@@ -1839,6 +1842,28 @@ mod tests {
         assert!(check_task_routes(&pipelines, &[a, b]).is_ok());
     }
 
+    /// A task on a pipeline name a private and a tracked file both claim
+    /// does not stop the start: the pass holds that one task, and the rest
+    /// run. Before, the clash failed the load and every command refused.
+    #[test]
+    fn check_task_routes_lets_a_task_on_a_name_clash_through() {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.remove("bugfix");
+        pipelines.clashes.insert(
+            "bugfix".into(),
+            crate::pipeline::Clash {
+                tracked: "tracked/bugfix.yml".into(),
+                private: "local/bugfix.yml".into(),
+            },
+        );
+        let held = crate::task::Task::parse(
+            std::path::PathBuf::from("held.md"),
+            "---\nid: held\nstage: queued\npipeline: bugfix\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(check_task_routes(&pipelines, &[held]).is_ok());
+    }
+
     /// A dependent whose `base:` no longer agrees with its dependency's —
     /// one of them edited by hand after the batch was sent, since
     /// `validate_batch` already enforced this once — refuses the whole
@@ -2023,6 +2048,7 @@ mod tests {
         Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         }
     }
 
@@ -2066,6 +2092,7 @@ mod tests {
         let pipelines = Pipelines {
             pipelines,
             ignored_overrides: Vec::new(),
+            clashes: Default::default(),
         };
         assert_eq!(
             stack_steps(&pipelines),
