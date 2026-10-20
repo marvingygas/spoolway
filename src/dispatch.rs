@@ -7652,6 +7652,9 @@ struct Boot {
     /// the limit closes none after the split.
     replaced: Vec<String>,
     args: Vec<String>,
+    /// Put first on the lane's `PATH`, so it reports with the dispatcher's own
+    /// `spoolway` — see [`crate::release::dispatcher_bin_dir`].
+    path_prefix: Option<PathBuf>,
     env: BTreeMap<String, String>,
     /// The messages typed into the pane, in order. Only an opening can be
     /// more than one: a step's skills each go first as their own message.
@@ -7688,7 +7691,7 @@ impl Boot {
             pane_id: &self.pane_id,
             args: &self.args,
             env: &self.env,
-            path_prefix: None,
+            path_prefix: self.path_prefix.as_deref(),
         }
     }
 }
@@ -8571,9 +8574,6 @@ fn prepare_boot(
         "SPOOLWAY_SCRATCH".to_string(),
         scratch.display().to_string(),
     );
-    // The lane reports with the dispatcher's own `spoolway`, never an older
-    // one first on the person's `PATH` — see [`crate::release::dispatcher_bin_dir`].
-    crate::release::use_dispatcher_binary(&mut env);
 
     // The pane this lane runs in: the one the task's workspace has just opened
     // for it, the first pane an earlier pass opened and nothing has used since,
@@ -8687,6 +8687,7 @@ fn prepare_boot(
         pane_id,
         replaced,
         args,
+        path_prefix: crate::release::lane_path_prefix(),
         env,
         prompts,
         session,
@@ -10027,11 +10028,13 @@ mod tests {
             let mut names: Vec<&str> = spec.env.keys().map(String::as_str).collect();
             names.sort_unstable();
             self.log(format!("env {} {}", spec.name, names.join(" ")));
-            // The lane's `PATH` too, to check whose `spoolway` it reaches first.
+            // The folder the lane's `PATH` is prefixed with, to check whose
+            // `spoolway` it reaches first.
             self.log(format!(
-                "path {} {}",
+                "path_prefix {} {}",
                 spec.name,
-                spec.env.get("PATH").map_or("-", String::as_str)
+                spec.path_prefix
+                    .map_or("-".to_string(), |dir| dir.display().to_string())
             ));
             // One value too, since a name alone cannot tell a threshold of 30
             // from one of 60.
@@ -28831,7 +28834,7 @@ mod tests {
     }
 
     /// A lane reports with the dispatcher's own `spoolway`, not an older one
-    /// first on the person's `PATH`. The environment a lane is started with
+    /// first on the person's `PATH`. The `PATH` prefix a lane is started with
     /// is where that is decided, so it is read off the lane that is started.
     #[test]
     fn a_lane_is_started_with_the_dispatchers_folder_first_on_its_path() {
@@ -28842,11 +28845,11 @@ mod tests {
 
         run_pass(&repo, &mux);
 
-        let started = mux.did("path");
+        let started = mux.did("path_prefix");
         let line = started.first().expect("no lane was started");
         assert!(
-            line.ends_with(" /opt/dispatcher-bin") || line.contains(" /opt/dispatcher-bin:"),
-            "the lane's PATH does not start with the dispatcher's folder: {line}"
+            line.ends_with(" /opt/dispatcher-bin"),
+            "the lane's PATH is not prefixed with the dispatcher's folder: {line}"
         );
     }
 

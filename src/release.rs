@@ -678,10 +678,13 @@ fn cached_reading(
 /// older than the dispatcher cannot read the pipeline snapshot the dispatcher
 /// wrote, so every `report` fails and the task stays `running` for ever.
 ///
-/// Worked out once, at the first call, because `spoolway update` can replace
-/// the binary under a dispatcher that is still running. Asked again later, the
-/// answer would be the new install, and the dispatcher would hand its lanes a
-/// binary that is not its own. The answer is:
+/// Worked out once, at the first call. `spoolway update` can replace the file
+/// in this folder under a running dispatcher, and the answer is cached so the
+/// folder stays first on the `PATH` of every later lane. Asked afresh, a
+/// folder whose binary was replaced would be dropped and a lane would fall
+/// back to whatever `spoolway` the person's own `PATH` holds, which may be
+/// older. The lanes then run the folder's new install, which is the one the
+/// person asked for. The answer is:
 ///
 /// - `Ok(Some(dir))`: `dir/spoolway` reports this build's version.
 /// - `Ok(None)`: this process is not a binary named `spoolway`, as under
@@ -735,13 +738,12 @@ fn resolve_bin_dir(exe: &Path, version: &str) -> Result<Option<PathBuf>, String>
         return Ok(None);
     }
     let program = dir.join(PACKAGE);
-    let reported = Command::new(&program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| reported_version(&String::from_utf8_lossy(&out.stdout)));
+    // Bounded, because the board asks this synchronously on every dispatch
+    // start, and a binary that hangs on `--version` must not freeze it.
+    let reported = {
+        let program = program.clone();
+        bounded(move || reported_version_of(&program), LOOKUP_DEADLINE)
+    };
     match reported {
         Some(found) if found == version => Ok(Some(dir.to_path_buf())),
         Some(found) => Err(format!(
@@ -750,7 +752,7 @@ fn resolve_bin_dir(exe: &Path, version: &str) -> Result<Option<PathBuf>, String>
             program.display()
         )),
         None => Err(format!(
-            "lanes use the `{PACKAGE}` on PATH: {} is gone or does not run. \
+            "lanes use the `{PACKAGE}` on PATH: {} is gone or does not answer `--version`. \
              Restart the dispatcher to pick up the new install",
             program.display()
         )),
@@ -777,7 +779,20 @@ pub fn put_first_on_path(
     }
 }
 
-/// Make the `spoolway` a lane or command step calls the dispatcher's own.
+/// The folder a lane is started with first on its `PATH`, if there is one.
+///
+/// A lane gets it as a prefix on the `PATH` its own shell has, which is how a
+/// herdr pane keeps the shell's `PATH` and a headless turn keeps the
+/// dispatcher's.
+pub fn lane_path_prefix() -> Option<PathBuf> {
+    dispatcher_bin_dir().as_ref().ok().cloned().flatten()
+}
+
+/// Make the `spoolway` a command step calls the dispatcher's own.
+///
+/// A command step's environment is a map of values rather than a shell to
+/// prefix, and a shown one already replays the dispatcher's whole
+/// environment, so `PATH` is written out in full.
 pub fn use_dispatcher_binary(env: &mut BTreeMap<String, String>) {
     let dir = dispatcher_bin_dir()
         .as_ref()
@@ -795,7 +810,13 @@ pub fn use_dispatcher_binary(env: &mut BTreeMap<String, String>) {
 fn path_reported_version() -> Option<String> {
     let program =
         std::env::var_os("PATH").and_then(|path| crate::platform::which(PACKAGE, &path))?;
-    let out = Command::new(&program)
+    reported_version_of(&program)
+}
+
+/// What `program --version` says its version is, or `None` when it does not
+/// run, exits non-zero or prints nothing.
+fn reported_version_of(program: &Path) -> Option<String> {
+    let out = Command::new(program)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -925,11 +946,10 @@ mod tests {
         dir
     }
 
-    /// A lane's `PATH` starts with the folder holding the dispatcher's binary,
-    /// ahead of the older `spoolway` the person's own `PATH` carries. Before
-    /// the change nothing wrote `PATH` into a lane's environment at all.
+    /// The dispatcher's folder goes ahead of every entry of the `PATH` it is
+    /// put on, so an older `spoolway` further along is never reached first.
     #[test]
-    fn a_lanes_path_starts_with_the_dispatchers_folder() {
+    fn the_folder_goes_ahead_of_every_entry_on_the_path_it_is_given() {
         let mut env = BTreeMap::new();
         put_first_on_path(
             &mut env,

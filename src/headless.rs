@@ -336,8 +336,9 @@ impl Headless {
 
         // A PATH prefix goes on first, because the agent is resolved through
         // this PATH — the same mechanism a herdr lane gets, so one story covers
-        // both backends rather than two. Nothing sets it in a real run; the
-        // tests use it to put a stand-in agent in front of the real one.
+        // both backends rather than two. A real run puts the dispatcher's own
+        // folder here; the tests use it to put a stand-in agent in front of
+        // the real one.
         if let Some(prefix) = &record.path_prefix {
             script.push_str(&crate::platform::path_export(prefix));
             script.push('\n');
