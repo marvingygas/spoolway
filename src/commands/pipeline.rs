@@ -1232,6 +1232,15 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     let (step_id, key) = step_key
         .split_once('.')
         .with_context(|| format!("`--set {set}` — expected `<step>.<key>=<value>`"))?;
+    // Caught ahead of the probe below, whose refusal is the one a *written*
+    // patch gets at load and so tells the person to run `sync`. Nothing has
+    // been written here, so `sync` would have nothing to rename.
+    if key == "headless" {
+        bail!(
+            "`--set {set}` — `headless:` is no longer a step key; use `--set \
+             {step_id}.hide={raw_value}` instead"
+        );
+    }
 
     let tracked = Pipelines::load_tracked(&repo.checkout, &repo.config)
         .with_context(|| format!("reading the tracked pipeline `{name}`"))?;
@@ -4954,6 +4963,24 @@ mod tests {
             let message = format!("{err:#}");
             assert!(message.contains("`on_loop_max:`"), "{message}");
             assert!(message.contains("`blocked`"), "{message}");
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "a refused `--set` must leave no patch behind"
+            );
+        });
+    }
+
+    /// `--set <step>.headless=…` writes nothing, so `sync` has nothing to
+    /// rename: the refusal points at `--set <step>.hide=…` instead.
+    #[test]
+    fn pipeline_override_refuses_headless_and_names_hide_not_sync() {
+        with_repo_and_pipeline("retired-headless", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "demo", "implement.headless=true").unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("--set implement.hide=true"), "{message}");
+            assert!(!message.contains("spoolway sync"), "{message}");
             assert!(
                 crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
                     .unwrap()

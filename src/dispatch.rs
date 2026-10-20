@@ -26105,33 +26105,6 @@ mod tests {
         }
     }
 
-    /// `hide: true` is the escape hatch back to today's silent, detached
-    /// run — no pane is ever asked for.
-    #[test]
-    fn headless_true_never_asks_for_a_pane() {
-        let (repo, _root_guard) = fixture("command-headless");
-        let path = add_task_with_worktree(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![]).offering_panes();
-        let mut pipelines = pipelines_running("echo hidden", false);
-        pipelines
-            .pipelines
-            .get_mut("default")
-            .unwrap()
-            .steps
-            .iter_mut()
-            .find(|s| s.id == "implement")
-            .unwrap()
-            .headless = Some(true);
-
-        drive(&repo, &pipelines, &mux, &path, "review");
-
-        assert!(
-            mux.did("run_in_pane").is_empty(),
-            "a headless step must never split a pane: {:?}",
-            mux.calls()
-        );
-    }
-
     /// `implement` of the built-in pipeline, as a command step with `hide:`
     /// set to `hide`, on a project whose `dispatch.hide_commands` is
     /// `hide_commands`. Returns how many panes `run_in_pane` was asked for.

@@ -924,8 +924,8 @@ fn is_default_pipeline_version(value: &str) -> bool {
 
 impl Step {
     /// Whether this command step runs detached, with no pane. The step's own
-    /// The step's own `hide:` wins in either direction; otherwise the
-    /// project's `dispatch.hide_commands` decides.
+    /// `hide:` wins in either direction; otherwise the project's
+    /// `dispatch.hide_commands` decides.
     pub fn hides_command(&self, hide_commands: bool) -> bool {
         self.hide.unwrap_or(hide_commands)
     }
@@ -1644,10 +1644,11 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Every occurrence of the six retired step shapes this pipeline's own
-    /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step,
-    /// `loop:` written as the old per-route map, `loop: 0`, which 0.7 ran
-    /// as no limit, `end: true`, `on_pass: blocked` and `headless:` — each
+    /// Every occurrence of the eight retired step shapes this pipeline's own
+    /// steps carry — `on_loop_max:`, a step routing to itself by `on_pass:`
+    /// or `on_fail:`, `loop:` written as the old per-route map, `loop: 0`,
+    /// which 0.7 ran as no limit, `end: true`, `on_pass: blocked`,
+    /// `background: true` beside an `on_fail:`, and `headless:` — each
     /// named by its step, collected without stopping at the first the way
     /// [`Self::validate`] must.
     ///

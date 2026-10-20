@@ -1183,6 +1183,19 @@ pub(crate) fn promote_pipeline_patch(
              promote` only writes step keys; edit the tracked file for either of those by hand"
         );
     }
+    // `headless:` is no longer a step key. Copied across like any other, it
+    // would be reported as promoted and leave a tracked pipeline that
+    // refuses to load, so it is refused here as [`apply_step_patch`] refuses
+    // it when the patch is applied. Before anything is read or written.
+    for (step_id, fields) in &patch.steps {
+        if fields.contains_key("headless") {
+            bail!(
+                "step `{step_id}` of pipeline `{name}` sets `headless:` in its patch — the key \
+                 is now `hide:`; run `spoolway sync` to rename it there, or write `hide:` in \
+                 its place, then promote again"
+            );
+        }
+    }
     let path = crate::pipeline::Pipelines::file_in(root, name);
     let mut text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -1652,6 +1665,31 @@ agent: pi
         assert!(written.contains("A demo pipeline for a promote test."));
         // The other step's `model:` is untouched — the edit named one step.
         assert!(written.contains("- id: review\n    description: Check it.\n    agent: claude\n    model: claude-sonnet-5\n"));
+    }
+
+    /// A patch still saying `headless:` is refused by promote, which would
+    /// otherwise copy the retired key into the tracked file and report
+    /// success, leaving a pipeline that refuses to load. Nothing is written.
+    #[test]
+    fn promote_pipeline_patch_refuses_the_retired_headless_key() {
+        let root = crate::scratch::root("overrides-promote-pipeline-headless");
+        let _ = std::fs::remove_dir_all(&root);
+        let original = pipeline_fixture();
+        let path = crate::pipeline::Pipelines::file_in(&root, "demo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let patch = one_step_patch("implement", "headless", "true");
+        let err = promote_pipeline_patch(&root, "demo", &patch)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("step `implement`"), "the step by name: {err}");
+        assert!(
+            err.contains("`headless:`") && err.contains("`hide:`"),
+            "{err}"
+        );
+        assert!(err.contains("spoolway sync"), "the way out: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     /// A trailing `# comment` on the promoted line survives the edit — only

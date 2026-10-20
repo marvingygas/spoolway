@@ -892,6 +892,7 @@ fn plan(repo: &Repo) -> Result<(Vec<Outcome>, Vec<Act>)> {
     retired_markers(repo, &mut outcomes, &mut acts);
     pipelines(repo, &mut outcomes, &mut acts)?;
     override_pipelines(repo, &mut outcomes, &mut acts);
+    private_pipelines(repo, &mut outcomes, &mut acts);
     user_level(&mut outcomes, &mut acts)?;
     Ok((outcomes, acts))
 }
@@ -2479,8 +2480,8 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
             serde_norway::from_str::<crate::pipeline::Pipeline>(crate::task::without_bom(&on_disk))
         {
             // A `headless:` still here after the rename sits on a line it
-            // cannot read, a flow-style step: telling the person to run
-            // `sync` again would send them round in a circle.
+            // cannot read, such as a flow-style step: telling the person to
+            // run `sync` again would send them round in a circle.
             let problems: Vec<String> = pipeline
                 .retired_shape_problems()
                 .into_iter()
@@ -2590,21 +2591,138 @@ fn override_pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<A
     };
     for name in names {
         let path = crate::overrides::pipeline_patch_path(&overrides, &name);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let shown = crate::platform::relative(&repo.checkout, &path);
-        match rename_headless(&text, Layout::Patch) {
-            Renamed::Nothing => {}
-            Renamed::Refused(ids) => {
-                outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
-            }
-            Renamed::Done { text, ids } => {
-                outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
-                outcomes.push(rename_note(&shown, &name, &ids));
-                acts.push(Act::write(path, &shown, text));
-            }
+        rename_outside_checkout(
+            repo,
+            path,
+            &name,
+            Layout::Patch,
+            "its override is skipped",
+            outcomes,
+            acts,
+        );
+    }
+}
+
+/// The private layer's own pipelines under `local/pipelines/`, renamed the
+/// same way [`pipelines`] renames the tracked ones.
+///
+/// A private pipeline is read by the same loader as a tracked one, so a
+/// `headless:` in it fails the whole load with the advice to run `sync`.
+/// Without this pass `sync` would answer "Nothing updating." and every
+/// command would go on failing. Only repo mode has a private layer; a layer
+/// that cannot be found or read is skipped quietly, as [`override_pipelines`]
+/// skips its own.
+fn private_pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) {
+    if !crate::local::is_repo_mode(&repo.checkout) {
+        return;
+    }
+    let Ok(local) = crate::local::dir_for(&repo.checkout) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(crate::local::pipelines_dir(&local)) else {
+        return;
+    };
+    // Sorted for the same reason [`pipelines`] sorts: the report reads the
+    // same twice running. The two extensions are the ones the loader reads.
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        rename_outside_checkout(
+            repo,
+            path,
+            &name,
+            Layout::Steps,
+            "will not load",
+            outcomes,
+            acts,
+        );
+    }
+}
+
+/// Rename `headless:` in one file the checkout does not track — a patch or a
+/// private pipeline — and plan its write.
+///
+/// `consequence` is what the file does while it still names `headless:`, for
+/// the refusal. A file whose rename leaves a `headless:` behind on a line
+/// [`rename_headless`] cannot read is refused whole and written not at all,
+/// as [`pipelines`] refuses a tracked one, so the person is never told to run
+/// `sync` again over a key it will never rename.
+fn rename_outside_checkout(
+    repo: &Repo,
+    path: PathBuf,
+    name: &str,
+    layout: Layout,
+    consequence: &str,
+    outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
+) {
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let shown = crate::platform::relative(&repo.checkout, &path);
+    let (text, renamed) = match rename_headless(&text, layout) {
+        Renamed::Nothing => (text, None),
+        Renamed::Refused(ids) => {
+            outcomes.push(Outcome::blocked(&shown, both_keys_refusal(&ids)));
+            return;
         }
+        Renamed::Done { text, ids } => (text, Some(ids)),
+    };
+    let stuck = headless_left(&text, layout);
+    if !stuck.is_empty() {
+        let why = stuck
+            .iter()
+            .map(|id| unrenamed_message(id))
+            .collect::<Vec<_>>()
+            .join("; ");
+        outcomes.push(Outcome::blocked(&shown, format!("{consequence}: {why}")));
+        return;
+    }
+    if let Some(ids) = renamed {
+        outcomes.push(Outcome::wrote(&shown, "`headless:` renamed to `hide:`"));
+        outcomes.push(rename_note(&shown, name, &ids));
+        acts.push(Act::write(path, &shown, text));
+    }
+}
+
+/// The ids of the steps in `text` that still carry `headless:`, read the way
+/// the loader reads the file. Called on what [`rename_headless`] returned, so
+/// anything it finds sits where the renamer could not reach it. Empty when
+/// the text does not parse, since a file that is broken for another reason
+/// is that reason's to report.
+fn headless_left(text: &str, layout: Layout) -> Vec<String> {
+    let text = crate::task::without_bom(text);
+    match layout {
+        Layout::Steps => serde_norway::from_str::<crate::pipeline::Pipeline>(text)
+            .map(|pipeline| {
+                pipeline
+                    .steps
+                    .iter()
+                    .filter(|step| step.headless.is_some())
+                    .map(|step| step.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Layout::Patch => serde_norway::from_str::<crate::overrides::PipelinePatch>(text)
+            .map(|patch| {
+                patch
+                    .steps
+                    .iter()
+                    .filter(|(_, fields)| fields.contains_key("headless"))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -2622,11 +2740,11 @@ fn rename_note(shown: &str, pipeline: &str, ids: &[String]) -> Outcome {
 }
 
 /// Why `sync` still refuses a file whose `headless:` it could not rename:
-/// the key is on a flow-style step, which [`rename_headless`] does not read.
+/// the key sits on a line [`rename_headless`] does not read.
 fn unrenamed_message(step_id: &str) -> String {
     format!(
-        "step `{step_id}` declares `headless:` where `sync` cannot rename it, in a flow-style \
-         step; write `hide:` in its place."
+        "step `{step_id}` declares `headless:` in a form `sync` cannot rename (flow style, a \
+         quoted key, or a `-` on a line of its own); write `hide:` in its place."
     )
 }
 
@@ -2675,9 +2793,10 @@ enum Renamed {
 /// `headless:` at the indentation of the step's own keys. That excludes a
 /// `headless` inside a comment, a `description:` or a `run:` value, and the
 /// lines of a block scalar, which sit deeper than the key that opens them.
-/// A step written in flow style (`- {id: a, headless: true}`) has no such
-/// line and is left as it is; the pipeline then still names `headless:`, and
-/// the check that follows in [`pipelines`] refuses the file.
+/// A step written in flow style (`- {id: a, headless: true}`), a quoted key
+/// (`"headless": true`) and a list item opened by a `-` on a line of its own
+/// have no such line and are left as they are; the file then still names
+/// `headless:`, and the caller refuses it with [`unrenamed_message`].
 fn rename_headless(text: &str, layout: Layout) -> Renamed {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
@@ -2873,6 +2992,16 @@ mod tests {
     fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
         let mut acts = Vec::new();
         super::pipelines(repo, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn override_pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::override_pipelines(repo, outcomes, &mut acts);
+        finish(args, acts)
+    }
+    fn private_pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::private_pipelines(repo, outcomes, &mut acts);
         finish(args, acts)
     }
     fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
@@ -5644,6 +5773,128 @@ mod tests {
         );
         assert!(refused[0].1.contains("write `hide:`"), "{refused:?}");
         assert!(!refused[0].1.contains("spoolway sync"), "{refused:?}");
+    }
+
+    /// A patch with `headless:` and `hide:` on one step is refused, naming
+    /// the step, and is left byte-identical, while a patch beside it that
+    /// names only `headless:` is renamed.
+    #[test]
+    fn a_patch_with_both_headless_and_hide_is_refused_and_left_alone() {
+        let (repo, _root_guard) = fixture("patch-headless-and-hide");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-patch-headless-and-hide-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            let both = "steps:\n  check:\n    headless: true\n    hide: false\n";
+            let only = "steps:\n  merge:\n    headless: true\n";
+            let both_path = crate::overrides::pipeline_patch_path(&overrides, "both");
+            let only_path = crate::overrides::pipeline_patch_path(&overrides, "only");
+            std::fs::create_dir_all(both_path.parent().unwrap()).unwrap();
+            std::fs::write(&both_path, both).unwrap();
+            std::fs::write(&only_path, only).unwrap();
+
+            let mut outcomes = Vec::new();
+            override_pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&both_path).unwrap(), both);
+            assert_eq!(
+                std::fs::read_to_string(&only_path).unwrap(),
+                only.replace("headless", "hide")
+            );
+            let refused = refusals(&outcomes);
+            assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+            assert!(refused[0].0.ends_with("both.yml"), "{refused:?}");
+            assert!(
+                refused[0].1.contains("step `check` declares both"),
+                "{refused:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A patch step written in flow style cannot be renamed. The patch is
+    /// still skipped at load, so `sync` refuses it and says to write `hide:`
+    /// by hand, not to run the `sync` that just failed to rename it.
+    #[test]
+    fn a_flow_style_headless_patch_is_refused_without_naming_sync() {
+        let (repo, _root_guard) = fixture("patch-headless-flow");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-patch-headless-flow-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            let path = crate::overrides::pipeline_patch_path(&overrides, "mine");
+            let before = "steps:\n  review: {headless: true}\n";
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, before).unwrap();
+
+            let mut outcomes = Vec::new();
+            override_pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+            let refused = refusals(&outcomes);
+            assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+            assert!(
+                refused[0].1.contains("step `review` declares `headless:`"),
+                "{refused:?}"
+            );
+            assert!(refused[0].1.contains("write `hide:`"), "{refused:?}");
+            assert!(!refused[0].1.contains("spoolway sync"), "{refused:?}");
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A private pipeline under `local/pipelines/` fails the whole load over
+    /// `headless:`, so `sync` renames it there as it does in the checkout. A
+    /// private pipeline whose key it cannot reach, here a quoted one, is
+    /// refused and left alone.
+    #[test]
+    fn a_private_pipeline_has_headless_renamed_and_an_unreadable_one_refused() {
+        let (repo, _root_guard) = fixture("private-headless");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-private-headless-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        crate::platform::test_home::with_home(&home, || {
+            let dir = crate::local::pipelines_dir(&crate::local::dir_for(&repo.root).unwrap());
+            std::fs::create_dir_all(&dir).unwrap();
+            let plain = dir.join("plain.yml");
+            let quoted = dir.join("quoted.yml");
+            let before = "steps:\n  - id: a\n    run: x\n    headless: true\n    on_pass: done\n";
+            let stuck =
+                "steps:\n  - id: a\n    run: x\n    \"headless\": true\n    on_pass: done\n";
+            std::fs::write(&plain, before).unwrap();
+            std::fs::write(&quoted, stuck).unwrap();
+
+            let mut outcomes = Vec::new();
+            private_pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(&plain).unwrap(),
+                before.replace("headless", "hide")
+            );
+            assert_eq!(std::fs::read_to_string(&quoted).unwrap(), stuck);
+            let refused = refusals(&outcomes);
+            assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+            assert!(refused[0].0.ends_with("quoted.yml"), "{refused:?}");
+            assert!(refused[0].1.contains("step `a` declares"), "{refused:?}");
+            assert!(refused[0].1.contains("quoted key"), "{refused:?}");
+            let notes = migration_notes(&outcomes);
+            assert_eq!(notes.len(), 1, "{notes:?}");
+
+            // The second run finds nothing to rename.
+            let mut again = Vec::new();
+            private_pipelines(&repo, &args(), &mut again).unwrap();
+            let (wrote, _) = dedup_paths(&again);
+            assert!(wrote.is_empty(), "{:?}", outcome_lines(&again));
+        });
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A blank `prompt_cache_ttl` on a row that holds another setting is kept
