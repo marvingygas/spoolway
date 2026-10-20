@@ -689,13 +689,17 @@ pub fn route(
         // passes on the way back to the `build` that keeps failing. The
         // command is, in order:
         //
-        // - when `origin` is a command, the command still failing behind it
-        //   (a `run:` step with a failure hop in `rounds` and no pass hop,
-        //   whose road the landing reaches; `rounds` keeps only the hops
-        //   since the task last left `blocked`, so an old failure does not
-        //   count). A loop that ends on `origin`, such as a `clean` between
-        //   two runs of `build`, stops the task on `clean` although `build` is
-        //   the one failing;
+        // - a command still failing: a `run:` step other than `origin` with
+        //   a failure hop in `rounds` and no pass hop, whose road the landing
+        //   reaches; the first in file order is taken. `origin` may be a
+        //   command or an agent step. A loop that ends on `origin`, such as
+        //   a `clean` between two runs of `build`, stops the task on `clean`
+        //   although `build` is the one failing, and an agent step ahead of
+        //   `build` can be the one whose arrival at `build` is refused.
+        //   `rounds` keeps only the hops since the task last left `blocked`.
+        //   On the first block it holds the whole history, so a command that
+        //   both passed and failed in it is skipped, and the count can fall
+        //   through to the branches below for one lap;
         // - `origin`, when it is a command and the landing's road reaches it
         //   again;
         // - the command a gate failed back from, when `origin` is the agent
@@ -742,31 +746,27 @@ pub fn route(
                 .map(|step| step.id.clone())
                 .find(|command| road_reaches(pipeline, &landing.destination, command))
         };
-        let counted = if is_command(&origin) {
-            failed_back_to_origin()
-        } else {
-            None
-        }
-        .or_else(|| {
-            Some(origin.clone())
-                .filter(|origin| is_command(origin))
-                .filter(|origin| road_reaches(pipeline, &landing.destination, origin))
-        })
-        .or_else(|| {
-            Some(cleared_block_target(task, pipeline, true))
-                .filter(|gate| {
-                    is_command(gate)
-                        && pipeline
-                            .step(gate)
-                            .is_some_and(|step| step.on_fail.as_deref() == Some(origin.as_str()))
-                        && task
-                            .front
-                            .rounds
-                            .contains_key(&crate::task::route_key(gate, &origin))
-                })
-                .filter(|gate| road_reaches(pipeline, &landing.destination, gate))
-        })
-        .or_else(|| Some(landing.destination.clone()).filter(|step| is_command(step)));
+        let counted = failed_back_to_origin()
+            .or_else(|| {
+                Some(origin.clone())
+                    .filter(|origin| is_command(origin))
+                    .filter(|origin| road_reaches(pipeline, &landing.destination, origin))
+            })
+            .or_else(|| {
+                Some(cleared_block_target(task, pipeline, true))
+                    .filter(|gate| {
+                        is_command(gate)
+                            && pipeline.step(gate).is_some_and(|step| {
+                                step.on_fail.as_deref() == Some(origin.as_str())
+                            })
+                            && task
+                                .front
+                                .rounds
+                                .contains_key(&crate::task::route_key(gate, &origin))
+                    })
+                    .filter(|gate| road_reaches(pipeline, &landing.destination, gate))
+            })
+            .or_else(|| Some(landing.destination.clone()).filter(|step| is_command(step)));
         if let (true, Some(counted)) = (unattended, counted) {
             let laps = task.front.unblock_laps.get(&counted).copied().unwrap_or(0);
             if laps >= UNBLOCK_LAP_LIMIT {
@@ -5079,6 +5079,28 @@ mod tests {
             None,
             &["build", "clean", "prep"],
             &["build", "clean", "prep"],
+        );
+    }
+
+    /// Road F: the task stops on an agent step. `build` fails back to
+    /// `implement`, `review` follows it, and `build`'s `loop:` refuses the
+    /// arrival from `review`, so the task stops on `review`, which is no
+    /// command. The unblocker answers `--stage implement`.
+    ///
+    /// Fails before the fix: nothing was counted when the step the task
+    /// stopped at was an agent step, and the pass cleared the map.
+    #[test]
+    fn a_stage_back_when_the_task_stopped_on_an_agent_is_parked_after_the_lap_limit() {
+        let yaml = "steps:\n  - id: implement\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    on_pass: build\n  \
+             - id: build\n    run: 'false'\n    loop: 3\n    on_pass: done\n    \
+             on_fail: implement\n  - id: blocked\n    agent: pi\n    session: true\n";
+        assert_parked_after_the_lap_limit(
+            yaml,
+            "review",
+            Some("implement"),
+            &["implement", "review", "build", "implement", "review"],
+            &["review", "build", "implement", "review"],
         );
     }
 
