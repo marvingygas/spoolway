@@ -450,16 +450,13 @@ pub fn settle_opens(repo: &Repo, tasks: &[Task]) {
     }
 }
 
-/// The `open` hooks running right now for task ids that are not in the queue
-/// yet — a routine's firing that is waiting on its ticket — with how long
-/// each has run. For the queue row that names them.
-pub fn opening(repo: &Repo, queued: &[Task]) -> Vec<(String, Duration)> {
+/// Every `open` hook running right now, by task id, with how long it has run.
+fn running_opens(repo: &Repo) -> Vec<(String, Duration)> {
     let runs = runs(repo);
     let mut found: Vec<(String, Duration)> = runs
         .keys_by_task()
-        .into_iter()
-        .filter(|(id, _)| !queued.iter().any(|task| task.id() == id))
-        .filter_map(|(id, _)| {
+        .into_keys()
+        .filter_map(|id| {
             let key = Runs::key("open", &id);
             (runs.state(&key) == RunState::Running)
                 .then(|| (id, runs.elapsed(&key).unwrap_or_default()))
@@ -467,6 +464,39 @@ pub fn opening(repo: &Repo, queued: &[Task]) -> Vec<(String, Duration)> {
         .collect();
     found.sort();
     found
+}
+
+/// The `open` hooks running right now for task ids that are not in the queue
+/// yet — a routine's firing that is waiting on its ticket, or a `queue add`
+/// that was stopped — with how long each has run. For the queue row that
+/// names them.
+pub fn opening(repo: &Repo, queued: &[Task]) -> Vec<(String, Duration)> {
+    let mut found = running_opens(repo);
+    found.retain(|(id, _)| !queued.iter().any(|task| task.id() == id));
+    found
+}
+
+/// Whether any `open` hook is running, for a dispatcher deciding whether it
+/// may stop: one that left now would leave a hung hook with nothing to end it.
+pub fn any_open_running(repo: &Repo) -> bool {
+    !running_opens(repo).is_empty()
+}
+
+/// Stop each running `open` hook past [`OPEN_FETCH_TIMEOUT`] whose task is not
+/// in `waited_on` — the ids a job's firing is asking about itself — and say
+/// how long each had run. A hook inside its limit is left alone, and so is a
+/// settled one, whose answer the `queue add` that started it reads when it is
+/// run again. Stopping signals the hook's whole process group, as for a job's.
+pub fn stop_overdue_strays(
+    repo: &Repo,
+    waited_on: &std::collections::BTreeSet<String>,
+) -> Vec<(String, Duration)> {
+    let runs = runs(repo);
+    running_opens(repo)
+        .into_iter()
+        .filter(|(id, ran)| *ran >= OPEN_FETCH_TIMEOUT && !waited_on.contains(id))
+        .inspect(|(id, _)| runs.stop(&Runs::key("open", id)))
+        .collect()
 }
 
 /// Every variable every event carries — `spoolway hook contract` prints this
@@ -2167,6 +2197,22 @@ mod tests {
             runs(&repo).state(&Runs::key("open", t.id())),
             RunState::Fresh
         );
+    }
+
+    /// A dispatcher deciding whether to stop asks whether an `open` hook is
+    /// still going, and a settled one does not count.
+    #[test]
+    fn an_open_hook_running_keeps_a_dispatcher_from_stopping_until_it_ends() {
+        let (mut repo, _root_guard) = fixture("open-any-running");
+        with_hook(&mut repo, "open.sh", "sleep 1");
+        let t = task("demo", |_| {});
+        assert!(!any_open_running(&repo));
+        open_ticket(&repo, &t, 1, "", "", "", "", OpenWait::Poll).unwrap();
+        assert!(any_open_running(&repo));
+        while any_open_running(&repo) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop_and_reclaim(&repo, t.id());
     }
 
     /// An adopted hook that is already past its limit is stopped with

@@ -1475,6 +1475,9 @@ impl<'a> Dispatcher<'a> {
             &mut report.actions,
             &mut report.problems,
         );
+        // An `open` hook a stopped `queue add` left running belongs to no job,
+        // so nothing above asks about it; one past its limit is ended here.
+        crate::jobs::stop_stray_opens(self.repo, &mut report.problems);
 
         // Before the queue is read: a killed writer's half-written temp file
         // is otherwise never cleaned up.

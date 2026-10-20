@@ -2728,6 +2728,60 @@ impl TicketLog for PrintedTickets {
     }
 }
 
+/// [`TicketLog`] that keeps what it is told and says it later, for a job
+/// firing whose hook may still be running: a pass that ends pending says
+/// nothing, so the group's header does not print on every pass of a hang,
+/// and the firing that settles prints its lines once.
+#[derive(Default)]
+struct BufferedTickets(Vec<Told>);
+
+enum Told {
+    Group(String),
+    Row([String; 4]),
+    Note(String),
+    Done,
+}
+
+impl BufferedTickets {
+    /// Print everything kept, in the order it was told.
+    fn say(self) {
+        let mut out = PrintedTickets;
+        for told in self.0 {
+            match told {
+                Told::Group(group) => out.group(&group),
+                Told::Row([kind, status, ticket, name]) => out.row(&kind, &status, &ticket, &name),
+                Told::Note(line) => out.note(&line),
+                Told::Done => out.done(),
+            }
+        }
+    }
+}
+
+impl TicketLog for BufferedTickets {
+    fn group(&mut self, group: &str) {
+        self.0.push(Told::Group(group.to_string()));
+    }
+
+    fn waiting(&mut self, _id: &str) {}
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        self.0.push(Told::Row([
+            kind.to_string(),
+            status.to_string(),
+            ticket.to_string(),
+            name.to_string(),
+        ]));
+    }
+
+    fn note(&mut self, line: &str) {
+        self.0.push(Told::Note(line.to_string()));
+    }
+
+    fn done(&mut self) {
+        self.0.push(Told::Done);
+    }
+}
+
 /// How [`open_and_prefix`] reaches the tool-requirements gate.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ToolGate {
@@ -10728,13 +10782,17 @@ pub(crate) fn queue_routine_target(
     // limit. A firing whose hook is still running comes back as an
     // `OpenPending` and is asked again on the next pass, which finds the
     // same ids minted (nothing was saved) and so the same `open` runs.
+    //
+    // What the ticket log would say is kept until the firing settles: a hook
+    // that hangs would otherwise repeat the group's header on every pass.
+    let mut log = BufferedTickets::default();
     let opened = open_and_prefix_waiting(
         repo,
         &[],
         &task_files,
         &mut tasks,
         gate,
-        &mut PrintedTickets,
+        &mut log,
         crate::tracking::OpenWait::Poll,
     );
     // Whatever ended the firing — answered, failed or timed out — its `open`
@@ -10745,6 +10803,7 @@ pub(crate) fn queue_routine_target(
         .is_some_and(|err| err.downcast_ref::<crate::tracking::OpenPending>().is_some());
     if !pending {
         crate::tracking::settle_opens(repo, &tasks);
+        log.say();
     }
     opened?;
     // The same lock-and-recheck `queue_add_tasks` saves with: a scheduled
