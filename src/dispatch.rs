@@ -2772,7 +2772,18 @@ impl<'a> Dispatcher<'a> {
         // would get an unblocker whose pass can only go to the entry, running
         // every step that already passed again. It waits for a person, with
         // the step named, instead.
+        //
+        // Not while a lane of its own is still on `blocked`: that lane began
+        // before the pipeline changed, and moving the task to `paused` under
+        // it would turn its `--pass` or `--block` into a refusal that names
+        // no lane (see `commands::report`) and lose its verdict. Its report
+        // meets the stranded refusal there instead, and its `--block` parks
+        // the task.
+        let lane_on_blocked = owned.iter().any(|(lane_step, lane_task, _)| {
+            lane_step == crate::pipeline::BLOCKED && lane_task == task.id()
+        });
         if stage == crate::pipeline::BLOCKED
+            && !lane_on_blocked
             && let Some(missing) = crate::commands::stranded_step(task, pipeline)
         {
             let note = crate::commands::missing_step_park_note(task, pipeline, &missing);
@@ -6565,10 +6576,14 @@ impl<'a> Dispatcher<'a> {
             // The unblocker laps end with this park too: nothing sent the task
             // back to a command step, so the resume starts them from zero.
             task.front.unblock_laps.clear();
+            // A step the pipeline dropped is named as it stands, as
+            // `commands::report` does, so the resume asks for a `--stage`
+            // rather than taking the entry.
             let origin = task
                 .front
                 .blocked_from
                 .clone()
+                .or_else(|| crate::commands::stranded_step(task, pipeline))
                 .unwrap_or_else(|| crate::commands::resume_target(task, pipeline));
             task.front.paused_at = Some(origin);
             task.set_stage(crate::pipeline::PAUSED, Some(reason));
@@ -24880,6 +24895,61 @@ mod tests {
             "{:?}",
             report.actions
         );
+    }
+
+    /// A lane that started on `blocked` before the pipeline lost the stopped
+    /// step keeps its task: parking the task under it would refuse the verdict
+    /// the lane is about to give.
+    #[test]
+    fn a_block_on_a_lost_step_is_not_parked_under_a_live_unblocker() {
+        let (repo, _root_guard) = unattended_fixture("blocked-step-gone-live-lane");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.blocked_from = Some("document".into());
+        });
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · blocked", LaneStatus::Working)]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+    }
+
+    /// An escalation from `blocked` whose `blocked_from` is absent and whose
+    /// last report names a dropped step parks on that step, as a `--block`
+    /// from `blocked` does, not on the entry.
+    #[test]
+    fn an_escalation_from_blocked_on_a_lost_step_parks_on_that_step() {
+        let (repo, _root_guard) = unattended_fixture("blocked-escalates-lost-step");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.last_report = Some(crate::task::LastReport {
+                step: "renamed-away".into(),
+                outcome: "block".into(),
+                at: 1,
+                ..crate::task::LastReport::neutral()
+            });
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut task = reload(&path);
+        let step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        dispatcher
+            .escalate(&mut task, pipeline, step, "its pane went quiet", false)
+            .unwrap();
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("renamed-away"));
     }
 
     /// A leftover `unblocked_from` does not replace the step cleanup's hold

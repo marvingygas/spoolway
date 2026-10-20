@@ -4730,11 +4730,11 @@ fn build_rows(
                         }
                         (Some(step), true) => format!("[r] {arrow} {step}"),
                         (Some(step), false) => format!("{arrow} {step}"),
-                        // Nothing to name: `paused_at` or `parked_from`
-                        // names a step the pipeline no longer has, a gated step has no pass
+                        // Nothing to name: a gated step has no pass
                         // destination, or neither `paused_at` nor
                         // `parked_from` is set. The row must still say
                         // something, and `r` may resume at once with no picker.
+                        // A step the pipeline dropped is the arm above.
                         (None, true) => "[r] resume".to_string(),
                         (None, false) => "no step named".to_string(),
                     };

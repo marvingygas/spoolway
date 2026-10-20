@@ -545,16 +545,12 @@ pub fn route(
     let mut walked_past = None;
 
     let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
-        // Where this task actually stopped, read once before anything below
-        // mutates the fields that answer it — the step whose work this pass
-        // stands in for, and so the step whose gate answers for it, never
-        // `blocked`'s own. Both the `--stage` refusal and the gate hold
-        // below need it.
         // A pass from a lane that was already running when the pipeline lost
         // the step the task stopped at has no origin to stand in for, and
         // `resume_target` would answer with the entry: every step that already
-        // passed would run again. The dispatcher parks such a task before it
-        // starts an unblocker, so this is the lane that began earlier.
+        // passed would run again. The dispatcher leaves such a task alone
+        // while that lane lives, and parks it before starting another, so the
+        // lane's own report is what meets this refusal.
         if let Some(missing) = stranded_step(task, pipeline) {
             bail!(
                 "task `{}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
@@ -564,6 +560,11 @@ pub fn route(
                 pipeline.name
             );
         }
+        // Where this task actually stopped, read once before anything below
+        // mutates the fields that answer it — the step whose work this pass
+        // stands in for, and so the step whose gate answers for it, never
+        // `blocked`'s own. Both the `--stage` refusal and the gate hold
+        // below need it.
         let origin = resume_target(task, pipeline);
 
         // `blocked` declares no `on_pass` of its own — where its pass goes is
@@ -1549,8 +1550,11 @@ fn lane_committed(started_at: &str, head_now: &str) -> bool {
 /// entry have it.
 ///
 /// That entry is still wrong for a task whose recorded steps are all gone:
-/// every step before it already passed. Callers that act unprompted or start
-/// a step over ask [`stranded_step`] first and stop for a person instead.
+/// every step before it already passed. The roads that would act on it ask
+/// [`stranded_step`] first and stop for a person instead: the dispatcher's
+/// park of a staffed `blocked`, [`restart_step`], [`resume_road`], and the
+/// pass, the `--fail`/`--block`/`--pause` park and the escalation park from
+/// `blocked`.
 pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
     // A task that never started — parked off `queued` by the board's `pause`
     // or `spoolway queue pause`, or stopped on `hook_failed` by its `queued`
@@ -1635,8 +1639,8 @@ fn missing_step_refusal(task: &Task, pipeline: &Pipeline, missing: &str) -> anyh
 }
 
 /// The line a task carries when it is parked on `paused` for a step its
-/// pipeline no longer defines: the status-log entry and the reason the board
-/// shows.
+/// pipeline no longer defines: the status-log entry and the dispatcher's
+/// action line. The board's row words it separately, in `status`.
 ///
 /// `--stage` is the way out, since a plain resume of such a task refuses
 /// ([`missing_step_refusal`]) rather than guess a step.
@@ -10707,6 +10711,47 @@ mod tests {
             err.ends_with("exists:\n  spoolway resume lost --stage <step>"),
             "{err}"
         );
+    }
+
+    /// A `--block` from `blocked` on a task with no `blocked_from` and a last
+    /// report on a dropped step parks on that step, not on the entry, so the
+    /// resume asks for a `--stage` instead of running passed steps again.
+    #[test]
+    fn a_block_from_blocked_on_a_lost_step_parks_on_that_step() {
+        let (repo, _root_guard) = fixture("block-stranded-block");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "renamed-away".into(),
+            outcome: "block".into(),
+            at: 1,
+            ..crate::task::LastReport::neutral()
+        });
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "blocked");
+        task.save().unwrap();
+
+        report(
+            &repo,
+            &pipelines,
+            &crate::cli::ReportArgs {
+                task: Some("lost".into()),
+                stage: None,
+                pass: false,
+                fail: false,
+                block: true,
+                pause: false,
+                message: None,
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "lost");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("renamed-away"));
     }
 
     /// An unblocker lane that started before the pipeline lost the stopped
