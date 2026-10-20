@@ -162,8 +162,9 @@ pub fn task_template(name: &str) -> Option<&'static str> {
 /// before closing it — and, once every child of a group has closed, the
 /// group's own epic. `init` no longer ships one. A project without one
 /// closes the ticket by hand after the merge. This repository's own
-/// `.github/workflows/spoolway-issues.yml` reads the group issue from the
-/// merged branch and each child's "Ready for review in" comment, and
+/// `.github/workflows/spoolway-issues.yml` sweeps every open group issue
+/// on each merged pull request, reading each child's "Ready for review in"
+/// comment, and
 /// `.github/scripts/close-jira.sh` is its Jira counterpart, run by hand.
 /// `open` was run against a real repository: the issues it creates, the
 /// parent link and the labels all landed, four times over, on a real group

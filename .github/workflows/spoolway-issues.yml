@@ -4,12 +4,10 @@ name: close merged spoolway issues
 # task issue and leaves the pull request alone; delivery completes here,
 # only after GitHub says that pull request actually merged. A task whose
 # branch has no pull request is closed by `github.sh` itself and never
-# reaches this workflow. A stack merge
-# fires one `pull_request` closed event per pull request in the stack, at
-# nearly the same time, so this always sweeps the whole group named by the
-# merged branch, the same way .github/scripts/close-jira.sh sweeps a
-# Story: whichever run goes last still sees every sibling merged and
-# closes the group once.
+# reaches this workflow. Every run sweeps every open `spoolway:group`
+# issue, whatever branch triggered it: one push can merge pull requests
+# from several groups within seconds, and the runs GitHub cancels (see
+# `concurrency` below) must not take their group down with them.
 on:
   pull_request:
     types: [closed]
@@ -20,12 +18,13 @@ permissions:
   pull-requests: read
 
 # One group for every run of this workflow, not one per branch or pull
-# request — a stack merge's closed events land here within moments of
-# each other. `cancel-in-progress: false` keeps a running sweep from being
+# request — closed events from one merge land here within moments of each
+# other. `cancel-in-progress: false` keeps a running sweep from being
 # cancelled, but GitHub holds at most one pending run per group: a newer
-# run replaces an older pending one, so in a four-PR stack runs 2 and 3
-# may never execute. That is harmless, because every run sweeps the whole
-# group, and the run that replaces them sees every sibling merged.
+# run replaces an older pending one, so runs may never execute. That is
+# harmless only because every run sweeps all open groups, not the group
+# its own branch names: the run that survives sees every merged pull
+# request, whichever group it belongs to.
 concurrency:
   group: spoolway-issues
   cancel-in-progress: false
@@ -36,33 +35,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: close the group's merged child issues
+      - name: close merged child issues in every open group
         uses: actions/github-script@v9
         with:
           script: |
             const {owner, repo} = context.repo;
-            const pull = context.payload.pull_request;
             const trusted = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
-            // `task/gh-123-…` names group issue #123 — a branch with no
-            // such prefix carries no group at all, so this logs and stops
-            // rather than guessing one. `key_in_names` is what puts the
-            // group on every branch spoolway cuts for this project.
-            const match = pull.head.ref.match(/^task\/gh-(\d+)-/i);
-            if (!match) {
-              core.notice(`branch "${pull.head.ref}" names no group issue — nothing to close`);
-              return;
-            }
-            const groupNumber = Number(match[1]);
-
-            const group = await github.rest.issues.get({owner, repo, issue_number: groupNumber});
-            const groupLabels = group.data.labels.map(label =>
-              typeof label === 'string' ? label : label.name
-            );
-            if (!groupLabels.includes('spoolway:group')) {
-              core.warning(`#${groupNumber} is not labelled spoolway:group; leaving it open`);
-              return;
-            }
+            // Every open group is swept, not just the one the merged
+            // branch names. One push can merge pull requests from many
+            // groups, and the single concurrency slot cancels all but one
+            // pending run, so a run must not depend on its own group.
+            const groups = (await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: 'spoolway:group', per_page: 100
+            })).filter(issue => !issue.pull_request);
 
             // The pull request named by a child's own "Ready for review
             // in <PR URL>" comment, the one `github.sh`'s own
@@ -105,30 +91,65 @@ jobs:
               }
             }
 
-            const children = await github.paginate(
-              'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
-              {owner, repo, issue_number: groupNumber, per_page: 100}
-            );
+            async function sweepGroup(groupNumber) {
+              const children = await github.paginate(
+                'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+                {owner, repo, issue_number: groupNumber, per_page: 100}
+              );
 
-            for (const child of children) {
-              if (child.state === 'closed') continue;
-              const prNumber = await mergedReviewPr(child.number);
-              if (!prNumber) {
-                core.notice(`#${child.number} has no trusted "Ready for review in" comment — leaving it open`);
-                continue;
+              for (const child of children) {
+                if (child.state === 'closed') continue;
+                const prNumber = await mergedReviewPr(child.number);
+                if (!prNumber) {
+                  core.notice(`#${child.number} has no trusted "Ready for review in" comment — leaving it open`);
+                  continue;
+                }
+                const candidate = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+                if (!candidate.data.merged) {
+                  core.notice(`#${child.number}'s pull request #${prNumber} has not merged — leaving it open`);
+                  continue;
+                }
+                await closeIssue(child.number, prNumber);
               }
-              const candidate = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              if (!candidate.data.merged) {
-                core.notice(`#${child.number}'s pull request #${prNumber} has not merged — leaving it open`);
-                continue;
+
+              const stillOpen = await github.paginate(
+                'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+                {owner, repo, issue_number: groupNumber, per_page: 100}
+              );
+              if (!stillOpen.length || stillOpen.some(child => child.state !== 'closed')) return;
+
+              // The group's comment names a merged pull request from its
+              // own children: the triggering one may belong to another
+              // group. A child closed by hand may name a pull request that
+              // never merged, so each is checked and the next child is
+              // tried. Children closed in an earlier run are read again
+              // here, so the group still closes when this run closed none.
+              let groupPr;
+              for (const child of stillOpen.reverse()) {
+                const named = await mergedReviewPr(child.number);
+                if (!named) continue;
+                const pr = await github.rest.pulls.get({owner, repo, pull_number: named});
+                if (pr.data.merged) {
+                  groupPr = named;
+                  break;
+                }
               }
-              await closeIssue(child.number, prNumber);
+              if (!groupPr) {
+                core.notice(`#${groupNumber}'s children name no merged pull request — leaving it open`);
+                return;
+              }
+              await closeIssue(groupNumber, groupPr);
             }
 
-            const stillOpen = await github.paginate(
-              'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
-              {owner, repo, issue_number: groupNumber, per_page: 100}
-            );
-            if (!stillOpen.length || stillOpen.some(child => child.state !== 'closed')) return;
-
-            await closeIssue(groupNumber, pull.number);
+            // One group failing must not stop the others, since a surviving
+            // run may be the only one to sweep them.
+            const failed = [];
+            for (const group of groups) {
+              try {
+                await sweepGroup(group.number);
+              } catch (error) {
+                failed.push(group.number);
+                core.error(`sweeping #${group.number} failed: ${error.message}`);
+              }
+            }
+            if (failed.length) core.setFailed(`could not sweep ${failed.map(n => '#' + n).join(', ')}`);

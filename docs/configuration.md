@@ -717,28 +717,28 @@ spoolway's own repository keeps a closing workflow at `.github/workflows/spoolwa
 Neither `init` nor `sync` writes or checks it in a project. It triggers on `pull_request:
 closed` and runs only when `github.event.pull_request.merged` is true, in a single
 `spoolway-issues` concurrency group. GitHub keeps at most one pending run per group and
-replaces an older pending run with a newer one, so in a stack of several pull requests some
-runs may never execute; that is harmless, because every run sweeps the whole group and the run
-that replaces them sees every sibling merged.
+replaces an older pending run with a newer one, so some runs may never execute. That is
+harmless only because every run sweeps every open group, not the group its own branch names:
+the run that survives sees all merged work, however many groups one push touched.
 
-The merged pull request's own head branch names the group: `task/gh-123-…` is group issue
-#123. A branch with no such prefix, including this repository's Jira-style `task/kan-40-…`
-branches, names no group, and the run stops. For every open child (sub-issue) of that group
-issue, the workflow reads the most recent trusted comment — one whose author association is
-OWNER, MEMBER or COLLABORATOR — matching "Ready for review in `<PR URL>`", the comment
-`github.sh` posts on `done`. A child with no such comment, or whose named pull request has not
-merged, is left open. A merged child is commented "**spoolway:** merged in #`<n>`." and closed,
-and its `spoolway:in-progress` and `spoolway:review` labels are removed.
+Each run lists every open issue labelled `spoolway:group`, whatever branch triggered it, so a
+merged branch with no `task/gh-<n>-` prefix still runs the full sweep. For every open child
+(sub-issue) of each group issue, the workflow reads the most recent trusted comment — one whose
+author association is OWNER, MEMBER or COLLABORATOR — matching "Ready for review in `<PR URL>`",
+the comment `github.sh` posts on `done`. A child with no such comment, or whose named pull
+request has not merged, is left open. A merged child is commented "**spoolway:** merged in
+#`<n>`." and closed, and its `spoolway:in-progress` and `spoolway:review` labels are removed.
+A group whose sweep fails does not stop the others, and the run is marked failed afterwards.
 
 ```mermaid
 flowchart LR
   PR[pull request] -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
-  Workflow -->|reads the group from the branch, each child's own comment| Closed[merged children closed]
+  Workflow -->|sweeps every open group, each child's own comment| Closed[merged children closed]
   Closed -->|every child in the group closed| Epic[group epic closed]
 ```
 
-Once every child of the group has closed, the workflow closes the group issue too, commented
-with the triggering pull request's number.
+Once every child of a group has closed, the workflow closes the group issue too, commented
+with the number of a merged pull request belonging to one of that group's own children.
 
 The shipped Jira hook has no pull request lifecycle to wait on. `jira.sh` moves a Sub-task to
 Review on `done`, and moves its Story to Review too once the group's last task reaches `done`.
