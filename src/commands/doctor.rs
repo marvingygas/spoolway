@@ -2595,7 +2595,8 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// Queue ids that cannot work: a second queue file holding an id another file
-/// already holds, and a queued task whose id is a routine's name. Also the
+/// already holds, a queued task whose id is a routine's name, and one routine
+/// id held by two files under `.spoolway/routines/`. Also the
 /// worktree and branch of a task whose queue file is gone.
 ///
 /// The first is the Windows Explorer copy `dd1 - Copy.md` beside `dd1.md`.
@@ -2603,7 +2604,9 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 /// failure here tells a person before they start a run. The second is a task
 /// whose lanes would be named like the routine's, so the two would take over
 /// each other's panes. Queueing one is refused, but a routine added after
-/// the task was queued is only caught here.
+/// the task was queued is only caught here. The third is two files that are
+/// one routine as far as the dispatcher can tell, so one of their jobs is
+/// skipped every minute while the other's copy is queued.
 fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     let (tasks, problems) = repo.tasks_and_problems().unwrap_or_default();
 
@@ -2616,6 +2619,17 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
         Ok(None)
     } else {
         Err(anyhow::anyhow!("{}", duplicates.join("; ")))
+    };
+
+    let folders = super::routines::list_routines(repo).unwrap_or_default();
+    let twin_ids: Vec<String> = super::routines::id_clashes(&folders)
+        .iter()
+        .map(|clash| clash.refusal(&repo.routines_dir()))
+        .collect();
+    let routine_ids_unique = if twin_ids.is_empty() {
+        Ok(None)
+    } else {
+        Err(anyhow::anyhow!("{}", twin_ids.join("; ")))
     };
 
     let routines = super::queue::routine_names(repo);
@@ -2669,6 +2683,7 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
     vec![
         Finding::Check("queue ids are unique".into(), unique),
         Finding::Check("no queued task is named like a routine".into(), unrouted),
+        Finding::Check("routine ids are unique".into(), routine_ids_unique),
         Finding::Check("no deleted task left a worktree or branch".into(), stray),
     ]
 }

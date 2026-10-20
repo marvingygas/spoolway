@@ -1189,6 +1189,13 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
         }
     }
 
+    // Two routine files with one id are one routine to the dispatcher, which
+    // skips one job's minute without a word. Doctor refuses it too.
+    let routines = super::routines::list_routines(repo).unwrap_or_default();
+    for clash in super::routines::id_clashes(&routines) {
+        problems.push(clash.refusal(&repo.routines_dir()));
+    }
+
     // Read the prompts against the steps that run them: this rule is a fact,
     // not an opinion — a prompt naming a `spoolway …` command this binary
     // does not have, checked against clap's own command tree. Nothing
@@ -4918,6 +4925,49 @@ mod tests {
         };
 
         pipeline_check(&repo, Ok(pipelines)).expect("pi resumes, so this should pass");
+    }
+
+    /// Two routine files holding one task id are one routine to the
+    /// dispatcher, so `pipeline check` refuses them like `doctor` does.
+    #[test]
+    fn pipeline_check_refuses_one_task_id_in_two_routine_folders() {
+        let root = crate::scratch::root("commands-pipeline-check-routine-id");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let repo = Repo {
+            borrowed: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let solo = || {
+            let pipeline =
+                Pipeline::parse("solo", "steps:\n  - id: z\n    run: x\n    on_pass: done\n")
+                    .unwrap();
+            Pipelines {
+                pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+                ignored_overrides: Vec::new(),
+                clashes: Default::default(),
+            }
+        };
+        pipeline_check(&repo, Ok(solo())).expect("no routines, no clash");
+
+        for dir in ["frontend", "backend"] {
+            let folder = repo.routines_dir().join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("lint.md"),
+                "---\nid: lint\nstage: queued\n---\n## Goal\nok\n",
+            )
+            .unwrap();
+        }
+
+        let err = pipeline_check(&repo, Ok(solo()))
+            .expect_err("one id in two routine folders is a problem");
+        assert!(err.to_string().contains("1 problem(s) found"), "{err}");
     }
 
     /// `pipeline check` is the command you run to find out which pipeline

@@ -110,6 +110,71 @@ pub(crate) fn list_routines(repo: &Repo) -> Result<Vec<RoutineFolder>> {
     paths.iter().map(|path| read_folder(path)).collect()
 }
 
+/// A task `id:` held by more than one file under `.spoolway/routines/`.
+///
+/// A routine is identified by its id alone: [`super::queue::routine_names`]
+/// merges ids across folders and `claim_routines` counts any live copy of an
+/// id as that routine's. Two files sharing an id are therefore one routine,
+/// and whichever job fires second is skipped for as long as the first one's
+/// copy is queued, with nothing saying why.
+pub(crate) struct IdClash {
+    /// The id the files share.
+    pub(crate) id: String,
+    /// Every file holding it, in folder order. Always two or more.
+    pub(crate) files: Vec<PathBuf>,
+}
+
+impl IdClash {
+    /// The refusal, naming every file by its path under `routines_dir` and
+    /// suggesting an id built from the first file's folder.
+    pub(crate) fn refusal(&self, routines_dir: &Path) -> String {
+        let shown: Vec<String> = self
+            .files
+            .iter()
+            .map(|file| {
+                file.strip_prefix(routines_dir)
+                    .unwrap_or(file)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let folder = self
+            .files
+            .first()
+            .and_then(|file| file.strip_prefix(routines_dir).ok())
+            .and_then(|rel| rel.components().next())
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+        let (last, rest) = shown.split_last().expect("a clash holds two files");
+        let (count, give) = match shown.len() {
+            2 => ("two".to_string(), "one of them"),
+            n => (n.to_string(), "all but one of them"),
+        };
+        format!(
+            "routines: task id `{id}` is in {count} routines — {rest} and {last}. \
+             Give {give} another id:, such as {folder}-{id}.",
+            id = self.id,
+            rest = rest.join(", "),
+        )
+    }
+}
+
+/// Every id held by more than one task file in `routines`, in id order.
+pub(crate) fn id_clashes(routines: &[RoutineFolder]) -> Vec<IdClash> {
+    let mut by_id: std::collections::BTreeMap<&str, Vec<PathBuf>> = Default::default();
+    for task in routines.iter().flat_map(|folder| &folder.tasks) {
+        by_id.entry(&task.id).or_default().push(task.path.clone());
+    }
+    by_id
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(id, files)| IdClash {
+            id: id.to_string(),
+            files,
+        })
+        .collect()
+}
+
 /// One folder at a known path, read the same recursive way [`list_routines`]
 /// reads a top-level one. For a caller that already has the folder it wants —
 /// a job pointing at `routines/nightly/` — rather than the whole tree. The

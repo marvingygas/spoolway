@@ -7982,6 +7982,8 @@ fn routine_folder_lines(
 /// [`tasks_pane_lines`].
 fn routine_task_lines(
     folder: Option<&RoutineFolder>,
+    routines: &[RoutineFolder],
+    routines_dir: &std::path::Path,
     _pipelines: &Pipelines,
     nav: &RoutineNav,
     width: usize,
@@ -7990,6 +7992,7 @@ fn routine_task_lines(
         return (Vec::new(), Vec::new(), (0, 0));
     };
 
+    let clashes = super::routines::id_clashes(routines);
     let mut lines = Vec::new();
     let mut starts = Vec::with_capacity(folder.tasks.len());
     let mut focus = (0, 0);
@@ -8021,6 +8024,12 @@ fn routine_task_lines(
             lines.extend(labeled_row("Description:", description, width));
         }
 
+        // A shared id makes these files one routine, so the pane says so
+        // beside the task rather than leaving it to `doctor`.
+        if let Some(clash) = clashes.iter().find(|clash| clash.id == task.id) {
+            lines.extend(labeled_row("Problem:", &clash.refusal(routines_dir), width));
+        }
+
         if i == nav.task_cursor {
             focus = (opened, lines.len().saturating_sub(1));
         }
@@ -8042,8 +8051,14 @@ fn render_routines(
     let layout = layout(footer);
     let (left, left_starts) = routine_folder_lines(routines_dir, routines, nav, layout.left);
     let highlighted = routines.get(nav.folder_cursor);
-    let (right, right_starts, focus) =
-        routine_task_lines(highlighted, pipelines, nav, layout.right);
+    let (right, right_starts, focus) = routine_task_lines(
+        highlighted,
+        routines,
+        routines_dir,
+        pipelines,
+        nav,
+        layout.right,
+    );
 
     let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
     two_pane_frame(
@@ -21127,6 +21142,30 @@ mod tests {
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(!last.contains("queued 1 task"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
+    }
+
+    /// Two routine files sharing a task id are one routine, so the pane
+    /// draws a problem beside the task naming both files.
+    #[test]
+    fn the_routines_pane_names_both_files_of_a_shared_task_id() {
+        let (repo, _root_guard) = fixture("routines-shared-id");
+        for dir in ["frontend", "backend"] {
+            write_routine(&repo, dir, "lint", &task_text("lint", "", BODY));
+        }
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+
+        let (lines, _, _) = routine_task_lines(
+            routines.first(),
+            &routines,
+            &repo.routines_dir(),
+            &route_pipelines(),
+            &RoutineNav::new(),
+            200,
+        );
+
+        let drawn = lines.join("\n");
+        assert!(drawn.contains("backend/lint.md"), "{drawn}");
+        assert!(drawn.contains("frontend/lint.md"), "{drawn}");
     }
 
     /// The one non-goal this feature draws a hard line at: the empty
