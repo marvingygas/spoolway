@@ -194,13 +194,6 @@ pub const REFERENCE: &[Reference] = &[
                     `spoolway eval` and `calibrate_window` read.",
     },
     Reference {
-        key: "housekeeping.price_max_age_days",
-        values: "<days>",
-        default: "30",
-        sentence: "How old the active shared price table may be before `spoolway doctor` says so; \
-                    0 disables the note.",
-    },
-    Reference {
         key: "watch.dirs",
         values: "<path>, ...",
         default: "(empty)",
@@ -590,6 +583,9 @@ fn retired_hint(key: &str) -> Option<&'static str> {
         }
         "dispatch.keep_finished_lanes" => {
             Some("it is retired; set `dispatch.visible_lanes` to a count of 1 or more, or `all`")
+        }
+        "housekeeping.price_max_age_days" => {
+            Some("it is retired; `spoolway models` shows how old the price table is")
         }
         _ => None,
     }
@@ -2127,17 +2123,19 @@ mod tests {
         assert_eq!(ninety.housekeeping.retention_days, 30);
     }
 
+    /// The retired price-age key is refused by both `get` and `set` as an
+    /// unknown key, with a sentence saying where the table's age went.
     #[test]
-    fn price_table_age_round_trips_and_zero_means_quiet() {
+    fn price_max_age_days_is_refused_with_a_retired_hint() {
         let config = Config::default();
-        assert_eq!(
-            get(&config, "housekeeping.price_max_age_days").unwrap(),
-            "30"
-        );
-
-        let off = set(&config, "housekeeping.price_max_age_days", "0").unwrap();
-        assert_eq!(off.housekeeping.price_max_age_days, 0);
-        assert_eq!(get(&off, "housekeeping.price_max_age_days").unwrap(), "0");
+        let got = get(&config, "housekeeping.price_max_age_days").unwrap_err();
+        let set_err = set(&config, "housekeeping.price_max_age_days", "30").unwrap_err();
+        for err in [got, set_err] {
+            let text = format!("{err:#}");
+            assert!(text.contains("unknown key"), "{text}");
+            assert!(text.contains("retired"), "{text}");
+            assert!(text.contains("`spoolway models`"), "{text}");
+        }
     }
 
     /// The four one-key tables the mockup folds into `[housekeeping]` are
@@ -2157,6 +2155,7 @@ mod tests {
             "calibrate.window",
             "retention.days",
             "prices.max_age_days",
+            "housekeeping.price_max_age_days",
             "stack.summary.agent",
             "stack.summary.model",
             "stack.summary.effort",
@@ -2178,7 +2177,6 @@ mod tests {
             "housekeeping.calibrate_window",
             "housekeeping.retention_days",
             "housekeeping.archive_retention_days",
-            "housekeeping.price_max_age_days",
         ] {
             assert!(
                 keys.contains(&present.to_string()),

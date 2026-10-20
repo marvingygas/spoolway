@@ -293,7 +293,6 @@ update_check = true          # show a newer release in the dispatcher header
 calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads
 retention_days = 30          # how long run records, logs and scratch space are kept; 0 keeps everything
 archive_retention_days = 0   # how long finished tasks are kept; 0 keeps every one
-price_max_age_days = 30      # how old the price table may be before `spoolway doctor` says so
 
 [watch]
 dirs = []                    # extra directories whose own agent sessions count as this project's spend
