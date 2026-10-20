@@ -24134,6 +24134,58 @@ mod tests {
         std::fs::remove_dir_all(other.front.worktree_path.clone().unwrap()).ok();
     }
 
+    /// Passes over a task whose cut is still going, for `pipelines`: the task
+    /// stays on `implement`, no launch attempt is counted and no failure is
+    /// reported, however many passes go by. A task charged a strike per pass
+    /// would be blocked after the third while its hook is only slow.
+    fn passes_over_a_hung_cut_spend_nothing(name: &str, pipelines: &Pipelines) {
+        let (repo, _root_guard) = fixture(name);
+        hang_in_checkout_of_hung(&repo);
+        let path = add_task(&repo, "hung", "implement");
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+
+        for pass in 1..=4 {
+            let report = run_pass_with(&repo, &mux, pipelines);
+            let task = reload(&path);
+            assert_eq!(task.stage(), "implement", "pass {pass} moved the task");
+            assert!(
+                task.front.launch_failures.is_empty(),
+                "pass {pass} counted a launch attempt: {:?}",
+                task.front.launch_failures
+            );
+            assert!(
+                !report.actions.iter().any(|a| a.contains("could not")),
+                "pass {pass} reported a failure: {:?}",
+                report.actions
+            );
+            assert!(
+                crate::cut::running(&repo, "hung").is_some(),
+                "pass {pass} lost the cut"
+            );
+        }
+        crate::command_step::Runs::new(&repo.cuts_dir())
+            .stop(&crate::command_step::Runs::key("cut", "hung"));
+    }
+
+    /// An agent step's task waits out a slow cut without a launch attempt
+    /// being spent on every pass. Fails when `handle_boot_failure` treats the
+    /// pending cut as a failed start.
+    #[test]
+    fn passes_over_a_hung_cut_do_not_charge_an_agent_step_task() {
+        passes_over_a_hung_cut_spend_nothing("pass-hung-cut-agent", &Pipelines::builtin());
+    }
+
+    /// The same for a command step, whose launch goes through `run_command`.
+    /// Fails when its pending-cut arm is taken out and the cut reads as a
+    /// failed run.
+    #[test]
+    fn passes_over_a_hung_cut_do_not_charge_a_command_step_task() {
+        passes_over_a_hung_cut_spend_nothing(
+            "pass-hung-cut-command",
+            &pipelines_running("true", false),
+        );
+    }
+
     /// A hung cut is stopped at its limit by the pass itself, even for a task
     /// that pass does not start, and the stop is a failed launch the task is
     /// charged for when it is next looked at.

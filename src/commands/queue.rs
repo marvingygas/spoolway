@@ -948,6 +948,9 @@ fn queue_unqueue_forced(
         }
         runs.stop(&key);
     }
+    // A worktree cut left running is one of these too, and writes the
+    // checkout that comes down below.
+    crate::cut::stop_and_reclaim(repo, id)?;
 
     let mut task = repo.task(id)?;
 

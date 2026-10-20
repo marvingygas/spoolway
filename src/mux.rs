@@ -1112,11 +1112,19 @@ impl Herdr {
         }
     }
 
+    /// Where this backend cuts `branch`'s checkout. The one place the path is
+    /// worked out: [`Mux::cut_path`] answers it to a cut running beside the
+    /// pass, and the cut here adopts what that cut made only if the two
+    /// agree.
+    fn checkout_path(&self, branch: &str) -> PathBuf {
+        self.worktree_root.join(branch_slug(branch))
+    }
+
     /// Cut a task's own worktree with git, and say where it landed. See
     /// [`Mux::create_workspace`]. The directory is named after the branch
     /// slug, the rule every backend now shares — see [`branch_slug`].
     fn cut_task_worktree(&self, branch: &str, base: &str) -> Result<PathBuf> {
-        let path = self.worktree_root.join(branch_slug(branch));
+        let path = self.checkout_path(branch);
         cut_worktree(&self.cwd, &path, branch, base)?;
         Ok(path)
     }
@@ -2050,7 +2058,7 @@ impl Mux for Herdr {
     }
 
     fn cut_path(&self, branch: &str) -> Option<PathBuf> {
-        Some(self.worktree_root.join(branch_slug(branch)))
+        Some(self.checkout_path(branch))
     }
 
     fn remove_workspace(&self, workspace_id: &str) -> Result<()> {
@@ -2852,7 +2860,7 @@ fn cut_worktree_within(
     if let Err(err) = &cut
         && let Some(stopped) = err.downcast_ref::<crate::repo::GitTimedOut>()
     {
-        undo_stopped_cut(repo, path, branch, exists, &stopped.0)?;
+        undo_stopped_cut(repo, path, branch, exists, &stopped.0, "resume the task")?;
     }
     cut.with_context(|| {
         cut_failure(
@@ -2864,8 +2872,9 @@ fn cut_worktree_within(
     Ok(())
 }
 
-/// Take away what a cut left when its hook was stopped at the limit, with
-/// the branch if the cut made it. `stopped` is the message the stop gave.
+/// Take away what a cut left when it was stopped, with the branch if the cut
+/// made it. `stopped` is the message the stop gave, and `next` finishes the
+/// advice "Run `<command>`, then ..." when the removal fails.
 ///
 /// `post-checkout` runs after git has written the files and dropped its
 /// `initializing` lock, so a hook stopped at its limit leaves a checkout
@@ -2889,6 +2898,7 @@ pub(crate) fn undo_stopped_cut(
     branch: &str,
     branch_existed: bool,
     stopped: &str,
+    next: &str,
 ) -> Result<()> {
     let path_arg = path.display().to_string();
     let root = path.parent().unwrap_or(path);
@@ -2907,7 +2917,7 @@ pub(crate) fn undo_stopped_cut(
             );
             bail!(
                 "{stopped} The worktree it left half set up at {path_arg} could not be \
-                 removed ({removal:#}). Run `{}`, then resume the task.",
+                 removed ({removal:#}). Run `{}`, then {next}.",
                 remove_by_hand_command(repo, path)
             );
         }

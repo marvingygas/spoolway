@@ -165,6 +165,14 @@ impl Headless {
         self.lanes_dir.clone()
     }
 
+    /// Where this backend cuts `branch`'s checkout. The one place the path is
+    /// worked out: [`Mux::cut_path`] answers it to a cut running beside the
+    /// pass, and [`Mux::create_workspace`] adopts what that cut made only if
+    /// the two agree.
+    fn checkout_path(&self, branch: &str) -> PathBuf {
+        self.worktree_root.join(branch_slug(branch))
+    }
+
     fn record_path(&self, name: &str) -> PathBuf {
         self.lane_dir().join(format!("{name}.json"))
     }
@@ -779,7 +787,7 @@ impl Mux for Headless {
         base: &str,
         _label: &str,
     ) -> Result<Workspace> {
-        let path = self.worktree_root.join(branch_slug(branch));
+        let path = self.checkout_path(branch);
         cut_worktree(cwd, &path, branch, base)?;
 
         Ok(Workspace {
@@ -791,7 +799,7 @@ impl Mux for Headless {
     }
 
     fn cut_path(&self, branch: &str) -> Option<PathBuf> {
-        Some(self.worktree_root.join(branch_slug(branch)))
+        Some(self.checkout_path(branch))
     }
 
     fn remove_workspace(&self, id: &str) -> Result<()> {

@@ -2793,6 +2793,11 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
     if !not_started(&task) {
         return Ok(Unqueued::Untouched);
     }
+    // A task still on `queued` may have its worktree being cut. Ended before
+    // the task leaves: afterwards the dispatcher's sweep no longer reaches
+    // it, and a cut that finished on its own would leave a checkout and a
+    // branch for the next queue of this task to trip over.
+    crate::cut::stop_and_reclaim(repo, id)?;
     if let Some(routine_file) = deleted_on_unqueue(repo, &task, drafted) {
         std::fs::remove_file(&task.path)
             .with_context(|| format!("removing {}", task.path.display()))?;
@@ -7943,6 +7948,56 @@ mod tests {
             !next("idle-one").contains("cutting worktree"),
             "{}",
             next("idle-one")
+        );
+    }
+
+    /// Unqueuing a task whose worktree is being cut ends the cut: the hook and
+    /// everything it started stop, and no checkout or branch is left for the
+    /// task's next queue to trip over. An agent step's task is `queued` for
+    /// its whole cut, so this is the road a person takes when `cutting
+    /// worktree` sits there.
+    #[test]
+    fn unqueuing_a_task_mid_cut_stops_the_hook_and_leaves_no_checkout() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("unqueue-mid-cut");
+        add(&repo, "solo", &[], None);
+        let child = repo.root.join("child.pid");
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nsleep 300 & echo $! >'{}'; wait\n",
+                child.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = repo.worktree_root().join("task-solo");
+        let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "group/demo");
+        assert!(
+            began
+                .unwrap_err()
+                .downcast_ref::<crate::cut::CutPending>()
+                .is_some()
+        );
+        assert!(crate::cut::running(&repo, "solo").is_some());
+
+        let outcome = unqueue_task(&repo, "solo").unwrap();
+
+        assert!(matches!(outcome, Unqueued::Drafted(_)));
+        assert_eq!(crate::cut::running(&repo, "solo"), None);
+        let child: u32 = std::fs::read_to_string(&child)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!crate::headless::alive(child), "the hook's child lived on");
+        assert!(!path.exists(), "the half checkout was left standing");
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/solo"])
+                .is_err(),
+            "the branch the cut made was left behind"
         );
     }
 

@@ -207,7 +207,9 @@ pub(crate) fn run_killing_at(
 /// A worktree cut runs detached, in a group of its own, so the dispatcher has
 /// no child to wait on. It watches the checkout from here instead, and the
 /// kill lands the same way: inside `git worktree add`, with the checkout half
-/// written. Returns once the point has not fired, or after [`DURING_WAIT`].
+/// written. Returns at once when the point is not armed or was already
+/// claimed, and otherwise after [`DURING_WAIT`] if the command never started
+/// changing the checkout.
 pub(crate) fn kill_run_at(repo_root: &Path, point: &str, group: u32, moved: impl Fn() -> bool) {
     if !ARMED.load(Ordering::SeqCst) || !claim(repo_root, point) {
         return;

@@ -31,11 +31,18 @@
 //! - It is still going at [`crate::repo::GIT_HOOK_TIMEOUT`]: the run's whole
 //!   process group is stopped, so the hook and everything it started go with
 //!   it, the half checkout is taken away, and that is a failed launch too.
-//!   The stop happens in [`stop_if_overdue`], which every pass runs over all
-//!   the project's cuts, so a task that is not visited this pass — one that
-//!   cannot get a worker slot, or that a person paused — does not hold a hung
-//!   hook past its limit. The stop leaves its error in a note beside the run,
-//!   and the next visit to the task reads it as that launch's failure.
+//!   The stop happens in [`stop_if_overdue`], which every pass runs over every
+//!   cut of a task still in the queue, so a task that is not visited this
+//!   pass — one that cannot get a worker slot, or that a person paused — does
+//!   not hold a hung hook past its limit. The stop leaves its error in a note
+//!   beside the run, and the next visit to the task reads it as that launch's
+//!   failure.
+//!
+//! A task that leaves the queue while its cut is going — unqueued, discarded
+//! or cleaned up — is no longer in that sweep. [`stop_and_reclaim`] ends its
+//! cut first, so the hook does not run on unwatched, and a checkout the cut
+//! finished after the task was gone does not stay behind for a later queue of
+//! the same task to trip over.
 //!
 //! A run that vanished without an exit code is not a verdict. The machine went
 //! down, or something killed the wrapper, so what it left running is stopped
@@ -129,6 +136,23 @@ fn shown_note(runs: &Runs, key: &str) -> std::path::PathBuf {
     runs.log_path(key).with_extension("shown")
 }
 
+/// The note kept beside a run holding the branch on its first line and the
+/// checkout's path after it, so [`stop_and_reclaim`] can take the checkout
+/// away without the caller knowing which backend cut it. It exists from the
+/// start of a cut until its answer is read.
+fn where_note(runs: &Runs, key: &str) -> std::path::PathBuf {
+    runs.log_path(key).with_extension("where")
+}
+
+/// Remove every note kept beside a run, the answer of an earlier run
+/// included. A stopped task's `.stopped` note left behind would be read as
+/// the failure of the cut that follows it.
+fn clear_notes(runs: &Runs, key: &str) {
+    for note in [fetch_note, made_note, shown_note, where_note, stopped_note] {
+        let _ = std::fs::remove_file(note(runs, key));
+    }
+}
+
 /// The note a stop leaves beside the run it stopped, holding the error the
 /// task's next visit reports. Read before the run's exit code, because a hook
 /// that caught the signal and exited `0` would otherwise read as a cut that
@@ -182,9 +206,7 @@ fn poll_within(
         }
         .into()),
         RunState::Exited(0) => {
-            let _ = std::fs::remove_file(fetch_note(&runs, &key));
-            let _ = std::fs::remove_file(made_note(&runs, &key));
-            let _ = std::fs::remove_file(shown_note(&runs, &key));
+            clear_notes(&runs, &key);
             runs.forget(&key)?;
             // `git worktree add` can only exit `0` with the checkout in
             // place. Checked all the same, because the next step opens a
@@ -204,9 +226,7 @@ fn poll_within(
         RunState::Exited(code) => {
             let base = std::fs::read_to_string(fetch_note(&runs, &key)).ok();
             let said = failure_text(&runs, &key);
-            let _ = std::fs::remove_file(fetch_note(&runs, &key));
-            let _ = std::fs::remove_file(made_note(&runs, &key));
-            let _ = std::fs::remove_file(shown_note(&runs, &key));
+            clear_notes(&runs, &key);
             runs.forget(&key)?;
             Err(anyhow::anyhow!(crate::mux::cut_failure(
                 &format!(
@@ -280,7 +300,14 @@ fn stop_if_overdue_within(repo: &Repo, task_id: &str, path: &Path, branch: &str,
     // The text is built as the synchronous cut built it: the stop with the
     // cut's context in front, or, when the half checkout could not be taken
     // away, the removal's own message alone with the command to run by hand.
-    let text = match crate::mux::undo_stopped_cut(&repo.root, path, branch, !made, &stopped) {
+    let text = match crate::mux::undo_stopped_cut(
+        &repo.root,
+        path,
+        branch,
+        !made,
+        &stopped,
+        "resume the task",
+    ) {
         Ok(()) => format!(
             "{}: {stopped}",
             crate::mux::cut_failure(
@@ -303,9 +330,7 @@ fn stop_if_overdue_within(repo: &Repo, task_id: &str, path: &Path, branch: &str,
 /// notes and its log are cleared, so the visit after starts clean.
 fn take_stopped(runs: &Runs, key: &str) -> Option<anyhow::Error> {
     let text = std::fs::read_to_string(stopped_note(runs, key)).ok()?;
-    for note in [stopped_note, fetch_note, made_note, shown_note] {
-        let _ = std::fs::remove_file(note(runs, key));
-    }
+    clear_notes(runs, key);
     let _ = runs.forget(key);
     Some(anyhow::anyhow!(text))
 }
@@ -351,11 +376,14 @@ fn begin_within(
     tidy(repo, task_id, path)?;
     let command = crate::mux::cut_command(&repo.root, path, branch, base);
     // The notes are written before the run starts so a run that is stopped
-    // or that fails has them to read. A stale one from an earlier run was
-    // removed when that run's answer was read.
-    let _ = std::fs::remove_file(fetch_note(&runs, &key));
-    let _ = std::fs::remove_file(made_note(&runs, &key));
+    // or that fails has them to read. Cleared first, whatever an earlier run
+    // left: the answer of one cut must never be read as another's.
+    clear_notes(&runs, &key);
     std::fs::create_dir_all(repo.cuts_dir())?;
+    let _ = std::fs::write(
+        where_note(&runs, &key),
+        format!("{branch}\n{}", path.display()),
+    );
     if command.fetch_timed_out {
         let _ = std::fs::write(fetch_note(&runs, &key), base);
     }
@@ -433,9 +461,48 @@ fn tidy(repo: &Repo, task_id: &str, path: &Path) -> Result<()> {
     })
 }
 
-/// Drop what this task's cut left under `cuts/`, once the task has been
-/// archived. Nothing reads a finished cut's log after that.
-pub(crate) fn reclaim(repo: &Repo, task_id: &str) {
+/// End this task's cut because the task is leaving the queue, and take away
+/// what the cut made or half made: the checkout, and the branch if the cut
+/// created it.
+///
+/// Does nothing for a task whose cut has been answered, or never ran. The
+/// checkout of a cut that was answered belongs to the task, and its teardown
+/// removes it.
+///
+/// The error is the removal's own, and names the command to remove the
+/// checkout by hand. The checkout is then locked as `initializing`, so a later
+/// queue of the same task removes it, or says it cannot, instead of running
+/// in it.
+pub(crate) fn stop_and_reclaim(repo: &Repo, task_id: &str) -> Result<()> {
+    let runs = runs(repo);
+    let key = key(task_id);
+    let cut = std::fs::read_to_string(where_note(&runs, &key)).ok();
+    let made = made_note(&runs, &key).exists();
+    // The group is signalled and waited for here, before the checkout is
+    // taken away: a hook still running would write into a folder that is
+    // being removed.
+    runs.stop(&key);
+    let undone = match cut.as_deref().and_then(|text| text.split_once('\n')) {
+        Some((branch, path)) => crate::mux::undo_stopped_cut(
+            &repo.root,
+            Path::new(path),
+            branch,
+            !made,
+            &format!(
+                "{task_id}: the cut of its worktree was stopped because the task left the queue."
+            ),
+            "queue the task again",
+        ),
+        None => Ok(()),
+    };
+    clear_notes(&runs, &key);
+    reclaim(repo, task_id);
+    undone
+}
+
+/// Drop what this task's cut left under `cuts/`. Nothing reads a finished
+/// cut's log once the task is gone.
+fn reclaim(repo: &Repo, task_id: &str) {
     runs(repo).reclaim_task(task_id);
 }
 
@@ -672,6 +739,150 @@ mod tests {
             Poll::Idle,
             "the stop was reported twice"
         );
+    }
+
+    /// Whether `branch` exists in the repository.
+    fn branch_exists(repo: &Repo, branch: &str) -> bool {
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["rev-parse", "--verify", "--quiet", branch],
+        )
+        .is_ok()
+    }
+
+    /// A task that leaves the queue while its hook is running takes the cut
+    /// with it: the hook and its children are stopped, and neither the
+    /// half checkout nor the branch the cut made is left for a later queue
+    /// of the same task to trip over.
+    #[test]
+    fn a_task_that_leaves_mid_cut_has_its_hook_stopped_and_nothing_left_behind() {
+        let (repo, _guard) = fixture("leaves");
+        let child = repo.root.join("child.pid");
+        hook(
+            &repo,
+            &format!("sleep 300 & echo $! >'{}'; wait", child.display()),
+        );
+        let path = target(&repo);
+        let _ = begin_within(
+            &repo,
+            "t1",
+            &path,
+            "task/t1",
+            "main",
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        );
+        let began = Instant::now();
+        while !child.exists() {
+            assert!(began.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(running(&repo, "t1").is_some());
+
+        stop_and_reclaim(&repo, "t1").unwrap();
+
+        let child: u32 = std::fs::read_to_string(&child)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!crate::headless::alive(child), "the hook's child lived on");
+        assert_eq!(running(&repo, "t1"), None);
+        assert!(!path.exists(), "the half checkout was left standing");
+        assert!(
+            !branch_exists(&repo, "task/t1"),
+            "the branch the cut made was left behind"
+        );
+        let left = std::fs::read_dir(repo.cuts_dir())
+            .map(|d| d.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "files of the cut were left under cuts/");
+    }
+
+    /// A cut that finished on its own after nobody was looking leaves a
+    /// complete checkout and a branch that belong to no task once the task is
+    /// gone. They are taken away as well.
+    #[test]
+    fn a_cut_that_finished_unread_is_taken_away_when_its_task_leaves() {
+        let (repo, _guard) = fixture("finished-unread");
+        // Slow enough that the cut is still going when the pass moves on, so
+        // nothing reads its answer.
+        hook(&repo, "sleep 1");
+        let path = target(&repo);
+        // No wait at all: the pass moves on and the cut finishes unread.
+        let _ = begin_within(
+            &repo,
+            "t1",
+            &path,
+            "task/t1",
+            "main",
+            Duration::from_secs(60),
+            Duration::ZERO,
+        );
+        settle(&repo);
+
+        stop_and_reclaim(&repo, "t1").unwrap();
+
+        assert!(!path.exists(), "the finished checkout was left standing");
+        assert!(!branch_exists(&repo, "task/t1"), "the branch was left");
+    }
+
+    /// A branch that was there before the cut is the task's own work and
+    /// stays, whatever happens to the checkout.
+    #[test]
+    fn a_branch_the_cut_did_not_make_is_kept_when_its_task_leaves() {
+        let (repo, _guard) = fixture("keeps-branch");
+        // Slow enough that the cut is still going when the pass moves on, so
+        // nothing reads its answer.
+        hook(&repo, "sleep 1");
+        crate::repo::run(&repo.root, "git", &["branch", "task/t1", "main"]).unwrap();
+        let path = target(&repo);
+        let _ = begin_within(
+            &repo,
+            "t1",
+            &path,
+            "task/t1",
+            "main",
+            Duration::from_secs(60),
+            Duration::ZERO,
+        );
+        settle(&repo);
+
+        stop_and_reclaim(&repo, "t1").unwrap();
+
+        assert!(!path.exists());
+        assert!(
+            branch_exists(&repo, "task/t1"),
+            "a branch of the task's was deleted"
+        );
+    }
+
+    /// A task with no cut has nothing to stop, and asking twice is harmless.
+    #[test]
+    fn stopping_the_cut_of_a_task_that_never_had_one_does_nothing() {
+        let (repo, _guard) = fixture("never");
+
+        stop_and_reclaim(&repo, "t1").unwrap();
+        stop_and_reclaim(&repo, "t1").unwrap();
+    }
+
+    /// A stop note an earlier queue of the task left behind is not the failure
+    /// of the cut that follows it.
+    #[test]
+    fn a_stale_stop_note_is_not_read_as_the_next_cuts_failure() {
+        let (repo, _guard) = fixture("stale-stop");
+        let path = target(&repo);
+        std::fs::create_dir_all(repo.cuts_dir()).unwrap();
+        std::fs::write(
+            stopped_note(&runs(&repo), &key("t1")),
+            "an earlier queue's stop",
+        )
+        .unwrap();
+
+        begin(&repo, "t1", &path, "task/t1", "main").unwrap();
+
+        assert!(crate::mux::cut_is_finished(&repo.root, &path, "task/t1"));
     }
 
     /// A cut that fails is an ordinary error carrying git's reason, and it is
