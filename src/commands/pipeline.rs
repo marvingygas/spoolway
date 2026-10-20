@@ -3687,11 +3687,10 @@ mod tests {
         let err = pipeline_promote(&lane, "default-strict", false).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            format!(
-                "the dispatcher reads the project's pipelines, not this worktree's.\n  \
-                 spoolway -C {} pipeline promote default-strict",
-                repo.root.display()
-            )
+            "the dispatcher reads the project's pipelines, not this worktree's.\n  \
+             A lane does not change the project's setup. Write the\n  \
+             setting you wanted into your report, and a person\n  \
+             will make the change."
         );
         assert!(
             crate::local::pipelines_dir(&repo.local_dir())

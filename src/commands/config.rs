@@ -81,9 +81,10 @@ pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
 /// own file. A worktree on its own branch writes the worktree's copy, so the
 /// change can ride that branch into a pull request; the dispatcher keeps
 /// reading the main checkout's until the branch merges. A worktree that
-/// borrows the main checkout's setup, that is a dispatcher lane's, or that
-/// is on a detached HEAD is refused with the `-C` invocation that lands in
-/// the file the dispatcher reads.
+/// borrows the main checkout's setup, or that is on a detached HEAD, is
+/// refused with the `-C` invocation that lands in the file the dispatcher
+/// reads. A dispatcher lane's worktree is refused too, but without that
+/// line: the lane is told to put the setting in its report instead.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
     let write = repo.tracked_write_root("config", &format!("config set {key} {value}"))?;
     let write_root = write.root;
@@ -798,8 +799,9 @@ mod tests {
         );
     }
 
-    /// A dispatcher lane's worktree keeps the old refusal, and no config
-    /// file is touched — not the lane's own, not the main checkout's.
+    /// A dispatcher lane's worktree is told to report the setting, not handed
+    /// a `-C` command, and no config file is touched — not the lane's own,
+    /// not the main checkout's.
     #[test]
     fn config_set_refuses_a_lane_worktree_and_writes_nothing() {
         let (repo, root, _base_guard) = worktree_fixture("set-lane");
@@ -823,11 +825,10 @@ mod tests {
         let err = config_set(&lane, "unattended.blocked_agent", "changed").unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            format!(
-                "the dispatcher reads the project's config, not this worktree's.\n  spoolway \
-                 -C {} config set unattended.blocked_agent changed",
-                repo.root.display()
-            )
+            "the dispatcher reads the project's config, not this worktree's.\n  \
+             A lane does not change the project's setup. Write the\n  \
+             setting you wanted into your report, and a person\n  \
+             will make the change."
         );
         assert_eq!(
             std::fs::read_to_string(Config::path_in(&root)).unwrap(),

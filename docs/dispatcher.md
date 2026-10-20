@@ -1087,8 +1087,10 @@ Quote the lane name. It holds a space.
 Each task gets a git worktree under the project's own home, at
 `~/.spoolway/<project>/worktrees/task-<id>`, or, for a home-mode checkout, its
 workspace's `dispatchers/<dispatcher>/worktrees/task-<id>`. See [Home
-mode](concepts.md#home-mode). If somebody already has the task's branch checked out, the lane
-borrows that checkout and cleanup leaves it alone. See
+mode](concepts.md#home-mode). If somebody already has the task's branch checked out in another
+checkout, the lane borrows it and cleanup leaves it alone. A lane never runs in the main checkout:
+if that has the task's branch out, the start fails, retries, and then moves the task to `blocked`.
+Switch the main checkout to another branch, such as `git switch main`, then resume the task. See
 [Whose worktree](pipelines.md#whose-worktree).
 
 If you delete a task's worktree folder by hand, the dispatcher runs `git worktree prune` before the

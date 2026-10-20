@@ -1499,7 +1499,9 @@ the worktree's branch:
 ```
 
 Commit the file on that branch and open a pull request. A refused worktree prints the command to
-run in the main checkout instead, as `spoolway -C <root> override promote <target>`.
+run in the main checkout instead, as `spoolway -C <root> override promote <target>`. A worktree
+the dispatcher made for a task is the exception. It tells the lane to write the setting it wanted
+into its report, and prints no command.
 
 ```
 $ spoolway override promote impl && git diff --stat

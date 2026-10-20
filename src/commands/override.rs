@@ -1130,7 +1130,8 @@ mod tests {
         own.clone()
     }
 
-    /// A dispatcher lane's worktree keeps today's refusal and writes nothing.
+    /// A dispatcher lane's worktree is told to report the setting, not handed
+    /// a `-C` command, and writes nothing.
     #[test]
     fn override_promote_refuses_a_lane_worktree_and_writes_nothing() {
         with_worktrees("promote-lane", |[_, _, _, lane], root| {
@@ -1138,11 +1139,10 @@ mod tests {
             let err = override_promote(lane, "demo").unwrap_err();
             assert_eq!(
                 format!("{err:#}"),
-                format!(
-                    "the dispatcher reads the project's tracked files, not this worktree's.\n  \
-                     spoolway -C {} override promote demo",
-                    lane.root.display()
-                )
+                "the dispatcher reads the project's tracked files, not this worktree's.\n  \
+                 A lane does not change the project's setup. Write the\n  \
+                 setting you wanted into your report, and a person\n  \
+                 will make the change."
             );
             assert_eq!(tracked_demo(root), before);
             assert_eq!(tracked_demo(&lane.checkout), before);

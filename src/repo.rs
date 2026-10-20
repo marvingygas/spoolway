@@ -1092,7 +1092,8 @@ impl Repo {
     /// pipeline, a prompt) writes them, or the refusal naming where to run it
     /// instead. `reads` finishes "the dispatcher reads the project's …" in
     /// that refusal, and `typed` is the command as the person typed it, so
-    /// the `-C` line can be pasted as it stands.
+    /// the `-C` line can be pasted as it stands. A lane's refusal prints no
+    /// `-C` line; it tells the lane to put the setting in its report.
     ///
     /// The main checkout writes itself. A worktree on its own branch with
     /// its own `.spoolway/` (`checkout` differs from `root`, not
@@ -1112,10 +1113,17 @@ impl Repo {
                 branch: None,
             });
         }
-        let dash_c = format!("spoolway -C {} {typed}", self.root.display());
         if self.in_lane_worktree() {
-            bail!("the dispatcher reads the project's {reads}, not this worktree's.\n  {dash_c}");
+            // No `-C` line here: a lane that read one might run it and write
+            // the main checkout's setup while its task is still running.
+            bail!(
+                "the dispatcher reads the project's {reads}, not this worktree's.\n  \
+                 A lane does not change the project's setup. Write the\n  \
+                 setting you wanted into your report, and a person\n  \
+                 will make the change."
+            );
         }
+        let dash_c = format!("spoolway -C {} {typed}", self.root.display());
         if self.borrowed {
             bail!(
                 "this worktree's branch has no .spoolway/ of its own, so there is no setup \
