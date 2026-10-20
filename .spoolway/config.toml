@@ -55,8 +55,8 @@ lane_layout = "panes"
 
 [unattended]
 enabled = true
-max_output_tokens = 0
-max_cost_usd = 0.0
+max_output_tokens = 10000000
+max_cost_usd = 1000.0
 blocked_agent = "claude"
 blocked_model = "claude-opus-5-5"
 blocked_effort = "medium"
@@ -101,8 +101,6 @@ session_blocked_ctx = 0
 
 # How long a session's prompt cache is trusted to stay warm.
 # Unset means no limit. Uncomment a row to choose one.
-# [models."claude-*"]
-# prompt_cache_ttl = "1h"
 # [models."gpt-*"]
 # prompt_cache_ttl = "1h"
 
@@ -110,3 +108,6 @@ session_blocked_ctx = 0
 context_window = 100096
 slots = 2
 local = true
+
+[models."claude-*"]
+prompt_cache_ttl = "1h"
