@@ -111,8 +111,10 @@ A base rate set to `0` also prints a `warning:` line on stderr. `doctor` does no
 base rate means unset, so for a model that the price table or another `[models]` row prices, the
 line names the rate that stays in effect. For a model nothing prices, there is no line.
 
-A zero rate inside an `above_<N>k_tokens` tier is charged as zero, because a tier you write
-replaces the table's tier whole. The line says that part of a request is free above the threshold.
+A zero rate inside an `above_<N>k_tokens` tier means unset too, when the price table has a tier at
+the same threshold: the line names the rate that stays in effect. Where no tier at that threshold
+fills it in, the rate is charged as zero, and the line says that part of a request is free above
+the threshold.
 Setting a tier rate to `0` where the row has no tier writes no tier. The line names the tier the
 model keeps.
 
@@ -831,7 +833,12 @@ slots = 3
 local = true
 ```
 
-Each row is keyed by a glob over the model name. The most literal match wins. A bare name
+Each row is keyed by a glob over the model name. Every row that matches a model applies, merged
+value by value: each value comes from the most literal row that sets it. A `claude-*` row that
+sets only `prompt_cache_ttl` therefore leaves a `*haiku*` row's `compact_ctx`, `slots` and
+`context_window` in force. A tier merges the same way when it names the same threshold as the
+price table's tier, so setting one tier rate leaves the other four at the table's values.
+`spoolway models` lists the rows a model's values came from on a `rows:` line. A bare name
 also matches `vendor/name`. Leave a field out and it keeps the value from the built-in or
 refreshed price table, when that table has an entry for the model. Only a model with no
 entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets

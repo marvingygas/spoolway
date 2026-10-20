@@ -8368,7 +8368,7 @@ fn prepare_boot(
             checkout_config.display()
         );
     }
-    if let Some(glob) = crate::models::resolved_row(&repo.config.models, &model) {
+    for glob in crate::models::matching_rows(&repo.config.models, &model) {
         let scope = format!("models.\"{glob}\"");
         if let Some(problem) = crate::confkv::value_problems(&repo.config)
             .into_iter()
@@ -8754,11 +8754,11 @@ struct Started {
 }
 
 /// The key a lane's model is counted under against its `slots` cap: the
-/// `[models]` row it resolves to, else the literal name. Two spellings of one
+/// `[models]` row that sets its `slots`, else the literal name. Two spellings of one
 /// row (`qwen3`, `local/qwen3`) must share a count, because the cap describes
 /// the one server behind the row, not the name a step happened to use.
 fn slot_key(config_models: &BTreeMap<String, crate::usage::ModelPrice>, model: &str) -> String {
-    crate::models::resolved_row(config_models, model)
+    crate::models::row_setting(config_models, model, |row| row.slots != 0)
         .unwrap_or(model)
         .to_string()
 }

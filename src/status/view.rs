@@ -938,14 +938,13 @@ pub(super) fn footer(
             // `slots`, one entry per pool — but two names that match the same
             // `[models."<row>"]` entry collapse to the one entry, since they
             // are the same pool being rationed and must draw only one line.
-            // `models::resolved_row` is the same lookup `resolve` itself
-            // answers through — full name first, a bare model's suffix only
-            // once that whole pass fails — so comparing the row *key* it
-            // returns is comparing pool identity exactly as `resolve` sees
-            // it: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+            // `models::row_setting` names the row `resolve` takes `slots` from,
+            // so comparing that row's *key* is comparing pool identity as
+            // `resolve` sees it, even when a more literal row sets other
+            // values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
             // `Ornith-1.5-35B-A3B` both key on `Ornith-1.5-35B-A3B` and
-            // collapse to one line, which a raw `best_match` pointer would
-            // miss since it never takes the suffix fallback.
+            // collapse to one line, which a raw glob match would miss since
+            // it never takes the suffix fallback.
             let mut pools: Vec<(&str, u32)> = Vec::new();
             let mut seen_rows: Vec<&str> = Vec::new();
             for model in agent_model.get(name.as_str()).into_iter().flatten() {
@@ -956,7 +955,9 @@ pub(super) fn footer(
                 else {
                     continue;
                 };
-                if let Some(row) = crate::models::resolved_row(&repo.config.models, model) {
+                if let Some(row) =
+                    crate::models::row_setting(&repo.config.models, model, |row| row.slots != 0)
+                {
                     if seen_rows.contains(&row) {
                         continue;
                     }

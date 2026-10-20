@@ -950,9 +950,10 @@ pub fn check_typed(key: &str, input: &str) -> Result<()> {
 /// Zero is how a row spells "unset", and `config set` prints the saved `= 0.0`
 /// and nothing else, which reads as "free". A base rate is filled from the
 /// price table by [`crate::models::resolve`], so for a model the table knows
-/// the table's rate stays in effect. A tier rate is not: a row's tier replaces
-/// the table's tier whole, so a zero inside it is charged as zero (the
-/// one-hour cache rate excepted, which follows the five-minute one).
+/// the table's rate stays in effect. A tier rate follows the same rule when the
+/// table's tier is at the same threshold, and is charged as zero when there is
+/// no tier at that threshold to fill it from (the one-hour cache rate
+/// excepted, which follows the five-minute one).
 ///
 /// What is named as in effect is read from `resolve` over the project's own
 /// rows, never from the table alone: when no row of the glob's own is left, a
@@ -997,20 +998,33 @@ fn zero_rate_note(config: &Config, key: &str) -> Option<String> {
         if rate_of(&tier.rates) != 0.0 {
             return None;
         }
-        return Some(
-            if field == "cache_write_1h" && tier.rates.cache_write_5m != 0.0 {
-                format!(
-                    "`{key}` = 0 means unset: the hourly cache is priced at the tier's \
-                     five-minute rate"
-                )
-            } else {
-                format!(
-                    "`{key}` = 0 is charged as zero, not filled from the price table: \
-                     above {}k tokens that part of a request is free",
-                    tier.above_k
-                )
-            },
-        );
+        if field == "cache_write_1h" && tier.rates.cache_write_5m != 0.0 {
+            return Some(format!(
+                "`{key}` = 0 means unset: the hourly cache is priced at the tier's \
+                 five-minute rate"
+            ));
+        }
+        // The merged tier, so a rate filled from the price table or a less
+        // literal row is named, and one nothing fills is said to be free.
+        let filled = crate::models::resolve(&config.models, glob)
+            .price
+            .and_then(|price| price.tier)
+            .filter(|merged| merged.above_k == tier.above_k)
+            .map(|merged| rate_of(&merged.rates))
+            .filter(|rate| *rate != 0.0);
+        return Some(match filled {
+            Some(rate) => format!(
+                "`{key}` = 0 means unset, not free: the rate above {}k tokens that the price \
+                 table or a matching `[models]` row gives `{glob}` (${rate} per million \
+                 tokens) stays in effect",
+                tier.above_k
+            ),
+            None => format!(
+                "`{key}` = 0 is charged as zero, nothing fills it in: above {}k tokens that \
+                 part of a request is free",
+                tier.above_k
+            ),
+        });
     }
     if rate_of(&row.rates()) != 0.0 {
         return None;
@@ -1677,7 +1691,8 @@ mod tests {
 
     /// A zero tier rate saves and says what it means, instead of being refused
     /// for the empty tier it leaves behind. Fails before the fix: the empty
-    /// tier stayed in the config and `save_key` refused the write.
+    /// tier stayed in the config and `save_key` refused the write. Whether the
+    /// zero is filled in follows the price table's tier at that threshold.
     #[test]
     fn a_zero_tier_rate_saves_and_says_what_it_means() {
         let key = "models.claude-haiku-5-5.above_100k_tokens.input";
@@ -1686,6 +1701,14 @@ mod tests {
         let note = zero_rate_note(&fresh, key).unwrap();
         assert!(note.contains("keeps the price table's tier"), "{note}");
 
+        // Over a tier the table knows, a zero is filled from it.
+        let tiered = set(&Config::default(), key, "2").unwrap();
+        let zeroed = set(&tiered, key, "0").unwrap();
+        let note = zero_rate_note(&zeroed, key).unwrap();
+        assert!(note.contains("means unset, not free"), "{note}");
+
+        // Over a model no table tiers, nothing fills it.
+        let key = "models.mystery-model.above_100k_tokens.output";
         let tiered = set(&Config::default(), key, "2").unwrap();
         let zeroed = set(&tiered, key, "0").unwrap();
         let note = zero_rate_note(&zeroed, key).unwrap();

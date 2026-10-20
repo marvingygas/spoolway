@@ -2231,10 +2231,10 @@ impl Config {
     /// `prompt_cache_ttl`.
     ///
     /// Earlier releases wrote such a row for a hosted profile as a reminder.
-    /// It prices nothing and limits nothing, yet it took part in glob matching
-    /// and, being a literal prefix, beat a person's own `*haiku*` row, whose
-    /// `compact_ctx`, `slots` and `context_window` then stopped applying. A row
-    /// that holds any other value is left alone, blank lifetime and all.
+    /// It prices nothing and limits nothing, and a blank lifetime sets no value
+    /// for a matching row to merge in, so it only cluttered the table and the
+    /// rows `spoolway models` lists. A row that holds any other value is left
+    /// alone, blank lifetime and all.
     fn drop_blank_lifetime_rows(&mut self) {
         self.models.retain(|_, row| !row.is_blank_lifetime_only());
     }
@@ -4683,7 +4683,7 @@ mod tests {
     }
 
     /// A row holding only a blank lifetime, as earlier releases wrote it, is
-    /// dropped on load, so it no longer outranks a person's `*haiku*` row for
+    /// dropped on load, so it no longer takes part in matching
     /// `claude-haiku-5-5`. A row that holds anything else keeps its blank.
     #[test]
     fn a_blank_lifetime_only_row_stops_taking_part_in_model_matching() {
