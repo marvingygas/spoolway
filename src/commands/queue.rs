@@ -867,7 +867,8 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
 /// the task to pending — all or nothing, so a teardown this stops
 /// partway through leaves the task queued and its task untouched. A copy of a
 /// routine that still exists is deleted instead of carried. The branch the
-/// teardown keeps for unpushed commits is named by the teardown's own line
+/// teardown keeps for unpushed commits (or, with no remote, one its base does
+/// not contain) is named by the teardown's own line
 /// on standard error, which is all this road says about it.
 ///
 /// Refused too while the worktree is off its task's branch or midway through

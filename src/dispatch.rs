@@ -10922,7 +10922,9 @@ mod tests {
 
     /// Stand in for a real `git push`: a remote-tracking ref pointing at
     /// `branch`'s own tip, which is all `Dispatcher::branch_keep_reason`
-    /// ever reads. No actual remote is needed for that check to answer yes.
+    /// reads once the repo has a remote. A test using this must first
+    /// `git remote add`, since with none configured the check ignores
+    /// `refs/remotes` and asks the task's base branch instead.
     fn mark_pushed(repo: &Repo, branch: &str) {
         let sha = crate::repo::run(&repo.root, "git", &["rev-parse", branch]).unwrap();
         crate::repo::run(
@@ -11026,6 +11028,8 @@ mod tests {
     #[test]
     fn a_finished_task_takes_its_branch_with_it() {
         let (repo, _root_guard) = fixture("cleanup-branch");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         mark_pushed(&repo, "task/demo");
         let path = add_task(&repo, "demo", "implement");
@@ -11551,6 +11555,77 @@ mod tests {
                 .problems
                 .iter()
                 .any(|p| p.contains("task/first") || p.contains("remote")),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    /// The twin of the test above: a retained branch its base does not
+    /// contain is the only copy of the work, so the orphan sweep leaves it
+    /// alone once the dependent has finished.
+    #[test]
+    fn with_no_remote_the_orphan_sweep_keeps_an_unmerged_retained_branch() {
+        let (repo, _root_guard) = fixture("branch-kept-no-remote-sweep");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "done", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "nothing queued needs it, but `work` does not contain it"
+        );
+    }
+
+    /// A base that no longer exists cannot be told to merge anything, so the
+    /// line names the missing base rather than asking for a merge into it.
+    #[test]
+    fn with_no_remote_a_missing_base_is_named_as_missing() {
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote-no-base");
+        repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.base = Some("gone".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(has_branch(&repo, "task/demo"), "nothing shows it merged");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("its base `gone` no longer exists")),
             "{:?}",
             report.problems
         );
@@ -24484,6 +24559,8 @@ mod tests {
     #[test]
     fn a_finished_tasks_branch_survives_while_a_queued_dependent_still_names_it() {
         let (repo, _root_guard) = fixture("branch-survives-dependent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();

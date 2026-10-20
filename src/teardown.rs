@@ -630,8 +630,8 @@ impl<'a> Dispatcher<'a> {
     /// any more, since [`Dispatcher::sweep_on_stop`] leaves an interrupted
     /// task's checkout exactly where it stood.
     ///
-    /// `report` is where a branch kept because it is not fully pushed gets
-    /// named — see the comment on the delete itself, below. It is also where a
+    /// `report` is where a branch kept because it is not fully pushed (or,
+    /// with no remote, not yet in its base) gets named — see the comment on the delete itself, below. It is also where a
     /// worktree that could not be removed is named, in which case this returns
     /// `false` and leaves the branch alone, since git will not delete a branch
     /// that is still checked out.
@@ -808,12 +808,13 @@ impl<'a> Dispatcher<'a> {
             // the deal that mode signs. That same squash-merge is why git's own
             // "is this merged" check cannot stand in for the question asked
             // here either: the branch is asked directly whether every commit
-            // on it is reachable from some remote-tracking ref, or, with no
-            // remote, from the task's base branch. A `handover`
-            // that never ran, or a push that failed silently, is otherwise the
-            // last thing that happens to a finished task being the deletion of
-            // the only copy of its work — which is exactly how one task lost
-            // twelve commits to this path.
+            // on it is reachable from some remote-tracking ref. With no
+            // remote the question is ancestry in the task's base branch, so a
+            // squash-merged branch reads as unmerged there and is kept, on the
+            // safe side. A `handover` that never ran, or a push that failed
+            // silently, is otherwise the last thing that happens to a
+            // finished task being the deletion of the only copy of its work —
+            // which is exactly how one task lost twelve commits to this path.
             //
             // A trial arm is exempt from that protection: its comparison is
             // already banked in the usage ledger by the time it reaches here
@@ -919,8 +920,10 @@ impl<'a> Dispatcher<'a> {
     /// destroy the only copy of the work. A merge into `base` is the one way
     /// such a project ever has a second copy, and once it has happened the
     /// branch is debris, so a local-only project keeps only unmerged branches.
-    /// A task with no recorded `base`, or one that no longer resolves, cannot
-    /// be shown merged anywhere and is kept.
+    /// That is plain ancestry, so a branch squash-merged into `base` reads as
+    /// unmerged and is kept, on the safe side. A task with no recorded `base`,
+    /// or one that no longer resolves, cannot be shown merged anywhere and is
+    /// kept, with a line of its own for each.
     ///
     /// A git failure otherwise — no such branch, a corrupt ref — reads as
     /// "not safe" rather than propagating: this gates whether the only copy of
@@ -928,6 +931,24 @@ impl<'a> Dispatcher<'a> {
     fn branch_keep_reason(&self, branch: &str, base: Option<&str>) -> Option<String> {
         if !self.repo.has_remote() {
             return match base {
+                // A base that is gone makes `merge-base` fail the same way an
+                // unmerged branch does, and "`<base>` does not contain it"
+                // would send a person to merge into a branch that is not there.
+                Some(base)
+                    if self
+                        .repo
+                        .git(&[
+                            "rev-parse",
+                            "--verify",
+                            "--quiet",
+                            &format!("{base}^{{commit}}"),
+                        ])
+                        .is_err() =>
+                {
+                    Some(format!(
+                        "this repo has no remote, and its base `{base}` no longer exists"
+                    ))
+                }
                 Some(base)
                     if self
                         .repo
@@ -978,11 +999,12 @@ impl<'a> Dispatcher<'a> {
     /// rather than tracked separately: one `for-each-ref` and a scan of the
     /// tasks already in hand.
     ///
-    /// The same push check `tear_down_checkout` used to spare this branch in
-    /// the first place is asked again here, for the same reason: nothing
-    /// about becoming orphaned makes an unpushed commit any less the only
-    /// copy of the work it holds. Once it is pushed, this is what frees it —
-    /// nothing re-visits an archived task's own cleanup to do it there.
+    /// The same check `tear_down_checkout` used to spare this branch in the
+    /// first place is asked again here, for the same reason: nothing about
+    /// becoming orphaned makes an unpushed commit any less the only copy of
+    /// the work it holds. Once it is pushed — or, with no remote, once its
+    /// base branch contains it — this is what frees it; nothing re-visits an
+    /// archived task's own cleanup to do it there.
     fn sweep_orphaned_branches(&mut self, tasks: &[Task]) {
         let Ok(listing) = self.repo.git(&[
             "for-each-ref",
