@@ -825,6 +825,23 @@ else
   bad "and leaves that branch and the task's branch alone"
 fi
 
+# A task file with no `branch:` line is held to the default `task/<id>`, so the
+# person's side worktree is refused for it as well.
+queue_task nobranch "base: main"
+nb_out=$(cd "$WORKTREES/person-wt" && "$SPOOLWAY" stack nobranch 2>&1)
+nb_status=$?
+if [ "$nb_status" -eq 1 ] && grep -qF 'Nothing was committed or pushed' <<<"$nb_out"; then
+  ok "a task with no \`branch:\` is refused from a worktree on another branch"
+else
+  bad "a task with no \`branch:\` is refused from a worktree on another branch (exit $nb_status)"; sed 's/^/        /' <<<"$nb_out"
+fi
+if [ "$(git -C "$WORKTREES/person-wt" rev-parse HEAD)" = "$side_head" ] \
+   && [ -z "$(git ls-remote origin refs/heads/person-wt)" ]; then
+  ok "and that branch is neither moved nor pushed"
+else
+  bad "and that branch is neither moved nor pushed"
+fi
+
 # Every agent lane exports `SPOOLWAY_WORKTREE`, so naming a worktree is no
 # licence either: another checkout's worktree is refused the same way.
 env_out=$(SPOOLWAY_WORKTREE="$WORKTREES/person-wt" "$SPOOLWAY" stack handed 2>&1)

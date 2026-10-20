@@ -81,41 +81,43 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     };
     // Everything below commits, squashes and force-pushes whatever checkout
     // this is, so it must be this task's own: a linked worktree on the
-    // task's `branch:`. Anything else — the main checkout, a person's side
+    // task's branch. Anything else — the main checkout, a person's side
     // worktree, or another task's — would have its branch rewritten and
     // pushed over the task's pull request branch. The same check holds
     // whether the worktree came from `SPOOLWAY_WORKTREE` or from the current
     // directory, because every agent lane exports that variable: a
     // `spoolway stack <other-task>` typed in one lane's pane must not squash
     // that lane's branch onto another task. A task's own handover lane sits
-    // on its `branch:`, so it passes. The refusal comes before the task's
-    // header line is printed so it stands alone. A task with no recorded
-    // `branch:` is held only to being in a linked worktree, as there is no
-    // branch to compare.
-    if !crate::repo::is_linked_worktree(&worktree) {
-        bail!(
+    // on its branch, so it passes. A task file with no `branch:` is held to
+    // the default branch name, the one the dispatcher cuts its worktree on.
+    // The refusal comes before the task's header line is printed so it
+    // stands alone.
+    let not_own = || {
+        anyhow::anyhow!(
             "`stack` hands a task over from the task's own worktree, and this is not \
              one.\n  Nothing was committed or pushed. Run it in {id}'s worktree,\n  or let \
              {id}'s handover step run it."
-        );
+        )
+    };
+    if !crate::repo::is_linked_worktree(&worktree) {
+        return Err(not_own());
     }
-    if let Some(branch) = task.front.branch.as_deref() {
-        match crate::repo::current_branch_at(&worktree)? {
-            Some(current) if current == branch => {}
-            // A detached HEAD here may well be the task's own worktree, so
-            // "run it in the task's worktree" would point back at this very
-            // directory; say what is actually wrong instead.
-            None => bail!(
-                "`stack` hands a task over from the task's own worktree on `{branch}`, and \
-                 this worktree is on a detached HEAD.\n  Nothing was committed or pushed. \
-                 Check out `{branch}` here first,\n  or let {id}'s handover step run it."
-            ),
-            Some(_) => bail!(
-                "`stack` hands a task over from the task's own worktree, and this is not \
-                 one.\n  Nothing was committed or pushed. Run it in {id}'s worktree,\n  or let \
-                 {id}'s handover step run it."
-            ),
-        }
+    let own_branch = task
+        .front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(&id));
+    match crate::repo::current_branch_at(&worktree)? {
+        Some(current) if current == own_branch => {}
+        // A detached HEAD here may well be the task's own worktree, so "run
+        // it in the task's worktree" would point back at this very
+        // directory; say what is actually wrong instead.
+        None => bail!(
+            "`stack` hands a task over from the task's own worktree on `{own_branch}`, and \
+             this worktree is on a detached HEAD.\n  Nothing was committed or pushed. \
+             Check out `{own_branch}` here first,\n  or let {id}'s handover step run it."
+        ),
+        Some(_) => return Err(not_own()),
     }
     println!("{id}\n");
     let step = std::env::var(crate::dispatch::ENV_STEP).unwrap_or_else(|_| "stack".to_string());
