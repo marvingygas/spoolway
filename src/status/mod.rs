@@ -10999,8 +10999,8 @@ mod tests {
     }
 
     /// A paused task whose `paused_at` names a step the pipeline does not
-    /// have has nowhere to name. The row still says so rather than going
-    /// blank, with the key when it is on offer and without it when not.
+    /// have has nowhere to send it. The row names the step it lost rather than
+    /// going blank, and the key follows whether the row is resumable.
     #[test]
     fn a_paused_row_with_no_named_step_still_says_something() {
         let (repo, _root_guard) = fixture("paused-no-step");
@@ -11029,10 +11029,11 @@ mod tests {
         .unwrap();
         let free = rows.iter().find(|r| r.id == "free").unwrap();
         assert!(free.resumable);
-        assert_eq!(free.next, "[r] resume");
+        let lost = "stopped at `no-such-step`, which `default` no longer defines";
+        assert_eq!(free.next, lost);
         let held = rows.iter().find(|r| r.id == "held").unwrap();
         assert!(!held.resumable);
-        assert_eq!(held.next, "no step named");
+        assert_eq!(held.next, lost);
     }
 
     /// A paused task offers the resume key only once no lane of its own is
