@@ -759,10 +759,14 @@ because a home-mode project's whole setup is already private to the machine it r
   outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
   [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
-- A private pipeline whose name matches a tracked one is refused, naming both files. Two
-  private files of the same name but different extensions — `foo.yml` beside `foo.yaml` — are
-  refused the same way, naming both private files; this is never reported as a clash with a
-  tracked file.
+- A private pipeline whose name matches a tracked one is a name clash. Neither file runs. A
+  task on that name is held and shows as `held` in `queue list` and on the board. Every other
+  pipeline loads and every other task runs. `spoolway pipeline rename <old> <new>` renames the
+  private pipeline and moves what names it onto the new name. `doctor` and `pipeline check`
+  report the clash, naming both files. See [`pipeline
+  rename`](cli-reference.md#spoolway-pipeline-rename-old-new). Two private files of the same
+  name but different extensions, `foo.yml` beside `foo.yaml`, are refused, naming both private
+  files. This is never reported as a clash with a tracked file.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step
   names a prompt that exists only privately is refused, because that pipeline would break the
   moment it ran on a machine with no copy of the private prompt. A prompt name holding `/` is

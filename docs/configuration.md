@@ -361,6 +361,7 @@ write nothing:
 | `spoolway prompt override` | `overrides/prompts/<name>/PROMPT.md` |
 | `spoolway config override` | `overrides/config.toml` |
 | `spoolway pipeline copy`, `spoolway prompt copy` | The private `local/` folder. In home mode, the workspace's own setup. |
+| `spoolway pipeline rename` | The private pipeline file, its task skeleton, and the tasks and jobs that name it. |
 
 The refusal tells the lane to write the change it wanted into its report, so a person makes it.
 `spoolway override promote` and `spoolway pipeline promote` refuse in a lane as well.

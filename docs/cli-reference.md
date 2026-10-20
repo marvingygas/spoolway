@@ -35,9 +35,9 @@ object, written to stderr so that stdout stays one JSON value a script can parse
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `pipeline copy`, `pipeline rename`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
-`config show`, `config list`, `config get`, `config path`, `config override`, `doctor`, `jobs
-list` and `sync`.
+override`, `pipeline copy`, `pipeline rename`, `prompt contract`, `prompt list`, `prompt
+override`, `prompt copy`, `config show`, `config list`, `config get`, `config path`, `config
+override`, `doctor`, `jobs list` and `sync`.
 
 ## Commands with no JSON form
 
@@ -1144,6 +1144,10 @@ A pipeline with no `description:` carries `"description": null`. `source` is `"t
 pipeline from `.spoolway/pipelines/` or `"private"` for one from `local/pipelines/`. `file`
 names the private file a private pipeline came from, and is `null` for a tracked one.
 
+A name claimed by both a tracked and a private pipeline prints as `<name>  held`, with the held
+line indented under it. See [`pipeline rename`](#spoolway-pipeline-rename-old-new). In the JSON,
+each such name is an entry of a `clashes` array with `name`, `tracked`, `private` and `held`.
+
 ### `spoolway pipeline override <name> --set <step>.<key>=<value>`
 
 Patch one step's key in the [overrides layer](configuration.md#the-overrides-layer). The
@@ -1221,8 +1225,8 @@ pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline rename <old> <new>`
 
-Rename a private pipeline, and move the tasks naming it onto the new name. This is how a name
-clash with a tracked pipeline is settled.
+Rename a private pipeline, and move everything that names it onto the new name. This is how a
+name clash with a tracked pipeline is settled.
 
 Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
@@ -1240,20 +1244,44 @@ as `held`, with this line:
 private `hotfix` clashes with the tracked one: spoolway pipeline rename hotfix <new-name>
 ```
 
-`doctor` and `pipeline check` still report the clash, naming both files.
+`doctor` and `pipeline check` still report the clash, naming both files. `pipeline list` shows
+the name as `held`.
 
-The rename keeps each task on the steps it was queued with: every task naming `<old>` is
-rewritten to name `<new>`, and `<new>` is the private pipeline's file. The private task skeleton
-`<old>.md` moves with it, unless the pipeline names its own `task_template:`. The tracked
-pipeline keeps the old name. A running dispatcher loaded the old name, so it prints a line
-saying to restart the dispatcher before the tasks run on `<new>`.
+The rename rewrites these to name `<new>`, so each keeps the steps it was queued with:
 
-Both names must be one plain name, as for `pipeline copy`. Refused when `<old>` names no private
-pipeline, when `<new>` already names a pipeline or a skeleton, tracked or private, and in home
-mode, where the whole setup is already private and no name can clash. Refused, with nothing
-changed, while a task naming `<old>` is on a step, since a lane may be working it: only tasks
-that are queued, paused, blocked or hook-failed are moved. `--json` prints
-`{"renamed": {"from", "to"}, "moved": [<id>, ...], "left": [<id>, ...]}`.
+| What | Moved |
+|---|---|
+| Tasks in the queue | Those on `queued`, `paused`, `blocked`, `hook_failed` or `done`. |
+| Drafted tasks in `pending/` | All of them. |
+| Jobs in your own `jobs.toml` | All of them. |
+
+Jobs in the tracked `.spoolway/jobs.toml` are shared with the team. They stay on `<old>`, and
+the command names them in its output.
+
+The private task skeleton `<old>.md` moves with the pipeline, unless the pipeline names its own
+`task_template:`. The tracked pipeline keeps the old name. A running dispatcher loaded the old
+name, so the command prints a line saying to restart the dispatcher before the tasks run on
+`<new>`.
+
+Both names must be one plain name, as for `pipeline copy`. The command is refused when:
+
+- `<old>` names no private pipeline.
+- `<new>` already names a pipeline or a skeleton, tracked or private.
+- the project is in home mode, where the whole setup is already private and no name can clash.
+- a task naming `<old>` is on a step, since a lane may be working it.
+- a queue file or a drafted task that may name `<old>` cannot be read.
+- a job file cannot be read.
+
+A refusal changes nothing. If one task, draft or job cannot be moved, the command moves the rest
+and keeps the pipeline file under `<old>`. It names each one it left, with the line to set by
+hand. Run the command again to finish. Until the file is renamed, the clash holds `<old>`.
+
+`--json` prints:
+
+```
+{"renamed": {"from", "to"}, "moved": [<id>, ...], "moved_pending": [<path>, ...],
+ "moved_jobs": [<name>, ...], "shared_jobs_left": [<name>, ...]}
+```
 
 ### `spoolway pipeline promote <name>`
 
