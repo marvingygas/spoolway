@@ -4292,7 +4292,7 @@ impl<'a> Dispatcher<'a> {
             return Ok(());
         }
 
-        let nudge = crate::compose::reminder_prompt(task, pipeline, step);
+        let nudge = crate::compose::reminder_prompt(task, pipeline, step, self.unattended);
         self.mux.prompt(&lane.name, &nudge)?;
         // Baselined *after* the nudge lands, not before. A lane with no
         // session to read its transcript by falls back to hashing the pane
@@ -8183,7 +8183,8 @@ fn prepare_boot(
     // framing and the policy it cannot know. Written per lane rather than
     // pointed at the project's own file, so that spoolway's half of the system
     // prompt is unskippable — see [`system_prompt`].
-    let system_prompt_text = crate::compose::system_prompt(repo, task, pipeline, step, &prompt)?;
+    let system_prompt_text =
+        crate::compose::system_prompt(repo, task, pipeline, step, &prompt, repo.unattended())?;
     let prompt_file = write_system_prompt(repo, &name, &system_prompt_text)?;
 
     let model = resolve_model(step);
@@ -10186,7 +10187,8 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("handover").unwrap();
 
-        let composed = crate::compose::system_prompt(&repo, &task, pipeline, step, theirs).unwrap();
+        let composed =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, theirs, false).unwrap();
         assert!(composed.contains(theirs), "the prompt was not carried");
         // And nothing spoolway writes says how to use git.
         for gone in [
@@ -10209,8 +10211,15 @@ mod tests {
     fn sent(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
         format!(
             "{}\n\n{}",
-            crate::compose::system_prompt(repo, task, pipeline, step, "[the project's prompt]")
-                .unwrap(),
+            crate::compose::system_prompt(
+                repo,
+                task,
+                pipeline,
+                step,
+                "[the project's prompt]",
+                false
+            )
+            .unwrap(),
             crate::compose::opening_prompt(task, pipeline, step),
         )
     }
@@ -17022,6 +17031,66 @@ mod tests {
         assert!(task.front.launched_at.is_some());
     }
 
+    /// A lane takes the mode of the run that starts it: `prepare_boot` reads
+    /// it, so a lane launched in an unattended run is told its `--block`
+    /// goes to an unblocker, and one launched in an attended run keeps the
+    /// text that asks for a person.
+    #[test]
+    fn a_launch_composes_its_block_text_for_the_mode_of_its_run() {
+        let unattended_text = "An unblocker lane picks it up next.";
+        let attended_text = "goes up to a person, or to a stronger agent.";
+        for (unattended, present, absent) in [
+            (true, unattended_text, attended_text),
+            (false, attended_text, unattended_text),
+        ] {
+            let name = format!("launch-block-text-{unattended}");
+            let (repo, _root_guard) = match unattended {
+                true => unattended_fixture(&name),
+                false => fixture(&name),
+            };
+            let path = add_task(&repo, "demo", "queued");
+            let mux = FakeMux::new(vec![]);
+            run_pass(&repo, &mux);
+
+            let task = reload(&path);
+            let lane = lane_name("implement", &task);
+            let written =
+                std::fs::read_to_string(repo.system_prompts_dir().join(format!("{lane}.md")))
+                    .unwrap();
+            let flat = written.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains(present), "unattended={unattended}: {written}");
+            assert!(!flat.contains(absent), "unattended={unattended}: {written}");
+        }
+    }
+
+    /// `blocked` is told the fix is its own job, in every project, whatever
+    /// its prompt says; no other step is.
+    #[test]
+    fn the_unblocker_is_told_the_fix_is_its_job() {
+        let (repo, _root_guard) = fixture("unblocker-owns-the-fix");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+
+        let blocked = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        let blocked_task = reload(&add_task(&repo, "stuck", crate::pipeline::BLOCKED));
+        let lane = crate::compose::situating(pipeline, blocked, &blocked_task, &repo).unwrap();
+        let expected = "\
+- Your remit is the run, not one task's step. `stuck` may have stopped inside its worktree or well outside it.
+- Whatever stands between this task and its next step is yours: the code, the tests, a rebase, a red check, a missing tool, a choice the task or the code already settles. Another step's work is yours too.
+- Your prompt's `## Never` list still holds.
+- Your output is not read;";
+        assert!(lane.contains(expected), "got: {lane}");
+        assert!(
+            !lane.contains("Stay inside your prompt's bounds."),
+            "{lane}"
+        );
+
+        let implement = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "demo", "implement"));
+        let lane = crate::compose::situating(pipeline, implement, &task, &repo).unwrap();
+        assert!(!lane.contains("Whatever stands between"), "{lane}");
+    }
+
     #[test]
     fn a_busy_lane_is_never_torn_down() {
         let (repo, _root_guard) = fixture("busy");
@@ -17762,7 +17831,7 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
         let sent = format!(
             "{}{}",
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap(),
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap(),
             crate::compose::opening_prompt(&task, pipeline, step),
         );
         assert!(
@@ -18523,6 +18592,16 @@ mod tests {
                 assert_eq!(reload(&path).stage(), "implement", "{name} round {round}");
                 assert_eq!(mux.did("prompt").len(), 1, "{name} round {round}");
             }
+
+            // The nudge carries the `--block` text of the run that sends it.
+            let nudge = mux.read("demo · implement", 9999).unwrap();
+            let flat = nudge.split_whitespace().collect::<Vec<_>>().join(" ");
+            let (present, absent) = match unattended {
+                true => ("An unblocker lane picks it up next.", "goes up to a person"),
+                false => ("goes up to a person", "An unblocker lane picks it up next."),
+            };
+            assert!(flat.contains(present), "{name}: {nudge}");
+            assert!(!flat.contains(absent), "{name}: {nudge}");
         }
     }
 
@@ -27893,8 +27972,8 @@ mod tests {
 
         // The report contract is where the two finally differ: the gated
         // step's carries the fact, the plain one's does not.
-        let gated_contract = crate::compose::report_contract(&task, &pipeline, gated_step);
-        let plain_contract = crate::compose::report_contract(&task, &pipeline, plain_step);
+        let gated_contract = crate::compose::report_contract(&task, &pipeline, gated_step, false);
+        let plain_contract = crate::compose::report_contract(&task, &pipeline, plain_step, false);
         assert!(
             gated_contract.contains("A pass is held here for a person, who opens this pane."),
             "got: {gated_contract}"
@@ -28046,7 +28125,7 @@ mod tests {
             "{prompt}"
         );
 
-        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step, false);
         assert!(
             contract.contains("and never one past `look`."),
             "{contract}"
@@ -28077,7 +28156,7 @@ mod tests {
             |f| f.blocked_from = Some("implement".into()),
         ));
 
-        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step, false);
         assert!(
             contract.contains("and never one past `review`."),
             "{contract}"
@@ -28103,7 +28182,7 @@ mod tests {
             |f| f.blocked_from = Some("deploy".into()),
         ));
 
-        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step, false);
         assert!(
             !contract.contains("A pass is held here for a person"),
             "{contract}"
@@ -28145,7 +28224,7 @@ mod tests {
             "a command step is handed back to itself by a plain pass: {prompt}"
         );
 
-        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step, false);
         assert!(
             !contract.contains("A pass is held here for a person"),
             "{contract}"
@@ -28267,7 +28346,8 @@ mod tests {
                     &task,
                     pipeline,
                     pipeline.step(step).unwrap(),
-                    "[prompt]"
+                    "[prompt]",
+                    false
                 )
                 .unwrap()
                 .contains("spoolway runs one task at a time"),
@@ -28561,18 +28641,21 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let opening = crate::compose::lane_prompt_for_state(&task, &pipeline, step, "opening");
+        let opening =
+            crate::compose::lane_prompt_for_state(&task, &pipeline, step, "opening", false);
         assert_eq!(opening.len(), 3, "{opening:?}");
         assert_eq!(opening[..2], ["/code-review", "/spoolway-doctor"]);
         // A restart is an opening too, so it keeps the same skill messages.
-        let restart = crate::compose::lane_prompt_for_state(&task, &pipeline, step, "restart");
+        let restart =
+            crate::compose::lane_prompt_for_state(&task, &pipeline, step, "restart", false);
         assert_eq!(restart.len(), 3, "{restart:?}");
         assert_eq!(restart[..2], opening[..2]);
         for state in crate::compose::STATES
             .iter()
             .filter(|s| !["opening", "restart"].contains(s))
         {
-            let messages = crate::compose::lane_prompt_for_state(&task, &pipeline, step, state);
+            let messages =
+                crate::compose::lane_prompt_for_state(&task, &pipeline, step, state, false);
             assert_eq!(messages.len(), 1, "{state}: {messages:?}");
         }
     }
@@ -28593,7 +28676,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         assert!(
             prompt.trim_end().ends_with("spoolway report --fail"),
             "got: {prompt}"
@@ -28618,7 +28701,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         let have_at = prompt.find("WHAT YOU HAVE").expect("no WHAT YOU HAVE");
         let write_down_at = prompt
             .find("WHAT YOU WRITE DOWN")
@@ -28646,7 +28729,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         assert!(prompt.contains("Status Log"), "got: {prompt}");
         assert!(prompt.contains("Handoff"), "got: {prompt}");
         assert!(prompt.contains("Blocker"), "got: {prompt}");
@@ -28665,7 +28748,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         let column_of = |label: &str, first_value_word: &str| {
             let line = prompt
                 .lines()
@@ -28700,7 +28783,8 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
         let role = "[the project's prompt]";
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, role).unwrap();
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, role, false).unwrap();
         let words = prompt.replace(role, "").split_whitespace().count();
         assert!(words < 480, "got {words} words:\n{prompt}");
     }
@@ -28718,7 +28802,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         assert!(!prompt.contains("\n\n\n"), "got: {prompt}");
     }
 
@@ -28738,7 +28822,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", crate::pipeline::BLOCKED));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         assert!(prompt.contains("--pause"), "got: {prompt}");
         assert!(
             !prompt.contains("--fail  -m"),
@@ -28757,7 +28841,8 @@ mod tests {
 
         let implement = pipeline.step("implement").unwrap();
         let elsewhere =
-            crate::compose::system_prompt(&repo, &task, pipeline, implement, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, implement, "[prompt]", false)
+                .unwrap();
         assert!(
             !elsewhere.contains("--pause"),
             "no other step offers --pause: got: {elsewhere}"
@@ -28785,7 +28870,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "review"));
 
         let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]", false).unwrap();
         assert!(prompt.contains("--fail  -m"), "got: {prompt}");
         assert!(
             !prompt.contains("not available to you"),
@@ -28833,9 +28918,15 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.arrived_from = Some("review".to_string());
 
-        let system_prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[the project's prompt]")
-                .unwrap();
+        let system_prompt = crate::compose::system_prompt(
+            &repo,
+            &task,
+            pipeline,
+            step,
+            "[the project's prompt]",
+            false,
+        )
+        .unwrap();
         let typed = crate::compose::carry_prompt(&task, pipeline);
 
         assert!(system_prompt.contains("Fix pass"), "{system_prompt}");

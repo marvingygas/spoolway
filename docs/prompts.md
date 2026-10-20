@@ -124,8 +124,12 @@ The system prompt opens with the step and the task, then nine rules:
   to another step than resuming would, the lane tells them to press `r` on its row and pick the
   step.
 
-A `blocked` step gets a different first rule — its remit is the run, not one task's step, and it
-lacks the "another step's" sentence — and a `READING THE RUN` block naming
+A `blocked` step gets a different first rule: its remit is the run, not one task's step, and it
+lacks the "another step's" sentence. Two rules follow it. The first says that whatever stands
+between the task and its next step is the lane's to clear: the code, the tests, a rebase, a red
+check, a missing tool, or a choice the task or the code already settles. Another step's work is
+the lane's too. The second says the prompt's `## Never` list still holds. A `blocked` step also
+gets a `READING THE RUN` block naming
 `spoolway queue list`, `spoolway queue show`, `spoolway lane`, `spoolway prompt show <name>` and
 `spoolway resume`.
 
@@ -154,7 +158,7 @@ It prints seven sections:
 | 3 | The message typed into its pane | Eight states: `opening`, `restart` and six more. Each shows one sentence naming the task file. `restart` adds a paragraph saying an earlier attempt's changes are still in the worktree. A step with `skills:` shows one message per skill first, then that briefing, each labelled `message N of M`, for `opening` and `restart` alike |
 | 4 | The environment every lane has, and never reads | The table below, with a note that these variables are set for the lane's own tooling and that a prompt naming one only runs under spoolway. A closing note says what a role needs is in the task file whose path section 3 names |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
-| 6 | How a lane finishes | The forms this step may use, each with a sentence saying what reporting it claims. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass`, `--pass --stage <step>` and `--pause`. Off `blocked`, a step that leaves out `--fail` prints no refusal for it — `commands::report` already refuses `--stage` by name on every other step, so `blocked`'s own forms are what teach a lane the flag exists. A step with nothing left to withhold prints no "not available to you" block at all. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is. On `blocked`, that line and the `--stage` form's own "never one past `<step>`" clause both ask the step this pass stands in for, never `blocked` itself, which no pipeline may gate |
+| 6 | How a lane finishes | The forms this step may use, each with a sentence saying what reporting it claims. `--block` has two texts. In an attended run it says the block goes up to a person or a stronger agent, and asks the lane to name what a person must do. In an unattended run it says an unblocker lane picks it up next, and asks only for what the lane tried and what stopped it. A launch takes the mode of the run that starts the lane, and a reminder the mode of the run that sends it. `spoolway prompt contract` renders sections 2, 3 and 6 for the mode `unattended.enabled` sets in `config.toml`, and names that mode above section 6. `--pause`, on `blocked`, ends with two sentences telling the unblocker that a blocker naming what a person must do is the stuck lane's view, not a finding, and to check it before it pauses. Both modes get them. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass`, `--pass --stage <step>` and `--pause`. Off `blocked`, a step that leaves out `--fail` prints no refusal for it — `commands::report` already refuses `--stage` by name on every other step, so `blocked`'s own forms are what teach a lane the flag exists. A step with nothing left to withhold prints no "not available to you" block at all. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is. On `blocked`, that line and the `--stage` form's own "never one past `<step>`" clause both ask the step this pass stands in for, never `blocked` itself, which no pipeline may gate |
 | 7 | The shape to write | The headings below, then what a prompt may never restate, the ban on examples, and the ban on sentences defending a rule |
 
 | Variable | What it is |

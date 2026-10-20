@@ -199,16 +199,26 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
         }
     }
 
+    // The mode `unattended.enabled` sets, on purpose and not the mode of a
+    // dispatcher that happens to be running: `Repo::unattended` would read a
+    // live run's own mode from its lock, and the same command would then
+    // print different text depending on whether one is up. A lane launched
+    // by `dispatch --unattended` or `--attended` against a different
+    // setting reads the other `--block` text, so the mode is named below.
+    let unattended = repo.config.unattended.enabled;
+    let mode = if unattended { "unattended" } else { "attended" };
+
     println!();
     println!("2  THE SYSTEM PROMPT THIS LANE IS STARTED WITH");
     if sampled {
         println!("   Rendered against a sample task — pass `--task <id>` for a real one.");
     } else {
         println!(
-            "   Rendered for task `{}`, exactly as its lane received it.",
+            "   Rendered for task `{}`, as a lane in an {mode} run receives it.",
             task.id()
         );
     }
+    println!("   The mode is the one `unattended.enabled` in config.toml sets.");
     println!("   spoolway's framing, then the prompt above verbatim, then this pass's policy.");
     println!("   Only the middle section is yours — do not restate the rest of it.");
     println!();
@@ -222,7 +232,9 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
             missing_prompt_fix(step.prompt_name())
         )
     });
-    for line in crate::compose::system_prompt(repo, &task, pipeline, step, &prompt)?.lines() {
+    for line in
+        crate::compose::system_prompt(repo, &task, pipeline, step, &prompt, unattended)?.lines()
+    {
         println!("   | {line}");
     }
 
@@ -236,7 +248,8 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     for state in crate::compose::STATES {
         println!();
         println!("   This is `{state}`:");
-        let messages = crate::compose::lane_prompt_for_state(&task, pipeline, step, state);
+        let messages =
+            crate::compose::lane_prompt_for_state(&task, pipeline, step, state, unattended);
         for (i, message) in messages.iter().enumerate() {
             if messages.len() > 1 {
                 let when = match i {
@@ -288,7 +301,19 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // `crate::compose::report_contract` for why `blocked` keeps two forms,
     // and why every other step offers `--fail` only when it routes
     // somewhere `--block` does not.
-    for line in crate::compose::report_contract(&task, pipeline, step).lines() {
+    // `blocked` offers no `--block`, so the sentence about its text would
+    // point at a form section 6 does not show.
+    match step.id == crate::pipeline::BLOCKED {
+        true => {
+            println!("   Rendered for {mode} runs, as `unattended.enabled` in config.toml sets it.")
+        }
+        false => println!(
+            "   Rendered for {mode} runs, as `unattended.enabled` in config.toml sets it. The \
+             --block text differs by mode."
+        ),
+    }
+    println!();
+    for line in crate::compose::report_contract(&task, pipeline, step, unattended).lines() {
         println!("   {line}");
     }
     println!();
