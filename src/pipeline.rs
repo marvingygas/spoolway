@@ -1180,7 +1180,7 @@ fn background_on_fail_message(step_id: &str) -> String {
 
 /// A step still declaring the retired `headless:`, the old spelling of
 /// `hide: true`. `scripts/e2e/suites/upgrade.sh` greps this wording too.
-fn headless_message(step_id: &str) -> String {
+pub(crate) fn headless_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` declares `headless:` — the key is now `hide:`; run `spoolway sync` \
          to rename it, or write `hide: true` in its place."

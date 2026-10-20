@@ -450,7 +450,7 @@ on Unix, whether or not its text changed.
 | A prompt, task skeleton, document skeleton or hook script | The shipped file, whole. |
 | A project skill file, such as `.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. |
 | A user-level skill file, such as `~/.claude/skills/spoolway-plan/SKILL.md` | The shipped file, whole. The path may start with `~` or be absolute. |
-| A pipeline file | The shipped key block. Every other line stays. |
+| A pipeline file | The shipped key block, and `hide:` in place of any step's `headless:`. Every other line stays. |
 | `.spoolway/config.toml` | The file as `sync` rewrites it. Your values stay. |
 
 `spoolway doctor` reports files that are behind, and lists each refused file on its own line.

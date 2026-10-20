@@ -423,7 +423,10 @@ the private patches under `overrides/pipelines/`, and prints a `wrote` line for 
 note naming the pipeline and its steps. It changes no other line. This is the one edit `sync` makes
 to a step. A step that carries both `headless:` and `hide:` cannot be renamed without losing one
 of them, so `sync` refuses that file, names the step and leaves the file as it was. Keep only
-`hide:` there and run `sync` again.
+`hide:` there and run `sync` again. A file whose key block `sync` refuses as hand-edited is not
+renamed either; `spoolway sync --replace <file>`, which that refusal names, swaps the block and
+makes the rename together. A step written in flow style, such as `- {id: a, headless: true}`, is
+not renamed, and `sync` refuses its file with a note to write `hide:` there by hand.
 
 A shown command behaves the same whichever setting showed it. The pane stays open after the
 command exits, counts toward `dispatch.visible_lanes`, and closes with the task or when the limit

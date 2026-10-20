@@ -1833,6 +1833,9 @@ enum Scope {
     Whole,
     /// A pipeline file's fenced key block. Every other line is kept.
     KeyBlock,
+    /// The key block, and `headless:` renamed to `hide:` on the steps that
+    /// had it. Every other line is kept.
+    KeyBlockRenamed,
     /// `config.toml`, rewritten as `sync` does: values kept, the table and
     /// comments spoolway's.
     Config,
@@ -1843,7 +1846,7 @@ impl Scope {
     fn dry_run(self, discarded: usize) -> String {
         match self {
             Scope::Whole => format!("whole file, discarding {discarded} line(s)"),
-            Scope::KeyBlock | Scope::Config => self.wrote().to_string(),
+            Scope::KeyBlock | Scope::KeyBlockRenamed | Scope::Config => self.wrote().to_string(),
         }
     }
 
@@ -1852,6 +1855,9 @@ impl Scope {
         match self {
             Scope::Whole => "whole file, discarding your changes",
             Scope::KeyBlock => "key block only, every other line kept",
+            Scope::KeyBlockRenamed => {
+                "key block, and `headless:` renamed to `hide:`; every other line kept"
+            }
             Scope::Config => "rewritten as sync does, your values kept",
         }
     }
@@ -1901,9 +1907,8 @@ fn replacement_for(
             .extension()
             .is_some_and(|ext| ext == "yml" || ext == "yaml");
     if in_pipelines {
-        return crate::pipeline::KEY_BLOCK
+        let swapped = crate::pipeline::KEY_BLOCK
             .replace(on_disk, crate::pipeline::key_block())
-            .map(|next| (next, Scope::KeyBlock))
             .ok_or_else(|| {
                 format!(
                     "it has no key block to swap, so spoolway has no place in it to write; paste \
@@ -1911,7 +1916,15 @@ fn replacement_for(
                     crate::assets::PIPELINE_KEYS_BEGIN,
                     crate::assets::PIPELINE_KEYS_END
                 )
-            });
+            })?;
+        // A plain `sync` refuses a hand-edited key block before it renames
+        // anything, and names this command as the way on. So this command
+        // makes the rename too, or the file would still not load after it.
+        return match rename_headless(&swapped, Layout::Steps) {
+            Renamed::Nothing => Ok((swapped, Scope::KeyBlock)),
+            Renamed::Done { text, .. } => Ok((text, Scope::KeyBlockRenamed)),
+            Renamed::Refused(ids) => Err(both_keys_refusal(&ids)),
+        };
     }
 
     Err("not a file spoolway ships, so there is nothing to replace it with".to_string())
@@ -2366,7 +2379,8 @@ fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
 ///   binary does, so nothing in it is a project's to have meant. One that
 ///   matches no shipped copy was written by a newer spoolway or edited by hand,
 ///   so it is refused, naming the file and `spoolway sync --replace <path>`,
-///   which swaps only the block and keeps every other line.
+///   which swaps the block, renames `headless:` as below, and keeps every
+///   other line.
 /// - A file with no markers is never written, and is reported only by the
 ///   check below. Writing a block into a pipeline somebody wrote themselves
 ///   would be this command helping, which is the one thing it must never do.
@@ -2464,7 +2478,23 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         if let Ok(pipeline) =
             serde_norway::from_str::<crate::pipeline::Pipeline>(crate::task::without_bom(&on_disk))
         {
-            let problems = pipeline.retired_shape_problems();
+            // A `headless:` still here after the rename sits on a line it
+            // cannot read, a flow-style step: telling the person to run
+            // `sync` again would send them round in a circle.
+            let problems: Vec<String> = pipeline
+                .retired_shape_problems()
+                .into_iter()
+                .map(|problem| {
+                    pipeline
+                        .steps
+                        .iter()
+                        .find(|step| {
+                            step.headless.is_some()
+                                && problem == crate::pipeline::headless_message(&step.id)
+                        })
+                        .map_or(problem.clone(), |step| unrenamed_message(&step.id))
+                })
+                .collect();
             if !problems.is_empty() {
                 outcomes.push(Outcome::blocked(
                     &shown,
@@ -2588,6 +2618,15 @@ fn rename_note(shown: &str, pipeline: &str, ids: &[String]) -> Outcome {
         shown,
         format!("migrated: {pipeline}: `headless:` renamed to `hide:` on {word} {listed}"),
         format!("migrated: headless renamed to hide on {word} {listed}"),
+    )
+}
+
+/// Why `sync` still refuses a file whose `headless:` it could not rename:
+/// the key is on a flow-style step, which [`rename_headless`] does not read.
+fn unrenamed_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` declares `headless:` where `sync` cannot rename it, in a flow-style \
+         step; write `hide:` in its place."
     )
 }
 
@@ -5513,6 +5552,98 @@ mod tests {
 
         assert!(why.contains(crate::assets::PIPELINE_KEYS_BEGIN), "{why}");
         assert!(why.contains(crate::assets::PIPELINE_KEYS_END), "{why}");
+    }
+
+    /// A plain `sync` refuses a hand-edited key block before it renames
+    /// anything, and names `--replace` as the way on. That command makes the
+    /// rename too, so the file loads after it, and a plain `sync` then has
+    /// nothing left to do.
+    #[test]
+    fn replace_renames_headless_in_a_pipeline_whose_key_block_was_edited() {
+        let (repo, _root_guard) = fixture("replace-pipeline-headless");
+        let edited = crate::pipeline::key_block().replace("Absent: 30m.", "Absent: forever.");
+        let path = pipeline_file(&repo, "default", &edited);
+        let before = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("    run: x\n", "    run: x\n    headless: true\n");
+        std::fs::write(&path, &before).unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert!(refused[0].1.contains("--replace"), "{refused:?}");
+
+        let (shipped, scope) = replacement_for(&repo, &path, &before).unwrap();
+        assert!(matches!(scope, Scope::KeyBlockRenamed));
+        assert_eq!(
+            shipped,
+            before
+                .replace("Absent: forever.", "Absent: 30m.")
+                .replace("    headless: true\n", "    hide: true\n")
+        );
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/pipelines/default.yml".to_string()],
+                ..args()
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), shipped);
+
+        let mut again = Vec::new();
+        pipelines(&repo, &args(), &mut again).unwrap();
+        assert!(refusals(&again).is_empty(), "{:?}", outcome_lines(&again));
+        assert!(
+            dedup_paths(&again).0.is_empty(),
+            "{:?}",
+            outcome_lines(&again)
+        );
+    }
+
+    /// `--replace` on a pipeline with `headless:` and `hide:` on one step
+    /// refuses as a plain `sync` does, naming the step, and writes nothing.
+    #[test]
+    fn replace_refuses_a_step_with_both_headless_and_hide() {
+        let (repo, _root_guard) = fixture("replace-pipeline-both-keys");
+        let path = pipeline_file(&repo, "default", crate::pipeline::key_block());
+        let before = std::fs::read_to_string(&path).unwrap().replace(
+            "    run: x\n",
+            "    run: x\n    headless: true\n    hide: true\n",
+        );
+
+        let why = replacement_for(&repo, &path, &before)
+            .err()
+            .expect("refused");
+        assert!(why.contains("step `work` declares both"), "{why}");
+    }
+
+    /// A `headless:` on a flow-style step is one the renamer cannot reach.
+    /// The file is still refused, and the reason says to write `hide:`, not
+    /// to run the `sync` that just failed to rename it.
+    #[test]
+    fn a_flow_style_headless_step_is_refused_without_naming_sync() {
+        let (repo, _root_guard) = fixture("pipeline-headless-flow");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.yml");
+        let before = "steps:\n  - {id: a, run: x, headless: true, on_pass: done}\n";
+        std::fs::write(&path, before).unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 1, "{:?}", outcome_lines(&outcomes));
+        assert!(
+            refused[0].1.contains("step `a` declares `headless:`"),
+            "{refused:?}"
+        );
+        assert!(refused[0].1.contains("write `hide:`"), "{refused:?}");
+        assert!(!refused[0].1.contains("spoolway sync"), "{refused:?}");
     }
 
     /// A blank `prompt_cache_ttl` on a row that holds another setting is kept
