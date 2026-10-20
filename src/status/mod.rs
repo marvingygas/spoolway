@@ -4461,6 +4461,16 @@ fn origin_step(task: &crate::task::Task, parked_on_blocked: bool) -> &str {
     origin.unwrap_or_else(|| task.stage())
 }
 
+/// What the next column says for a task whose worktree is being cut, and for
+/// how long that has gone on.
+fn cutting_line(ran: Duration) -> String {
+    format!(
+        "cutting worktree {} (stopped at {})",
+        crate::tracking::minutes(ran),
+        crate::tracking::minutes(crate::repo::GIT_HOOK_TIMEOUT),
+    )
+}
+
 /// The rows themselves, from state already read. Split out so the board can
 /// read the queue and the lane list once per frame and share both.
 ///
@@ -4666,10 +4676,15 @@ fn build_rows(
                         crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
                     )
                 });
-                match (hook, dependency) {
-                    (Some(hook), _) => (State::Queued, hook, false),
-                    (None, Some(d)) => (State::Queued, d, false),
-                    (None, None) => (
+                //
+                // So is a worktree cut still going: an agent step's task
+                // stays on `queued` for the whole cut, and the cut is what it
+                // waits on, not a worker slot.
+                match (hook, cutting, dependency) {
+                    (Some(hook), _, _) => (State::Queued, hook, false),
+                    (None, Some(ran), _) => (State::Starting, cutting_line(ran), false),
+                    (None, None, Some(d)) => (State::Queued, d, false),
+                    (None, None, None) => (
                         State::Queued,
                         "waiting for a worker slot to free up".to_string(),
                         false,
@@ -4802,11 +4817,7 @@ fn build_rows(
             // waits on it.
             Some(_) if cutting.is_some() => (
                 State::Starting,
-                format!(
-                    "cutting worktree {} (stopped at {})",
-                    crate::tracking::minutes(cutting.unwrap_or_default()),
-                    crate::tracking::minutes(crate::repo::GIT_HOOK_TIMEOUT),
-                ),
+                cutting_line(cutting.unwrap_or_default()),
                 false,
             ),
             Some(_) if serial_holder.is_some() => (
@@ -7899,15 +7910,30 @@ mod tests {
         let (repo, _root_guard) = fixture("cutting-row");
         add(&repo, "cutting-one", &[], Some("implement"));
         add(&repo, "idle-one", &["cutting-one"], Some("implement"));
+        // An agent step's task stays on `queued` while its worktree is cut.
+        add_to(&repo, "cutting-queued", &[], None, Some("other"));
         let runs = crate::command_step::Runs::new(&repo.cuts_dir());
-        let key = crate::command_step::Runs::key("cut", "cutting-one");
-        runs.start(&key, "sleep 60", &repo.root, &Default::default())
+        for id in ["cutting-one", "cutting-queued"] {
+            runs.start(
+                &crate::command_step::Runs::key("cut", id),
+                "sleep 60",
+                &repo.root,
+                &Default::default(),
+            )
             .unwrap();
+        }
 
         let rows = rows(&repo, &Pipelines::builtin()).unwrap();
-        runs.stop(&key);
+        for id in ["cutting-one", "cutting-queued"] {
+            runs.stop(&crate::command_step::Runs::key("cut", id));
+        }
 
         let next = |id: &str| rows.iter().find(|r| r.id == id).unwrap().next.clone();
+        assert!(
+            next("cutting-queued").starts_with("cutting worktree"),
+            "{}",
+            next("cutting-queued")
+        );
         assert!(
             next("cutting-one").starts_with("cutting worktree"),
             "{}",

@@ -1485,6 +1485,21 @@ impl<'a> Dispatcher<'a> {
         crate::task::sweep_stale_tmp(&self.repo.queue_dir());
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
 
+        // A worktree cut past its limit is stopped here, for every task and
+        // before any of them is visited: a task that cannot get a worker slot
+        // this pass, or that a person has paused, is not visited, and its
+        // hung hook would otherwise run on past the limit.
+        for task in &tasks {
+            let branch = task
+                .front
+                .branch
+                .clone()
+                .unwrap_or_else(|| crate::task::default_branch(task.id()));
+            if let Some(path) = self.mux.cut_path(&branch) {
+                crate::cut::stop_if_overdue(self.repo, task.id(), &path, &branch);
+            }
+        }
+
         // Every task's own stage, before this pass moves anything — compared
         // against the same tasks' stages once the pass is done, to answer
         // `Report::moved` below. `tasks` keeps its length and order for the
@@ -24117,6 +24132,63 @@ mod tests {
         crate::command_step::Runs::new(&repo.cuts_dir())
             .stop(&crate::command_step::Runs::key("cut", "hung"));
         std::fs::remove_dir_all(other.front.worktree_path.clone().unwrap()).ok();
+    }
+
+    /// A hung cut is stopped at its limit by the pass itself, even for a task
+    /// that pass does not start, and the stop is a failed launch the task is
+    /// charged for when it is next looked at.
+    #[test]
+    fn a_pass_stops_a_cut_past_its_limit_for_a_task_it_does_not_start() {
+        let (repo, _root_guard) = fixture("overdue-cut-sweep");
+        let ran = hang_in_checkout_of_hung(&repo);
+        let hung_path = add_task_with(&repo, "hung", "implement", |_| {});
+        let mux = FakeMux::new(vec![]).cutting_beside_the_pass(repo.worktree_root());
+        let mut hung = reload(&hung_path);
+        let err = ensure_workspace(&repo, &mux, &mut hung, &mut Default::default()).unwrap_err();
+        assert!(err.downcast_ref::<crate::cut::CutPending>().is_some());
+        assert!(crate::cut::running(&repo, "hung").is_some());
+        // The task is parked, so the pass never reaches its checkout: only
+        // the sweep over every task's cut can stop this one.
+        let mut parked = reload(&hung_path);
+        parked.set_stage(crate::pipeline::BLOCKED, None);
+        parked.save().unwrap();
+        // The run's start is the pid file's own timestamp: move it back past
+        // the limit instead of waiting the limit out.
+        let runs = crate::command_step::Runs::new(&repo.cuts_dir());
+        let pid_file = runs
+            .log_path(&crate::command_step::Runs::key("cut", "hung"))
+            .with_extension("pid");
+        let started =
+            std::time::SystemTime::now() - crate::repo::GIT_HOOK_TIMEOUT - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&pid_file)
+            .unwrap()
+            .set_modified(started)
+            .unwrap();
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            crate::cut::running(&repo, "hung"),
+            None,
+            "the pass left a cut past its limit running"
+        );
+        let mut again = reload(&hung_path);
+        again.set_stage("implement", None);
+        let err = ensure_workspace(&repo, &mux, &mut again, &mut Default::default()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            err.downcast_ref::<crate::cut::CutPending>().is_none()
+                && text.contains("could not cut a worktree for `task/hung`")
+                && text.contains("was stopped after"),
+            "the stop was not the next visit's failed launch: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ran).unwrap().lines().count(),
+            1,
+            "the cut was started again instead of reporting the stop"
+        );
     }
 
     /// A cut that fails is a failed launch the caller counts, and the next

@@ -31,12 +31,18 @@
 //! - It is still going at [`crate::repo::GIT_HOOK_TIMEOUT`]: the run's whole
 //!   process group is stopped, so the hook and everything it started go with
 //!   it, the half checkout is taken away, and that is a failed launch too.
+//!   The stop happens in [`stop_if_overdue`], which every pass runs over all
+//!   the project's cuts, so a task that is not visited this pass — one that
+//!   cannot get a worker slot, or that a person paused — does not hold a hung
+//!   hook past its limit. The stop leaves its error in a note beside the run,
+//!   and the next visit to the task reads it as that launch's failure.
 //!
 //! A run that vanished without an exit code is not a verdict. The machine went
-//! down, or something killed the wrapper, so the half checkout is cleaned up
+//! down, or something killed the wrapper, so what it left running is stopped
 //! and the cut starts again without spending a launch attempt — up to
 //! [`MAX_CUT_KILLS`] times in a row, so a cut something kills every time is
-//! still a failure in the end.
+//! still a failure in the end. The folder it may have left behind is cleared
+//! by [`begin`], or adopted by the caller when git had finished writing it.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -117,6 +123,20 @@ fn made_note(runs: &Runs, key: &str) -> std::path::PathBuf {
     runs.log_path(key).with_extension("made")
 }
 
+/// The note kept beside a run holding the `git worktree add` it runs, as it is
+/// shown in an error.
+fn shown_note(runs: &Runs, key: &str) -> std::path::PathBuf {
+    runs.log_path(key).with_extension("shown")
+}
+
+/// The note a stop leaves beside the run it stopped, holding the error the
+/// task's next visit reports. Read before the run's exit code, because a hook
+/// that caught the signal and exited `0` would otherwise read as a cut that
+/// finished.
+fn stopped_note(runs: &Runs, key: &str) -> std::path::PathBuf {
+    runs.log_path(key).with_extension("stopped")
+}
+
 /// How long this task's cut has been going, when one is.
 pub(crate) fn running(repo: &Repo, task_id: &str) -> Option<Duration> {
     let runs = runs(repo);
@@ -144,22 +164,27 @@ fn poll_within(
 ) -> Result<Poll> {
     let runs = runs(repo);
     let key = key(task_id);
-    match runs.state(&key) {
+    // A cut past its limit is stopped first, if the pass's sweep has not
+    // already. Once a stop has left its note, that error is this poll's
+    // answer, whatever the run's files now say.
+    stop_if_overdue_within(repo, task_id, path, branch, limit);
+    let state = runs.state(&key);
+    if state != RunState::Running
+        && let Some(stopped) = take_stopped(&runs, &key)
+    {
+        return Err(stopped);
+    }
+    match state {
         RunState::Fresh => Ok(Poll::Idle),
-        RunState::Running => {
-            let ran = runs.elapsed(&key).unwrap_or_default();
-            if ran < limit {
-                return Err(CutPending {
-                    task: task_id.to_string(),
-                    ran,
-                }
-                .into());
-            }
-            Err(stop_overdue(repo, &runs, &key, path, branch, limit))
+        RunState::Running => Err(CutPending {
+            task: task_id.to_string(),
+            ran: runs.elapsed(&key).unwrap_or_default(),
         }
+        .into()),
         RunState::Exited(0) => {
             let _ = std::fs::remove_file(fetch_note(&runs, &key));
             let _ = std::fs::remove_file(made_note(&runs, &key));
+            let _ = std::fs::remove_file(shown_note(&runs, &key));
             runs.forget(&key)?;
             // `git worktree add` can only exit `0` with the checkout in
             // place. Checked all the same, because the next step opens a
@@ -181,6 +206,7 @@ fn poll_within(
             let said = failure_text(&runs, &key);
             let _ = std::fs::remove_file(fetch_note(&runs, &key));
             let _ = std::fs::remove_file(made_note(&runs, &key));
+            let _ = std::fs::remove_file(shown_note(&runs, &key));
             runs.forget(&key)?;
             Err(anyhow::anyhow!(crate::mux::cut_failure(
                 &format!(
@@ -223,37 +249,65 @@ fn failure_text(runs: &Runs, key: &str) -> String {
     }
 }
 
-/// A cut still going at its limit: stop its whole process group, take the half
-/// checkout away, and say so. The error is a failed launch like any other, so
-/// the task is tried again on a later pass and blocked on the third.
-fn stop_overdue(
-    repo: &Repo,
-    runs: &Runs,
-    key: &str,
-    path: &Path,
-    branch: &str,
-    limit: Duration,
-) -> anyhow::Error {
+/// Stop the task's cut if it is still going at its limit. Does nothing for a
+/// cut that is under it, finished, or not there.
+///
+/// Called for every task in each pass, and again by [`poll`]: a cut must not
+/// outlive its limit because its task was not visited.
+pub(crate) fn stop_if_overdue(repo: &Repo, task_id: &str, path: &Path, branch: &str) {
+    stop_if_overdue_within(repo, task_id, path, branch, crate::repo::GIT_HOOK_TIMEOUT)
+}
+
+fn stop_if_overdue_within(repo: &Repo, task_id: &str, path: &Path, branch: &str, limit: Duration) {
+    let runs = runs(repo);
+    let key = key(task_id);
+    if runs.state(&key) != RunState::Running || stopped_note(&runs, &key).exists() {
+        return;
+    }
+    if runs.elapsed(&key).unwrap_or_default() < limit {
+        return;
+    }
     // Looked at before the group is signalled: the hook is gone afterwards.
     let seen = runs
-        .read_pid(key)
+        .read_pid(&key)
         .and_then(|group| crate::repo::running_hook_name(&repo.root, group, &["post-checkout"]));
-    let made = made_note(runs, key).exists();
-    let _ = std::fs::remove_file(fetch_note(runs, key));
-    let _ = std::fs::remove_file(made_note(runs, key));
-    // `stop` signals the group and clears the files, and the name is read
-    // first. A run that cannot be cleared is still stopped.
-    runs.stop(key);
-    let stopped = crate::repo::hook_stopped_message(
-        &format!("git worktree add {}", path.display()),
-        limit,
-        seen,
-        &["post-checkout"],
-    );
-    match crate::mux::undo_stopped_cut(&repo.root, path, branch, !made, &stopped) {
-        Ok(()) => anyhow::anyhow!(stopped),
-        Err(removal) => removal,
+    let made = made_note(&runs, &key).exists();
+    let base = std::fs::read_to_string(fetch_note(&runs, &key)).ok();
+    let shown = std::fs::read_to_string(shown_note(&runs, &key))
+        .unwrap_or_else(|_| format!("git worktree add {}", path.display()));
+    runs.stop_the_group(&key);
+    let stopped = crate::repo::hook_stopped_message(&shown, limit, seen, &["post-checkout"]);
+    // The text is built as the synchronous cut built it: the stop with the
+    // cut's context in front, or, when the half checkout could not be taken
+    // away, the removal's own message alone with the command to run by hand.
+    let text = match crate::mux::undo_stopped_cut(&repo.root, path, branch, !made, &stopped) {
+        Ok(()) => format!(
+            "{}: {stopped}",
+            crate::mux::cut_failure(
+                &format!(
+                    "could not cut a worktree for `{branch}` at {}",
+                    path.display()
+                ),
+                base.as_deref().unwrap_or_default(),
+                base.is_some(),
+            )
+        ),
+        Err(removal) => format!("{removal:#}"),
+    };
+    // Nothing to do if the note cannot be written: the run then reads as
+    // vanished and the cut starts again, which is the stop's own cost.
+    let _ = std::fs::write(stopped_note(&runs, &key), text);
+}
+
+/// The error a stop left for the task's next visit, read once: the run, its
+/// notes and its log are cleared, so the visit after starts clean.
+fn take_stopped(runs: &Runs, key: &str) -> Option<anyhow::Error> {
+    let text = std::fs::read_to_string(stopped_note(runs, key)).ok()?;
+    for note in [stopped_note, fetch_note, made_note, shown_note] {
+        let _ = std::fs::remove_file(note(runs, key));
     }
+    let _ = runs.forget(key);
+    Some(anyhow::anyhow!(text))
 }
 
 /// Start the cut and give it [`QUICK_CUT`] to finish.
@@ -308,6 +362,10 @@ fn begin_within(
     if !command.branch_existed {
         let _ = std::fs::write(made_note(&runs, &key), "");
     }
+    let _ = std::fs::write(
+        shown_note(&runs, &key),
+        format!("git {}", command.args.join(" ")),
+    );
     let line = std::iter::once("git".to_string())
         .chain(command.args.iter().map(|a| crate::platform::quote(a)))
         .collect::<Vec<_>>()
@@ -530,7 +588,16 @@ mod tests {
 
         let err = poll_within(&repo, "t1", &path, "task/t1", Duration::ZERO).unwrap_err();
 
-        assert!(format!("{err:#}").contains("post-checkout"), "{err:#}");
+        let text = format!("{err:#}");
+        assert!(text.contains("post-checkout"), "{text}");
+        assert!(
+            text.starts_with("could not cut a worktree for `task/t1` at "),
+            "{text}"
+        );
+        assert!(
+            text.contains("`git worktree add --no-track -b task/t1 "),
+            "{text}"
+        );
         let child: u32 = std::fs::read_to_string(&child)
             .unwrap()
             .trim()
@@ -554,6 +621,56 @@ mod tests {
         assert_eq!(
             poll_within(&repo, "t1", &path, "task/t1", Duration::ZERO).unwrap(),
             Poll::Idle
+        );
+    }
+
+    /// A stop does not need its task to be visited: the sweep stops the cut
+    /// at its limit, and the visit that comes later reads the stop as the
+    /// failed launch it is, instead of finding nothing and cutting again with
+    /// no strike spent.
+    #[test]
+    fn a_cut_stopped_by_the_sweep_is_a_failure_for_the_next_visit() {
+        let (repo, _guard) = fixture("swept");
+        let child = repo.root.join("child.pid");
+        hook(
+            &repo,
+            &format!(
+                "trap 'exit 0' TERM; sleep 300 & echo $! >'{}'; wait",
+                child.display()
+            ),
+        );
+        let path = target(&repo);
+        let _ = begin_within(
+            &repo,
+            "t1",
+            &path,
+            "task/t1",
+            "main",
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        );
+        let began = Instant::now();
+        while !child.exists() {
+            assert!(began.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        stop_if_overdue_within(&repo, "t1", &path, "task/t1", Duration::ZERO);
+
+        assert_eq!(
+            running(&repo, "t1"),
+            None,
+            "the stopped cut still reads as going"
+        );
+        let err = poll_within(&repo, "t1", &path, "task/t1", Duration::from_secs(60))
+            .expect_err("a hook that exited 0 after the stop was read as a finished cut");
+        let text = format!("{err:#}");
+        assert!(text.contains("was stopped after"), "{text}");
+        assert!(!path.exists(), "the half checkout was left standing");
+        assert_eq!(
+            poll_within(&repo, "t1", &path, "task/t1", Duration::from_secs(60)).unwrap(),
+            Poll::Idle,
+            "the stop was reported twice"
         );
     }
 
