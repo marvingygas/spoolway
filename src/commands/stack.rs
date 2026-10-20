@@ -159,6 +159,22 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
             )
         })?;
 
+    // A dependent cut before its dependency was closed with nothing to hand
+    // over still records that dependency's branch, which was never pushed and
+    // never will be. Its pull request opens against the dependency's own base
+    // instead, the one a dependent cut afterwards is given at the cut. Only a
+    // `starts_from` that is that very branch is swapped: a person who pointed
+    // it elsewhere keeps their choice.
+    let starts_from = match task.front.depends_on.first() {
+        Some(dep_id)
+            if repo.closed_dependency_base(dep_id).is_some()
+                && repo.dependency_own_branch(dep_id).ok().as_ref() == Some(&starts_from) =>
+        {
+            repo.closed_dependency_base(dep_id).unwrap_or(starts_from)
+        }
+        _ => starts_from,
+    };
+
     // A dependency's branch was published by its own handover, and this
     // checkout may predate that, so a fetch runs before anything looks at
     // what this branch sits on. Best-effort: a fetch that fails (no remote,
@@ -984,6 +1000,15 @@ fn register_stack(
     let Some(dep_id) = depends_on.first() else {
         return Ok("none — foot of stack".to_string());
     };
+    // A dependency closed with nothing to hand over has no pull request and
+    // never will, so there is nothing to stack onto. This pull request opens
+    // against that dependency's own base, and stands alone.
+    if let Some(base) = repo.closed_dependency_base(dep_id) {
+        return Ok(format!(
+            "none — dependency `{dep_id}` closed without a pull request, so `{id}` stands on \
+             `{base}`"
+        ));
+    }
     let gh = gh_program();
     let (owner, repo_name) = owner_repo(worktree)?;
 

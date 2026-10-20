@@ -1031,7 +1031,21 @@ impl Repo {
     /// on to a cut that then fails over a ref nobody can place. A file that
     /// is *gone* is different: the branch may well still be there, and it is
     /// asked for by its default name before this gives up — see the body.
+    ///
+    /// A dependency closed with nothing to hand over hands its own base on
+    /// instead — see [`Repo::closed_dependency_base`].
     pub fn dependency_branch(&self, dep_id: &str) -> Result<String> {
+        match self.closed_dependency_base(dep_id) {
+            Some(base) => Ok(base),
+            None => self.dependency_own_branch(dep_id),
+        }
+    }
+
+    /// The branch `dep_id`'s own work lives on, whether or not it was ever
+    /// pushed. [`Repo::dependency_branch`] without the carve-out for a
+    /// dependency closed with nothing to hand over; see its docs for the
+    /// failures.
+    pub fn dependency_own_branch(&self, dep_id: &str) -> Result<String> {
         let file = format!("{dep_id}.md");
         let on_disk = [self.queue_dir(), self.archive_dir()]
             .iter()
@@ -1073,6 +1087,36 @@ impl Repo {
             .branch
             .clone()
             .unwrap_or_else(|| task::default_branch(dep_id)))
+    }
+
+    /// The branch to start from and open against in place of `dep_id`'s own,
+    /// when `dep_id` was closed with nothing to hand over: the base that task
+    /// itself was queued against. `None` for every other dependency.
+    ///
+    /// `resume --stage done` closes a task that has nothing to hand over, and
+    /// its dependents go on. Its branch was never pushed and no pull request
+    /// will ever open from it, so a dependent that kept it as a base would
+    /// be cut from a branch nobody can fetch and, under `stack`, fail its
+    /// handover on every resume.
+    ///
+    /// "Closed with nothing to hand over" is read from the archive alone: the
+    /// task is there at `done` and its recorded patch is empty, so no pull
+    /// request could have been opened from it. A task still in the queue is
+    /// not handed over *yet*, and one archived with commits or with no patch
+    /// recorded (a borrowed checkout, or one archived before patches were
+    /// measured) may well have had a pull request, so it keeps its branch as
+    /// the base.
+    pub fn closed_dependency_base(&self, dep_id: &str) -> Option<String> {
+        let file = format!("{dep_id}.md");
+        if self.queue_dir().join(&file).exists() || !self.archive_dir().join(&file).exists() {
+            return None;
+        }
+        let dep = self.task(dep_id).ok()?;
+        let empty = dep.front.patch.is_some_and(|patch| patch.files == 0);
+        if dep.front.stage != crate::pipeline::DONE || !empty {
+            return None;
+        }
+        dep.front.base.clone()
     }
 
     /// The branch this checkout is on.
@@ -5438,6 +5482,38 @@ mod tests {
             &work,
             &["worktree", "remove", "--force", plan_y.to_str().unwrap()],
         );
+    }
+
+    /// A task closed with nothing to hand over never pushes its branch, so a
+    /// dependent is given the base that task was queued against. Anything
+    /// else keeps the dependency's own branch: a task still queued is not
+    /// handed over yet, and one archived with changes, or with no patch
+    /// recorded, may have had a pull request.
+    #[test]
+    fn only_a_dependency_closed_with_an_empty_patch_hands_its_base_on() {
+        let (_origin, work, _base_guard) = fixture("closed-dependency-base");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let write = |dir: &Path, id: &str, stage: &str, patch: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: {stage}\nbranch: task/{id}\nbase: main\n{patch}---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{id}.md")), doc).unwrap();
+        };
+        let empty = "patch:\n  files: 0\n  insertions: 0\n  deletions: 0\n";
+        let full = "patch:\n  files: 2\n  insertions: 9\n  deletions: 1\n";
+        write(&repo.archive_dir(), "noop", "done", empty);
+        write(&repo.archive_dir(), "shipped", "done", full);
+        write(&repo.archive_dir(), "unmeasured", "done", "");
+        write(&repo.queue_dir(), "waiting", "implement", empty);
+
+        assert_eq!(repo.closed_dependency_base("noop").as_deref(), Some("main"));
+        assert_eq!(repo.dependency_branch("noop").unwrap(), "main");
+        assert_eq!(repo.dependency_own_branch("noop").unwrap(), "task/noop");
+        for keeps in ["shipped", "unmeasured", "waiting", "nobody"] {
+            assert_eq!(repo.closed_dependency_base(keeps), None, "{keeps}");
+        }
+        assert_eq!(repo.dependency_branch("shipped").unwrap(), "task/shipped");
     }
 
     /// `retain` sweeps the archive by age with no regard for a queued

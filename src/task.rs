@@ -443,7 +443,8 @@ pub struct Frontmatter {
     /// The branch this task's worktree starts from: its own value when a
     /// person set one before the cut, else the first dependency's own branch
     /// when `depends_on` names one — read from that task's `branch:` field,
-    /// see [`crate::repo::Repo::dependency_branch`] — and `base` otherwise.
+    /// see [`crate::repo::Repo::dependency_branch`], or that task's own `base`
+    /// when it was closed with nothing to hand over — and `base` otherwise.
     /// Recorded separately from `base`, which keeps its own meaning — the
     /// branch the plan lands in — whether or not the two agree.
     ///

@@ -7004,7 +7004,9 @@ pub(crate) fn base_problem_when_unasked(
 pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 
 /// The branch an uncut `task` is cut from: its own `starts_from:`, else its
-/// first dependency's branch, else `base`.
+/// first dependency's branch, else `base`. A dependency closed with nothing to
+/// hand over counts as its own base here, not its branch — see
+/// [`Repo::closed_dependency_base`].
 ///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in

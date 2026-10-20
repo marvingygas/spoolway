@@ -224,7 +224,8 @@ pub(crate) fn situating(
 /// handing over the finished line is what actually gets it out.
 ///
 /// The diff and log read against `task.front.base` when there is no
-/// dependency, and against the first dependency's own branch when there is —
+/// dependency, and against the first dependency's own branch when there is
+/// (its own base, if it was closed with nothing to hand over) —
 /// read from that task's own `branch:` field through
 /// [`Repo::dependency_branch`], not `task.front.base` even then: `base` is
 /// only the queueing worktree's branch at the moment this task was added,

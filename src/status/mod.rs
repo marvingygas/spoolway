@@ -4169,6 +4169,22 @@ fn spool_turns(holder: Option<u32>, finishing: Option<usize>) -> bool {
     holder.is_some() || finishing.is_some_and(|n| n > 0)
 }
 
+/// The NEXT-column line for a queued task whose first dependency was closed
+/// with nothing to hand over: it is cut from, and opens against, that
+/// dependency's own base, and the row says so. `None` for any other task,
+/// including one whose `starts_from:` a person set, since that is the branch
+/// it uses whatever its dependency did.
+fn closed_dependency_note(repo: &Repo, task: &crate::task::Task) -> Option<String> {
+    if task.front.starts_from.is_some() {
+        return None;
+    }
+    let dep = task.front.depends_on.first()?;
+    let base = repo.closed_dependency_base(dep)?;
+    Some(format!(
+        "based on `{base}`: `{dep}` closed without a pull request"
+    ))
+}
+
 /// Where `task` goes once `step_id` passes, for the NEXT column of a row
 /// working that step — a running one, or a starting one whose boot mark
 /// names it.
@@ -4656,9 +4672,13 @@ fn build_rows(
                 match (hook, dependency) {
                     (Some(hook), _) => (State::Queued, hook, false),
                     (None, Some(d)) => (State::Queued, d, false),
+                    // Said once nothing else holds the task, which is when
+                    // its dependency has finished: the base it is cut from
+                    // and opens against is not the dependency's branch.
                     (None, None) => (
                         State::Queued,
-                        "waiting for a worker slot to free up".to_string(),
+                        closed_dependency_note(repo, task)
+                            .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
                         false,
                     ),
                 }
@@ -6823,6 +6843,45 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "release-publishing").unwrap();
         assert!(matches!(row.state, State::Paused));
         assert_eq!(row.next, "[r] → review");
+    }
+
+    /// A dependency archived at `done` with an empty patch was closed with
+    /// nothing to hand over, so the dependent's row says which base it is
+    /// cut from and why. One archived with a real patch keeps the ordinary
+    /// wait, since a pull request may have been opened from it.
+    #[test]
+    fn a_queued_row_names_the_base_a_closed_dependency_handed_on() {
+        let (repo, _root_guard) = fixture("closed-parent-note");
+        let pipelines = Pipelines::builtin();
+        for (dep, files) in [("a-noop", 0), ("a-work", 3)] {
+            add_to(&repo, dep, &[], Some("implement"), Some(dep));
+            let mut task = repo.task(dep).unwrap();
+            task.front.patch = Some(crate::task::Patch {
+                files,
+                insertions: files,
+                deletions: 0,
+            });
+            task.save().unwrap();
+            archive_on(&repo, dep, crate::pipeline::DONE);
+        }
+        // `a-work` pushed a branch; `a-noop` never had one, which queueing
+        // would refuse its dependent for if it started from it.
+        crate::repo::run(&repo.root, "git", &["branch", "task/a-work"]).unwrap();
+        add_to(&repo, "b-dep", &["a-noop"], None, Some("a-noop"));
+        add_to(&repo, "b-work", &["a-work"], None, Some("a-work"));
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+
+        assert_eq!(
+            row("b-dep").next,
+            "based on `group/demo`: `a-noop` closed without a pull request"
+        );
+        assert_eq!(
+            row("b-work").next,
+            "waiting for a worker slot to free up",
+            "a dependency closed with changes keeps its branch as the base"
+        );
     }
 
     /// A task the gate has ranked behind another group is not held by the
