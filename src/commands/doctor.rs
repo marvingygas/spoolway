@@ -273,6 +273,7 @@ pub(crate) fn cheap_findings(
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
+    report.record_all(stale_gate_checks(&tasks, pipelines));
     report.record_all(cheap_branch_checks(repo, &tasks));
     report.record_all(queue_id_checks(repo));
     report.record(mux_finding(&mux));
@@ -481,6 +482,7 @@ pub fn doctor(
     report.record_all(orphaned_home_note());
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
+    report.record_all(stale_gate_checks(&tasks, pipelines));
     report.record_all(queue_id_checks(repo));
     report.record_all(branch_and_forge_checks(
         repo,
@@ -2589,6 +2591,27 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             Some(Finding::Check(
                 format!("task template of pipeline `{}`", pipeline.name),
                 Err(anyhow::anyhow!("{problem}")),
+            ))
+        })
+        .collect()
+}
+
+/// One failed row for each task in the queue whose `gate_at:` names a step its
+/// pipeline lacks, except one already at `done`. The dispatcher parks such a
+/// task when it is still on `queued`; one past that, or already parked, is
+/// named here all the same, while the pipeline edit can still be undone.
+fn stale_gate_checks(tasks: &[Task], pipelines: &Pipelines) -> Vec<Finding> {
+    tasks
+        .iter()
+        .filter_map(|task| {
+            let pipeline = pipelines.for_task(task).ok()?;
+            let gate_at = crate::commands::stale_gate_at(task, pipeline)?;
+            Some(Finding::Check(
+                format!("gate of task `{}`", task.id()),
+                Err(anyhow::anyhow!(
+                    "{}",
+                    crate::commands::stale_gate_note(task, pipeline, gate_at)
+                )),
             ))
         })
         .collect()
@@ -6484,6 +6507,58 @@ mod tests {
                 Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
                     !t.starts_with("editor") && !t.contains("editor.toml"),
             }),
+            "{warnings:?}"
+        );
+    }
+
+    /// A queued task whose `gate_at:` names a step its pipeline lacks is a
+    /// failed row, and so a warning before a run; a gate that names a step is
+    /// not, and neither is a task already at `done`. Fails without
+    /// `stale_gate_checks` in `cheap_findings`: no warning names the gate.
+    #[test]
+    fn a_gate_at_no_step_has_is_a_failed_row_and_a_warning() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-stale-gate");
+        let pipelines = Pipelines::builtin();
+        let mut tasks = Vec::new();
+        for (id, stage, gate) in [
+            ("stale", "queued", "review-renamed"),
+            ("fine", "queued", "implement"),
+            ("finished", "done", "review-renamed"),
+        ] {
+            tasks.push(
+                Task::parse(
+                    std::path::PathBuf::from(format!("{id}.md")),
+                    &format!(
+                        "---\nid: {id}\npipeline: default\nstage: {stage}\ngate_at: {gate}\n---\n"
+                    ),
+                )
+                .unwrap(),
+            );
+        }
+
+        let findings = stale_gate_checks(&tasks, &pipelines);
+        assert_eq!(findings.len(), 1);
+        match &findings[0] {
+            Finding::Check(label, Err(why)) => {
+                assert_eq!(label, "gate of task `stale`");
+                assert!(
+                    format!("{why}").contains("`gate_at: review-renamed`"),
+                    "{why}"
+                );
+            }
+            _ => panic!("expected one failed check"),
+        }
+
+        crate::commands::testutil::add(&repo, "queued-one", &[]);
+        let mut task = repo.task("queued-one").unwrap();
+        task.front.gate_at = Some("review-renamed".into());
+        task.save().unwrap();
+        let warnings = cheap_findings(&repo, &pipelines, &Config::default(), false);
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                Warning::Problem(t) if t.starts_with("gate of task `queued-one`")
+            )),
             "{warnings:?}"
         );
     }

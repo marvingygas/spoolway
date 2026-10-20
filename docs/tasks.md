@@ -73,6 +73,8 @@ as JSON.
 | `unblock_laps` | the dispatcher | In an unattended run, how many times an unblocker's pass has sent the task back towards each command step, by a plain pass or by `--stage`. Three laps is the limit. See [Loops](pipelines.md#loops). `spoolway queue add` clears it. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
+| `held_pass_to` | the dispatcher | The step an unblocker's `--pass` was sending the task to when a `gate_at: blocked` held it on `paused`: the step named by `--stage`, else the step the pass leads to. `spoolway resume` sends the task there and clears the key. `spoolway queue add` clears it. |
+| `unblocked_from` | the dispatcher | The step an unblocker's pass stood in for, kept when that pass sent the task to `done`. If the task is then held on `blocked` for work spoolway could not commit, the key becomes `blocked_from`, so the next unblocker is told the step the task stopped at. `spoolway queue add` clears it. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
 | `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
 | `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and stopped the task on `hook_failed`. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. `spoolway resume --skip-hook` clears it and records the event as passed. A task file on `paused` with this key set is read as `hook_failed`. |
@@ -128,8 +130,21 @@ mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. Set i
 `spoolway queue add` and `spoolway task contract --from` refuse any other value, naming the task
 and the steps it may name. `spoolway task contract` lists the steps of each pipeline under
 `.pipelines.<name>.gate_at`.
-A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. See
-[Trials](planning.md#trials).
+A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. It also refuses
+a copy that would never run the gated step. See [Trials](planning.md#trials).
+
+A `gate_at` can stop naming a step after the task is queued, when an edit to the pipeline renames
+or removes that step. The dispatcher then parks the task on `paused` before its first step and
+logs the gate with the fix:
+
+```
+t2: queued task `t2` has `gate_at: review`, which pipeline `default` does not define. Change `gate_at:` in the task to a step `default` has.
+```
+
+`spoolway pipeline check`, `spoolway doctor` and the task's row on the board and in
+`spoolway queue list` report the same line. A task at `done` is not reported. Resuming the task
+sends it back to `queued`, and the dispatcher parks it again until `gate_at:` names a step the
+pipeline has.
 
 `spoolway queue add` also refuses a `gate_at` on a step the task [walks
 past](pipelines.md#steps-a-task-walks-past), because that gate would never fire. An example is the
@@ -383,8 +398,9 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 column names the outcome a scheduled pause caught, such as `review failed → implement`, when it was
 not a plain pass.
 
-A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the `on_pass` of the
-step the task stopped at, which is where an unheld pass would have gone. A command step it stopped
+A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the step the
+unblocker named with `--stage`. Without `--stage`, it sends the task to the `on_pass` of the step
+the task stopped at, which is where an unheld pass would have gone. A command step it stopped
 at runs again. The board's resume picker says the block was cleared. When the stopped step has
 `gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
 

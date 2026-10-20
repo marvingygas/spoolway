@@ -811,9 +811,10 @@ pub struct Frontmatter {
     /// Nothing here is dropped on a move: the cycle can run through an agent
     /// step on its way back to `blocked` (a gate that fails back to the agent
     /// behind it), and the count has to survive that. It ends instead where
-    /// the cycle does. A command step that passes clears it (the dispatcher,
-    /// after `run_command`), and so does an unblocker pass whose road does
-    /// not lead back to a failing command, or that parks the task. A
+    /// the cycle does. A command step that passes clears its own entry and no
+    /// other (the dispatcher, after `run_command`), and an unblocker pass whose
+    /// road does not lead back to a failing command, or that parks the task,
+    /// clears them all. A
     /// `--stage` does not end it by being a `--stage`: the count watches the
     /// command, whichever road the unblocker takes. A person stepping in ends
     /// it too: an unblocker that gives up parks the task, and
@@ -821,6 +822,30 @@ pub struct Frontmatter {
     /// always gets the full `UNBLOCK_LAP_LIMIT` laps.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unblock_laps: BTreeMap<String, u32>,
+
+    /// The step an unblocker's `--pass` was sending the task to when
+    /// `gate_at: blocked` held it on `paused`.
+    ///
+    /// Without it the resume could only recompute the pass's destination from
+    /// `blocked_from`, which is the `on_pass` of the step the task stopped at.
+    /// A `--stage` the unblocker named is written nowhere else, so the resume
+    /// would skip the step it asked for. Read by `held_pass_target` in
+    /// `src/commands/report.rs`. Cleared by `resume_at` when the hold is
+    /// released, and written afresh by the next pass from `blocked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_pass_to: Option<String>,
+
+    /// The step an unblocker's `--pass` stood in for, kept when the pass sent
+    /// the task to `done`.
+    ///
+    /// The pass clears `blocked_from`. If cleanup then holds the task on
+    /// `blocked` for work it could not commit, nothing else says where the
+    /// task had stopped, and the next unblocker would be told the pipeline's
+    /// entry. That hold, in `report` or in cleanup, puts it back as
+    /// `blocked_from` and drops this, but only when the report it follows was
+    /// filed from `blocked`. A restart clears it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unblocked_from: Option<String>,
 
     /// The step this task last moved here from, written by [`Task::set_stage`]
     /// and read by the dispatcher to key the two counters above.
@@ -836,6 +861,16 @@ pub struct Frontmatter {
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_norway::Value>,
+}
+
+impl Frontmatter {
+    /// Ends the unblocker laps counted against `command`, which has just
+    /// passed. The laps counted against any other command stay: the dispatcher
+    /// calls this, and the tests that walk its road call it too, so both end
+    /// the count the same way.
+    pub fn end_unblock_laps(&mut self, command: &str) {
+        self.unblock_laps.remove(command);
+    }
 }
 
 fn is_zero_i64(n: &i64) -> bool {

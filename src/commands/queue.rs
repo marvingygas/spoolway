@@ -1473,6 +1473,8 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.launch_failures = Default::default();
     front.launch_busy_since = Default::default();
     front.unblock_laps = Default::default();
+    front.held_pass_to = None;
+    front.unblocked_from = None;
     front.arrived_from = None;
 
     let body = ends_with_newline(body.to_string());
@@ -1790,10 +1792,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
 /// The `gate_at:` of `task` when `pipeline` has no step of that name, which
 /// is what [`check_gate_at`] and a trial arm both refuse.
 fn unmatched_gate_at<'a>(task: &'a Task, pipeline: &crate::pipeline::Pipeline) -> Option<&'a str> {
-    task.front
-        .gate_at
-        .as_deref()
-        .filter(|gate_at| pipeline.step(gate_at).is_none())
+    crate::commands::stale_gate_at(task, pipeline)
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -9572,6 +9571,9 @@ fn begin_trial(
     let mut minted: std::collections::BTreeSet<String> = Default::default();
     let mut claimed: std::collections::BTreeSet<String> = Default::default();
     let mut arms = Vec::with_capacity(group.tasks.len() * ticked.len());
+    // The source file each arm was cut from, in step with `arms`, so a refusal
+    // names a file the person has rather than an id minted a moment ago.
+    let mut sources = Vec::with_capacity(arms.capacity());
 
     // Pipelines outside, tasks inside: every task's arms are numbered in
     // the order the pipelines are listed, so `alpha-1` and `beta-1` are the
@@ -9667,14 +9669,69 @@ fn begin_trial(
                 .collect();
 
             arm.path = repo.queue_dir().join(format!("{id}.md"));
+            sources.push(task.path.display().to_string());
             arms.push(arm);
         }
     }
 
+    if let Err(err) = check_trial_gates(repo, pipelines, &arms, &sources) {
+        return outcome("trial refused", format!("{err:#}"));
+    }
     match finish_trial(repo, arms) {
         Ok(()) => Mode::Browsing,
         Err(err) => outcome("trial refused", format!("{err:#}")),
     }
+}
+
+/// Refuse a trial whose copy never runs the step an arm's `gate_at:` names.
+///
+/// A step an arm walks past is never written as its stage, so no report comes
+/// from it and the gate never fires: the arm runs straight past where its
+/// author asked it to stop. Each arm is judged by [`crate::dispatch::walk_past`],
+/// the one place the three rules live (its own `skip:`, a `last:` step with a
+/// dependent above it, a `first:` step on a task with `depends_on`). That
+/// needs the whole set of arms, since the dependents and the remapped
+/// `depends_on` of one arm are other arms, so it runs once they are all built.
+/// `sources[n]` names the file `arms[n]` was cut from.
+fn check_trial_gates(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    arms: &[Task],
+    sources: &[String],
+) -> Result<()> {
+    let graph = Graph::build(arms, &repo.archive_dir());
+    for (arm, name) in arms.iter().zip(sources) {
+        let (Some(gate_at), Ok(pipeline)) = (arm.front.gate_at.as_deref(), pipelines.for_task(arm))
+        else {
+            continue;
+        };
+        let Some(step) = pipeline.step(gate_at) else {
+            continue;
+        };
+        let dependents = crate::dispatch::same_group_dependents(repo, pipelines, arms, &graph, arm);
+        match crate::dispatch::walk_past(step, arm, dependents) {
+            None => {}
+            // An arm's `skip:` is the trial's own ticked skips for this
+            // pipeline (`build_trial_arm`), never a key the source file
+            // carries, so the remedy is the tick, not the file.
+            Some(crate::dispatch::Hidden::Skip) => bail!(
+                "{name} has `gate_at: {gate_at}`, but the trial skips `{gate_at}` on pipeline \
+                 `{}`, so the gate would never fire. Untick `{gate_at}` in the trial's skips \
+                 for `{}`, or change or drop `gate_at:` in {name}.",
+                pipeline.name,
+                pipeline.name
+            ),
+            Some(why) => bail!(
+                "{name} has `gate_at: {gate_at}`, but the copy on pipeline `{}` will never run \
+                 `{gate_at}`: {}, so the gate would never fire. Untick `{}` in the trial, or \
+                 change or drop `gate_at:` in {name}.",
+                pipeline.name,
+                why.refusal(),
+                pipeline.name
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Validate the minted arms as one set and save them — or none, on any
@@ -16640,6 +16697,73 @@ mod tests {
         assert_eq!(arm.front.gate_at.as_deref(), Some("implement"));
     }
 
+    /// Every way a trial's copy can walk past the step an arm's `gate_at:`
+    /// names is refused, through the one rule the dispatcher walks by: its own
+    /// `skip:`, a `last:` step with a dependent above it in the copy group,
+    /// and a `first:` step on an arm with `depends_on`. A gate on a step the
+    /// arm does run passes. Fails if `check_trial_gates` lets any of the three
+    /// through; `a_trial_that_skips_the_gated_step_writes_nothing` covers its
+    /// call from `begin_trial`.
+    #[test]
+    fn a_trial_refuses_a_copy_that_walks_past_its_gate_at_step() {
+        let (repo, _root_guard) = fixture("trial-gates");
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "chain".into(),
+            crate::pipeline::Pipeline::parse(
+                "chain",
+                "steps:\n  \
+                 - id: setup\n    agent: pi\n    first: true\n    on_pass: work\n  \
+                 - id: work\n    agent: pi\n    on_pass: wrap\n  \
+                 - id: wrap\n    agent: pi\n    last: true\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        let arm = |id: &str, extra: &str| {
+            Task::parse(
+                std::path::PathBuf::from(format!("{id}.md")),
+                &format!(
+                    "---\nid: {id}\ngroup: demo-chain\npipeline: chain\nstage: queued\n{extra}---\n"
+                ),
+            )
+            .unwrap()
+        };
+        let judge = |arms: Vec<Task>| {
+            let sources: Vec<String> = arms.iter().map(|a| format!("{}.md", a.front.id)).collect();
+            check_trial_gates(&repo, &pipelines, &arms, &sources)
+                .err()
+                .map(|err| format!("{err:#}"))
+        };
+
+        let said = judge(vec![arm("a", "gate_at: work\nskip: [work]\n")]).expect("skipped");
+        assert!(said.contains("a.md has `gate_at: work`"), "{said}");
+        assert!(said.contains("the trial skips `work`"), "{said}");
+        assert!(said.contains("the gate would never fire"), "{said}");
+        assert!(said.contains("Untick `work`"), "{said}");
+        assert!(!said.contains("its own skip:"), "{said}");
+
+        let said = judge(vec![
+            arm("base", ""),
+            arm("top", "gate_at: wrap\ndepends_on: [base]\n"),
+        ]);
+        assert!(said.is_none(), "nothing sits above `top`: {said:?}");
+        let said = judge(vec![
+            arm("lower", "gate_at: wrap\n"),
+            arm("upper", "depends_on: [lower]\n"),
+        ])
+        .expect("a dependent above takes the last step over");
+        assert!(said.contains("it is not last in its chain"), "{said}");
+
+        let said = judge(vec![
+            arm("root", ""),
+            arm("child", "gate_at: setup\ndepends_on: [root]\n"),
+        ])
+        .expect("a dependent is not its chain's root");
+        assert!(said.contains("it is not the root of its chain"), "{said}");
+
+        assert!(judge(vec![arm("ok", "gate_at: work\n")]).is_none());
+    }
+
     /// Six `queue add` calls of a root task into one group, all validated
     /// before any saved, queue exactly one. The rest are refused naming the
     /// group and the root already there. Fails without the group lock: each
@@ -19397,6 +19521,42 @@ mod tests {
             queued(&repo, "solo-2").front.skip,
             vec!["implement".to_string()],
             "only default's own set reaches default's arm"
+        );
+    }
+
+    /// A trial that ticks the step a task's `gate_at:` names as a skip is
+    /// refused from the screen, writes no arm, and names the step to untick.
+    /// Fails without `begin_trial`'s call to `check_trial_gates`: the arm is
+    /// written and runs past its gate.
+    #[test]
+    fn a_trial_that_skips_the_gated_step_writes_nothing() {
+        let (repo, _root_guard) = fixture("screen-trial-skips-gate");
+        write_pending(
+            &repo,
+            "solo",
+            &task_text("solo", "group: audits\ngate_at: implement\n", BODY),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.ticked = ["default".to_string()].into();
+        trial.stage = TrialStage::ChooseSkips;
+        trial
+            .skip
+            .insert("default".to_string(), ["implement".to_string()].into());
+
+        let mode = begin_trial(&repo, &pipelines, "main", &groups, &trial);
+        let Mode::Outcome { .. } = &mode else {
+            panic!("expected a refusal: {mode:?}");
+        };
+        let said = format!("{mode:?}");
+        assert!(said.contains("the trial skips `implement`"), "{said}");
+        assert!(said.contains("Untick `implement`"), "{said}");
+        assert_eq!(
+            repo.queue_dir().read_dir().unwrap().count(),
+            0,
+            "a refused trial must write no arm"
         );
     }
 

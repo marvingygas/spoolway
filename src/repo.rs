@@ -1322,7 +1322,7 @@ impl Repo {
     }
 
     /// Whether `checkout` sits under [`Repo::worktree_root`].
-    pub(crate) fn in_lane_worktree(&self) -> bool {
+    pub fn in_lane_worktree(&self) -> bool {
         crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
 

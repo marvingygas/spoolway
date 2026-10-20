@@ -4390,7 +4390,7 @@ fn paused_next(
             Some(crate::commands::Caught::Pass)
                 if crate::commands::held_unblocker_pass(task, gated) =>
             {
-                crate::commands::cleared_block_target(task, pipeline, true)
+                crate::commands::held_pass_target(task, pipeline)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
             // A held failure resumes down the step's `on_fail` — see
@@ -4410,6 +4410,25 @@ fn paused_next(
         .parked_from
         .clone()
         .filter(|from| pipeline.step(from).is_some())
+}
+
+/// The step a paused task was held or parked on, when its pipeline no longer
+/// defines it: a plain resume refuses such a task, so its row names the loss
+/// in place of a destination.
+///
+/// Only `paused_at` and `parked_from` are read. [`crate::commands::
+/// stranded_step`] also weighs `last_report`, which a gate that is still
+/// defined does not need.
+fn paused_on_missing_step<'a>(
+    task: &'a crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+) -> Option<&'a str> {
+    let front = &task.front;
+    front
+        .paused_at
+        .as_deref()
+        .or(front.parked_from.as_deref())
+        .filter(|step| !crate::pipeline::RESERVED.contains(step) && pipeline.step(step).is_none())
 }
 
 /// The word this pause caught, prefixed onto the arrow the NEXT column draws
@@ -4681,13 +4700,18 @@ fn build_rows(
                         crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
                     )
                 });
-                match (hook, dependency) {
-                    (Some(hook), _) => (State::Queued, hook, false),
-                    (None, Some(d)) => (State::Queued, d, false),
+                // The dispatcher parks this task at its next pass, so the
+                // row says why now rather than "waiting for a worker slot".
+                let stale = crate::commands::stale_gate_at(task, pipeline)
+                    .map(|gate_at| crate::commands::stale_gate_line(task, pipeline, gate_at));
+                match (stale, hook, dependency) {
+                    (Some(stale), _, _) => (State::Queued, stale, false),
+                    (None, Some(hook), _) => (State::Queued, hook, false),
+                    (None, None, Some(d)) => (State::Queued, d, false),
                     // Said once nothing else holds the task, which is when
                     // its dependency has finished: the base it is cut from
                     // and opens against is not the dependency's branch.
-                    (None, None) => (
+                    (None, None, None) => (
                         State::Queued,
                         closed_dependency_note(repo, task)
                             .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
@@ -4726,7 +4750,13 @@ fn build_rows(
                     && task.front.parked_from.is_none()
                     && crate::commands::resume_target(task, pipeline) == crate::pipeline::QUEUED;
                 if never_started {
-                    (State::Paused, "→ queued — [r] resumes it".to_string(), true)
+                    // Parked for a `gate_at:` its pipeline lost: a resume
+                    // only parks it again until the task file is changed.
+                    let next = match crate::commands::stale_gate_at(task, pipeline) {
+                        Some(gate_at) => crate::commands::stale_gate_line(task, pipeline, gate_at),
+                        None => "→ queued — [r] resumes it".to_string(),
+                    };
+                    (State::Paused, next, true)
                 } else {
                     // A row parked by a person's own Escape or the board's
                     // `pause` (`parked_from` set, `escalated: false`) is a
@@ -4756,6 +4786,15 @@ fn build_rows(
                         None => "→".to_string(),
                     };
                     let next = match (target, resumable) {
+                        // The step it was held or parked on is gone, so there
+                        // is no destination to draw; the row says what was
+                        // lost, and a resume asks for a `--stage`.
+                        (None, _) if let Some(missing) = paused_on_missing_step(task, pipeline) => {
+                            format!(
+                                "stopped at `{missing}`, which `{}` no longer defines",
+                                pipeline.name
+                            )
+                        }
                         // A stop's own park: the next start resumes it on its
                         // own — see `resume_stop_parked` — so the row says
                         // that rather than offering a key. `r` still works.
@@ -4764,11 +4803,11 @@ fn build_rows(
                         }
                         (Some(step), true) => format!("[r] {arrow} {step}"),
                         (Some(step), false) => format!("{arrow} {step}"),
-                        // Nothing to name: `paused_at` or `parked_from`
-                        // names a step the pipeline no longer has, a gated step has no pass
+                        // Nothing to name: a gated step has no pass
                         // destination, or neither `paused_at` nor
                         // `parked_from` is set. The row must still say
                         // something, and `r` may resume at once with no picker.
+                        // A step the pipeline dropped is the arm above.
                         (None, true) => "[r] resume".to_string(),
                         (None, false) => "no step named".to_string(),
                     };
@@ -11070,8 +11109,8 @@ mod tests {
     }
 
     /// A paused task whose `paused_at` names a step the pipeline does not
-    /// have has nowhere to name. The row still says so rather than going
-    /// blank, with the key when it is on offer and without it when not.
+    /// have has nowhere to send it. The row names the step it lost rather than
+    /// going blank, and the key follows whether the row is resumable.
     #[test]
     fn a_paused_row_with_no_named_step_still_says_something() {
         let (repo, _root_guard) = fixture("paused-no-step");
@@ -11100,10 +11139,11 @@ mod tests {
         .unwrap();
         let free = rows.iter().find(|r| r.id == "free").unwrap();
         assert!(free.resumable);
-        assert_eq!(free.next, "[r] resume");
+        let lost = "stopped at `no-such-step`, which `default` no longer defines";
+        assert_eq!(free.next, lost);
         let held = rows.iter().find(|r| r.id == "held").unwrap();
         assert!(!held.resumable);
-        assert_eq!(held.next, "no step named");
+        assert_eq!(held.next, lost);
     }
 
     /// A paused task offers the resume key only once no lane of its own is
@@ -13744,6 +13784,72 @@ mod tests {
         assert_eq!(
             paused_next(&task, pipeline, 0).as_deref(),
             Some("implement")
+        );
+    }
+
+    /// A queued task whose `gate_at:` names no step of its pipeline says so in
+    /// its row, as the dispatcher's park will, instead of waiting for a slot.
+    /// Fails without the row's check: the row reads "waiting for a worker slot".
+    #[test]
+    fn a_queued_row_names_a_gate_at_its_pipeline_lacks() {
+        let (repo, _root_guard) = fixture("queued-stale-gate-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("review-renamed".into());
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert!(
+            rows[0].next.contains("`gate_at: review-renamed`")
+                && rows[0].next.contains("Change `gate_at:` in the task"),
+            "{}",
+            rows[0].next
+        );
+    }
+
+    /// The row a person sees after the dispatcher's park of a stale gate: the
+    /// task is on `paused` with no step recorded, and the row names the gate
+    /// and keeps the resume key. Fails without the row's check: it reads
+    /// "→ queued — [r] resumes it".
+    #[test]
+    fn a_parked_row_names_the_gate_at_its_pipeline_lacks() {
+        let (repo, _root_guard) = fixture("parked-stale-gate-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("review-renamed".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert!(rows[0].resumable);
+        assert!(
+            rows[0].next.contains("`gate_at: review-renamed`")
+                && rows[0].next.contains("Change `gate_at:` in the task"),
+            "{}",
+            rows[0].next
+        );
+    }
+
+    /// A paused row whose held or parked step the pipeline dropped says what
+    /// was lost, in place of "no step named" or a resume that would refuse.
+    #[test]
+    fn a_paused_row_names_the_step_its_pipeline_no_longer_defines() {
+        let (repo, _root_guard) = fixture("paused-missing-step-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+        task.front.paused_at = Some("old-name".into());
+        task.front.blocked_from = Some("old-name".into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "stopped");
+        task.save().unwrap();
+
+        let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
+        assert_eq!(
+            rows[0].next,
+            "stopped at `old-name`, which `default` no longer defines"
         );
     }
 

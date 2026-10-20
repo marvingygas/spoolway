@@ -90,6 +90,8 @@ const IGNORED_KEYS: &[&str] = &[
     "launch_failures",
     "launch_busy_since",
     "unblock_laps",
+    "held_pass_to",
+    "unblocked_from",
     "arrived_from",
     "usage_limit_hold",
     "quota_retries",

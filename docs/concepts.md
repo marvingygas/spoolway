@@ -225,7 +225,8 @@ task pauses once, and a later report from the same step runs straight through un
 writes a fresh `gate_at`. `spoolway resume` sends a caught pass on by `on_pass`, a caught fail down `on_fail`, and
 a caught block or loop-max to `blocked`, the same place it would have reached unheld.
 `blocked` has no `on_pass`. A `gate_at: blocked` that caught the unblocker's pass sends the task
-to the `on_pass` of the step it stopped at, and hands a command step back to itself.
+to the step the unblocker named with `--stage`. Without `--stage`, it sends the task to the `on_pass`
+of the step it stopped at, and hands a command step back to itself.
 A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
 exit, and `gate_at` holds any exit.
 Picking another step in the board's resume picker sends it to a step you name instead. The

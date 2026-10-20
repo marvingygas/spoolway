@@ -234,7 +234,8 @@ mod tests {
     /// and so never routes a pass from it back onto the command a second
     /// time, and so never routes a `--stage` out of `blocked` either: the lap
     /// count watches the command whatever route the unblocker names, and
-    /// `commands::report`'s own tests cover that.
+    /// `commands::report`'s own tests cover that, walking the clear the
+    /// dispatcher makes when a command passes on the road back.
     /// `unattended.max_output_tokens`/`max_cost_usd` stay the money brake
     /// behind that bound, one this walk has no `Repo` to read. What this walk
     /// still proves at that boundary is [`walk_from_blocked`]'s own job: a

@@ -337,6 +337,13 @@ fails validation, a task still holding its skeleton's `[[…]]` placeholder text
 `gate_at:` names a step that a ticked pipeline lacks. The `gate_at:` refusal names the task and
 tells you to untick that pipeline or to change `gate_at:` in the task.
 
+A trial also refuses a task whose `gate_at:` names a step its copy would never run. That happens
+when the step is ticked to skip, when it is the `last:` step and another task in the copy depends
+on the task, or when it is the `first:` step and the task has `depends_on`. See [Steps a task walks
+past](pipelines.md#steps-a-task-walks-past). The refusal names the source file. For a skipped step
+it tells you to untick that step. For the other two it tells you to untick the pipeline. In both
+cases it also offers to change or drop `gate_at:` in the task.
+
 An arm runs every step you leave in. A step that pushes or opens a pull request,
 such as `create-pr`, does so for the arm too: tick it to skip it. Compare the arms with
 `spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.

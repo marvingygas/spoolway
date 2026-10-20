@@ -869,6 +869,21 @@ impl<'a> Dispatcher<'a> {
             .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
             .unwrap_or_else(|| task.stage().to_string());
         crate::commands::set_blocked_from(task, &back);
+        // A pass from `blocked` that came here left no `blocked_from`
+        // and a `last_report` filed from `blocked`, which `back` can
+        // only answer with the pipeline's entry. It kept the step it
+        // stood in for. A `last_report` from any other step makes
+        // `back` the right answer, and a leftover record is dropped.
+        let stopped = task.front.unblocked_from.take();
+        if task
+            .front
+            .last_report
+            .as_ref()
+            .is_some_and(|r| r.step == crate::pipeline::BLOCKED)
+            && stopped.is_some()
+        {
+            task.front.blocked_from = stopped;
+        }
         task.log_status(log);
         task.set_stage(crate::pipeline::BLOCKED, Some(reason));
         task.save()

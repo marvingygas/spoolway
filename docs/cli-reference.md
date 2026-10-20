@@ -972,6 +972,7 @@ A `paused` task restarts the step it was parked or gated on. A task parked from 
 | On `hook_failed` | Run `spoolway resume <task>` |
 | On `done` | A finished task cannot run again. Run `spoolway queue add` to queue a new task |
 | On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
+| Blocked or paused at a step the pipeline no longer defines | Run `spoolway resume <task> --stage <step>`. The message ends with that command on its own line |
 
 With `--step <step>`, the command restarts only while the task is on that step. When the task has moved on, it exits 1 and restarts nothing:
 
@@ -1108,10 +1109,30 @@ The check also reads every task in the queue. It fails, naming the task, when th
 `pipeline:` names a pipeline the project does not define. It fails, naming the task, the step
 and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `parked_from` names
 a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
+reported. It also fails, naming the task and the gate, when the task's `gate_at:` names a step its
+pipeline does not have, including a reserved word such as `done`. A task at `done` is not
 reported. Pending tasks and routines are not read.
 
 The check also fails when two routine files hold one task id. It prints `routines:` followed by the
 text of the `routines` row of `spoolway doctor`.
+
+It also fails, naming the task, the step and the pipeline, when a task's `skip:` names a step its
+pipeline does not have.
+
+```
+  problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
+    Change `gate_at:` in the task to a step `default` has.
+```
+
+Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
+another task in the queue is then a warning, and the check still exits 0. A task that names a
+pipeline the branch lacks reads:
+
+```
+  warning: live task `l2` names pipeline `newp`, which this branch does not have yet
+```
+
+Run anywhere else, the same finding is a failure and reads `which this project no longer defines`.
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
@@ -1934,6 +1955,10 @@ every file and an id to give one of them:
 A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
 `task/<id>` branch that no queued task owns, with the commands that drop them and the rename
 that keeps the work. The row also fails when git cannot list the worktrees.
+
+A `FAIL` row labelled ``gate of task `<id>` `` names a task whose `gate_at:` names a step its
+pipeline does not have, with the line `spoolway pipeline check` prints. A task at `done` is not
+reported. The row also shows on the warnings screen before dispatching.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
 its event, task, exit code, remedy and log path.

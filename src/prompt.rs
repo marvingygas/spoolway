@@ -1278,14 +1278,22 @@ fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>,
                 .unwrap_or(words.len());
             let rest = &words[at + 1..end];
 
-            let path: Vec<String> = rest
-                .iter()
-                .take_while(|word| {
-                    !word.starts_with('-') && !word.starts_with('<') && !word.starts_with('$')
-                })
-                .take(2)
-                .map(|word| word.to_string())
-                .collect();
+            // A word that ends in `.`, `:`, `!` or `?` closes the sentence,
+            // so "Report with spoolway report." names `report`, not the
+            // unknown command `report.`, and nothing after it belongs to
+            // the command.
+            let mut path: Vec<String> = Vec::new();
+            for word in rest.iter().take_while(|word| {
+                !word.starts_with('-') && !word.starts_with('<') && !word.starts_with('$')
+            }) {
+                let bare = word.trim_end_matches(['.', ':', '!', '?']);
+                if !bare.is_empty() {
+                    path.push(bare.to_string());
+                }
+                if bare.len() != word.len() || path.len() == 2 {
+                    break;
+                }
+            }
 
             let flags: Vec<String> = rest
                 .iter()
@@ -1608,6 +1616,28 @@ mod tests {
                 "false positive on: {line}"
             );
         }
+    }
+
+    /// A sentence that ends on the command leaves its full stop, colon, mark
+    /// or question mark on the last word. Fails before the trim: `report.` is
+    /// read as an unknown command.
+    #[test]
+    fn sentence_punctuation_after_a_command_is_not_part_of_it() {
+        for line in [
+            "Report with spoolway report.",
+            "Report with `spoolway report.`",
+            "Is it `spoolway queue show?`",
+            "Finish with spoolway report!",
+        ] {
+            assert!(
+                stale_commands("ok", line, "").is_empty(),
+                "false positive on: {line}"
+            );
+        }
+        assert!(
+            !stale_commands("bad", "Run `spoolway nonesuch.`", "").is_empty(),
+            "a real mistake is still caught"
+        );
     }
 
     /// `--pass|--fail|--block` is how these get written in prose, and reading it
