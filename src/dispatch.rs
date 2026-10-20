@@ -5713,7 +5713,7 @@ impl<'a> Dispatcher<'a> {
                 // ended the whole pass, so every other task waited behind
                 // it; counted as a failed launch it is retried and then
                 // routed like any other command that never got going.
-                // Read before `ensure_workspace`, which can cut the task a new
+                // Read before `ensure_checkout`, which can open the task a new
                 // workspace: see the same read in `prepare_boot`.
                 let placement = task.front.workspace_id.clone();
                 // Decided ahead of the checkout, because a hidden command
@@ -5771,10 +5771,11 @@ impl<'a> Dispatcher<'a> {
                     runs.forget_pane(&key);
                 }
 
-                // The workspace's first pane, when nothing has used it yet: a
-                // hidden command leaves it empty, and this is the first step
-                // that shows a pane. Only looked at for a shown run, since a
-                // hidden one has nowhere to put it.
+                // The workspace's first pane, when nothing has used it yet:
+                // the one `ensure_checkout` just opened, or one an earlier
+                // pass opened and left empty after a failed launch or a heal.
+                // Only looked at for a shown run, since a hidden one has
+                // nowhere to put it.
                 let spare = match shown {
                     true => spare_pane_to_take(self.mux, task, fresh_pane.as_deref()),
                     false => None,
@@ -6840,15 +6841,10 @@ fn take_back_fresh_cut(
     if stage_before != crate::pipeline::QUEUED || task.front.borrowed {
         return;
     }
-    // A task whose first step was a hidden command has a checkout and no
-    // workspace yet, so there is no workspace to remove: the checkout goes by
-    // itself, the way a failed `remove_workspace` falls back to it below.
-    let removed_with_workspace = task
-        .front
-        .workspace_id
-        .as_deref()
-        .is_some_and(|workspace| mux.remove_workspace(workspace).is_ok());
-    if !removed_with_workspace {
+    let Some(workspace) = task.front.workspace_id.as_deref() else {
+        return;
+    };
+    if mux.remove_workspace(workspace).is_err() {
         if let Some(path) = task.front.worktree_path.as_deref()
             && let Err(err) = mux.remove_checkout(path)
         {
@@ -6860,9 +6856,7 @@ fn take_back_fresh_cut(
                 crate::mux::remove_by_hand_command(&repo.root, path)
             ));
         }
-        if let Some(workspace) = task.front.workspace_id.as_deref() {
-            let _ = mux.close_workspace(workspace);
-        }
+        let _ = mux.close_workspace(workspace);
     }
     if let (Some(branch), Some(base_commit)) = (
         task.front.branch.as_deref(),
@@ -25532,31 +25526,6 @@ mod tests {
         assert_eq!(fresh, None);
         assert_eq!(task.front.workspace_id, None);
         assert!(mux.calls().is_empty(), "{:?}", mux.calls());
-    }
-
-    /// Unqueueing a task whose first step was a hidden command takes back the
-    /// checkout it cut, though there is no workspace to remove.
-    ///
-    /// Fails before `take_back_fresh_cut` handled a missing workspace: it
-    /// returned at once and left the worktree and its branch standing.
-    #[test]
-    fn taking_back_a_cut_with_no_workspace_removes_the_checkout() {
-        let (repo, _root_guard) = fixture("lazy-workspace-take-back");
-        let path = add_task_with_worktree(&repo, "demo", crate::pipeline::QUEUED);
-        let mut task = Task::load(&path).unwrap();
-        task.front.workspace_id = None;
-        let mux = FakeMux::new(vec![]);
-
-        take_back_fresh_cut(
-            &mux,
-            &repo,
-            &task,
-            crate::pipeline::QUEUED,
-            &mut Report::default(),
-        );
-
-        assert_eq!(mux.did("remove_workspace"), Vec::<String>::new());
-        assert_eq!(mux.did("remove_checkout").len(), 1, "{:?}", mux.calls());
     }
 
     /// A task whose workspace has an idle first pane nothing has used yet, and

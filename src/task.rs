@@ -558,8 +558,9 @@ pub struct Frontmatter {
     ///
     /// The workspace opens at the first step that shows a pane, and that
     /// step takes the pane at once. The record outlives that only when the
-    /// step's launch fails: the pane is left empty, and recording it here is
-    /// what lets the next pass hand it over instead of splitting a new pane
+    /// step's launch fails, or when a hidden command found its workspace gone
+    /// and the heal reopened it: the pane is left empty, and recording it here
+    /// is what lets the next pass hand it over instead of splitting a new pane
     /// beside an empty shell. It is taken only while nothing runs in it: see
     /// `Mux::pane_is_idle`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

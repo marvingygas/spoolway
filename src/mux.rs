@@ -409,9 +409,10 @@ pub trait Mux: Sync {
     /// of its own.
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace>;
     /// The same, but for a checkout this task cut for itself rather than
-    /// borrowed — [`crate::dispatch::ensure_workspace`]'s heal path, the only
-    /// caller, reaches for this instead of [`Mux::create_pane`] whenever
-    /// `!task.front.borrowed`.
+    /// borrowed. Two callers in [`crate::dispatch::ensure_checkout`] reach for
+    /// this instead of [`Mux::create_pane`] whenever `!task.front.borrowed`:
+    /// the heal path, and the arm that takes back a checkout this task cut,
+    /// including one cut bare by [`Mux::cut_checkout`] for a hidden step.
     ///
     /// A backend that marks ownership on the workspace or session itself
     /// rather than asking the multiplexer directly has to re-apply that mark
