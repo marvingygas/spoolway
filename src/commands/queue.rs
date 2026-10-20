@@ -9654,15 +9654,26 @@ fn check_trial_gates(
             continue;
         };
         let dependents = crate::dispatch::same_group_dependents(repo, pipelines, arms, &graph, arm);
-        if let Some(why) = crate::dispatch::walk_past(step, arm, dependents) {
-            bail!(
+        match crate::dispatch::walk_past(step, arm, dependents) {
+            None => {}
+            // An arm's `skip:` is the trial's own ticked skips for this
+            // pipeline (`build_trial_arm`), never a key the source file
+            // carries, so the remedy is the tick, not the file.
+            Some(crate::dispatch::Hidden::Skip) => bail!(
+                "{name} has `gate_at: {gate_at}`, but the trial skips `{gate_at}` on pipeline \
+                 `{}`, so the gate would never fire. Untick `{gate_at}` in the trial's skips \
+                 for `{}`, or change or drop `gate_at:` in {name}.",
+                pipeline.name,
+                pipeline.name
+            ),
+            Some(why) => bail!(
                 "{name} has `gate_at: {gate_at}`, but the copy on pipeline `{}` will never run \
                  `{gate_at}`: {}, so the gate would never fire. Untick `{}` in the trial, or \
                  change or drop `gate_at:` in {name}.",
                 pipeline.name,
                 why.refusal(),
                 pipeline.name
-            );
+            ),
         }
     }
     Ok(())
@@ -16594,7 +16605,9 @@ mod tests {
     /// names is refused, through the one rule the dispatcher walks by: its own
     /// `skip:`, a `last:` step with a dependent above it in the copy group,
     /// and a `first:` step on an arm with `depends_on`. A gate on a step the
-    /// arm does run passes. Fails without the check: all three are built.
+    /// arm does run passes. Fails if `check_trial_gates` lets any of the three
+    /// through; `a_trial_that_skips_the_gated_step_writes_nothing` covers its
+    /// call from `begin_trial`.
     #[test]
     fn a_trial_refuses_a_copy_that_walks_past_its_gate_at_step() {
         let (repo, _root_guard) = fixture("trial-gates");
@@ -16628,9 +16641,10 @@ mod tests {
 
         let said = judge(vec![arm("a", "gate_at: work\nskip: [work]\n")]).expect("skipped");
         assert!(said.contains("a.md has `gate_at: work`"), "{said}");
-        assert!(said.contains("its own skip: names it"), "{said}");
+        assert!(said.contains("the trial skips `work`"), "{said}");
         assert!(said.contains("the gate would never fire"), "{said}");
-        assert!(said.contains("Untick `chain`"), "{said}");
+        assert!(said.contains("Untick `work`"), "{said}");
+        assert!(!said.contains("its own skip:"), "{said}");
 
         let said = judge(vec![
             arm("base", ""),
@@ -19411,6 +19425,42 @@ mod tests {
             queued(&repo, "solo-2").front.skip,
             vec!["implement".to_string()],
             "only default's own set reaches default's arm"
+        );
+    }
+
+    /// A trial that ticks the step a task's `gate_at:` names as a skip is
+    /// refused from the screen, writes no arm, and names the step to untick.
+    /// Fails without `begin_trial`'s call to `check_trial_gates`: the arm is
+    /// written and runs past its gate.
+    #[test]
+    fn a_trial_that_skips_the_gated_step_writes_nothing() {
+        let (repo, _root_guard) = fixture("screen-trial-skips-gate");
+        write_pending(
+            &repo,
+            "solo",
+            &task_text("solo", "group: audits\ngate_at: implement\n", BODY),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.ticked = ["default".to_string()].into();
+        trial.stage = TrialStage::ChooseSkips;
+        trial
+            .skip
+            .insert("default".to_string(), ["implement".to_string()].into());
+
+        let mode = begin_trial(&repo, &pipelines, "main", &groups, &trial);
+        let Mode::Outcome { .. } = &mode else {
+            panic!("expected a refusal: {mode:?}");
+        };
+        let said = format!("{mode:?}");
+        assert!(said.contains("the trial skips `implement`"), "{said}");
+        assert!(said.contains("Untick `implement`"), "{said}");
+        assert_eq!(
+            repo.queue_dir().read_dir().unwrap().count(),
+            0,
+            "a refused trial must write no arm"
         );
     }
 
