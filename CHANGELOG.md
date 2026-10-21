@@ -21,14 +21,61 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
-## Unreleased
+## 0.14.0
 
-### Changed
-- A step's `headless:` key is now `hide:` (#1127). This spoolway refuses `headless:`, naming the step: run `spoolway sync` to rename it, or write `hide:` yourself. `sync` renames `headless: true` to `hide: true` and deletes `headless: false`, because `hide: false` forces a pane where `headless: false` only spelled out the default and followed `dispatch.hide_commands`. Older spoolway binaries refuse `hide:`, so CI and teammates must upgrade once the repo is synced.
-- `dispatch.visible_lanes` now defaults to 3, and `dispatch.hide_commands` to false.
+### Highlights
+- A command step's `headless:` key is now `hide:`, which overrides `dispatch.hide_commands` in both directions, and a new project shows command steps in panes and keeps three of a task's lanes open. A task's herdr workspace opens only at its first shown step, so a hidden command no longer leaves an empty shell beside the lanes. (#1134, #1135, #1136, #1137, #1138, #1140)
+- One slow hook no longer freezes every task in the project: a worktree cut and a job's `open` hook run beside the dispatcher's pass, a restarted dispatcher adopts the run already going, and `spoolway queue list` and the board show `cutting worktree` and `opening ticket` while they run. Tasks are cut from `origin`'s base branch, so unpushed commits on a local `main` stay out of every pull request. (#1154, #1157, #1158)
+- spoolway no longer loses work around a lane: a lane never runs in the main checkout, teardown holds a task whose worktree is off its branch instead of committing there, an unmerged branch survives teardown in a repo with no remote, `spoolway stack` refuses to run outside its task's worktree, and every lane and command step runs the dispatcher's own `spoolway`. (#1108, #1141, #1142, #1143, #1145, #1148)
+- A plan page no task names yet shows up: it is a row in the queue screen's groups pane that opens or deletes the page, and `spoolway group list` prints it as `<name>  0 open — plan <path>`. (#1106, #1111, #1112, #1114)
+- The screen and the dispatcher do less work while nothing changes: usage is kept as running totals, a lane's transcript is read from where the last read stopped, an idle tick or pass reads no file and makes at most one herdr call, and freed memory goes back to the system on Linux. `spoolway eval` adds TURNS to every view and an experimental COMPLEXITY under `--by task`. (#1088, #1089, #1103, #1109, #1113, #1115, #1116, #1117)
 
-### Removed
-- `housekeeping.price_max_age_days`.
+### Breaking changes and migration
+- A step's `headless:` key no longer loads, whatever its value. The pipeline is refused by name with ``step `<id>` declares `headless:` — the key is now `hide:` ``. `spoolway sync` renames `headless: true` to `hide: true` in the checkout's pipelines, the private pipelines and the override patches, and deletes `headless: false`, because `hide: false` forces a pane where `headless: false` only followed `dispatch.hide_commands`. A step that carries both keys, or a `headless:` written in flow style, is refused and left as it is. Where an override patch's `headless: false` overrode a tracked `headless: true`, the tracked `hide: true` now wins; set `hide: false` in the patch to keep the pane. `pipeline override --set <step>.headless=…` and `override promote` refuse the old key. Run `spoolway sync` and commit what it writes. (#1134, #1135, #1140)
+- spoolway 0.13.0 and older refuse `hide:`, so once a repo is synced every machine and CI job that runs it needs this release, or its pipelines will not load. (#1134, #1135)
+- A new project keeps three of a task's lanes open and shows its command steps in panes, where 0.13.0 kept five and ran commands with no pane. A project 0.13.0 set up or synced already has `visible_lanes = 5` and `hide_commands = true` written in `config.toml`, keeps them, and `sync` changes neither. Run `spoolway config set dispatch.visible_lanes 3` and `spoolway config set dispatch.hide_commands false` to take the new defaults. (#1137, #1138)
+- `housekeeping.price_max_age_days` is retired, and `spoolway doctor` no longer notes an old price table. `spoolway sync` drops the key and names it among the retired settings it dropped. `spoolway config get` and `config set` refuse it as an unknown key, with a hint that `spoolway models` shows the table's age. Drop it from scripts that set it. (#1130)
+- A task whose start point is its own `base:` is cut from `origin/<base>` after one fetch, where 0.13.0 cut it from the local branch. Push the commits a task should start from before you queue it. With no `origin`, or no base branch on it, the task is still cut from the local branch, and the startup warnings say so. A dependent task still starts from its parent's local `task/<id>` branch. (#1154)
+- A lane never runs in the main checkout. When the main checkout has a task's branch out, the task's start fails with a message naming the branch and the checkout, where 0.13.0 ran the lane there and could commit your unsaved edits. Switch that checkout to another branch and resume the task. A task with no `worktree_path` on record is retried and then blocked, with a message saying to remove `workspace_id` from the task file. (#1108)
+- Matching `[models]` rows combine value by value, where 0.13.0 let the most literal row hide every other. A row that sets one tier rate fills only that rate and keeps the price table's other tier rates, where 0.13.0 read them as $0. A bare model name matches a `vendor/name` form only when no row matches the full name, and a slot pool is keyed by the row that sets `slots`. Costs, `unattended.max_cost_usd`, slot caps and `compact_ctx` can change. Read the new `rows:` line in `spoolway models` and set a value on the row you mean it for. (#1147)
+- Every `spoolway eval` lane view draws a TURNS column after BLOCKS, or TURNS/TASK under `--per-task`, and `--by task` draws an experimental COMPLEXITY column after WHEN. `--csv` and `--json` carry `turns` or `turns_per_task`, and `complexity` sits between `when` and `tasks` under `--by task`. CSV whole numbers now round a tie away from zero, so a value on .5 can differ by one. Update scripts that read an export by column position. (#1116, #1117)
+- `spoolway queue list --json` lists an `opening ticket` row under `tasks` while a routine's `open` hook runs, for an id that has no task file yet. A script that reads `tasks` as task files should skip it. (#1157)
+- `spoolway pipeline check` exits 1 and `spoolway doctor` fails a row when a queued task's `gate_at:` names a step its pipeline lacks, and the dispatcher parks such a task on `paused` before its first step, where 0.13.0 ran it past the gate to `done`. Both also fail two routine files that hold one task `id:`, which 0.13.0 ran as one routine and skipped one of their jobs. Change the `gate_at:` or give one routine an `id:` of its own. (#1152, #1156)
+- `spoolway stack` exits 1 unless it runs in its task's own linked worktree on the task's `branch:`, read from `SPOOLWAY_WORKTREE` when that is set, where 0.13.0 rewrote and force-pushed whatever branch it ran on. Run it from the task's worktree, or move the step to `create-pr`. (#1145)
+- Inside a lane's worktree, `override drop`, `pipeline override`, `prompt override`, `config override`, `pipeline copy` and `prompt copy` refuse and write nothing, where 0.13.0 let `override drop` delete the whole private layer. `sync` in a lane leaves the private layer alone. A lane refused by `config set`, `pipeline promote` or `override promote` is told to write the setting into its report, and no longer gets a `spoolway -C <main checkout>` line to run. Make those changes outside the lane. (#1110, #1148)
+
+### Features
+- A command step's `hide: false` gives it a pane while `dispatch.hide_commands` hides commands, and `hide: true` keeps it detached while they are shown; without `hide:` it follows the setting. `pipeline show` prints `hide=true` or `hide=false` for each command step. (#1134)
+- `spoolway pipeline rename <old> <new>` renames a private pipeline and its skeleton and moves the queued, paused, blocked, hook-failed and done tasks, drafts and user jobs that name `<old>`. A private pipeline that shares a name with a tracked one now holds only the tasks queued on that name, where every task stopped; the board, `queue list` and `pipeline list` say how to settle it. (#1153)
+- A dependent of a task closed with `resume --stage done` and no pull request is cut from, and opens against, the base the closed task started from, and `queue list` names the closed task that handed it on. (#1150)
+- In an unattended run, the unblocker's prompt says clearing the block is its own job, and `--block` says an unblocker lane picks it up next instead of asking for a person. Attended runs keep the old text. `spoolway prompt contract` renders the mode `unattended.enabled` sets. (#1087)
+- The popup shown while the issue hook runs reads `issue tracking` with a progress bar that fills as each task's ticket is created. (#1105)
+- `spoolway models` prints a `rows:` line, and `--json` a `rows` key, when two or more `[models]` rows supply a model's values. (#1147)
+- A task may carry `complexity`, a whole number from 1 to 100, as an experimental estimate. It is written onto every ledger row for the task, and `eval --by task --sort complexity` orders by it. (#1116)
+- The shipped `spoolway-tasks` skill asks one confirm ballot with the whole breakdown before it writes tasks you picked away from the recommendation, and a note on that ballot such as `2 to impl` moves a task to another pipeline. `spoolway-calibrate` reads turns, versions and cost per complexity point, and the shipped skills name only commands the CLI has. Run `spoolway sync` to take them. (#1104, #1107, #1118, #1119)
+
+### Fixes
+- The unattended lap count sits on the command that keeps failing, and a passing command clears only its own count, so an unblocker can no longer loop a failing command for ever by stopping at another step. The status log names the lap, such as ``unblocker lap 2 of 3 on `build` ``. (#1144)
+- A held unblocker pass resumes on the step it named with `--stage`, where it went to the origin step's `on_pass`, and a second unblocker is told the step the task really stopped at. (#1146)
+- A task blocked on a step its pipeline no longer defines parks on `paused` and names the step, where its unblocker could only send it back to the entry and rerun every passed step. `spoolway restart` refuses it with the `resume --stage` line to use. (#1149)
+- `spoolway pipeline check` run in a task's own worktree judges that branch's pipelines, so a live task on a pipeline the branch does not have yet is a warning and no longer fails the task's gate. The prompt lint reads `spoolway report.` at the end of a sentence as `spoolway report`. (#1155)
+- `spoolway install` writes the skill folders of the checkout it runs in, where it always wrote the main checkout's, even from a linked worktree. (#1129)
+- Trial arm ids skip a number held only by a fetched remote branch, so a new arm no longer blocks on an earlier arm's pushed branch, and the docs say a trial arm runs every step you leave in, `create-pr` included. (#1151)
+- A plan page's `plan:` is kept in the archive index, so a finished plan is not listed as task-less. (#1106)
+- The refusal for a retired `headless: false` names deleting it, where it said to write `hide: true` and would have hidden a command that ran in a pane. (#1159)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- On Linux with glibc, spoolway caps the number of memory pools at four and hands freed memory back to the system after an Eval load and a slow board reading. macOS and the musl build are unchanged. (#1103)
+- A nightly end-to-end suite holds the screen and the dispatcher to a memory budget per lane and counts the processes an idle pass starts, so a change whose cost grows with history rather than lanes fails before release. (#1115)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.14.0`, or run it without installing via `npx spoolway@0.14.0`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64; the GitHub release carries one archive per platform and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, upgrade every machine and CI job that runs a synced repo, set `visible_lanes` and `hide_commands` if you want the new defaults, push a task's base before queueing it, review `spoolway models` for merged rows, update scripts that read `eval` exports or `queue list --json`, clear what `spoolway doctor` fails, and restart the dispatcher. The 0.13.0 to 0.14.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.14.0
 
 ## 0.13.0
 
