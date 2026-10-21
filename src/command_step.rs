@@ -1865,7 +1865,24 @@ mod tests {
     fn a_pid_file_without_a_start_time_still_reads_as_running() {
         let f = Fixture::new("old-pid-file");
         let real = f.start("bench-demo", "sleep 60");
-        std::fs::write(f.runs.pid_path("bench-demo"), format!("{real}\n")).unwrap();
+        // `start` returns once the pid can be read, which can be before the
+        // child appends its `started` mark. Written over too soon, the file
+        // would get that mark back as its second line, read as a start time
+        // that does not match, and the run would read as interrupted.
+        let pid_path = f.runs.pid_path("bench-demo");
+        let began = std::time::Instant::now();
+        while !std::fs::read_to_string(&pid_path)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line == "started")
+        {
+            assert!(
+                began.elapsed() < Duration::from_secs(20),
+                "never marked started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&pid_path, format!("{real}\n")).unwrap();
 
         let state = f.runs.state("bench-demo");
         crate::headless::kill_group(real);
