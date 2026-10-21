@@ -741,6 +741,10 @@ mod tests {
         let err = poll_within(&repo, "t1", &path, "task/t1", Duration::from_secs(60))
             .expect_err("a hook that exited 0 after the stop was read as a finished cut");
         let text = format!("{err:#}");
+        assert!(text.contains("was stopped"), "{text}");
+        // Naming the hook reads `/proc`, which only Linux has; elsewhere the
+        // message lists the hooks it could have been.
+        #[cfg(target_os = "linux")]
         assert!(text.contains("was stopped after"), "{text}");
         assert!(!path.exists(), "the half checkout was left standing");
         assert_eq!(
