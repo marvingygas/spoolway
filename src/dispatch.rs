@@ -24582,9 +24582,13 @@ mod tests {
         assert!(
             err.downcast_ref::<crate::cut::CutPending>().is_none()
                 && text.contains("could not cut a worktree for `task/hung`")
-                && text.contains("was stopped after"),
+                && text.contains("was stopped"),
             "the stop was not the next visit's failed launch: {text}"
         );
+        // Naming the hook reads `/proc`, which only Linux has; elsewhere the
+        // message lists the hooks it could have been.
+        #[cfg(target_os = "linux")]
+        assert!(text.contains("was stopped after"), "{text}");
         assert_eq!(
             std::fs::read_to_string(&ran).unwrap().lines().count(),
             1,
