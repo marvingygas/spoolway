@@ -1,7 +1,7 @@
 {
   "source": "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
   "license": "MIT",
-  "generated": "2026-10-18",
+  "generated": "2026-10-21",
   "models": {
     "ai21.j2-mid-v1": {
       "context_window": 8191,
@@ -1125,6 +1125,13 @@
       "output": 0.44,
       "cache_read": 0.028
     },
+    "azure/eu/gpt-4o": {
+      "context_window": 128000,
+      "input": 2.75,
+      "output": 11.0,
+      "cache_read": 1.375,
+      "cache_write_5m": 1.38
+    },
     "azure/eu/gpt-4o-2024-05-13": {
       "context_window": 128000,
       "input": 5.5,
@@ -1142,6 +1149,12 @@
       "output": 11.0,
       "cache_read": 1.375,
       "cache_write_5m": 1.38
+    },
+    "azure/eu/gpt-4o-mini": {
+      "context_window": 128000,
+      "input": 0.165,
+      "output": 0.66,
+      "cache_read": 0.083
     },
     "azure/eu/gpt-4o-mini-2024-07-18": {
       "context_window": 128000,
@@ -1380,6 +1393,12 @@
         "cache_write_5m": 6.0
       }
     },
+    "azure/eu/o1": {
+      "context_window": 200000,
+      "input": 16.5,
+      "output": 66.0,
+      "cache_read": 8.25
+    },
     "azure/eu/o1-2024-12-17": {
       "context_window": 200000,
       "input": 16.5,
@@ -1403,6 +1422,12 @@
       "output": 66.0,
       "cache_read": 8.25
     },
+    "azure/eu/o3": {
+      "context_window": 200000,
+      "input": 2.2,
+      "output": 8.8,
+      "cache_read": 0.55
+    },
     "azure/eu/o3-2025-04-16": {
       "context_window": 200000,
       "input": 2.2,
@@ -1414,11 +1439,23 @@
       "output": 44.0,
       "cache_read": 2.75
     },
+    "azure/eu/o3-mini": {
+      "context_window": 200000,
+      "input": 1.21,
+      "output": 4.84,
+      "cache_read": 0.605
+    },
     "azure/eu/o3-mini-2025-01-31": {
       "context_window": 200000,
       "input": 1.21,
       "output": 4.84,
       "cache_read": 0.605
+    },
+    "azure/eu/o4-mini": {
+      "context_window": 200000,
+      "input": 1.21,
+      "output": 4.84,
+      "cache_read": 0.303
     },
     "azure/eu/o4-mini-2025-04-16": {
       "context_window": 200000,
@@ -2130,6 +2167,13 @@
       "output": 0.44,
       "cache_read": 0.028
     },
+    "azure/us/gpt-4o": {
+      "context_window": 128000,
+      "input": 2.75,
+      "output": 11.0,
+      "cache_read": 1.375,
+      "cache_write_5m": 1.38
+    },
     "azure/us/gpt-4o-2024-05-13": {
       "context_window": 128000,
       "input": 5.5,
@@ -2147,6 +2191,12 @@
       "output": 11.0,
       "cache_read": 1.375,
       "cache_write_5m": 1.38
+    },
+    "azure/us/gpt-4o-mini": {
+      "context_window": 128000,
+      "input": 0.165,
+      "output": 0.66,
+      "cache_read": 0.083
     },
     "azure/us/gpt-4o-mini-2024-07-18": {
       "context_window": 128000,
@@ -2391,6 +2441,12 @@
       "output": 33.0,
       "cache_read": 0.55
     },
+    "azure/us/o1": {
+      "context_window": 200000,
+      "input": 16.5,
+      "output": 66.0,
+      "cache_read": 8.25
+    },
     "azure/us/o1-2024-12-17": {
       "context_window": 200000,
       "input": 16.5,
@@ -2414,6 +2470,12 @@
       "output": 66.0,
       "cache_read": 8.25
     },
+    "azure/us/o3": {
+      "context_window": 200000,
+      "input": 2.2,
+      "output": 8.8,
+      "cache_read": 0.55
+    },
     "azure/us/o3-2025-04-16": {
       "context_window": 200000,
       "input": 2.2,
@@ -2425,11 +2487,23 @@
       "output": 44.0,
       "cache_read": 2.75
     },
+    "azure/us/o3-mini": {
+      "context_window": 200000,
+      "input": 1.21,
+      "output": 4.84,
+      "cache_read": 0.605
+    },
     "azure/us/o3-mini-2025-01-31": {
       "context_window": 200000,
       "input": 1.21,
       "output": 4.84,
       "cache_read": 0.605
+    },
+    "azure/us/o4-mini": {
+      "context_window": 200000,
+      "input": 1.21,
+      "output": 4.84,
+      "cache_read": 0.303
     },
     "azure/us/o4-mini-2025-04-16": {
       "context_window": 200000,
@@ -2587,6 +2661,12 @@
       "context_window": 10000000,
       "input": 0.2,
       "output": 0.78
+    },
+    "azure_ai/MAI-Code-1.1-Flash": {
+      "context_window": 256000,
+      "input": 0.2,
+      "output": 1.2,
+      "cache_read": 0.02
     },
     "azure_ai/MAI-Cyber-1-Flash": {
       "context_window": 256000,
@@ -3290,9 +3370,9 @@
     },
     "baseten/reflection/Beam-1.0": {
       "context_window": 1048576,
-      "input": 1.3,
-      "output": 4.3,
-      "cache_read": 0.13
+      "input": 0.4,
+      "output": 1.2,
+      "cache_read": 0.04
     },
     "baseten/thinkingmachines/inkling": {
       "context_window": 1048576,
@@ -4292,7 +4372,7 @@
       "output": 0.6
     },
     "bedrock_mantle/qwen.qwen3-coder-480b-a35b-instruct": {
-      "context_window": 128000,
+      "context_window": 262144,
       "input": 0.45,
       "output": 1.8
     },
@@ -5061,7 +5141,8 @@
       "context_window": 991808,
       "input": 2.5,
       "output": 7.5,
-      "cache_read": 0.5
+      "cache_read": 0.5,
+      "cache_write_5m": 3.125
     },
     "dashscope/qwen3.8-flash": {
       "context_window": 991808,
@@ -6858,6 +6939,12 @@
       "output": 1.2,
       "cache_read": 0.006
     },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017-us": {
+      "context_window": 1048576,
+      "input": 0.45,
+      "output": 1.8,
+      "cache_read": 0.009
+    },
     "fireworks_ai/accounts/fireworks/models/devstral-small-2505": {
       "context_window": 131072,
       "input": 0.9,
@@ -7287,6 +7374,12 @@
       "input": 0.3,
       "output": 1.2,
       "cache_read": 0.06
+    },
+    "fireworks_ai/accounts/fireworks/models/minimax-m3p1-flash": {
+      "context_window": 1048576,
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.015
     },
     "fireworks_ai/accounts/fireworks/models/ministral-3-14b-instruct-2512": {
       "context_window": 256000,
@@ -12854,7 +12947,7 @@
       "output": 0.6
     },
     "qwen.qwen3-coder-480b-a35b-v1:0": {
-      "context_window": 131072,
+      "context_window": 262144,
       "input": 0.45,
       "output": 1.8
     },
@@ -12993,7 +13086,8 @@
       "context_window": 991808,
       "input": 2.5,
       "output": 7.5,
-      "cache_read": 0.5
+      "cache_read": 0.5,
+      "cache_write_5m": 3.125
     },
     "qwen_ai_platform/qwen3.8-flash": {
       "context_window": 991808,
@@ -13139,7 +13233,8 @@
       "context_window": 991808,
       "input": 2.5,
       "output": 7.5,
-      "cache_read": 0.5
+      "cache_read": 0.5,
+      "cache_write_5m": 3.125
     },
     "qwencloud/qwen3.8-max": {
       "context_window": 991808,
@@ -14010,6 +14105,12 @@
       "cache_read": 0.13
     },
     "together_ai/deepseek-ai/DeepSeek-V4.1-Flash": {
+      "context_window": 1048576,
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006
+    },
+    "together_ai/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
       "context_window": 1048576,
       "input": 0.3,
       "output": 1.2,
@@ -16093,8 +16194,20 @@
       "output": 4.4,
       "cache_read": 0.14
     },
+    "volcengine/doubao-seed-2-1-lite-260915": {
+      "context_window": 1024000,
+      "input": 0.115,
+      "output": 0.388126,
+      "cache_read": 0.023
+    },
     "volcengine/doubao-seed-2-1-pro-260628": {
       "context_window": 256000,
+      "input": 0.8625,
+      "output": 4.3125,
+      "cache_read": 0.1725
+    },
+    "volcengine/doubao-seed-2-1-pro-260915": {
+      "context_window": 1024000,
       "input": 0.8625,
       "output": 4.3125,
       "cache_read": 0.1725
@@ -16266,11 +16379,23 @@
       "input": 0.03,
       "output": 0.13
     },
+    "wandb/reflection/Beam-1.0-501B-A23B": {
+      "context_window": 1049000,
+      "input": 1.0,
+      "output": 3.0,
+      "cache_read": 0.1
+    },
     "wandb/zai-org/GLM-5.2": {
       "context_window": 1049000,
       "input": 0.76,
       "output": 2.42,
       "cache_read": 0.14
+    },
+    "wandb/zai-org/GLM-5.3": {
+      "context_window": 1049000,
+      "input": 1.2,
+      "output": 4.0,
+      "cache_read": 0.19
     },
     "wandb/zai-org/GLM-5.3-Flash": {
       "context_window": 1049000,
