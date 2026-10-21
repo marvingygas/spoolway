@@ -440,7 +440,8 @@ no pane instead. The `hide:` key overrides that project setting for one step in 
 detached while the project shows them. Without `hide:`, the step follows `dispatch.hide_commands`.
 
 The older `headless:` key no longer loads. A step that still carries it, with any value, is refused
-by name, and the message says to run `spoolway sync` or to write `hide: true` in its place.
+by name. The message says to run `spoolway sync`, or to write `hide: true` in place of
+`headless: true` and delete `headless: false`.
 `spoolway sync` fixes the key on every step in three places: the checkout's pipeline files, the
 private patches under `overrides/pipelines/`, and the private pipelines under `local/pipelines/`.
 It renames `headless: true` to `hide: true`. It deletes `headless: false` and writes no `hide:`,
@@ -448,6 +449,10 @@ because `hide: false` forces a pane even while `dispatch.hide_commands` is true,
 only followed that setting. `sync` prints a `wrote` line for each file with a note naming the
 pipeline and the steps it renamed or cleared. It changes no other line. This is the one edit `sync`
 makes to a step.
+
+A patch's `headless: false` could override the tracked step's `headless: true`. Once both are
+synced, the tracked step's `hide: true` wins, so the step runs without a pane. The note under the
+patch says so. Set `hide: false` in the patch to keep the pane.
 
 A step that carries both `headless:` and `hide:` cannot be fixed without losing one of them. `sync`
 refuses that file, names the step and leaves the file as it was. Keep only `hide:` there and run

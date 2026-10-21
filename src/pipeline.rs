@@ -1179,11 +1179,14 @@ fn background_on_fail_message(step_id: &str) -> String {
 }
 
 /// A step still declaring the retired `headless:`, the old spelling of
-/// `hide: true`. `scripts/e2e/suites/upgrade.sh` greps this wording too.
+/// `hide: true`. `headless: false` only spelled out the default, so its fix
+/// is a deletion: `hide: false` would force a pane `dispatch.hide_commands`
+/// hides. `scripts/e2e/suites/upgrade.sh` greps this wording too.
 pub(crate) fn headless_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` declares `headless:` — the key is now `hide:`; run `spoolway sync` \
-         to rename it, or write `hide: true` in its place."
+         to rename it, or write `hide: true` in place of `headless: true` and delete \
+         `headless: false`."
     )
 }
 
@@ -3463,7 +3466,8 @@ mod tests {
             assert_eq!(
                 err,
                 "dependabot: step `a` declares `headless:` — the key is now `hide:`; run \
-                 `spoolway sync` to rename it, or write `hide: true` in its place.",
+                 `spoolway sync` to rename it, or write `hide: true` in place of \
+                 `headless: true` and delete `headless: false`.",
                 "{steps}"
             );
             let pipeline: Pipeline = serde_norway::from_str(steps).unwrap();

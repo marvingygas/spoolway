@@ -346,7 +346,7 @@ fi
 # the sync below renames it and says so. The wording is `Pipeline`'s own, which
 # `headless_message` in `src/pipeline.rs` keeps in step with this.
 has "the 0.6.0 fixture's headless: key is refused by name before the sync" \
-  "default.yml: step \`handover\` declares \`headless:\` — the key is now \`hide:\`; run \`spoolway sync\` to rename it, or write \`hide: true\` in its place." \
+  "default.yml: step \`handover\` declares \`headless:\` — the key is now \`hide:\`; run \`spoolway sync\` to rename it, or write \`hide: true\` in place of \`headless: true\` and delete \`headless: false\`." \
   "$WORK/0.6.0/check-before.out"
 
 # The dry run first, then the real run, each against a snapshot of every file in
