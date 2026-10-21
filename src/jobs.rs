@@ -2399,7 +2399,7 @@ mod tests {
         let (actions, problems) = fire(&repo);
         assert!(actions.is_empty() && problems.is_empty(), "{actions:?}");
         assert_eq!(
-            std::fs::read_to_string(&starts).unwrap().lines().count(),
+            hook_starts(&starts),
             1,
             "a pass found the running hook and started no second"
         );
@@ -2460,7 +2460,7 @@ mod tests {
         );
         let (actions, _) = fire(&repo);
         assert!(actions.is_empty(), "{actions:?}");
-        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        assert_eq!(hook_starts(&starts), 1);
 
         let key = crate::command_step::Runs::key("open", "audit-1");
         std::fs::File::options()
@@ -2560,11 +2560,7 @@ mod tests {
         }
         assert!(queued, "the answer was never queued");
         assert_eq!(repo.task("audit-1").unwrap().extra_str("ticket"), "T-9");
-        assert_eq!(
-            std::fs::read_to_string(&starts).unwrap().lines().count(),
-            1,
-            "the hook ran once"
-        );
+        assert_eq!(hook_starts(&starts), 1, "the hook ran once");
         assert!(read_opening(&repo, Scope::User, "nightly").is_none());
     }
 
@@ -2995,6 +2991,18 @@ mod tests {
         );
     }
 
+    /// How many times the hook writing `starts` has started, once it has
+    /// started at all. The hook runs beside the pass, so the pass that
+    /// started it can return before its first line is written; on a loaded
+    /// machine reading the file straight away finds nothing there.
+    fn hook_starts(starts: &Path) -> usize {
+        let began = std::time::Instant::now();
+        while !starts.exists() && began.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::fs::read_to_string(starts).unwrap().lines().count()
+    }
+
     /// Gives each clone of a workspace an `open` hook that appends to
     /// `hook-starts`, waits for a `hook-release` file, and then names a
     /// ticket. Returns both paths. The wait is bounded at ten seconds, so a
@@ -3071,11 +3079,7 @@ mod tests {
             actions.is_empty() && problems.is_empty(),
             "{actions:?} {problems:?}"
         );
-        assert_eq!(
-            std::fs::read_to_string(&starts).unwrap().lines().count(),
-            1,
-            "one hook for the window"
-        );
+        assert_eq!(hook_starts(&starts), 1, "one hook for the window");
 
         // Every pass that finds the hook still running renews the claim, so
         // an old one is not read as a dispatcher that stopped asking. The
@@ -3127,11 +3131,7 @@ mod tests {
             record["nightly"].opening.is_none(),
             "a settled firing ends the claim"
         );
-        assert_eq!(
-            std::fs::read_to_string(&starts).unwrap().lines().count(),
-            1,
-            "still one hook"
-        );
+        assert_eq!(hook_starts(&starts), 1, "still one hook");
     }
 
     /// A claim left by a clone whose dispatcher is gone does not keep the
@@ -3162,7 +3162,7 @@ mod tests {
             actions,
             ["job nightly · fired · opening ticket for audit-1"]
         );
-        assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 1);
+        assert_eq!(hook_starts(&starts), 1);
         std::fs::write(&release, "").unwrap();
     }
 
