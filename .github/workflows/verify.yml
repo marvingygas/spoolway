@@ -150,7 +150,7 @@ jobs:
   # one there is.
   #
   # It runs before a release, not on every pull request. It is the slowest
-  # job by far — about fifteen minutes against eight for `test` — and it set
+  # job by far — about thirty minutes against fifteen for `test` — and it set
   # the length of every merge. `release.yml` leaves `macos` at its default,
   # so the rehearsal and the tag both run it and a red Mac stops the release.
   # `ci.yml` turns it off, and a manual dispatch there can turn it back on.
@@ -169,7 +169,7 @@ jobs:
   # of which the system tools do. Their unprefixed names go on PATH ahead of
   # the system ones.
   test-macos:
-    timeout-minutes: 45
+    timeout-minutes: 60
     if: inputs.run-tests && inputs.macos
     runs-on: macos-latest
     steps:
@@ -206,8 +206,12 @@ jobs:
       # that hangs would leave a log with nothing in it. The step's own
       # timeout is shorter than the job's so a hang is cut here, with time left
       # for the upload below — a job cancelled by its own limit skips it.
+      #
+      # The suite takes about twenty minutes on a good runner, and a slow
+      # `macos-latest` runner is a third slower again: v0.14.0's rehearsal was
+      # cut at 25 minutes while still passing checks. 40 leaves room for that.
       - name: command steps, end to end
-        timeout-minutes: 25
+        timeout-minutes: 40
         env:
           KEEP: 1
         run: |
