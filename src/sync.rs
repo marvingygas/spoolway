@@ -2600,7 +2600,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 
         if let Some((ids, dropped)) = renamed {
             outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
-            outcomes.push(rename_note(&shown, &name, &ids, &dropped));
+            outcomes.push(rename_note(&shown, &name, &ids, &dropped, Layout::Steps));
         }
         if changed {
             acts.push(Act::write(path, &shown, on_disk));
@@ -2727,7 +2727,7 @@ fn rename_outside_checkout(
     }
     if let Some((ids, dropped)) = renamed {
         outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
-        outcomes.push(rename_note(&shown, name, &ids, &dropped));
+        outcomes.push(rename_note(&shown, name, &ids, &dropped, layout));
         acts.push(Act::write(path, &shown, text));
     }
 }
@@ -2776,8 +2776,17 @@ fn rename_wrote(ids: &[String], dropped: &[String]) -> &'static str {
 /// The note under a file whose steps [`rename_headless`] changed.
 ///
 /// `ids` is every step it changed and `dropped` the ones among them that lost
-/// a `headless: false` instead of gaining a `hide:`.
-fn rename_note(shown: &str, pipeline: &str, ids: &[String], dropped: &[String]) -> Outcome {
+/// a `headless: false` instead of gaining a `hide:`. In a pipeline file that
+/// line only spelled out the default. In a patch it could have overridden the
+/// tracked step's `headless: true`, whose `hide: true` now wins, so the note
+/// says how to keep the pane instead.
+fn rename_note(
+    shown: &str,
+    pipeline: &str,
+    ids: &[String],
+    dropped: &[String],
+    layout: Layout,
+) -> Outcome {
     let word = |ids: &[String]| if ids.len() == 1 { "step" } else { "steps" };
     let renamed: Vec<String> = ids
         .iter()
@@ -2796,10 +2805,16 @@ fn rename_note(shown: &str, pipeline: &str, ids: &[String], dropped: &[String]) 
     if !dropped.is_empty() {
         let (word, listed) = (word(dropped), dropped.join(", "));
         let join = if renamed.is_empty() { "" } else { ";" };
-        long.push_str(&format!(
-            "{join} `headless: false` removed from {word} {listed}, where it only spelled \
-             out the default"
-        ));
+        long.push_str(&match layout {
+            Layout::Steps => format!(
+                "{join} `headless: false` removed from {word} {listed}, where it only spelled \
+                 out the default"
+            ),
+            Layout::Patch => format!(
+                "{join} `headless: false` removed from {word} {listed}; where the tracked step \
+                 sets `hide: true`, that now wins, so set `hide: false` here to keep a pane"
+            ),
+        });
         short.push_str(&format!(
             "{join} headless false removed from {word} {listed}"
         ));
@@ -5602,6 +5617,29 @@ mod tests {
                 .iter()
                 .any(|line| line.ends_with("(`headless: false` removed)")),
             "{lines:?}"
+        );
+    }
+
+    /// A patch's `headless: false` could have overridden the tracked step's
+    /// `headless: true`, so its note says how to keep the pane, never that the
+    /// line only spelled out the default.
+    #[test]
+    fn a_patch_note_says_how_to_keep_the_pane() {
+        let ids = ["lint".to_string()];
+        let note = |layout| {
+            let outcomes = [rename_note("p.yml", "default", &ids, &ids, layout)];
+            format!("{:?}", migration_notes(&outcomes))
+        };
+        let tracked = note(Layout::Steps);
+        assert!(
+            tracked.contains("only spelled out the default"),
+            "{tracked}"
+        );
+        let patch = note(Layout::Patch);
+        assert!(!patch.contains("only spelled out the default"), "{patch}");
+        assert!(
+            patch.contains("set `hide: false` here to keep a pane"),
+            "{patch}"
         );
     }
 

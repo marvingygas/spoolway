@@ -419,7 +419,7 @@ pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) 
     if fields.contains_key("headless") {
         bail!(
             "sets `headless:` — the key is now `hide:`; run `spoolway sync` to rename it, or \
-             write `hide: true` in its place"
+             write `hide: true` in place of `headless: true` and delete `headless: false`"
         );
     }
     let mut value = serde_norway::to_value(&*step).context("serialising step for override")?;
@@ -1191,8 +1191,8 @@ pub(crate) fn promote_pipeline_patch(
         if fields.contains_key("headless") {
             bail!(
                 "step `{step_id}` of pipeline `{name}` sets `headless:` in its patch — the key \
-                 is now `hide:`; run `spoolway sync` to rename it there, or write `hide:` in \
-                 its place, then promote again"
+                 is now `hide:`; run `spoolway sync` to rename it there, or write `hide: true` \
+                 in place of `headless: true` and delete `headless: false`, then promote again"
             );
         }
     }
