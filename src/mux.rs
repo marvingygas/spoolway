@@ -3279,10 +3279,18 @@ pub(crate) fn git_bounded(
         .stderr
         .then(|| reader(child.stderr.take().map(|p| Box::new(p) as _)));
     let deadline = Instant::now() + timeout;
+    // The wait starts short and doubles up to [`HERDR_POLL`]. Most of these
+    // calls end in a few milliseconds, such as a fetch from a checkout with
+    // no `origin`, and a flat [`HERDR_POLL`] would charge each of them a
+    // quarter second of the pass for nothing.
+    let mut wait = Duration::from_millis(5);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(HERDR_POLL),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(HERDR_POLL);
+            }
             _ => break None,
         }
     };
