@@ -5351,7 +5351,13 @@ fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
         crate::memory::trim();
         // A send into a dropped receiver is the screen having moved on — a
         // newer load, or the person leaving the tab — and nothing to report.
-        let _ = tx.send(result);
+        // The table it hands back is freed here, after the trim above and
+        // after the screen's own trim on leaving, so trim once more or a
+        // tab left mid-load keeps the whole table resident.
+        if let Err(unsent) = tx.send(result) {
+            drop(unsent);
+            crate::memory::trim();
+        }
     }) {
         let _ = failed.send(Err(
             anyhow::Error::new(err).context("could not start the load")
