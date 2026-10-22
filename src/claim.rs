@@ -1,5 +1,6 @@
 //! The mark a dispatcher leaves on a task for as long as it is booting that
-//! task's lane, so the board can say `◌ starting` rather than `○ queued`.
+//! task's lane, or cutting and starting its command step, so the board can
+//! say `◌ starting` rather than `○ queued`.
 //!
 //! A booting task has nothing else on disk to say so. Its stage moves off
 //! `queued` only once `Mux::start_lane` has returned — see
@@ -12,8 +13,8 @@
 //!
 //! One file per task under [`crate::repo::Repo::claims_dir`], holding the id
 //! of the step being booted, rather than one shared file: the dispatcher
-//! sets and clears a mark per lane, and a file of its own is written and
-//! removed whole, with nothing to read back and merge.
+//! sets and clears a mark per lane or command step, and a file of its own is
+//! written and removed whole, with nothing to read back and merge.
 //!
 //! A mark outlives its dispatcher only when that dispatcher is killed
 //! mid-boot. Two things keep that from pinning a row on `starting`: [`live`]

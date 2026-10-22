@@ -300,6 +300,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // built one per pass — see `crate::dispatch::PassMemory`.
     let mut pass_memory = crate::dispatch::PassMemory::default();
 
+    // Whether the first pass has returned and said so in `first-pass`.
+    let mut first_pass_stamped = false;
+
     loop {
         // Before anything is read or moved: a dispatcher whose lock file was
         // deleted or re-taken can no longer tell whether it is the only one
@@ -329,7 +332,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // one wait, not be retried with no pause at all.
         let mut worked = false;
 
-        let outcome = dispatcher.pass(&mut || {});
+        let outcome = stamped_pass(repo, &mut first_pass_stamped, || {
+            dispatcher.pass(&mut || {})
+        });
         pass_memory = dispatcher.into_memory();
         match outcome {
             Ok(report) => {
@@ -1620,11 +1625,75 @@ fn print_staying_up(jobs: &crate::jobs::StayingUp) {
     }
 }
 
+/// Run one pass, and if it is the run's first, say so in `first-pass` the
+/// moment it returns. The stamp follows the pass whatever its outcome: a
+/// failed first pass must stamp too, or the dispatch tab's `Starting
+/// dispatcher` popup would stay up for good. Once per run, so a long run pays
+/// no write per pass.
+fn stamped_pass<T>(repo: &Repo, stamped: &mut bool, pass: impl FnOnce() -> Result<T>) -> Result<T> {
+    let outcome = pass();
+    if !*stamped {
+        *stamped = true;
+        stamp_first_pass(repo);
+    }
+    outcome
+}
+
+/// Write this process's pid into `first-pass`, which the dispatch tab's
+/// `Starting dispatcher` popup closes on. A write that fails is logged and
+/// costs only the popup staying up until a claim, not the run.
+fn stamp_first_pass(repo: &Repo) {
+    let path = repo.first_pass_file();
+    if let Err(err) = crate::task::write_atomic(&path, std::process::id().to_string()) {
+        crate::problem_log::append(
+            repo,
+            &format!(
+                "could not write {}: {err:#}. The dispatch tab's `Starting dispatcher` popup \
+                 stays up until a lane is claimed. Make the project home writable.",
+                path.display()
+            ),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
     use crate::screen::corner::TOP_LEFT;
+
+    /// A first pass that fails stamps `first-pass` all the same, and a later
+    /// pass does not stamp again.
+    #[test]
+    fn a_failed_first_pass_still_stamps_and_only_once() {
+        let (repo, _root) = fixture("first-pass-failed");
+        let mut stamped = false;
+        let outcome: Result<()> =
+            stamped_pass(&repo, &mut stamped, || Err(anyhow!("herdr went away")));
+        assert!(outcome.is_err());
+        assert!(stamped);
+        assert_eq!(
+            std::fs::read_to_string(repo.first_pass_file()).unwrap(),
+            std::process::id().to_string()
+        );
+
+        std::fs::remove_file(repo.first_pass_file()).unwrap();
+        stamped_pass(&repo, &mut stamped, || Ok(())).unwrap();
+        assert!(!repo.first_pass_file().exists());
+    }
+
+    /// The stamp holds this process's pid and nothing else, which is what
+    /// the dispatch tab compares with its child's pid.
+    #[test]
+    fn the_first_pass_stamp_holds_the_dispatchers_pid() {
+        let (repo, _root) = fixture("first-pass-stamp");
+        assert!(!repo.first_pass_file().exists());
+        stamp_first_pass(&repo);
+        assert_eq!(
+            std::fs::read_to_string(repo.first_pass_file()).unwrap(),
+            std::process::id().to_string()
+        );
+    }
 
     /// A record of the last good config that cannot be written is announced
     /// once, not on every pass, and the next good record clears it so the

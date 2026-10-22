@@ -110,9 +110,11 @@ when `enter` is pressed, so it never reports a pipeline deleted since the screen
 does report one added since. When the pipelines on disk do not load, a popup shows the load
 error and no child starts. The moment the child starts, a `Starting
 dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and every other key
-on this page still reach the board underneath it. It closes once the child's first pass has
-claimed a slot or found nothing to claim, and does not open again on a later pass. `enter`
-again, over a running child, stops it at once when no agent lane or command step is running.
+on this page still reach the board underneath it. It closes once the child's first pass is over,
+whatever that pass did, or earlier when the dispatcher starts a lane or a command step. The child
+says so by writing its pid to a `first-pass` file in the project's home. The popup does not open again on
+a later pass. `enter` again, over a running child, stops it at once when no agent lane or
+command step is running.
 Otherwise it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
 still up:
 

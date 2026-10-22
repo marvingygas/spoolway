@@ -821,9 +821,19 @@ impl Repo {
         self.home().join(crate::dispatch::LANES_FILE)
     }
 
-    /// One mark per task a dispatcher is booting a lane for right now — see
-    /// [`crate::claim`]. Not a `home_subdir`: nothing needs it to exist
-    /// until a mark is written, and writing one creates it.
+    /// Written once per dispatcher run, right after its first pass returns,
+    /// and holding the dispatcher's pid. The dispatch tab learns the first
+    /// pass is over from it, because the child's stdout goes nowhere and
+    /// `lanes.json` is left alone by a pass that changes no lane record. The
+    /// pid lets the tab ignore a file an earlier dispatcher left behind.
+    pub fn first_pass_file(&self) -> PathBuf {
+        self.home().join(crate::dispatch::FIRST_PASS_FILE)
+    }
+
+    /// One mark per task a dispatcher is booting a lane or starting a command
+    /// step for right now — see [`crate::claim`]. Not a `home_subdir`:
+    /// nothing needs it to exist until a mark is written, and writing one
+    /// creates it.
     pub fn claims_dir(&self) -> PathBuf {
         self.home().join(crate::claim::CLAIMS_DIR)
     }

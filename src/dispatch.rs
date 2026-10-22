@@ -35,6 +35,10 @@ use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
 
+/// The file a dispatcher writes, holding its own pid, once its first pass
+/// has returned. See `Repo::first_pass_file`.
+pub(crate) const FIRST_PASS_FILE: &str = "first-pass";
+
 /// The fixed rate a full probe repeats at — [`Dispatcher::pass`] — when
 /// nothing wakes `commands::dispatch`'s wait loop early. A change that lands
 /// in the commands directory wakes that wait the moment it is written (see
@@ -1459,8 +1463,8 @@ impl<'a> Dispatcher<'a> {
         let mut report = Report::default();
         // Any boot mark still on disk is one a dispatcher killed mid-boot
         // left behind — this pass's own are set and cleared inside
-        // `start_lanes` — so it goes before anything here could set a new
-        // one. See [`crate::claim`].
+        // `start_lanes` and `run_command` — so it goes before anything here
+        // could set a new one. See [`crate::claim`].
         crate::claim::clear(self.repo);
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
@@ -5799,6 +5803,14 @@ impl<'a> Dispatcher<'a> {
                     ));
                     return Ok(None);
                 }
+                // Marked as booting from here until the command is started or
+                // its start failed, so the board reads `starting` rather
+                // than `queued` while the worktree is cut — see
+                // [`crate::claim`]. `Drop` clears it on every early return
+                // below, and the explicit release after the start covers
+                // the rest of the arm.
+                let mut claims = crate::claim::Claims::new(self.repo);
+                claims.claim(&id, &step.id);
                 // A checkout that cannot be cut — a branch name git refuses,
                 // say — is this task's failure alone. Passed up with `?` it
                 // ended the whole pass, so every other task waited behind
@@ -5898,6 +5910,7 @@ impl<'a> Dispatcher<'a> {
                         report,
                     ),
                 };
+                claims.release(&id);
                 match started {
                     Ok(_) => {
                         // Cleared only now that the run is in it: a launch
@@ -9647,6 +9660,11 @@ mod tests {
         /// Make `list_lanes` fail, as a multiplexer that has gone away does:
         /// the pass errors out before it does anything else.
         list_fails: bool,
+        /// The boot marks standing in this directory each time the backend is
+        /// asked to cut a workspace or run a command in a pane, as
+        /// `(call, task, step)`. Empty unless [`FakeMux::watching_marks`] set it.
+        mark_dir: Option<PathBuf>,
+        marks_seen: Mutex<Vec<(String, String, String)>>,
     }
 
     impl FakeMux {
@@ -9691,6 +9709,29 @@ mod tests {
                 tabs_opened: Mutex::new(0),
                 asked: Mutex::new(Vec::new()),
                 list_fails: false,
+                mark_dir: None,
+                marks_seen: Mutex::new(Vec::new()),
+            }
+        }
+        /// Record the boot marks under `repo` at every workspace cut and
+        /// every command run in a pane, the moments inside one pass that a
+        /// test cannot reach from outside it.
+        fn watching_marks(mut self, repo: &Repo) -> FakeMux {
+            self.mark_dir = Some(repo.claims_dir());
+            self
+        }
+        fn note_marks(&self, call: &str) {
+            let Some(dir) = &self.mark_dir else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let task = entry.file_name().to_string_lossy().to_string();
+                let step = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                self.marks_seen
+                    .lock()
+                    .unwrap()
+                    .push((call.to_string(), task, step));
             }
         }
         /// Place `pane` in `tab`, which holds `panes` panes, for
@@ -10060,6 +10101,7 @@ mod tests {
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
+            self.note_marks("create_workspace");
             self.cut(cwd, branch, base)
         }
         fn cut_path(&self, branch: &str) -> Option<PathBuf> {
@@ -10175,6 +10217,7 @@ mod tests {
             if !self.run_commands_in_pane {
                 return Ok(None);
             }
+            self.note_marks("run_in_pane");
             let mut splits = self.splits.lock().unwrap();
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
@@ -10218,6 +10261,7 @@ mod tests {
             script: &str,
             _env: &BTreeMap<String, String>,
         ) -> Result<Option<String>> {
+            self.note_marks("run_in_open_pane");
             if self.refuse_run_in_open_pane {
                 anyhow::bail!("pane {pane_id} would not take a command");
             }
@@ -13679,6 +13723,95 @@ mod tests {
         run_pass(&repo, &mux);
 
         assert!(!mux.did("start").is_empty(), "{:?}", mux.did("start"));
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A command step's task carries a boot mark naming the step from the
+    /// moment the dispatcher starts it — while its worktree is cut — and no
+    /// mark is left once the pass returns. The mark is what the board reads
+    /// as `◌ starting` instead of `○ queued`. See [`crate::claim`].
+    #[test]
+    fn a_command_step_is_marked_while_its_worktree_is_cut_and_cleared_after() {
+        let (repo, _root_guard) = fixture("claim-mark-command-cut");
+        add_task(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).watching_marks(&repo);
+        let pipelines = pipelines_running("true", false);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let seen = mux.marks_seen.lock().unwrap().clone();
+        assert!(
+            seen.contains(&(
+                "create_workspace".to_string(),
+                "demo".to_string(),
+                "implement".to_string()
+            )),
+            "no mark named the step while its worktree was cut: {seen:?}; calls: {:?}",
+            mux.calls()
+        );
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A shown command step is marked while its pane is started, and the mark
+    /// is gone once the pass returns.
+    #[test]
+    fn a_shown_command_step_is_marked_while_its_pane_starts_and_cleared_after() {
+        let (mut repo, _root_guard) = fixture("claim-mark-command-pane");
+        repo.config.dispatch.hide_commands = false;
+        add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes().watching_marks(&repo);
+        let pipelines = pipelines_running("true", false);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let seen = mux.marks_seen.lock().unwrap().clone();
+        assert!(
+            seen.contains(&(
+                "run_in_pane".to_string(),
+                "demo".to_string(),
+                "implement".to_string()
+            )),
+            "no mark named the step while its pane started: {seen:?}; calls: {:?}",
+            mux.calls()
+        );
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A command step whose start is refused leaves no mark behind, so the
+    /// row does not stay on `◌ starting` over a start that already failed.
+    #[test]
+    fn a_refused_command_start_leaves_no_mark() {
+        let (mut repo, _root_guard, mux) = tabs_fixture(
+            "claim-mark-command-refused",
+            crate::config::VisibleLanes::Count(3),
+            "implement",
+            &[("review", "w1:p7", "w1:t1", 1)],
+        );
+        repo.config.dispatch.hide_commands = false;
+        let mux = mux
+            .offering_panes()
+            .refusing_to_run_in_open_pane()
+            .with_pane_in_tab("w1:p7", "w1:t1", 1)
+            .watching_marks(&repo);
+        let pipelines = pipelines_running("true", false);
+
+        let _ = Dispatcher::new(&repo, &pipelines, &mux).pass(&mut || {});
+
+        let seen = mux.marks_seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|(_, task, _)| task == "demo"),
+            "the refused start was never marked: {seen:?}; calls: {:?}",
+            mux.calls()
+        );
         let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
             .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
             .unwrap_or_default();

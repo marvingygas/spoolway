@@ -376,9 +376,9 @@ enum Popup {
     /// The dispatcher just started and has not yet claimed anything: its own
     /// checks — herdr, git, the queue — run before its first pass, and the
     /// board has nothing to show for them. Takes no key and names none;
-    /// [`DispatchTab::reap`] closes it once the first pass has claimed a
-    /// slot or found nothing to claim. `since` is when the child was
-    /// started, which is what that pass's files are timed against.
+    /// [`DispatchTab::reap`] closes it once the first pass is over, or
+    /// earlier at a claim. `since` is when the child was started, which is
+    /// what a boot mark is timed against.
     Starting {
         panel: Vec<String>,
         since: std::time::SystemTime,
@@ -415,18 +415,23 @@ fn starting_panel() -> Vec<String> {
     )
 }
 
-/// Whether the dispatcher started at `since` has finished its first pass's
-/// claims: a boot mark written since — see [`crate::claim`] — or, for a pass
-/// that found nothing to claim, `lanes.json`, which every pass writes on its
-/// way out. The child's stdout goes nowhere, so its files are all the tab
-/// has to go on. Both are written well after `since`, past the child's own
-/// start checks, so a filesystem clock a few milliseconds coarse cannot
-/// date either ahead of it.
-fn first_pass_seen(repo: &Repo, since: std::time::SystemTime) -> bool {
+/// Whether the dispatcher child `pid`, started at `since`, has finished
+/// loading: a boot mark written since — see [`crate::claim`] — or its
+/// `first-pass` file, which holds its pid and is written once its first pass
+/// returns, whatever that pass did. The child's stdout goes nowhere, so its
+/// files are all the tab has to go on. The pid and the file's date together
+/// tell this child's file from one an earlier dispatcher left behind: nothing
+/// deletes the file, and pids start over after a reboot, so the same pid
+/// alone could belong to a run from before. Both files are written well
+/// after `since`, past the child's own start checks, so a filesystem clock a
+/// few milliseconds coarse cannot date either ahead of it.
+fn first_pass_seen(repo: &Repo, since: std::time::SystemTime, pid: u32) -> bool {
     crate::claim::marked_since(repo, since)
-        || std::fs::metadata(repo.lanes_file())
+        || std::fs::metadata(repo.first_pass_file())
             .and_then(|meta| meta.modified())
             .is_ok_and(|at| at >= since)
+            && std::fs::read_to_string(repo.first_pass_file())
+                .is_ok_and(|text| text.trim().parse::<u32>() == Ok(pid))
 }
 
 impl DispatchTab {
@@ -441,7 +446,7 @@ impl DispatchTab {
     /// Forget a child that has exited, and open the popup saying why if it
     /// ended without being asked to — over `Starting`, if the child ended
     /// before its first pass. A child still running closes `Starting` once
-    /// its first pass has claimed.
+    /// its first pass is over, or earlier at a claim.
     fn reap(&mut self, repo: &Repo) {
         let Some(child) = self.child.as_mut() else {
             return;
@@ -461,7 +466,7 @@ impl DispatchTab {
             return;
         }
         if let Some(Popup::Starting { since, .. }) = &self.popup
-            && first_pass_seen(repo, *since)
+            && first_pass_seen(repo, *since, child.pid())
         {
             self.popup = None;
         }
@@ -1805,24 +1810,96 @@ mod tests {
         assert!(tab.dispatching());
     }
 
-    // A first pass with nothing to claim still writes `lanes.json` on its
-    // way out, and that closes the popup too. A mark or a `lanes.json` from
-    // before the start does not.
+    // A boot mark from before the start does not close the popup, and
+    // neither does a `lanes.json` written after it: the tab no longer reads
+    // that file.
     #[test]
-    fn the_starting_popup_closes_on_a_first_pass_that_claimed_nothing() {
+    fn the_starting_popup_ignores_an_old_mark_and_lanes_json() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-empty");
-        crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
         crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
         std::thread::sleep(FIRST_PASS_GAP);
         let mut tab = DispatchTab::default();
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
-        tab.reap(&repo);
-        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
-
         std::thread::sleep(FIRST_PASS_GAP);
         crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
         tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+    }
+
+    // A first pass that changes no lane record leaves `lanes.json` alone, so
+    // the dispatcher says it is over with a `first-pass` file beside it that
+    // holds its own pid. That closes the popup, whatever the pass did and
+    // whatever `lanes.json` says. The stand-in waits before it stamps, as a
+    // real pass comes after the child's start checks, so the stamp is dated
+    // after `since`.
+    #[test]
+    fn the_starting_popup_closes_when_the_dispatcher_stamps_its_first_pass() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-stamp");
+        crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
+        std::thread::sleep(FIRST_PASS_GAP);
+        let stamp = repo.first_pass_file();
+        let mut tab = DispatchTab::default();
+        tab.started(
+            Ok(stand_in(&format!(
+                "sleep 0.1; echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
+                stamp.display(),
+                stamp.display(),
+                stamp.display()
+            ))),
+            std::time::SystemTime::now(),
+        );
+        for _ in 0..500 {
+            if stamp.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stamp.exists(), "the stand-in dispatcher stamped its pass");
+        tab.reap(&repo);
         assert!(tab.popup.is_none());
+        assert!(tab.dispatching());
+    }
+
+    // A `first-pass` file left by another dispatcher is not this child's
+    // first pass, so the popup stays up over it.
+    #[test]
+    fn a_first_pass_stamp_holding_another_pid_leaves_the_starting_popup_up() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-foreign");
+        std::thread::sleep(FIRST_PASS_GAP);
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        std::thread::sleep(FIRST_PASS_GAP);
+        crate::task::write_atomic(&repo.first_pass_file(), "1").unwrap();
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+    }
+
+    // Pids start over after a reboot, so a `first-pass` file left by an
+    // earlier run can hold this child's pid. Dated before the start, it does
+    // not close the popup.
+    #[test]
+    fn a_first_pass_stamp_dated_before_the_start_leaves_the_starting_popup_up() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-old-stamp");
+        let stamp = repo.first_pass_file();
+        let mut tab = DispatchTab::default();
+        tab.started(
+            Ok(stand_in(&format!(
+                "echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
+                stamp.display(),
+                stamp.display(),
+                stamp.display()
+            ))),
+            std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+        );
+        for _ in 0..500 {
+            if stamp.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stamp.exists(), "the stand-in dispatcher stamped its pass");
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
     }
 
     // A child that ends before its first pass puts `Ended` in the popup's

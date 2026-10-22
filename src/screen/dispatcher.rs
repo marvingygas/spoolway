@@ -102,6 +102,12 @@ impl Dispatcher {
         Dispatcher::spawn(command).unwrap()
     }
 
+    /// The child's process id, which the dispatcher writes into `first-pass`
+    /// once its first pass is over.
+    pub(crate) fn pid(&self) -> u32 {
+        self.process.id()
+    }
+
     /// Ask the child to stop, with the signal `spoolway dispatch` already
     /// answers: it settles what it holds, tears nothing down, and exits,
     /// leaving every lane running. Asked once. A second `SIGINT` would find
