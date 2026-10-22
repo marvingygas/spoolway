@@ -262,8 +262,8 @@ dispatch` child the tab starts on `enter` and stops with the next `enter` — th
 pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
 with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
 · 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
-turns while that count is above zero. On `enter`, until the child's first pass is over, or a
-lane has booted, the tab covers the board with a keyless `Starting dispatcher` popup. See
+turns while that count is above zero. On `enter`, until the child's first pass is over, or the
+dispatcher has started a lane or a command step, the tab covers the board with a keyless `Starting dispatcher` popup. See
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is
@@ -367,7 +367,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 |---|---|
 | TASK | The task id. For a copy of a routine, the routine's name. See [Routines](planning.md#routines). |
 | PIPELINE | The pipeline the task runs on. |
-| STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. For a paused row, or a blocked row no unblocker lane is working, the step the stop came from, and OUT, COST and TIME read that same step. For a `hook_failed` row, the stage the hook stopped the task on, `queued` or `done`. When the task file records no such step, the row shows `paused` or `blocked`. A task that cleanup held for a worktree off its branch reads `blocked`. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
+| STEP | The current step. For a starting task, the step the dispatcher is booting a lane for or starting as a command, ahead of the task file's own stage. For a paused row, or a blocked row no unblocker lane is working, the step the stop came from, and OUT, COST and TIME read that same step. For a `hook_failed` row, the stage the hook stopped the task on, `queued` or `done`. When the task file records no such step, the row shows `paused` or `blocked`. A task that cleanup held for a worktree off its branch reads `blocked`. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
@@ -384,7 +384,7 @@ stateDiagram-v2
   [*] --> queued
   [*] --> unknown: stage: names a step the pipeline does not have
   queued --> starting: dependencies archived, slot free
-  starting --> running: the lane comes up
+  starting --> running: the lane comes up or the command starts
   starting --> queued: the boot fails
   running --> starting: step passes or fails, the next lane starts
   running --> prompt: a permission prompt in its pane
@@ -406,7 +406,7 @@ stateDiagram-v2
 | State | Meaning |
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
-| `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
+| `starting` | The dispatcher is booting the lane, or cutting the worktree and starting the run of a command step. herdr does not list a lane until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
