@@ -262,8 +262,8 @@ dispatch` child the tab starts on `enter` and stops with the next `enter` — th
 pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
 with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
 · 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
-turns while that count is above zero. On `enter`, before the child's first pass has claimed
-anything, the tab covers the board with a keyless `Starting dispatcher` popup. See
+turns while that count is above zero. On `enter`, until the child's first pass is over, or a
+lane has booted, the tab covers the board with a keyless `Starting dispatcher` popup. See
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is

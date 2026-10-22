@@ -300,6 +300,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // built one per pass — see `crate::dispatch::PassMemory`.
     let mut pass_memory = crate::dispatch::PassMemory::default();
 
+    // Whether the first pass has returned and said so in `first-pass`.
+    let mut first_pass_stamped = false;
+
     loop {
         // Before anything is read or moved: a dispatcher whose lock file was
         // deleted or re-taken can no longer tell whether it is the only one
@@ -373,6 +376,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 crate::problem_log::append(repo, &failure);
                 println!("  ! {failure}");
             }
+        }
+
+        // Outside the match above on purpose: a failed first pass must
+        // stamp too, or the popup it feeds would stay up for good. Once per
+        // run, so a long run pays no write per pass.
+        if !first_pass_stamped {
+            first_pass_stamped = true;
+            stamp_first_pass(repo);
         }
 
         // Spent, and nothing left running to spend more. The queue keeps its
@@ -1620,11 +1631,38 @@ fn print_staying_up(jobs: &crate::jobs::StayingUp) {
     }
 }
 
+/// Say the first pass is over: write this process's pid into `first-pass`,
+/// which the dispatch tab's `Starting dispatcher` popup closes on. A write
+/// that fails is logged and costs only the popup staying up until a claim,
+/// not the run.
+fn stamp_first_pass(repo: &Repo) {
+    let path = repo.first_pass_file();
+    if let Err(err) = crate::task::write_atomic(&path, std::process::id().to_string()) {
+        crate::problem_log::append(
+            repo,
+            &format!("could not write {}: {err:#}", path.display()),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
     use crate::screen::corner::TOP_LEFT;
+
+    /// The stamp holds this process's pid and nothing else, which is what
+    /// the dispatch tab compares with its child's pid.
+    #[test]
+    fn the_first_pass_stamp_holds_the_dispatchers_pid() {
+        let (repo, _root) = fixture("first-pass-stamp");
+        assert!(!repo.first_pass_file().exists());
+        stamp_first_pass(&repo);
+        assert_eq!(
+            std::fs::read_to_string(repo.first_pass_file()).unwrap(),
+            std::process::id().to_string()
+        );
+    }
 
     /// A record of the last good config that cannot be written is announced
     /// once, not on every pass, and the next good record clears it so the

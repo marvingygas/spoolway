@@ -35,6 +35,10 @@ use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
 
+/// The file a dispatcher writes, holding its own pid, once its first pass
+/// has returned. See `Repo::first_pass_file`.
+pub(crate) const FIRST_PASS_FILE: &str = "first-pass";
+
 /// The fixed rate a full probe repeats at — [`Dispatcher::pass`] — when
 /// nothing wakes `commands::dispatch`'s wait loop early. A change that lands
 /// in the commands directory wakes that wait the moment it is written (see
