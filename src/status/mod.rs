@@ -120,10 +120,11 @@ pub enum State {
     /// turn.
     Silent { secs: i64 },
     /// The dispatcher has claimed a slot for the task and is booting its
-    /// lane, which herdr does not list until the boot is well along — read
-    /// off the dispatcher's boot mark, see [`crate::claim`]. The row names
-    /// the step being booted, which is not yet the task's own stage when
-    /// it is coming off `queued`.
+    /// lane, which herdr does not list until the boot is well along — or is
+    /// cutting a command step's worktree and starting its run, which may
+    /// have no pane at all. Read off the dispatcher's boot mark, see
+    /// [`crate::claim`]. The row names the step being started, which is not
+    /// yet the task's own stage when it is coming off `queued`.
     Starting,
     /// A step whose agent has settled its turn, or whose command run has
     /// exited, while no dispatcher holds the lock — so nothing will route it
@@ -4598,9 +4599,10 @@ fn build_rows(
     // weeks held thousands of dead ones (review finding 54). The set collected
     // here prunes the cache at the end of the reading.
     let mut live_sessions: HashSet<String> = HashSet::new();
-    // Every task a live dispatcher is booting a lane for this frame, and the
-    // step it is booting — empty with no dispatcher behind the lock, so a
-    // mark a killed one left never pins a row on `starting`.
+    // Every task a live dispatcher is booting a lane or starting a command
+    // step for this frame, and the step it is booting — empty with no
+    // dispatcher behind the lock, so a mark a killed one left never pins a
+    // row on `starting`.
     let claims = crate::claim::live(repo);
     // The dispatcher's own record of every lane, read once a frame: whether
     // a lane's last reminder went unanswered lives here and nowhere the

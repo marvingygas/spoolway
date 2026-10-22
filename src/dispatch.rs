@@ -1463,8 +1463,8 @@ impl<'a> Dispatcher<'a> {
         let mut report = Report::default();
         // Any boot mark still on disk is one a dispatcher killed mid-boot
         // left behind — this pass's own are set and cleared inside
-        // `start_lanes` — so it goes before anything here could set a new
-        // one. See [`crate::claim`].
+        // `start_lanes` and `run_command` — so it goes before anything here
+        // could set a new one. See [`crate::claim`].
         crate::claim::clear(self.repo);
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
