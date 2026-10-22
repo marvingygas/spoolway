@@ -324,23 +324,32 @@ measure large
 # right.
 eval_back_mb=""
 eval_stuck=""
-frames_before=$(screen_frames)
 screen_press $'\x1b[C'   # routines
 screen_press $'\x1b[C'   # jobs
 screen_press $'\x1b[C'   # eval
-# Left only once the load is over. Leaving mid-load would trim while the load
-# thread still holds its memory, and the check would then fail at random on a
-# slow runner. Each tab change draws a frame, so three new frames mean the
-# presses have been read; the popup is then waited for briefly, since a load
-# too quick to be seen has finished by the time it is asked about.
-eval_loading() { screen_last_frame | grep -qa 'Loading…'; }
-eval_opened() { [ "$(screen_frames)" -ge $((frames_before + 3)) ]; }
+# Left only once the load is over, which is not what is measured: a load left
+# early holds its memory until it ends, and on a slow runner that is after the
+# settle below. Judged from the frame on screen, not by counting frames: a tab
+# that redraws on a slow runner made three frames come before Eval's, and the
+# check then left Eval mid-load. A frame is read whole only once it holds the
+# frame writer's end code, so a frame cut short before its popup is drawn is
+# never taken for a load that has ended.
+eval_frame() { # prints the frame on screen when it is a whole Eval frame
+  local frame
+  frame=$(screen_last_frame)
+  case "$frame" in *'[EVAL]'*$'\x1b[?2026l'*) printf '%s' "$frame" ;; *) return 1 ;; esac
+}
+eval_opened() { eval_frame > /dev/null; }
+eval_loaded() {
+  local frame
+  frame=$(eval_frame) || return 1
+  case "$frame" in *'Loading…'*) return 1 ;; esac
+}
 settled=0
 if ! poll_until 60 eval_opened; then
   eval_stuck="the Eval tab never opened"
-else
-  poll_until 3 eval_loading
-  poll_while 120 eval_loading || eval_stuck="still loading after 120 s"
+elif ! poll_until 120 eval_loaded; then
+  eval_stuck="still loading after 120 s"
 fi
 # A load that never ends is an Eval that holds its memory for good, so it fails
 # the Eval check below rather than ending the suite before any verdict prints.
