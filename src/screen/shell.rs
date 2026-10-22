@@ -1825,6 +1825,52 @@ mod tests {
         assert!(tab.popup.is_none());
     }
 
+    // A first pass that changes no lane record leaves `lanes.json` alone, so
+    // the dispatcher says it is over with a `first-pass` file beside it that
+    // holds its own pid. That closes the popup, whatever the pass did and
+    // whatever `lanes.json` says.
+    #[test]
+    fn the_starting_popup_closes_when_the_dispatcher_stamps_its_first_pass() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-stamp");
+        crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
+        std::thread::sleep(FIRST_PASS_GAP);
+        let stamp = repo.home().join("first-pass");
+        let mut tab = DispatchTab::default();
+        tab.started(
+            Ok(stand_in(&format!(
+                "echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
+                stamp.display(),
+                stamp.display(),
+                stamp.display()
+            ))),
+            std::time::SystemTime::now(),
+        );
+        for _ in 0..500 {
+            if stamp.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stamp.exists(), "the stand-in dispatcher stamped its pass");
+        tab.reap(&repo);
+        assert!(tab.popup.is_none());
+        assert!(tab.dispatching());
+    }
+
+    // A `first-pass` file left by another dispatcher is not this child's
+    // first pass, so the popup stays up over it.
+    #[test]
+    fn a_first_pass_stamp_holding_another_pid_leaves_the_starting_popup_up() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-foreign");
+        std::thread::sleep(FIRST_PASS_GAP);
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        std::thread::sleep(FIRST_PASS_GAP);
+        crate::task::write_atomic(&repo.home().join("first-pass"), "1").unwrap();
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+    }
+
     // A child that ends before its first pass puts `Ended` in the popup's
     // place; one stopped by `enter` just takes the popup away.
     #[test]
