@@ -5803,6 +5803,14 @@ impl<'a> Dispatcher<'a> {
                     ));
                     return Ok(None);
                 }
+                // Marked as booting from here until the command is started or
+                // its start failed, so the board reads `starting` rather
+                // than `queued` while the worktree is cut — see
+                // [`crate::claim`]. `Drop` clears it on every early return
+                // below, and the explicit release after the start covers
+                // the rest of the arm.
+                let mut claims = crate::claim::Claims::new(self.repo);
+                claims.claim(&id, &step.id);
                 // A checkout that cannot be cut — a branch name git refuses,
                 // say — is this task's failure alone. Passed up with `?` it
                 // ended the whole pass, so every other task waited behind
@@ -5902,6 +5910,7 @@ impl<'a> Dispatcher<'a> {
                         report,
                     ),
                 };
+                claims.release(&id);
                 match started {
                     Ok(_) => {
                         // Cleared only now that the run is in it: a launch
@@ -10252,6 +10261,7 @@ mod tests {
             script: &str,
             _env: &BTreeMap<String, String>,
         ) -> Result<Option<String>> {
+            self.note_marks("run_in_open_pane");
             if self.refuse_run_in_open_pane {
                 anyhow::bail!("pane {pane_id} would not take a command");
             }
@@ -13768,6 +13778,38 @@ mod tests {
                 "implement".to_string()
             )),
             "no mark named the step while its pane started: {seen:?}; calls: {:?}",
+            mux.calls()
+        );
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A command step whose start is refused leaves no mark behind, so the
+    /// row does not stay on `◌ starting` over a start that already failed.
+    #[test]
+    fn a_refused_command_start_leaves_no_mark() {
+        let (mut repo, _root_guard, mux) = tabs_fixture(
+            "claim-mark-command-refused",
+            crate::config::VisibleLanes::Count(3),
+            "implement",
+            &[("review", "w1:p7", "w1:t1", 1)],
+        );
+        repo.config.dispatch.hide_commands = false;
+        let mux = mux
+            .offering_panes()
+            .refusing_to_run_in_open_pane()
+            .with_pane_in_tab("w1:p7", "w1:t1", 1)
+            .watching_marks(&repo);
+        let pipelines = pipelines_running("true", false);
+
+        let _ = Dispatcher::new(&repo, &pipelines, &mux).pass(&mut || {});
+
+        let seen = mux.marks_seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|(_, task, _)| task == "demo"),
+            "the refused start was never marked: {seen:?}; calls: {:?}",
             mux.calls()
         );
         let left: Vec<_> = std::fs::read_dir(repo.claims_dir())

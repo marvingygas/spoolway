@@ -1,5 +1,6 @@
 //! The mark a dispatcher leaves on a task for as long as it is booting that
-//! task's lane, so the board can say `◌ starting` rather than `○ queued`.
+//! task's lane, or cutting and starting its command step, so the board can
+//! say `◌ starting` rather than `○ queued`.
 //!
 //! A booting task has nothing else on disk to say so. Its stage moves off
 //! `queued` only once `Mux::start_lane` has returned — see
