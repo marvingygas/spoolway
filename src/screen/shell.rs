@@ -419,14 +419,19 @@ fn starting_panel() -> Vec<String> {
 /// loading: a boot mark written since — see [`crate::claim`] — or its
 /// `first-pass` file, which holds its pid and is written once its first pass
 /// returns, whatever that pass did. The child's stdout goes nowhere, so its
-/// files are all the tab has to go on. The pid is what tells this child's
-/// file from one an earlier dispatcher left behind. The boot mark is written
-/// well after `since`, past the child's own start checks, so a filesystem
-/// clock a few milliseconds coarse cannot date it ahead of it.
+/// files are all the tab has to go on. The pid and the file's date together
+/// tell this child's file from one an earlier dispatcher left behind: nothing
+/// deletes the file, and pids start over after a reboot, so the same pid
+/// alone could belong to a run from before. Both files are written well
+/// after `since`, past the child's own start checks, so a filesystem clock a
+/// few milliseconds coarse cannot date either ahead of it.
 fn first_pass_seen(repo: &Repo, since: std::time::SystemTime, pid: u32) -> bool {
     crate::claim::marked_since(repo, since)
-        || std::fs::read_to_string(repo.first_pass_file())
-            .is_ok_and(|text| text.trim().parse::<u32>() == Ok(pid))
+        || std::fs::metadata(repo.first_pass_file())
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at >= since)
+            && std::fs::read_to_string(repo.first_pass_file())
+                .is_ok_and(|text| text.trim().parse::<u32>() == Ok(pid))
 }
 
 impl DispatchTab {
@@ -1824,7 +1829,9 @@ mod tests {
     // A first pass that changes no lane record leaves `lanes.json` alone, so
     // the dispatcher says it is over with a `first-pass` file beside it that
     // holds its own pid. That closes the popup, whatever the pass did and
-    // whatever `lanes.json` says.
+    // whatever `lanes.json` says. The stand-in waits before it stamps, as a
+    // real pass comes after the child's start checks, so the stamp is dated
+    // after `since`.
     #[test]
     fn the_starting_popup_closes_when_the_dispatcher_stamps_its_first_pass() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-stamp");
@@ -1834,7 +1841,7 @@ mod tests {
         let mut tab = DispatchTab::default();
         tab.started(
             Ok(stand_in(&format!(
-                "echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
+                "sleep 0.1; echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
                 stamp.display(),
                 stamp.display(),
                 stamp.display()
@@ -1863,6 +1870,34 @@ mod tests {
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
         std::thread::sleep(FIRST_PASS_GAP);
         crate::task::write_atomic(&repo.first_pass_file(), "1").unwrap();
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+    }
+
+    // Pids start over after a reboot, so a `first-pass` file left by an
+    // earlier run can hold this child's pid. Dated before the start, it does
+    // not close the popup.
+    #[test]
+    fn a_first_pass_stamp_dated_before_the_start_leaves_the_starting_popup_up() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-old-stamp");
+        let stamp = repo.first_pass_file();
+        let mut tab = DispatchTab::default();
+        tab.started(
+            Ok(stand_in(&format!(
+                "echo $$ > '{}.tmp' && mv '{}.tmp' '{}'; exec sleep 30",
+                stamp.display(),
+                stamp.display(),
+                stamp.display()
+            ))),
+            std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+        );
+        for _ in 0..500 {
+            if stamp.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stamp.exists(), "the stand-in dispatcher stamped its pass");
         tab.reap(&repo);
         assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
     }

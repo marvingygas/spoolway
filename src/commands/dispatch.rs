@@ -1647,7 +1647,11 @@ fn stamp_first_pass(repo: &Repo) {
     if let Err(err) = crate::task::write_atomic(&path, std::process::id().to_string()) {
         crate::problem_log::append(
             repo,
-            &format!("could not write {}: {err:#}", path.display()),
+            &format!(
+                "could not write {}: {err:#}. The dispatch tab's `Starting dispatcher` popup \
+                 stays up until a lane is claimed. Make the project home writable.",
+                path.display()
+            ),
         );
     }
 }
