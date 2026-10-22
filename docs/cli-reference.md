@@ -113,8 +113,8 @@ dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and e
 on this page still reach the board underneath it. It closes once the child's first pass is over,
 whatever that pass did, or earlier when a lane's boot mark is written. The child says so by
 writing its pid to a `first-pass` file in the project's home. The popup does not open again on
-a later pass. `enter`
-again, over a running child, stops it at once when no agent lane or command step is running.
+a later pass. `enter` again, over a running child, stops it at once when no agent lane or
+command step is running.
 Otherwise it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
 still up:
 
