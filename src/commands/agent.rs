@@ -377,6 +377,8 @@ fn sample_placeholders(session: &str) -> std::collections::BTreeMap<&'static str
             "worktree_git_dir",
             "/<repo>/.git/worktrees/<task>".to_string(),
         ),
+        // The plans folder — see `crate::repo::Repo::plans_dir`.
+        ("plans_dir", "/<home>/.spoolway/<project>/plans".to_string()),
     ])
 }
 
@@ -786,6 +788,7 @@ fn agent_verify_live(
         ("project_home", dir.display().to_string()),
         ("git_dir", git_dir.display().to_string()),
         ("worktree_git_dir", worktree_git_dir.display().to_string()),
+        ("plans_dir", dir.join("plans").display().to_string()),
     ]);
     let rendered_args = profile.render_args(&values)?;
     // Composed by the adapter, exactly as a headless lane's first turn is —

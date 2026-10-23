@@ -1130,6 +1130,10 @@ impl LaneLayout {
 ///   (see [`crate::repo::worktree_git_dir`]) — `.git/worktrees/<name>` in a
 ///   linked worktree, holding the `index` that `git add` locks; the same
 ///   directory as `{git_dir}` anywhere else
+/// - `{plans_dir}`    absolute path to the plans folder (see
+///   [`crate::repo::Repo::plans_dir`]) — the plan page and mockup folders a
+///   task links to, which in home mode sit in the workspace, outside every
+///   other folder a lane is granted
 /// - `{session_id}`   session id spoolway minted for this lane, so that the
 ///   transcript the agent writes can be found again and its token usage
 ///   recorded. Drop it and the lane still runs — it just spends unaccounted.
@@ -3232,7 +3236,7 @@ mod tests {
     }
 
     /// Everything a lane start supplies, as `<name>`. Kept in step with the
-    /// `values` map in `dispatch::start_lane`.
+    /// `values` map in `prepare_boot` (`src/dispatch.rs`).
     fn values() -> BTreeMap<&'static str, String> {
         [
             "model",
@@ -3245,6 +3249,7 @@ mod tests {
             "project_home",
             "git_dir",
             "worktree_git_dir",
+            "plans_dir",
         ]
         .iter()
         .map(|key| (*key, format!("<{key}>")))
@@ -3488,7 +3493,8 @@ mod tests {
     /// actually uses — the grant that lets `git add`/`git commit` create
     /// `index.lock` there instead of failing on a read-only filesystem. codex
     /// carries a fourth, the worktree's own git directory, which its sandbox
-    /// keeps read-only even inside the third.
+    /// keeps read-only even inside the third. Both end with the plans folder,
+    /// so a lane can open the plan page its task links to without a prompt.
     #[test]
     fn both_kinds_carry_the_git_dir_as_a_third_add_dir() {
         for kind in ["claude", "codex"] {
@@ -3503,11 +3509,12 @@ mod tests {
             if kind == "codex" {
                 want.push("<worktree_git_dir>");
             }
+            want.push("<plans_dir>");
             assert_eq!(
                 add_dirs, want,
                 "`{kind}` must carry `{{state_dir}}`, `{{project_home}}` and \
                  `{{git_dir}}` as its first three `--add-dir` grants, in that \
-                 order, and codex `{{worktree_git_dir}}` after them"
+                 order, codex `{{worktree_git_dir}}` after them, and `{{plans_dir}}` last"
             );
         }
     }

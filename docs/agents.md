@@ -194,6 +194,7 @@ The argv a lane is started with is fixed per kind. Each row's template substitut
 | `{project_home}` | Absolute path to the project's own home under `~/.spoolway/` |
 | `{git_dir}` | Absolute path to the repository's shared `.git` |
 | `{worktree_git_dir}` | Absolute path to the git directory the lane's worktree owns: `.git/worktrees/<name>` in a linked worktree, the same path as `{git_dir}` in any other checkout |
+| `{plans_dir}` | Absolute path to the plans folder: `<workspace>/plans` in home mode, `plans/` under the project's home in repo mode |
 | `{session_id}` | The session id spoolway minted for this lane |
 
 `codex` has no `{session_id}`; its session is pinned by `$CODEX_HOME`. No part of the argv is
