@@ -64,7 +64,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reason {
     /// The fact, as a sentence that starts with the task it is about when it
-    /// is about one. Never longer than one line.
+    /// is about one. May run over several lines when it quotes a parse error.
     pub what: String,
     /// What to do about it, ending in the reload to try again.
     pub fix: String,
@@ -88,7 +88,9 @@ impl Answer {
     }
 
     /// A refusal on one line, for the problem log, which keeps one line per
-    /// problem. `None` for a good reload, which is no problem.
+    /// problem. Every run of whitespace, a parse error's line breaks included,
+    /// becomes one space: a continuation line the log cannot read a timestamp
+    /// from is never trimmed. `None` for a good reload, which is no problem.
     pub fn problem_line(&self) -> Option<String> {
         let Outcome::Refused(reasons) = &self.outcome else {
             return None;
@@ -97,10 +99,8 @@ impl Answer {
             .iter()
             .map(|reason| format!("{} {}", reason.what, reason.fix))
             .collect();
-        Some(format!(
-            "reload refused, nothing changed: {}",
-            reasons.join(" | ")
-        ))
+        let line = format!("reload refused, nothing changed: {}", reasons.join(" | "));
+        Some(line.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 }
 
@@ -320,7 +320,10 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
     let mut refusals: Vec<Reason> = unreadable
         .iter()
         .map(|file| Reason {
-            what: format!("{} cannot be checked", file.path.display()),
+            what: format!(
+                "{}, so a reload cannot tell whether the edit strands it",
+                file.skipped_line()
+            ),
             fix: "Fix or remove that queue file, then reload again.".to_string(),
         })
         .collect();
@@ -560,6 +563,16 @@ mod tests {
         let Outcome::Refused(reasons) = served.answer.outcome else {
             panic!("reload was not refused");
         };
+        let line = Answer {
+            request: String::new(),
+            outcome: Outcome::Refused(reasons.clone()),
+        }
+        .problem_line()
+        .unwrap();
+        assert!(
+            reasons[0].what.contains('\n') && !line.contains('\n'),
+            "{line}"
+        );
         assert!(
             reasons[0].what.starts_with("config.toml does not load"),
             "{reasons:?}"
@@ -607,7 +620,10 @@ mod tests {
             panic!("reload was not refused");
         };
         assert!(
-            reasons[0].what.contains("broken.md cannot be checked"),
+            reasons[0]
+                .what
+                .contains("broken.md did not parse and was skipped:")
+                && reasons[0].what.contains("a reload cannot tell whether"),
             "{reasons:?}"
         );
     }
