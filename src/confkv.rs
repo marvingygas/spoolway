@@ -71,10 +71,10 @@ pub const REFERENCE: &[Reference] = &[
     },
     Reference {
         key: "dispatch.priority",
-        values: "group, any",
+        values: "group, any, reserve",
         default: "group",
-        sentence: "Whether a free slot is filled from every ready task, or from the group \
-                    already landing first.",
+        sentence: "Whether a free slot is filled from every ready task, from the group \
+                    already landing first, or kept for a started group until it is done.",
     },
     Reference {
         key: "dispatch.lane_child_ceiling",
@@ -1638,6 +1638,16 @@ mod tests {
                 .unwrap()
                 .contains("priority = \"any\"")
         );
+
+        let reserve = set(&any, "dispatch.priority", "reserve").unwrap();
+        assert_eq!(reserve.dispatch.priority, Priority::Reserve);
+        assert_eq!(get(&reserve, "dispatch.priority").unwrap(), "reserve");
+        assert!(
+            toml::to_string(&reserve)
+                .unwrap()
+                .contains("priority = \"reserve\"")
+        );
+        assert!(set(&config, "dispatch.priority", "strict").is_err());
 
         let group = set(&any, "dispatch.priority", "group").unwrap();
         assert_eq!(group.dispatch.priority, Priority::Group);

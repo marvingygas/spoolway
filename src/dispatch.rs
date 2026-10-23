@@ -3043,7 +3043,7 @@ impl<'a> Dispatcher<'a> {
             );
         }
         // Four tiers, in order:
-        //   0. the gate: under `dispatch.priority = "group"`, a candidate
+        //   0. the gate: under `dispatch.priority = "group"` or `"reserve"`, a candidate
         //      whose own group has never run ranks behind one from a group
         //      already able to move — see [`group_gate_holds`]. A tier
         //      rather than the drop this used to be, so an open group that
@@ -9310,7 +9310,9 @@ fn parked_for_a_person(pipelines: &Pipelines, unattended: bool, task: &Task) -> 
 }
 
 /// Whether the gate ranks `task` behind a still-open group, under
-/// `dispatch.priority = "group"` — its own group has never run.
+/// `dispatch.priority = "group"` or `"reserve"` — its own group has never run.
+/// `reserve` ranks exactly as `group` does; the slot it keeps for a started
+/// group is not decided here.
 ///
 /// `false` covers every case the gate does not apply: `dispatch.priority` is
 /// `"any"`, `task` carries no `group:` — an ungrouped task has no siblings
@@ -9328,7 +9330,7 @@ pub(crate) fn group_gate_holds(
     graph: &Graph,
     task: &Task,
 ) -> bool {
-    if priority != crate::config::Priority::Group {
+    if priority == crate::config::Priority::Any {
         return false;
     }
     let Some(group) = task.front.group.as_deref() else {
@@ -23482,6 +23484,38 @@ mod tests {
             ["start billing · implement"],
             "gate-filter must rank behind dispatcher-ui while it can still move"
         );
+    }
+
+    /// `dispatch.priority = "reserve"` answers the gate exactly as `group`
+    /// does, and `any` is the only value that switches it off. A check that
+    /// compared against `Group` alone would treat `reserve` like `any`.
+    #[test]
+    fn group_gate_holds_answers_the_same_under_reserve_as_under_group() {
+        use crate::config::Priority;
+
+        let (repo, _root_guard) = fixture("gate-reserve");
+        add_task_with(&repo, "billing", "implement", |f| {
+            f.group = Some("dispatcher-ui".into());
+        });
+        add_task_with(&repo, "gate-filter", "queued", |f| {
+            f.group = Some("slot-priority".into());
+        });
+        add_task_with(&repo, "loner", "queued", |_| {});
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        for task in &tasks {
+            let id = task.front.id.as_str();
+            let group = group_gate_holds(Priority::Group, &graph, task);
+            assert_eq!(
+                group_gate_holds(Priority::Reserve, &graph, task),
+                group,
+                "{id}"
+            );
+            assert!(!group_gate_holds(Priority::Any, &graph, task), "{id}");
+        }
+        let held = tasks.iter().find(|t| t.front.id == "gate-filter").unwrap();
+        assert!(group_gate_holds(Priority::Reserve, &graph, held));
     }
 
     /// The gate only ranks a candidate behind an open group while that open
