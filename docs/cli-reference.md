@@ -647,8 +647,8 @@ Nothing was dispatched.
 ```
 
 It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with the
-`base:` of any dependency that is not `done`, or a task not yet cut whose base exists neither locally nor on `origin`, each
-refuses the whole start:
+`base:` of any dependency that is not `done`, or a task not yet cut whose base exists neither
+locally nor on `origin`, each refuses the whole start:
 
 ```
 refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
