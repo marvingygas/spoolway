@@ -16,10 +16,11 @@
 //! exception: its store is shared by every clone, so its history is one file
 //! in the workspace, and the clone that holds its copy is named there.
 //!
-//! Reads dominate. The two stores are written only by the `spoolway jobs`
-//! screen, through [`write`] and [`delete`] — nothing else stamps a schedule —
-//! and by the routines tab's delete, which deletes every job pointing into
-//! the routine it removes.
+//! Reads dominate. The two stores are written only by bare `spoolway`'s jobs
+//! tab and routines tab, through [`write`] and [`delete_in`] — nothing else
+//! stamps a schedule. The routines tab's job items act on the routine's own
+//! job, and its delete routine deletes every job pointing into the routine
+//! it removes.
 //! A missing store is an empty list, not an error, so a project with no job in
 //! it lists nothing and the dispatcher behaves exactly as it does today.
 //!
@@ -511,21 +512,13 @@ pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()
     crate::task::write_atomic(&path, doc.to_string())
 }
 
-/// Remove a job from whichever store holds it, leaving the rest of that file
-/// untouched. Removing a name no store has is not an error — the stores
-/// already say what this was asked to make them say — but a store that will
-/// not read is, so a confirmed delete never reports success over a job that
-/// is still there.
-pub fn delete(repo: &Repo, name: &str) -> Result<()> {
-    for scope in [Scope::User, Scope::Project] {
-        delete_in(repo, scope, name)?;
-    }
-    Ok(())
-}
-
-/// [`delete`], in `scope`'s store alone. For a caller that already knows
-/// which store holds the job and has to report exactly what it removed: a
-/// store it never needed to touch cannot fail it after the removal landed.
+/// Remove a job from `scope`'s store, leaving the rest of that file
+/// untouched. Removing a name the store does not have is not an error — the
+/// store already says what this was asked to make it say — but a store that
+/// will not read is, so a confirmed delete never reports success over a job
+/// that is still there. Only the one store is touched: a caller knows which
+/// store holds the job, and a store it never needed cannot fail it after the
+/// removal landed.
 pub fn delete_in(repo: &Repo, scope: Scope, name: &str) -> Result<()> {
     let path = store_path(repo, scope);
     let Some(text) = read_store_text(&path)? else {
@@ -1813,7 +1806,7 @@ mod tests {
         std::fs::create_dir_all(repo.user_jobs_file()).unwrap();
 
         assert!(write(&repo, Scope::User, "x", &spec("@daily")).is_err());
-        assert!(delete(&repo, "x").is_err());
+        assert!(delete_in(&repo, Scope::User, "x").is_err());
     }
 
     #[test]
@@ -1838,13 +1831,13 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_a_job_from_the_store_that_holds_it_and_is_quiet_otherwise() {
+    fn delete_in_removes_a_job_from_its_store_and_is_quiet_about_a_name_it_lacks() {
         let (repo, _root_guard) = fixture("jobs-delete");
         write(&repo, Scope::Project, "a", &spec("@daily")).unwrap();
         write(&repo, Scope::Project, "b", &spec("@weekly")).unwrap();
 
-        delete(&repo, "a").unwrap();
-        delete(&repo, "never-existed").unwrap();
+        delete_in(&repo, Scope::Project, "a").unwrap();
+        delete_in(&repo, Scope::Project, "never-existed").unwrap();
 
         let names: Vec<String> = load(&repo).unwrap().into_iter().map(|j| j.name).collect();
         assert_eq!(names, vec!["b"]);

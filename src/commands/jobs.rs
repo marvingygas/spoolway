@@ -464,6 +464,15 @@ impl NewJobWalk {
         Some(NewJobWalk::schedule(draft))
     }
 
+    /// The routines tab's edit job: the schedule popup over `job`'s own
+    /// schedule, then the pipeline popup on its own pipeline. The routine is
+    /// never asked for, so the job keeps it, and the save goes back under
+    /// the job's own name to the store its `scope` names, the same as the
+    /// jobs tab's edit, which picks the routine first.
+    pub(super) fn edit(job: &Job) -> NewJobWalk {
+        NewJobWalk::schedule(Draft::from_job(job))
+    }
+
     /// One key. `enter` on the schedule popup moves on only once the
     /// expression parses; `enter` on the pipeline popup saves through
     /// [`commit_draft`].
@@ -619,9 +628,9 @@ enum JobMode {
     /// The cron field and then the pipeline picker — the half of the walk
     /// the routines tab's own `n` shares; see [`NewJobWalk`].
     Walk(NewJobWalk),
-    /// The options menu's delete, waiting on `enter` to delete or `esc` to
-    /// keep.
-    ConfirmDelete(String),
+    /// The options menu's delete, waiting on `enter` to delete the named
+    /// job from the store `Scope` names or `esc` to keep it.
+    ConfirmDelete(String, Scope),
     /// A message in a popup over the list until `enter` closes it — a
     /// refused save, a failed delete — since `draw` clears the screen before
     /// every frame. Every other key is the popup's to ignore.
@@ -790,26 +799,15 @@ fn run_jobs_screen(
                 }
             }
 
-            JobMode::ConfirmDelete(name) => match key {
-                Key::Enter => {
-                    let name = name.clone();
-                    match jobs::delete(repo, &name) {
-                        Ok(()) => {
-                            reload(repo, &mut jobs);
-                            state.mode = JobMode::List;
-                            clamp_cursor(&jobs, &mut state);
-                        }
-                        Err(err) => {
-                            state.mode = JobMode::Outcome(Notice::new(
-                                "delete this job",
-                                format!(
-                                    "Could not delete the job `{name}`: {err:#}. Its store may \
-                                     be read-only; fix that and try again."
-                                ),
-                            ));
-                        }
+            JobMode::ConfirmDelete(name, scope) => match key {
+                Key::Enter => match delete_job(repo, name, *scope) {
+                    Ok(()) => {
+                        reload(repo, &mut jobs);
+                        state.mode = JobMode::List;
+                        clamp_cursor(&jobs, &mut state);
                     }
-                }
+                    Err(notice) => state.mode = JobMode::Outcome(notice),
+                },
                 Key::Esc => state.mode = JobMode::List,
                 // Every other key, `y` and `n` included, leaves the popup open
                 // so a stray keystroke can't delete or dismiss it.
@@ -961,25 +959,15 @@ fn run_option(
             nav: RoutineNav::new(),
         },
         JobOption::Pause | JobOption::Resume => {
-            let mut spec = job.spec.clone();
-            spec.enabled = !spec.enabled;
-            let (scope, name, verb) = (job.scope, job.name.clone(), pause_verb(spec.enabled));
-            match jobs::write(repo, scope, &name, &spec) {
+            match set_enabled(repo, job, item == JobOption::Resume) {
                 Ok(()) => {
                     reload(repo, jobs);
                     JobMode::List
                 }
-                Err(err) => JobMode::Outcome(Notice::new(
-                    verb,
-                    format!(
-                        "Could not {verb} the job `{name}` in `{}`: {err:#}. Check the file is \
-                         writable and try again.",
-                        store_label(repo, &store_of(repo, scope)),
-                    ),
-                )),
+                Err(notice) => JobMode::Outcome(notice),
             }
         }
-        JobOption::Delete => JobMode::ConfirmDelete(job.name.clone()),
+        JobOption::Delete => JobMode::ConfirmDelete(job.name.clone(), job.scope),
         // The picker's item is never put on the list's menu.
         JobOption::Open => JobMode::List,
     };
@@ -989,6 +977,45 @@ fn run_option(
 /// spec passed to `write` already carries the target state.
 fn pause_verb(will_be_enabled: bool) -> &'static str {
     if will_be_enabled { "resume" } else { "pause" }
+}
+
+/// Pause `job` (`enabled` false) or resume it (`enabled` true), written
+/// back to the store its own `scope` names and nowhere else, so a job is
+/// never copied into the other store. The jobs tab's and the routines tab's
+/// pause and resume both come here. The state wanted is passed rather than
+/// flipped, so a job paused by another hand since its menu opened is not
+/// resumed by a pick that said pause. `Err` is the popup that says why the
+/// store was not written.
+pub(super) fn set_enabled(repo: &Repo, job: &Job, enabled: bool) -> std::result::Result<(), Notice> {
+    let mut spec = job.spec.clone();
+    spec.enabled = enabled;
+    let verb = pause_verb(enabled);
+    jobs::write(repo, job.scope, &job.name, &spec).map_err(|err| {
+        Notice::new(
+            verb,
+            format!(
+                "Could not {verb} the job `{}` in `{}`: {err:#}. Check the file is writable and \
+                 try again.",
+                job.name,
+                store_label(repo, &store_of(repo, job.scope)),
+            ),
+        )
+    })
+}
+
+/// Delete the job `name` from the store `scope` names, and from no other —
+/// the jobs tab's and the routines tab's delete job both come here once
+/// their popup is answered. `Err` is the popup that says why it was not.
+pub(super) fn delete_job(repo: &Repo, name: &str, scope: Scope) -> std::result::Result<(), Notice> {
+    jobs::delete_in(repo, scope, name).map_err(|err| {
+        Notice::new(
+            "delete this job",
+            format!(
+                "Could not delete the job `{name}`: {err:#}. Its store may be read-only; fix \
+                 that and try again."
+            ),
+        )
+    })
 }
 
 /// Write the draft to the store its `scope` names. `Ok(name)` is the saved
@@ -1235,7 +1262,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     let overlay_panels: Vec<Vec<String>> = match &state.mode {
         JobMode::PickRoutine { nav, .. } => vec![routine_panel(ctx, nav)],
         JobMode::Walk(walk) => vec![walk.panel(ctx.pipelines)],
-        JobMode::ConfirmDelete(name) => vec![delete_panel(name)],
+        JobMode::ConfirmDelete(name, _) => vec![delete_panel(name)],
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border.
         JobMode::Outcome(notice) => vec![
@@ -1347,7 +1374,7 @@ fn jobs_footer(mode: &JobMode) -> String {
             picker: Some(_), ..
         }) => key_hint(ROUTINE_KEYS),
         JobMode::Walk(walk) => walk.footer(),
-        JobMode::ConfirmDelete(_) => hint(&crate::screen::answer_keys()),
+        JobMode::ConfirmDelete(..) => hint(&crate::screen::answer_keys()),
     }
 }
 
@@ -1577,8 +1604,8 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
 }
 
 /// The options menu's delete, as a popup over job `name`: what deleting it removes, and its one
-/// answer.
-fn delete_panel(name: &str) -> Vec<String> {
+/// answer. The jobs tab and the routines tab's delete job both draw it.
+pub(super) fn delete_panel(name: &str) -> Vec<String> {
     crate::screen::ask(
         "delete this job",
         &[

@@ -4725,16 +4725,28 @@ enum Mode {
     /// the file and what to fix. Unlike [`Mode::Outcome`] it is closed by
     /// `esc` and nothing else, which its own key row says.
     PlanNotDeleted(Notice),
-    /// The options menu's new job schedule and pipeline popups over the
-    /// routines pane `nav` describes, writing a job for the routine
-    /// highlighted when new job was picked. The popups, their keys and the save are the jobs tab's own —
-    /// see [`super::jobs::NewJobWalk`] — so `esc` on either comes back here
-    /// having written nothing.
+    /// The options menu's delete job popup over the routines pane `nav`
+    /// describes: the jobs tab's own popup, [`super::jobs::delete_panel`].
+    /// `enter` on its one answer, `delete`, removes `job` from its own
+    /// store through [`super::jobs::delete_job`], and leaves the routine
+    /// and every other job alone. `esc` keeps it. Every other key does
+    /// nothing, so a stray keystroke can neither delete nor dismiss it.
+    DeleteJob {
+        nav: RoutineNav,
+        job: JobRef,
+    },
+    /// The options menu's new job or edit job schedule and pipeline popups
+    /// over the routines pane `nav` describes: new job writing a job for
+    /// the routine highlighted when it was picked, edit job rewriting that
+    /// routine's job, opened on its own values. The popups, their keys and
+    /// the save are the jobs tab's own — see [`super::jobs::NewJobWalk`] —
+    /// so `esc` on either comes back here having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
     },
-    /// What new job saved, over the routines pane — [`super::jobs::saved_notice`].
+    /// What new job or edit job saved, over the routines pane —
+    /// [`super::jobs::saved_notice`].
     /// Apart from [`Mode::Outcome`] only in its key line, which names the one
     /// key the popup reads rather than the pane's under it. `enter` closes it
     /// back onto the pane.
@@ -4793,9 +4805,10 @@ impl OptionsMenu {
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
 /// gate, `t` trial, `s` save as routine, and the routines tab's `n` new job
-/// and `x` delete. Delete on the pending screen and open plan never had a
-/// key of their own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// and `x` delete routine. Delete on the pending screen and open plan never
+/// had a key of their own, and neither did the routines tab's job items,
+/// which do what the jobs tab's own menu does to the same job.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
     OpenPlan,
@@ -4803,21 +4816,62 @@ enum RowOption {
     Trial,
     SaveRoutine,
     NewJob,
+    /// The routine's job, through the schedule and pipeline popups.
+    EditJob(JobRef),
+    PauseJob(JobRef),
+    ResumeJob(JobRef),
+    /// `named` when the routine has more than one job, so the item has to
+    /// say which of them it deletes.
+    DeleteJob {
+        job: JobRef,
+        named: bool,
+    },
+    /// Delete on the pending screen, whose menu names a task, a group or a
+    /// plan.
     Delete,
+    /// Delete on a routine, worded apart from delete job so it cannot be
+    /// mistaken for it.
+    DeleteRoutine,
 }
 
 impl RowOption {
     /// The item's line in the menu: its verb, and for the two opens what
     /// each one opens, since the menu's own title already names the row.
-    fn label(self) -> &'static str {
+    /// The job items name the job too where the routine has several.
+    fn label(&self) -> String {
         match self {
-            RowOption::Open => "open task",
-            RowOption::OpenPlan => "open plan",
-            RowOption::Gate => "gate",
-            RowOption::Trial => "trial",
-            RowOption::SaveRoutine => "save as routine",
-            RowOption::NewJob => "new job",
-            RowOption::Delete => "delete",
+            RowOption::Open => "open task".to_string(),
+            RowOption::OpenPlan => "open plan".to_string(),
+            RowOption::Gate => "gate".to_string(),
+            RowOption::Trial => "trial".to_string(),
+            RowOption::SaveRoutine => "save as routine".to_string(),
+            RowOption::NewJob => "new job".to_string(),
+            RowOption::EditJob(_) => "edit job".to_string(),
+            RowOption::PauseJob(_) => "pause job".to_string(),
+            RowOption::ResumeJob(_) => "resume job".to_string(),
+            RowOption::DeleteJob { job, named: true } => format!("delete job {}", job.name),
+            RowOption::DeleteJob { named: false, .. } => "delete job".to_string(),
+            RowOption::Delete => "delete".to_string(),
+            RowOption::DeleteRoutine => "delete routine".to_string(),
+        }
+    }
+}
+
+/// A job a routine's menu item acts on, by its name and the store it was
+/// read from. The item holds no copy of the job itself: the stores are
+/// re-read when it is picked, so it acts on the job as it is then, and
+/// writes it back to the store it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JobRef {
+    name: String,
+    scope: crate::jobs::Scope,
+}
+
+impl JobRef {
+    fn of(job: &crate::jobs::Job) -> JobRef {
+        JobRef {
+            name: job.name.clone(),
+            scope: job.scope,
         }
     }
 }
@@ -6235,7 +6289,9 @@ fn run_screen_from(
                 // pipelines and the routines directory `new job` is checked
                 // against.
                 Key::Char('o') => {
-                    if let Some(menu) = routine_options(pipelines, &routines, &routines_dir, nav) {
+                    if let Some(menu) =
+                        routine_options(repo, pipelines, &routines, &state.jobs, nav)
+                    {
                         state.mode = Mode::Options(menu);
                     }
                 }
@@ -6265,6 +6321,22 @@ fn run_screen_from(
                     state.mode = state.after_popup(closed);
                 }
             }
+            Mode::DeleteJob { nav, job } => match key {
+                Key::Enter => {
+                    let nav = nav.clone();
+                    state.mode = match super::jobs::delete_job(repo, &job.name, job.scope) {
+                        Ok(()) => Mode::Routines(nav),
+                        Err(notice) => Mode::Outcome {
+                            notice,
+                            routines: Some(nav),
+                        },
+                    };
+                }
+                Key::Esc => state.mode = Mode::Routines(nav.clone()),
+                // Every other key leaves the popup open, so a stray
+                // keystroke can neither delete nor dismiss it.
+                _ => {}
+            },
             Mode::DeleteRoutine { nav, target } => match key {
                 Key::Enter => {
                     let (nav, target) = (nav.clone(), target.clone());
@@ -6313,7 +6385,7 @@ fn run_screen_from(
             Mode::Options(menu) => match key {
                 Key::Esc => state.mode = menu.closed(),
                 Key::Enter => {
-                    if let Some(&item) = menu.items.get(menu.cursor) {
+                    if let Some(item) = menu.items.get(menu.cursor).cloned() {
                         let menu = menu.clone();
                         let picked = Picked {
                             repo,
@@ -6869,30 +6941,39 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 }
 
 /// `o` on the routines pane: the menu for the row the focused pane
-/// highlights, titled with that row's name. A routine offers new job and
-/// then delete; new job only where [`super::jobs::NewJobWalk::for_routine`]
-/// can point a job at the folder, the same check `n` made. A routine's task
-/// offers open task, and never open plan. `None`, and no menu, with no
-/// routine or no task under the focused pane's cursor.
+/// highlights, titled with that row's name. A routine's items follow the
+/// jobs [`jobs_on`] finds for it in `jobs`, the stores as the pane last
+/// read them, and always end on delete routine:
+///
+/// - No job: new job, only where [`super::jobs::NewJobWalk::for_routine`]
+///   can point a job at the folder, the same check `n` made.
+/// - One job: edit job, then pause job for an enabled job or resume job for
+///   a paused one, then delete job.
+/// - Two or more: delete job with each job's name, sorted by name as the
+///   details pane lists them. Neither fires, so deleting is the one thing
+///   worth offering; editing or resuming one would leave the clash.
+/// - Stores that will not load: nothing but delete routine, since which
+///   jobs the routine has cannot be told. Delete routine refuses for the
+///   same reason, and says so.
+///
+/// A routine's task offers open task, and never open plan. `None`, and no
+/// menu, with no routine or no task under the focused pane's cursor.
 fn routine_options(
+    repo: &Repo,
     pipelines: &Pipelines,
     routines: &[RoutineFolder],
-    routines_dir: &std::path::Path,
+    jobs: &LoadedJobs,
     nav: &RoutineNav,
 ) -> Option<OptionsMenu> {
     let (title, row, items) = match nav.focus {
         Focus::Groups => {
             let folder = highlighted_routine_folder(routines, nav)?;
-            let walk = super::jobs::NewJobWalk::for_routine(pipelines, &folder.path, routines_dir);
-            let items = [
-                walk.is_some().then_some(RowOption::NewJob),
-                Some(RowOption::Delete),
-            ];
-            (
-                folder.name.clone(),
-                &folder.path,
-                items.into_iter().flatten().collect(),
-            )
+            let mut items = match jobs {
+                Ok(jobs) => routine_job_options(repo, pipelines, folder, jobs),
+                Err(_) => Vec::new(),
+            };
+            items.push(RowOption::DeleteRoutine);
+            (folder.name.clone(), &folder.path, items)
         }
         Focus::Tasks => {
             let task = highlighted_routine_task(routines, nav)?;
@@ -6906,6 +6987,42 @@ fn routine_options(
         cursor: 0,
         routines: Some(nav.clone()),
     })
+}
+
+/// A routine's job items, ahead of delete routine — see [`routine_options`].
+fn routine_job_options(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    folder: &RoutineFolder,
+    jobs: &[crate::jobs::Job],
+) -> Vec<RowOption> {
+    let mut on = jobs_on(repo, jobs, folder);
+    on.sort_by(|a, b| a.name.cmp(&b.name));
+    match on.as_slice() {
+        [] => super::jobs::NewJobWalk::for_routine(pipelines, &folder.path, &repo.routines_dir())
+            .map(|_| RowOption::NewJob)
+            .into_iter()
+            .collect(),
+        [job] => {
+            let job = JobRef::of(job);
+            let toggle = match on[0].spec.enabled {
+                true => RowOption::PauseJob(job.clone()),
+                false => RowOption::ResumeJob(job.clone()),
+            };
+            vec![
+                RowOption::EditJob(job.clone()),
+                toggle,
+                RowOption::DeleteJob { job, named: false },
+            ]
+        }
+        several => several
+            .iter()
+            .map(|job| RowOption::DeleteJob {
+                job: JobRef::of(job),
+                named: true,
+            })
+            .collect(),
+    }
 }
 
 /// What an item picked off [`Mode::Options`] runs against, bundled to keep
@@ -6936,7 +7053,20 @@ impl Picked<'_> {
         if let Some(nav) = &menu.routines {
             return match item {
                 RowOption::Open => open_highlighted_routine(self.repo, routines, nav),
-                RowOption::Delete => begin_routine_delete(self.repo, routines, nav),
+                RowOption::DeleteRoutine => begin_routine_delete(self.repo, routines, nav),
+                RowOption::EditJob(job) => match find_job(self.repo, nav, &job) {
+                    Ok(found) => Mode::NewJob {
+                        nav: nav.clone(),
+                        walk: super::jobs::NewJobWalk::edit(&found),
+                    },
+                    Err(refused) => refused,
+                },
+                RowOption::PauseJob(job) => set_job_enabled(self.repo, nav, &job, false),
+                RowOption::ResumeJob(job) => set_job_enabled(self.repo, nav, &job, true),
+                RowOption::DeleteJob { job, .. } => Mode::DeleteJob {
+                    nav: nav.clone(),
+                    job,
+                },
                 RowOption::NewJob => highlighted_routine_folder(routines, nav)
                     .and_then(|folder| {
                         super::jobs::NewJobWalk::for_routine(
@@ -6954,7 +7084,8 @@ impl Picked<'_> {
                 RowOption::OpenPlan
                 | RowOption::Gate
                 | RowOption::Trial
-                | RowOption::SaveRoutine => closed,
+                | RowOption::SaveRoutine
+                | RowOption::Delete => closed,
             };
         }
         if pending_row(groups, state).as_deref() != Some(menu.row.as_str()) {
@@ -6979,10 +7110,71 @@ impl Picked<'_> {
             RowOption::Delete => begin_plan_delete(groups, state)
                 .or_else(|| begin_pending_delete(groups, state))
                 .unwrap_or(closed),
-            // The routines tab's new job is never put on the pending
+            // The routines tab's items are never put on the pending
             // screen's menu.
-            RowOption::NewJob => closed,
+            RowOption::NewJob
+            | RowOption::EditJob(_)
+            | RowOption::PauseJob(_)
+            | RowOption::ResumeJob(_)
+            | RowOption::DeleteJob { .. }
+            | RowOption::DeleteRoutine => closed,
         }
+    }
+}
+
+/// The job `job` names, read from both stores again as the item is picked,
+/// so the item acts on the job as it is now. `Err` is the popup over the
+/// routines pane `nav` describes that says why there is nothing to act on:
+/// a store that will not load, or the job gone from its store since the
+/// menu opened.
+fn find_job(
+    repo: &Repo,
+    nav: &RoutineNav,
+    job: &JobRef,
+) -> std::result::Result<crate::jobs::Job, Mode> {
+    let jobs = crate::jobs::load(repo).map_err(|err| {
+        outcome_over(
+            Some(nav),
+            "job not changed",
+            format!(
+                "{err:#}\n\nthe job {} cannot be read until this store reads. \
+                 `spoolway doctor` names what is wrong.",
+                job.name
+            ),
+        )
+    })?;
+    jobs.into_iter()
+        .find(|found| found.name == job.name && found.scope == job.scope)
+        .ok_or_else(|| {
+            outcome_over(
+                Some(nav),
+                "job not changed",
+                format!(
+                    "the job {} is no longer in the {} store, so there is nothing to change. \
+                     Press o on the routine again to see the jobs it has now.",
+                    job.name,
+                    job.scope.label()
+                ),
+            )
+        })
+}
+
+/// Pause job or resume job off a routine's menu: [`find_job`], then
+/// [`super::jobs::set_enabled`], the jobs tab's own pause and resume, which
+/// writes the job back to its own store. Back on the routines pane, whose
+/// details show the new state as the stores are read again, or a popup over
+/// it saying why the store was not written.
+fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -> Mode {
+    let found = match find_job(repo, nav, job) {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    match super::jobs::set_enabled(repo, &found, enabled) {
+        Ok(()) => Mode::Routines(nav.clone()),
+        Err(notice) => Mode::Outcome {
+            notice,
+            routines: Some(nav.clone()),
+        },
     }
 }
 
@@ -8220,8 +8412,7 @@ fn routine_task_lines(
 ///   [`routine_jobs_lines`].
 /// - Stores that will not load: one `Jobs:` row naming the error.
 ///
-/// A job is on the routine when [`crate::jobs::Job::target`] is the folder's
-/// own path, so `nightly` and `nightly/` both count.
+/// Which jobs are on the routine is [`jobs_on`]'s to say.
 fn routine_job_lines(
     repo: &Repo,
     folder: &RoutineFolder,
@@ -8237,11 +8428,7 @@ fn routine_job_lines(
             return lines;
         }
     };
-    let on: Vec<&crate::jobs::Job> = jobs
-        .iter()
-        .filter(|job| job.target(repo).is_ok_and(|target| target == folder.path))
-        .collect();
-    match on.as_slice() {
+    match jobs_on(repo, jobs, folder).as_slice() {
         [] => lines.extend(config_row("Schedule:", "none", width)),
         [job] => {
             lines.extend(config_row("Schedule:", &job.spec.schedule, width));
@@ -8259,6 +8446,21 @@ fn routine_job_lines(
     }
     lines.push(String::new());
     lines
+}
+
+/// The jobs in `jobs` that run `folder`'s routine, in store order: those
+/// whose [`crate::jobs::Job::target`] is the folder's own path, so `nightly`
+/// and `nightly/` both count. A job on one task inside the folder is not
+/// the routine's job. The details pane draws these, and the routine's
+/// options menu offers to act on them, so the two always agree.
+fn jobs_on<'a>(
+    repo: &Repo,
+    jobs: &'a [crate::jobs::Job],
+    folder: &RoutineFolder,
+) -> Vec<&'a crate::jobs::Job> {
+    jobs.iter()
+        .filter(|job| job.target(repo).is_ok_and(|target| target == folder.path))
+        .collect()
 }
 
 /// The `Jobs:` block for a routine two or more jobs run: a headline saying
@@ -8550,6 +8752,7 @@ fn footer(state: &ScreenState) -> String {
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
         Mode::DeleteRoutine { .. }
+        | Mode::DeleteJob { .. }
         | Mode::DeletePending { .. }
         | Mode::DeletePlan { .. }
         | Mode::Gate { .. } => hint(&crate::screen::answer_keys()),
@@ -8691,6 +8894,7 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             ..
         })
         | Mode::DeleteRoutine { nav, .. }
+        | Mode::DeleteJob { nav, .. }
         | Mode::NewJob { nav, .. }
         | Mode::JobSaved { nav, .. } => Some(nav),
         _ => None,
@@ -8774,6 +8978,7 @@ fn popup(
         ),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
+        Mode::DeleteJob { job, .. } => Some(super::jobs::delete_panel(&job.name)),
         Mode::DeletePending { title, set, .. } => Some(delete_pending_panel(
             title,
             set,
@@ -8797,7 +9002,8 @@ fn popup(
         )),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
         Mode::Options(menu) => {
-            let items: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
+            let labels: Vec<String> = menu.items.iter().map(RowOption::label).collect();
+            let items: Vec<&str> = labels.iter().map(String::as_str).collect();
             Some(crate::screen::options(&menu.title, &items, menu.cursor))
         }
         Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
@@ -15950,8 +16156,8 @@ mod tests {
         assert_eq!(groups.len(), 1, "the group is still listed");
     }
 
-    /// On the routines tab, `o` over the list offers new job then delete,
-    /// titled with the routine; over the details pane it offers open task,
+    /// On the routines tab, `o` over the list offers new job then delete
+    /// routine for a routine with no job, titled with the routine; over the details pane it offers open task,
     /// titled with the task, and never open plan, even for a task with a
     /// `plan:`.
     #[test]
@@ -15972,14 +16178,15 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let mut nav = RoutineNav::new();
 
-        let menu = routine_options(&pipelines, &routines, &repo.routines_dir(), &nav).unwrap();
+        let jobs = Ok(Vec::new());
+        let menu = routine_options(&repo, &pipelines, &routines, &jobs, &nav).unwrap();
         assert_eq!(menu.title, "maintenance");
-        assert_eq!(menu.items, [RowOption::NewJob, RowOption::Delete]);
+        assert_eq!(menu.items, [RowOption::NewJob, RowOption::DeleteRoutine]);
         nav.focus = Focus::Tasks;
-        let menu = routine_options(&pipelines, &routines, &repo.routines_dir(), &nav).unwrap();
+        let menu = routine_options(&repo, &pipelines, &routines, &jobs, &nav).unwrap();
         assert_eq!(menu.title, "prune");
         assert_eq!(menu.items, [RowOption::Open]);
-        assert!(routine_options(&pipelines, &[], &repo.routines_dir(), &nav).is_none());
+        assert!(routine_options(&repo, &pipelines, &[], &jobs, &nav).is_none());
 
         let last = last_frame(&routines_screen(&repo, "o")).to_string();
         assert!(
@@ -15987,7 +16194,7 @@ mod tests {
             "{last}"
         );
         assert!(last.contains("│  > new job  "), "{last}");
-        assert!(last.contains("│    delete  "), "{last}");
+        assert!(last.contains("│    delete routine  "), "{last}");
         assert!(last.contains("[o] options   [tab] details"), "{last}");
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
@@ -21191,6 +21398,11 @@ mod tests {
         );
     }
 
+    /// Keys enough to move a routine's menu onto delete routine, its last
+    /// item, from the top, whichever job items sit above it: the cursor
+    /// stops on the last item rather than wrapping.
+    const DOWN_TO_LAST: &str = "\x1b[B\x1b[B\x1b[B\x1b[B";
+
     /// A job on `routine` in `scope`'s store, as the jobs tab would write it.
     fn write_job(repo: &Repo, scope: crate::jobs::Scope, name: &str, routine: &str) {
         crate::jobs::write(
@@ -21416,7 +21628,7 @@ mod tests {
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
-        let drawn = routines_screen(&repo, "jo\x1b[B\r");
+        let drawn = routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r"));
         let last = last_frame(&drawn);
 
         assert!(last.contains("─ delete this routine "), "{last}");
@@ -21455,11 +21667,11 @@ mod tests {
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
 
-        let held = last_frame(&routines_screen(&repo, "jo\x1b[B\rynq ")).to_string();
+        let held = last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\rynq "))).to_string();
         assert!(held.contains("─ delete this routine "), "{held}");
         assert!(repo.routines_dir().join("nightly").is_dir());
 
-        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\r\x1b")).to_string();
+        let last = last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r\x1b"))).to_string();
         assert!(!last.contains("delete this routine"), "{last}");
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(repo.routines_dir().join("nightly").is_dir());
@@ -21478,7 +21690,7 @@ mod tests {
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
-        let last = last_frame(&routines_screen(&repo, "j o\x1b[B\r\r")).to_string();
+        let last = last_frame(&routines_screen(&repo, &format!("j o{DOWN_TO_LAST}\r\r"))).to_string();
 
         assert!(!repo.routines_dir().join("nightly").exists());
         assert_eq!(job_names(&repo), vec!["weekly-prune"]);
