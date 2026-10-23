@@ -148,6 +148,7 @@ pub fn row(id: &str) -> Row {
         out: None,
         cost: None,
         lane_time: None,
+        hidden_run: None,
         next: String::new(),
         resumable: false,
     }

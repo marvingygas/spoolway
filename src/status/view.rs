@@ -1924,19 +1924,28 @@ pub(super) fn table_window(
 
 /// The full text of a row's STATE cell: the state's own word, and for a
 /// `Silent` row how long the lane has been silent after it, in
-/// [`state_age`]'s clock — `● silent · 31m`. Kept as its own function,
-/// rather than a direct call to [`State::word`] at each of its call sites,
-/// for the plain-text and coloured cells to stay the same shape.
+/// [`state_age`]'s clock — `● silent · 31m`. A running hidden command step
+/// draws how long its run has gone instead, in [`human_secs`]'s —
+/// `● running 9m 12s`. Kept as its own function, rather than a direct call
+/// to [`State::word`] at each of its call sites, for the plain-text and
+/// coloured cells to stay the same shape.
 fn state_cell_text(row: &Row) -> String {
-    format!("{}{}", row.state.word(), state_suffix(row.state))
+    format!("{}{}", row.state.word(), state_suffix(row))
 }
 
 /// What a STATE cell draws after the state's word: ` · <time>` on a
-/// `Silent` row, nothing on any other. Drawn uncoloured, so the word alone
-/// carries the state's colour as it does on every other row.
-fn state_suffix(state: State) -> String {
-    match state {
-        State::Silent { secs } => format!(" · {}", state_age(secs)),
+/// `Silent` row, ` <time>` on a `Running` row with [`Row::hidden_run`] set,
+/// nothing on any other. Drawn uncoloured, so the word alone carries the
+/// state's colour as it does on every other row.
+///
+/// A hidden run's time is [`human_secs`]'s, the TIME column's own clock and
+/// the one the restart panel shows a command's run in, so the same run never
+/// reads two different times on one screen. Asked of `Running` alone, so a
+/// row [`super::finish_settled`] has since called finished draws no time.
+fn state_suffix(row: &Row) -> String {
+    match (row.state, row.hidden_run) {
+        (State::Silent { secs }, _) => format!(" · {}", state_age(secs)),
+        (State::Running, Some(ran)) => format!(" {}", human_secs(ran)),
         _ => String::new(),
     }
 }
@@ -1958,7 +1967,7 @@ fn state_age(total: i64) -> String {
 impl Style {
     fn paint_state(&self, row: &Row) -> String {
         match self.colour {
-            true => format!("{}{}", row.state.dot(), state_suffix(row.state)),
+            true => format!("{}{}", row.state.dot(), state_suffix(row)),
             false => state_cell_text(row),
         }
     }
@@ -2784,6 +2793,37 @@ mod tests {
         assert_eq!(at(42), "● silent · 42s");
         assert_eq!(at(8 * 60 + 5), "● silent · 8m");
         assert_eq!(at(3840), "● silent · 1h 04m");
+    }
+
+    /// A running hidden command step's time is drawn after the word in
+    /// `human_secs`'s clock, uncoloured, on the board as in plain text. A row
+    /// that is no longer `Running` draws no time, whatever it carries.
+    #[test]
+    fn a_hidden_run_draws_its_time_after_the_running_word() {
+        let hidden = Row {
+            state: State::Running,
+            hidden_run: Some(552),
+            ..row("hidden-task")
+        };
+        assert_eq!(state_cell_text(&hidden), "● running 9m 12s");
+        let painted = Style::board(120).paint_state(&hidden);
+        assert_eq!(painted, format!("{GREEN}● running{RESET} 9m 12s"));
+        assert_eq!(strip_ansi(&painted), state_cell_text(&hidden));
+        assert_eq!(
+            state_cell_text(&Row {
+                hidden_run: Some(3840),
+                ..hidden
+            }),
+            "● running 1h 04m"
+        );
+        assert_eq!(
+            state_cell_text(&Row {
+                state: State::Finished,
+                hidden_run: Some(552),
+                ..row("hidden-task")
+            }),
+            "✓ finished"
+        );
     }
 
     /// The outer order is the group's name and nothing else, so a group
