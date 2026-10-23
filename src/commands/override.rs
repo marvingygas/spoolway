@@ -114,6 +114,9 @@ pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Resul
         note.print(false)?;
     }
     let path = crate::overrides::config_patch_path(&repo.overrides_dir());
+    // Picked before the placeholder is written, so an editor that is not on
+    // PATH is refused without leaving a new file behind.
+    let line = super::config::editor_line(&path)?;
     if !path.is_file() {
         write_atomic(
             &path,
@@ -122,7 +125,7 @@ pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Resul
         )?;
     }
 
-    super::config::open_in_editor(&path)?;
+    super::config::run_editor_line(&line)?;
 
     // Two files could be why this now fails to merge, and a person reopening
     // `overrides/config.toml` needs to be told which. The tracked file might
@@ -640,6 +643,21 @@ mod tests {
             assert!(
                 !repo.overrides_dir().exists(),
                 "nothing may be created under the unresolved placeholder home"
+            );
+        });
+    }
+
+    /// An editor that is not on `PATH` is refused before the placeholder is
+    /// written, so a refused `config override` leaves no new file behind.
+    #[test]
+    fn config_override_with_a_missing_editor_writes_no_placeholder() {
+        with_repo("missing-editor", |repo| {
+            let _pin = crate::editor::pin_editor("no-such-editor-for-spoolway");
+            let err = config_override(repo, None).expect_err("a missing editor must refuse");
+            assert!(format!("{err:#}").contains("$VISUAL"), "{err:#}");
+            assert!(
+                !crate::overrides::config_patch_path(&repo.overrides_dir()).exists(),
+                "a refused editor left overrides/config.toml behind"
             );
         });
     }

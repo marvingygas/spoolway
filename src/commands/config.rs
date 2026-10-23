@@ -409,7 +409,7 @@ fn render_config_contract() -> String {
         ),
         (
             "spoolway config edit",
-            "open it in $EDITOR, re-validated on save",
+            "open it in $VISUAL, $EDITOR or vim, re-validated on save",
         ),
         (
             "spoolway config override",
@@ -474,6 +474,8 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
 
 /// Open `path` in the editor the board would pick and wait for it, refusing on
 /// a nonzero exit. Shared by [`config_edit`] and `commands::config_override`.
+/// A caller that writes a file first calls [`editor_line`] before it writes,
+/// then [`run_editor_line`], so a refused editor leaves nothing behind.
 ///
 /// The choice reads only the environment and `PATH`, never the config, so a
 /// `config.toml` that no longer parses can still be opened to repair it. The
@@ -481,12 +483,18 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
 /// embedded `'`: a plain `format!("… '{}'")` would break on a checkout path
 /// that contains one, and the editor would exit on a syntax error (finding 71).
 pub(super) fn open_in_editor(path: &Path) -> Result<()> {
-    run_editor_line(&crate::editor::plan(&crate::editor::live_inputs(), path)?.line)
+    run_editor_line(&editor_line(path)?)
+}
+
+/// The shell line that opens `path` in the editor the board would pick, or the
+/// board's refusal when that editor cannot run.
+pub(super) fn editor_line(path: &Path) -> Result<String> {
+    Ok(crate::editor::plan(&crate::editor::live_inputs(), path)?.line)
 }
 
 /// Run `line` in a shell and wait, so the file is checked only once the
 /// editor has exited, even for a Windows `.exe` that draws its own window.
-fn run_editor_line(line: &str) -> Result<()> {
+pub(super) fn run_editor_line(line: &str) -> Result<()> {
     let status = crate::platform::shell_command(line)
         .status()
         .with_context(|| format!("could not start `{line}`"))?;
