@@ -154,6 +154,25 @@ has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gi
 has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
   .claude/skills/spoolway-config/SKILL.md
 
+# A plan page written before plans moved to the workspace sits in the clone's
+# own dispatcher folder, and a pending task names it by that absolute path.
+# `sync` moves the page into the workspace's plans/ and points the task there.
+OLD_PAGE="$WS/dispatchers/proj/plans/2026-10-12-moved.html"
+NEW_PAGE="$WS/plans/2026-10-12-moved.html"
+mkdir -p "$WS/dispatchers/proj/plans" "$WS/dispatchers/proj/pending"
+echo "<html>a page the clone already had</html>" > "$OLD_PAGE"
+printf -- '---\nid: moved\ngroup: moved\ntitle: a task naming the old page\nplan: %s\n---\n\nbody\n' \
+  "$OLD_PAGE" > "$WS/dispatchers/proj/pending/moved.md"
+says "a dry-run sync would move the page" "would move" "$SPOOLWAY" sync --dry-run
+if [ -e "$OLD_PAGE" ] && [ ! -e "$NEW_PAGE" ]; then ok "a dry-run sync moves nothing"
+else bad "a dry-run sync moves nothing"; fi
+says "sync reports the move and the rewrite" "rewrote" "$SPOOLWAY" sync
+if [ -e "$NEW_PAGE" ] && [ ! -e "$OLD_PAGE" ]; then ok "sync moved the page into the workspace's plans/"
+else bad "sync moved the page into the workspace's plans/"; fi
+has "the pending task now names the page in the workspace" "plan: $NEW_PAGE" \
+  "$WS/dispatchers/proj/pending/moved.md"
+rm -f "$WS/dispatchers/proj/pending/moved.md"
+
 # `--replace` takes a path spelled under `.spoolway/`, which in home mode is
 # the workspace's `config/` and not a folder of the checkout. The checkout has
 # no such file, so before this resolved through the setup folder the command

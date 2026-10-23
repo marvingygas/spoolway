@@ -50,6 +50,12 @@
 //! report says so, because the layer is the person's and sits in no git
 //! branch to revert from.
 //!
+//! In a home-mode clone, sync also moves the clone's plan pages into the
+//! workspace and relinks the tasks that name them. That is
+//! [`crate::sync_plans`]'s work and it happens in [`run`] only: it writes
+//! outside the checkout, under the workspace, and [`scan`] stays the read of
+//! what spoolway owns that `init`, `install` and `doctor` also call.
+//!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
 //! skeleton spoolway keeps current is one a project cannot restructure, and
@@ -314,12 +320,26 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
         }
     }
 
+    // After the file lines, and before the closing line, which has to know
+    // whether this also seeded, moved or refused a plan page.
+    let plans = crate::sync_plans::run(repo, args.dry_run)?;
+
     println!();
     let nothing_else = wrote.is_empty() && removed.is_empty();
-    println!(
-        "{}",
-        closing_line(args.dry_run, nothing_else, Refused::of(&refused))
-    );
+    let refused = match plans.refused {
+        true => Refused::Files,
+        false => Refused::of(&refused),
+    };
+    // The plan lines say what they did. `KEPT` and `NOOP` speak of config
+    // files, so a run whose only changes were plan pages closes with the dry
+    // run's line or none at all.
+    if nothing_else && plans.changed && refused == Refused::Nothing {
+        if args.dry_run {
+            println!("{DRY_RUN}");
+        }
+    } else {
+        println!("{}", closing_line(args.dry_run, nothing_else, refused));
+    }
 
     if !args.dry_run {
         remove_skill_stamp(&repo.home);

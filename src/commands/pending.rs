@@ -252,7 +252,7 @@ fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
 /// Every `.md` file directly inside `dir` that is a task file, not an
 /// editor's dotfile or dangling lock link, filename order — the listing
 /// [`list_groups_and_skipped`] runs the same way over all three of its own sources.
-fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|entry| entry.ok())
@@ -432,15 +432,41 @@ fn plans_since(repo: &Repo, any_page: bool) -> u128 {
     if let Some(since) = read_stamp(&file) {
         return since;
     }
-    let since = oldest_clone_stamp(repo).unwrap_or_else(|| {
-        if any_page {
-            nanos(std::time::SystemTime::now())
-        } else {
-            0
-        }
-    });
+    let (since, _) = seed_value(repo, any_page);
     let _ = crate::task::write_atomic(&file, since.to_string());
     since
+}
+
+/// Where a new `plans-since` stamp's number came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StampSource {
+    /// The oldest stamp a clone's dispatcher folder holds.
+    OldestClone,
+    /// No clone holds one and no page is there, so nothing needs hiding.
+    NoPage,
+    /// No clone holds one but a page is there, so the current time.
+    Now,
+}
+
+/// The number a missing `plans-since` stamp is seeded with, and why, by the
+/// rule [`plans_since`] documents. Shared with `spoolway sync`, which seeds
+/// the stamp before it moves any page into the workspace.
+fn seed_value(repo: &Repo, any_page: bool) -> (u128, StampSource) {
+    match oldest_clone_stamp(repo) {
+        Some(since) => (since, StampSource::OldestClone),
+        None if any_page => (nanos(std::time::SystemTime::now()), StampSource::Now),
+        None => (0, StampSource::NoPage),
+    }
+}
+
+/// What a stamp that is missing, or does not read as a number, would be
+/// seeded with, and `None` when a good one is there. Writes nothing, so a
+/// dry run of `spoolway sync` can report the seeding.
+pub(crate) fn missing_plans_since(repo: &Repo, any_page: bool) -> Option<(u128, StampSource)> {
+    match read_stamp(&repo.plans_since_file()) {
+        Some(_) => None,
+        None => Some(seed_value(repo, any_page)),
+    }
 }
 
 /// A stamp file's number, or `None` when it is missing or not a number.
