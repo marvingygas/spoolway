@@ -60,6 +60,7 @@ mod skeleton;
 mod spend;
 mod status;
 mod sync;
+mod sync_plans;
 mod task;
 mod task_template;
 mod teardown;

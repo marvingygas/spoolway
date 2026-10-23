@@ -1,6 +1,6 @@
 ---
 domain: cli
-covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**", "src/watch.rs"]
+covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**", "src/sync_plans.rs", "src/watch.rs"]
 ---
 
 # CLI reference
@@ -598,7 +598,7 @@ checkout is not checked.
 
 Print one line per group with open tasks: the group, how many tasks are open, and their ids.
 After the groups, it prints one line for each plan page that no task with a `group:` names,
-newest first. A plan line always reads `0 open — plan <path>`.
+newest first. In home mode a task in any clone of the workspace counts. A plan line always reads `0 open — plan <path>`.
 
 ```
 $ spoolway group list
@@ -608,7 +608,8 @@ search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/pl
 ```
 
 If the plan pages cannot be read, the group lines still print. A notice on stderr names the
-path that failed.
+path that failed. In home mode that path can also be another clone's pending, queue or archive
+folder, or the workspace's `project.toml`.
 
 ### `spoolway dispatch`
 
@@ -1585,10 +1586,14 @@ spoolway config edit
 |---|---|
 | `show` | Print the whole file |
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
-| `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
+| `path` | Print every place this project's setup lives: the setup folder, the plans folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","plans","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
 | `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vi`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
+
+The `plans:` line follows `setup:`. In repo mode it names `plans/` in the project's home. In home
+mode it names the workspace's `plans/`, the same folder for every clone. The planning skills
+read it instead of building the path.
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
 and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each
@@ -1930,6 +1935,43 @@ it kept, each group of settings it added, and each group of retired settings it 
 When a step runs the deprecated stack command, the report ends with a `note` that names
 each `pipeline · step`, above the closing line. See
 [Keeping a project's files current](installation.md#keeping-a-projects-files-current).
+
+#### Plan pages in a home-mode clone
+
+In a home-mode clone, `sync` also moves the clone's plan pages into the workspace. It moves each
+`.html` file directly inside `<workspace>/dispatchers/<name>/plans/` to `<workspace>/plans/`.
+Folders inside it stay, and so do the pages of every other clone.
+
+`sync` then rewrites `plan:` in each pending and queued task of that clone that named a moved
+page. It changes only that line. Archived tasks keep their old `plan:`.
+
+If `<workspace>/plans-since` is missing, `sync` writes it before it moves any page. See
+[Home mode](concepts.md#home-mode).
+
+`sync` never overwrites a page. A page whose file name is already in `<workspace>/plans/` with
+different content stays where it is. Every other page still moves.
+
+Each entry starts with a word, then a path:
+
+| Word | With `--dry-run` | What it reports |
+|---|---|---|
+| `seeded` | `would seed` | The `plans-since` file, with its number and where the number came from |
+| `moved` | `would move` | A page, with its old and new path |
+| `rewrote` | `would rewrite` | A task file whose `plan:` line names the new path |
+| `refused` | `refused` | A page that did not move, with both paths and each task that names it |
+
+A refused entry looks like this:
+
+```
+refused  ~/.spoolway/shop-8mg3gx/dispatchers/shop/plans/2026-10-20-search.html
+         — ~/.spoolway/shop-8mg3gx/plans/2026-10-20-search.html is already there
+         this task names it: ~/.spoolway/shop-8mg3gx/dispatchers/shop/pending/search-api.md
+         rename the page and that task's plan: line to a free name, then run spoolway sync again
+```
+
+Run `spoolway sync` again after the rename. In a lane, `sync` moves and rewrites nothing. It
+prints one line that says to run `spoolway sync` in the main checkout. In a repo-mode project,
+`sync` does none of this.
 
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
 a project that `sync` would change.

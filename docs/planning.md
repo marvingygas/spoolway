@@ -101,8 +101,10 @@ writes a task into the pending directory works too.
 <img src="screenshots/plan.png" alt="a plan page written by /spoolway-plan">
 
 The plan page is one self-contained HTML file. A person reads it once to approve the shape.
-The binary never reads it. It lives outside the checkout, at
-`~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`.
+The binary never reads it. It lives outside the checkout, in the `plans:` folder that
+`spoolway config path` prints, in repo mode and in home mode alike. A page is at
+`<plans>/<YYYY-MM-DD>-<slug>.html`, where `<plans>` is that `plans:` line. In home mode the folder
+is the workspace's own `plans/`, shared by every clone of the workspace.
 
 Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
 the one sentence a person can approve or reject, then two or three sentences on what is true
@@ -126,7 +128,7 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Non-goals | Name the tempting wrong thing next door: the refactor, the extra endpoint, the framework swap. |
 | Reference paths | Point at files and examples. Do not paste prose that will go stale. |
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
-| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `~/.spoolway/<label>-<id>/plans/<group>/` first, and the task links the copy. |
+| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `<plans>/<group>/` first, where `<plans>` is the `plans:` line of `spoolway config path`, and the task links the copy. |
 | Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
 | Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Work that does not chain goes in a group of its own. |
 
@@ -144,7 +146,8 @@ pane, titled `tasks`, lists the highlighted group's tasks and what each waits on
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
-`plan:`. Plan rows sit right under the queueable groups, newest first, and above the done
+`plan:`. In home mode a task in any clone of the workspace counts, so a page leaves every
+clone's list once one clone cuts it. Plan rows sit right under the queueable groups, newest first, and above the done
 groups. A plan row shows only its name, without the date in front of it, with no checkbox and
 no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-tasks`:
 
@@ -159,12 +162,15 @@ no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-ta
 
 `space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
 name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
-instead. Only pages written after the time kept in `~/.spoolway/<label>-<id>/plans-since` are
-shown. Older pages stay off the screen.
+instead. Only pages written after the time kept in the `plans-since` file beside `plans/` are
+shown. In home mode that file is the workspace's, so every clone uses the same cutoff. Older
+pages stay off the screen.
 
-When the `plans/` folder cannot be read, the screen lists the groups without plan rows and
-shows a notice titled `plans not listed`. The notice names the read error. It appears once per
-error, and the plan rows return on the next reload after the folder reads again.
+When the plan list cannot be read, the screen lists the groups without plan rows and shows a
+notice titled `plans not listed`. The cause is the `plans/` folder. In home mode it is also
+another clone's pending, queue or archive folder, or the workspace's `project.toml`. The notice
+names the read error. It appears once per error, and the plan rows return on the next reload
+after the path reads again.
 
 | Key | What it does |
 |---|---|
@@ -280,7 +286,8 @@ Some outcomes open a notice instead of closing the popup:
 ### Deleting a plan page
 
 `delete` on a plan row removes the plan's `.html` page from `plans/`, so a plan nobody will cut
-leaves the list. It removes that one file. A folder under `plans/` stays. The popup is titled
+leaves the list. It removes that one file. A folder under `plans/` stays. In home mode a
+clone cannot delete a page that a task in another clone names. The popup is titled
 `delete plan <name>` and names the page:
 
 ```
@@ -303,8 +310,8 @@ Two outcomes open a notice instead:
 
 | Title | When | What it says |
 |---|---|---|
-| `not deleted` | A task names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
-| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` Only `esc` closes it. |
+| `not deleted` | A task, in home mode in any clone, names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
+| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` In home mode, another clone's pending, queue or archive folder that cannot be read is also such an error, and it names the folder. Only `esc` closes it. |
 
 ### Trials
 

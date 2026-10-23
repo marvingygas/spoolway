@@ -252,7 +252,7 @@ fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
 /// Every `.md` file directly inside `dir` that is a task file, not an
 /// editor's dotfile or dangling lock link, filename order — the listing
 /// [`list_groups_and_skipped`] runs the same way over all three of its own sources.
-fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|entry| entry.ok())
@@ -371,9 +371,9 @@ pub(crate) fn list_groups_and_skipped(repo: &Repo) -> Result<(Vec<Group>, Vec<Pa
     list_groups_in(repo, &mut guard, &mut parsed)
 }
 
-/// The file in [`Repo::home`] that holds when plan listing began, in
-/// nanoseconds since the epoch.
-pub(crate) const PLANS_SINCE: &str = "plans-since";
+/// The file beside the plans folder that holds when plan listing began, in
+/// nanoseconds since the epoch; see [`Repo::plans_since_file`].
+pub(crate) const PLANS_SINCE: &str = crate::config::PLANS_SINCE;
 
 /// One plan page that no task names, as the queue screen draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,26 +419,173 @@ fn nanos(at: std::time::SystemTime) -> u128 {
 /// clock tick. A stamp that does not read as a number is treated as missing.
 /// If it cannot be written the value is still used, and the next call tries
 /// again.
+///
+/// In home mode the stamp is the workspace's, shared by every clone. A new
+/// one is seeded from the oldest stamp any clone's dispatcher folder holds,
+/// because the clones listed plans from those folders before the workspace
+/// had a stamp of its own. Stamping the current time instead would hide every
+/// page already in the workspace's `plans/`, which are the pages people have
+/// been missing. Only a workspace whose clones hold no stamp uses the rule
+/// above.
 fn plans_since(repo: &Repo, any_page: bool) -> u128 {
-    let file = repo.home().join(PLANS_SINCE);
-    if let Some(since) = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-    {
+    let file = repo.plans_since_file();
+    if let Some(since) = read_stamp(&file) {
         return since;
     }
-    let since = if any_page {
-        nanos(std::time::SystemTime::now())
-    } else {
-        0
-    };
+    let (since, _) = seed_value(repo, any_page);
     let _ = crate::task::write_atomic(&file, since.to_string());
     since
 }
 
-/// Every plan page that no pending, queued or archived task in `groups`
-/// names in `plan:` and that was created after the `plans-since` stamp,
-/// newest first.
+/// Where a new `plans-since` stamp's number came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StampSource {
+    /// The oldest stamp a clone's dispatcher folder holds.
+    OldestClone,
+    /// No clone holds one and no page is there, so nothing needs hiding.
+    NoPage,
+    /// No clone holds one but a page is there, so the current time.
+    Now,
+}
+
+/// The number a missing `plans-since` stamp is seeded with, and why, by the
+/// rule [`plans_since`] documents. Shared with `spoolway sync`, which seeds
+/// the stamp before it moves any page into the workspace.
+fn seed_value(repo: &Repo, any_page: bool) -> (u128, StampSource) {
+    match oldest_clone_stamp(repo) {
+        Some(since) => (since, StampSource::OldestClone),
+        None if any_page => (nanos(std::time::SystemTime::now()), StampSource::Now),
+        None => (0, StampSource::NoPage),
+    }
+}
+
+/// What a stamp that is missing, or does not read as a number, would be
+/// seeded with, and `None` when a good one is there. Writes nothing, so a
+/// dry run of `spoolway sync` can report the seeding.
+pub(crate) fn missing_plans_since(repo: &Repo, any_page: bool) -> Option<(u128, StampSource)> {
+    match read_stamp(&repo.plans_since_file()) {
+        Some(_) => None,
+        None => Some(seed_value(repo, any_page)),
+    }
+}
+
+/// A stamp file's number, or `None` when it is missing or not a number.
+fn read_stamp(file: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(file).ok()?.trim().parse().ok()
+}
+
+/// The oldest `plans-since` among the dispatcher folders of `repo`'s
+/// workspace, or `None` in repo mode and when no folder holds a readable one.
+fn oldest_clone_stamp(repo: &Repo) -> Option<u128> {
+    let workspace = repo.workspace_dir()?;
+    std::fs::read_dir(workspace.join("dispatchers"))
+        .ok()?
+        .filter_map(|entry| read_stamp(&entry.ok()?.path().join(PLANS_SINCE)))
+        .min()
+}
+
+/// Every `plan:` the pending, queued and archived tasks of the other clones
+/// in `repo`'s workspace name, and none in repo mode — see
+/// [`Repo::other_clone_homes`].
+///
+/// A thin wrapper over [`plans_named_by_other_clones_in`], holding its
+/// [`ListFrontCache`] in a static the same way [`list_groups_and_skipped`]
+/// holds its own, so every reload in the process shares one.
+pub(crate) fn plans_named_by_other_clones(
+    repo: &Repo,
+) -> Result<std::collections::HashSet<String>> {
+    static CACHE: OnceLock<Mutex<ListFrontCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut parsed = 0; // Nothing in production reads this.
+    let Ok(mut guard) = cache.lock() else {
+        // A poisoned lock costs this one call its cache, as it does in
+        // `list_groups_and_skipped`.
+        return plans_named_by_other_clones_in(repo, &mut HashMap::new(), &mut parsed);
+    };
+    plans_named_by_other_clones_in(repo, &mut guard, &mut parsed)
+}
+
+/// [`plans_named_by_other_clones`]'s own logic, taking the cache and the
+/// parse counter as arguments for the reason [`list_groups_in`] does.
+///
+/// A task counts by the rule [`list_groups_in`] lists this clone's by: a
+/// pending task needs a `group:` and an `id:`, a queued one a `group:`, and
+/// an archived one a `group:` in the archive index. So a page leaves every
+/// clone's screen at the same moment, whichever clone the task is in.
+///
+/// Pending and queue files go through [`list_front_in`], so a file whose
+/// bytes did not change is not parsed again, and the archive is read
+/// through its index, as [`archive_tasks`] reads this clone's, so no archived
+/// task file is opened while the index is current. A file that will not read
+/// is passed over, as this clone's own listing passes one over. A folder that
+/// is missing has no tasks; one that exists and will not list is an error
+/// naming it, since a page could otherwise read as having no tasks while that
+/// folder's tasks still link to it.
+pub(crate) fn plans_named_by_other_clones_in(
+    repo: &Repo,
+    front_cache: &mut ListFrontCache,
+    parsed: &mut usize,
+) -> Result<std::collections::HashSet<String>> {
+    let mut named = std::collections::HashSet::new();
+    let mut seen_paths: std::collections::HashSet<PathBuf> = Default::default();
+    for home in repo.other_clone_homes()? {
+        for (dir, needs_id) in [
+            (home.join(crate::config::PENDING_DIR), true),
+            (home.join(crate::config::QUEUE_DIR), false),
+        ] {
+            if !folder_exists(&dir)? {
+                continue;
+            }
+            for path in md_files(&dir)? {
+                // Counted here, the one line that actually touches the disk
+                // — see [`PENDING_READS`].
+                #[cfg(test)]
+                if let Ok(mut reads) = PENDING_READS.lock() {
+                    reads.push((path.clone(), std::thread::current().id()));
+                }
+                let Ok(doc) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                seen_paths.insert(path.clone());
+                let Some(front) = list_front_in(&path, &doc, front_cache, parsed) else {
+                    continue;
+                };
+                let listed = front_str(&front, "group").is_some()
+                    && (!needs_id || front_str(&front, "id").is_some());
+                if let Some(plan) = front_str(&front, "plan").filter(|_| listed) {
+                    named.insert(plan);
+                }
+            }
+        }
+        let archive = home.join(crate::config::ARCHIVE_DIR);
+        if folder_exists(&archive)? {
+            named.extend(
+                crate::archive_index::read_at(&archive)?
+                    .into_iter()
+                    .filter(|entry| !entry.group.trim().is_empty())
+                    .filter_map(|entry| {
+                        Some(entry.plan?.trim().to_string()).filter(|plan| !plan.is_empty())
+                    }),
+            );
+        }
+    }
+    front_cache.retain(|path, _| seen_paths.contains(path));
+    Ok(named)
+}
+
+/// Whether another clone's task folder is there to read. Only a folder that
+/// is not there answers `false`. `Path::exists` would answer `false` too for
+/// a clone home this user cannot search, and that clone's tasks would then
+/// read as none, so any other failure is an error naming the folder.
+fn folder_exists(dir: &Path) -> Result<bool> {
+    dir.try_exists()
+        .with_context(|| format!("reading {}", dir.display()))
+}
+
+/// Every plan page that no pending, queued or archived task names in
+/// `plan:` and that was created after the `plans-since` stamp, newest
+/// first. The tasks are those in `groups`, and in home mode every other
+/// clone's too — see [`plans_named_by_other_clones`].
 ///
 /// Only the folder's file names and creation times are read, never a page.
 /// Only `.html` files directly inside `plans/` count. A page whose creation
@@ -451,6 +598,9 @@ fn plans_since(repo: &Repo, any_page: bool) -> u128 {
 /// pending and queue files are parsed again only when their bytes change,
 /// and the archive comes from its index. A task with no `group:` is not in
 /// that listing, so a page only it names still counts as having no task.
+///
+/// An error when `plans/` will not list, or when another clone's task
+/// folders will not, since a page cannot then be shown to have no tasks.
 pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<PlanPage>> {
     let plans = repo.plans_dir();
     let mut pages: Vec<PathBuf> = std::fs::read_dir(&plans)
@@ -465,10 +615,12 @@ pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<P
         return Ok(Vec::new());
     }
 
+    let elsewhere = plans_named_by_other_clones(repo)?;
     let named: std::collections::HashSet<&str> = groups
         .iter()
         .flat_map(|group| &group.tasks)
         .filter_map(|task| task.plan.as_deref())
+        .chain(elsewhere.iter().map(String::as_str))
         .collect();
 
     let mut out: Vec<PlanPage> = pages
@@ -498,8 +650,9 @@ pub(crate) struct Rows {
     /// The pending files no group could be built from, as
     /// [`list_groups_and_skipped`] passed them over.
     pub(crate) unreadable: Vec<PathBuf>,
-    /// Why no plan rows could be listed, when `plans/` would not read. The
-    /// groups are listed all the same.
+    /// Why no plan rows could be listed: `plans/` would not read, or in home
+    /// mode another clone's task folders or the workspace's `project.toml`
+    /// would not. The groups are listed all the same.
     pub(crate) plans_error: Option<String>,
 }
 
@@ -508,10 +661,10 @@ pub(crate) struct Rows {
 /// after the queueable groups, and the pending files no group could be built
 /// from.
 ///
-/// A plans folder that cannot be read costs the plan rows alone, not the
-/// screen: the groups are still listed, the error comes back in
-/// [`Rows::plans_error`] for the screen to name, and the next reload tries
-/// again.
+/// A plan list that cannot be read, whether `plans/` or another clone's
+/// folders, costs the plan rows alone, not the screen: the groups are still
+/// listed, the error comes back in [`Rows::plans_error`] for the screen to
+/// name, and the next reload tries again.
 pub(crate) fn list_rows(repo: &Repo) -> Result<Rows> {
     let (mut groups, unreadable) = list_groups_and_skipped(repo)?;
     let (plans, plans_error) = match plans_without_tasks(repo, &groups) {
@@ -535,16 +688,18 @@ pub(crate) fn list_rows(repo: &Repo) -> Result<Rows> {
     })
 }
 
-/// Every file [`list_groups_in`] has read the bytes of so far in this
-/// process, with the thread that read it — test-only, the same shape as
-/// [`crate::status::QUEUE_READS`] and [`crate::repo::PROCESS_RUNS`]: scoped
-/// by path so a test counts only its own fixture, and by thread so it can
-/// tell a key's own thread's reads from a reader thread's.
+/// Every file [`list_groups_in`] and [`plans_named_by_other_clones_in`] have
+/// read the bytes of so far in this process, with the thread that read it —
+/// test-only, the same shape as [`crate::status::QUEUE_READS`] and
+/// [`crate::repo::PROCESS_RUNS`]: scoped by path so a test counts only its
+/// own fixture, and by thread so it can tell a key's own thread's reads from
+/// a reader thread's.
 #[cfg(test)]
 static PENDING_READS: Mutex<Vec<(PathBuf, std::thread::ThreadId)>> = Mutex::new(Vec::new());
 
-/// How many files under `dir` [`list_groups_in`] has read so far on the
-/// calling thread — see [`PENDING_READS`].
+/// How many files under `dir` [`list_groups_in`] and
+/// [`plans_named_by_other_clones_in`] have read so far on the calling thread
+/// — see [`PENDING_READS`].
 #[cfg(test)]
 pub(crate) fn pending_reads_here_under(dir: &Path) -> usize {
     let here = std::thread::current().id();
@@ -1990,7 +2145,7 @@ mod tests {
     /// The stamp is set to the earliest instant so only the behaviour under
     /// test decides what is listed.
     fn open_stamp(repo: &Repo) {
-        std::fs::write(repo.home().join(PLANS_SINCE), "1").unwrap();
+        std::fs::write(repo.plans_since_file(), "1").unwrap();
     }
 
     /// A page named by a pending, a queued or an archived task is not listed,
@@ -2030,6 +2185,214 @@ mod tests {
         assert_eq!(names(&repo), [".draft", "undated", "new", "old"]);
     }
 
+    /// A clone of a home-mode workspace: `home` is the dispatcher folder, so
+    /// `plans/` and `plans-since` resolve to the workspace root.
+    fn workspace_clone_repo(
+        name: &str,
+        dispatcher: &str,
+    ) -> (Repo, std::path::PathBuf, crate::scratch::ScratchRoot) {
+        let (mut repo, root) = crate::commands::testutil::fixture(name);
+        let workspace = root.join("ws");
+        repo.home = workspace.join("dispatchers").join(dispatcher);
+        std::fs::create_dir_all(&repo.home).unwrap();
+        (repo, workspace, root)
+    }
+
+    /// In home mode the pages and the cutoff are the workspace's, not the
+    /// clone's: a page in the workspace's `plans/` is listed, and the
+    /// dispatcher folder's own `plans/` is not read.
+    #[test]
+    fn a_home_mode_clone_lists_the_workspace_plans_folder() {
+        let (repo, workspace, _root) = workspace_clone_repo("pending-plans-ws", "a");
+        assert_eq!(repo.plans_dir(), workspace.join("plans"));
+        assert_eq!(repo.plans_since_file(), workspace.join("plans-since"));
+        open_stamp(&repo);
+        plan_pages(&repo, &["2026-01-01-shared.html"]);
+        let other = Repo {
+            home: workspace.join("dispatchers").join("b"),
+            ..repo.clone()
+        };
+
+        assert_eq!(names(&repo), ["shared"]);
+        assert_eq!(names(&other), ["shared"]);
+    }
+
+    /// A workspace with no stamp of its own takes the oldest one a clone
+    /// holds, so a page already in the workspace root is listed rather than
+    /// hidden by a stamp written now.
+    #[test]
+    fn a_new_workspace_stamp_is_seeded_from_the_oldest_clone_stamp() {
+        let (repo, workspace, _root) = workspace_clone_repo("pending-plans-seed", "a");
+        std::fs::write(repo.home.join(PLANS_SINCE), "50").unwrap();
+        let younger = workspace.join("dispatchers").join("b");
+        std::fs::create_dir_all(&younger).unwrap();
+        std::fs::write(younger.join(PLANS_SINCE), "0").unwrap();
+        std::fs::write(workspace.join("dispatchers/c-unreadable"), "").unwrap();
+        plan_pages(&repo, &["2026-01-01-waiting.html"]);
+
+        assert_eq!(names(&repo), ["waiting"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.plans_since_file()).unwrap(),
+            "0"
+        );
+    }
+
+    /// With no clone stamp at all, a workspace that already has pages stamps
+    /// the current time, the same as repo mode.
+    #[test]
+    fn a_workspace_with_no_clone_stamp_stamps_the_current_time() {
+        let (repo, _workspace, _root) = workspace_clone_repo("pending-plans-noseed", "a");
+        plan_pages(&repo, &["2026-01-01-before.html"]);
+
+        assert!(names(&repo).is_empty());
+        assert!(read_stamp(&repo.plans_since_file()).unwrap() > 1);
+    }
+
+    /// A page no task names is listed in both clones, and a pending, a
+    /// queued or an archived task in `shop` naming it takes it off `shop-2`'s
+    /// listing too.
+    #[test]
+    fn a_task_in_one_clone_takes_the_plan_off_every_clone() {
+        use crate::archive_index::testutil::*;
+        let (shop, shop_2, _root) = crate::commands::testutil::two_clones("pending-plans-clones");
+        let pages = plan_pages(
+            &shop,
+            &[
+                "2026-01-01-pending.html",
+                "2026-01-02-queued.html",
+                "2026-01-03-archived.html",
+                "2026-01-04-search.html",
+            ],
+        );
+        let all = ["search", "archived", "queued", "pending"];
+        assert_eq!(names(&shop), all);
+        assert_eq!(names(&shop_2), all);
+
+        let task =
+            |id: &str, plan: &str| format!("---\nid: {id}\ngroup: g\nplan: {plan}\n---\nbody\n");
+        std::fs::write(shop.pending_dir().join("p.md"), task("p", &pages[0])).unwrap();
+        std::fs::write(shop.queue_dir().join("q.md"), task("q", &pages[1])).unwrap();
+        archive(&shop, "a", &format!("group: g\nplan: {}\n", pages[2]));
+
+        assert_eq!(names(&shop), ["search"]);
+        assert_eq!(names(&shop_2), ["search"]);
+    }
+
+    /// A second read with nothing changed in the other clone parses no task
+    /// file there, counted the way `list_groups_in` counts its own.
+    #[test]
+    fn a_second_read_of_the_other_clones_parses_nothing() {
+        use crate::archive_index::testutil::*;
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-parse");
+        let task = |id: &str| format!("---\nid: {id}\ngroup: g\nplan: /x/{id}.html\n---\nb\n");
+        std::fs::write(shop.pending_dir().join("p.md"), task("p")).unwrap();
+        std::fs::write(shop.queue_dir().join("q.md"), task("q")).unwrap();
+        archive(&shop, "a", "group: g\nplan: /x/a.html\n");
+        let mut cache = ListFrontCache::new();
+
+        let mut parsed = 0;
+        let named = plans_named_by_other_clones_in(&shop_2, &mut cache, &mut parsed).unwrap();
+        assert_eq!(parsed, 2);
+        let mut named: Vec<String> = named.into_iter().collect();
+        named.sort();
+        assert_eq!(named, ["/x/a.html", "/x/p.html", "/x/q.html"]);
+
+        let mut parsed = 0;
+        plans_named_by_other_clones_in(&shop_2, &mut cache, &mut parsed).unwrap();
+        assert_eq!(parsed, 0);
+    }
+
+    /// Another clone's task folder that will not list stops the plan rows
+    /// with an error naming it, and the groups are still listed.
+    #[test]
+    fn another_clones_unreadable_folder_is_named_and_the_groups_stay() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-broken");
+        plan_pages(&shop, &["2026-01-01-search.html"]);
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        // A file where the folder should be: `read_dir` fails on it the same
+        // way it fails on a folder this user cannot read.
+        std::fs::write(&pending, "").unwrap();
+        std::fs::write(
+            shop_2.pending_dir().join("wire.md"),
+            "---\nid: wire\ngroup: cart\n---\nbody\n",
+        )
+        .unwrap();
+
+        let rows = list_rows(&shop_2).unwrap();
+
+        let err = rows.plans_error.expect("the read error is handed back");
+        assert!(err.contains(&pending.display().to_string()), "{err}");
+        let listed: Vec<&str> = rows.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(listed, ["cart"]);
+    }
+
+    /// Another clone's home that cannot be searched is an error naming the
+    /// folder under it, not a clone with no tasks. A file in the home's place
+    /// fails the same way a home this user cannot search does.
+    #[test]
+    fn another_clones_unsearchable_home_is_an_error_not_no_tasks() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-home");
+        plan_pages(&shop, &["2026-01-01-search.html"]);
+        std::fs::remove_dir_all(&shop.home).unwrap();
+        std::fs::write(&shop.home, "").unwrap();
+
+        let rows = list_rows(&shop_2).unwrap();
+
+        let err = rows.plans_error.expect("the read error is handed back");
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        assert!(err.contains(&pending.display().to_string()), "{err}");
+        assert!(rows.groups.is_empty());
+    }
+
+    /// A `project.toml` naming a dispatcher that is not one plain name is
+    /// refused, so nothing outside the workspace is read.
+    #[test]
+    fn a_dispatcher_that_is_not_a_plain_name_is_refused() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-bad");
+        let record = shop
+            .workspace_dir()
+            .unwrap()
+            .join(crate::repo::BINDING_FILE);
+        std::fs::write(
+            &record,
+            "id = \"ws\"\n\n[[clones]]\nroot = \"/x\"\ndispatcher = \"../../elsewhere\"\n",
+        )
+        .unwrap();
+
+        let err = format!("{:#}", shop_2.other_clone_homes().unwrap_err());
+        assert!(err.contains(&record.display().to_string()), "{err}");
+        assert!(err.contains("one plain name"), "{err}");
+    }
+
+    /// A workspace whose `project.toml` lists nobody but this clone, or is
+    /// missing, has no other clone to read; one that will not parse is an
+    /// error naming it.
+    #[test]
+    fn the_workspace_list_of_clones_decides_what_is_read() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-list");
+        let record = shop
+            .workspace_dir()
+            .unwrap()
+            .join(crate::repo::BINDING_FILE);
+        assert_eq!(
+            shop_2.other_clone_homes().unwrap(),
+            std::slice::from_ref(&shop.home)
+        );
+
+        std::fs::write(&record, "id = \"ws\"\nclones = []\n").unwrap();
+        assert!(shop_2.other_clone_homes().unwrap().is_empty());
+        std::fs::remove_file(&record).unwrap();
+        assert!(shop_2.other_clone_homes().unwrap().is_empty());
+        std::fs::write(&record, "not toml").unwrap();
+        let err = format!("{:#}", shop_2.other_clone_homes().unwrap_err());
+        assert!(err.contains(&record.display().to_string()), "{err}");
+    }
+
     /// Only an exact path counts: a task naming another folder's page of the
     /// same file name does not hide this one.
     #[test]
@@ -2052,7 +2415,7 @@ mod tests {
         let (repo, _root) = crate::commands::testutil::fixture("pending-plans-stamp");
         plan_pages(&repo, &["2026-01-01-before.html"]);
         let stamp = nanos(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
-        std::fs::write(repo.home().join(PLANS_SINCE), stamp.to_string()).unwrap();
+        std::fs::write(repo.plans_since_file(), stamp.to_string()).unwrap();
 
         assert!(names(&repo).is_empty());
         open_stamp(&repo);
@@ -2065,11 +2428,11 @@ mod tests {
     fn the_first_listing_stamps_after_the_pages_already_there() {
         let (repo, _root) = crate::commands::testutil::fixture("pending-plans-first");
         plan_pages(&repo, &["2026-01-01-before.html"]);
-        assert!(!repo.home().join(PLANS_SINCE).exists());
+        assert!(!repo.plans_since_file().exists());
 
         assert!(names(&repo).is_empty());
 
-        assert!(repo.home().join(PLANS_SINCE).exists());
+        assert!(repo.plans_since_file().exists());
         std::thread::sleep(std::time::Duration::from_millis(15));
         plan_pages(&repo, &["2026-01-02-after.html"]);
         assert_eq!(names(&repo), ["after"]);

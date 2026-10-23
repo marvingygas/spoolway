@@ -91,3 +91,30 @@ pub fn write_pending(repo: &Repo, id: &str, doc: &str) -> std::path::PathBuf {
 pub fn listed(repo: &Repo) -> Vec<super::pending::Group> {
     super::pending::list_groups(repo).unwrap()
 }
+
+/// Two clones of one home-mode workspace, `shop` and `shop-2`, listed in its
+/// `project.toml` the way `spoolway init` lists them. Each [`Repo`]'s home is
+/// its dispatcher folder, so `plans/` and `plans-since` are the workspace's;
+/// the stamp is set to the earliest instant, so every page is listed.
+pub fn two_clones(name: &str) -> (Repo, Repo, crate::scratch::ScratchRoot) {
+    let (mut shop, root) = fixture(name);
+    let workspace = root.join("ws");
+    shop.home = workspace.join("dispatchers").join("shop");
+    let shop_2 = Repo {
+        home: workspace.join("dispatchers").join("shop-2"),
+        ..shop.clone()
+    };
+    std::fs::create_dir_all(&shop.home).unwrap();
+    std::fs::create_dir_all(&shop_2.home).unwrap();
+    std::fs::write(
+        workspace.join(crate::repo::BINDING_FILE),
+        format!(
+            "id = \"ws\"\n\n[[clones]]\nroot = \"{0}\"\ndispatcher = \"shop\"\n\n\
+             [[clones]]\nroot = \"{0}/two\"\ndispatcher = \"shop-2\"\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(shop.plans_since_file(), "1").unwrap();
+    (shop, shop_2, root)
+}

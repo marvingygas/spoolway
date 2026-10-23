@@ -8821,6 +8821,9 @@ fn prepare_boot(
         ("project_home", repo.home().display().to_string()),
         ("git_dir", git_dir.display().to_string()),
         ("worktree_git_dir", worktree_git_dir.display().to_string()),
+        // The plan page and mockups a task links to, which sit outside every
+        // other grant in home mode — see `crate::repo::Repo::plans_dir`.
+        ("plans_dir", repo.plans_dir().display().to_string()),
     ]);
     let mut args = profile.render_args(&values)?;
     args.extend(profile.effort_args(step.effort.as_deref()));

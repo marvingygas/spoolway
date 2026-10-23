@@ -51,8 +51,8 @@ pub fn group_list(repo: &Repo) -> Result<()> {
         .unwrap_or_else(|err| {
             eprintln!(
                 "Plans with no tasks are not listed, because they could not be read: {err:#}. \
-                 Check that the path named above is one you can read, then run \
-                 `spoolway group list` again."
+                 Check that the path named above is one you can read, or repair \
+                 it if it will not parse, then run `spoolway group list` again."
             );
             Vec::new()
         });

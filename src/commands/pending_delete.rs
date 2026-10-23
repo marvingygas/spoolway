@@ -18,7 +18,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::pending::{Group, PendingTask, TaskState, list_groups_and_skipped};
+use super::pending::{
+    Group, PendingTask, TaskState, list_groups_and_skipped, plans_named_by_other_clones,
+};
 use super::*;
 
 /// What a delete was asked to take.
@@ -295,8 +297,11 @@ pub(crate) enum PlanDeleteOutcome {
 /// The pending, queue and archive folders are read again first, by the
 /// rule the queue screen lists plans by, since a task cut from the plan
 /// after its row was drawn would be left linking to a page that is gone.
-/// A page some task now names answers [`PlanDeleteOutcome::Named`] with
-/// nothing removed.
+/// In home mode that is every clone's folders, since the page is the
+/// workspace's: one clone must not remove a page another clone's tasks link
+/// to. A page some task now names answers [`PlanDeleteOutcome::Named`] with
+/// nothing removed, and a folder that will not read answers
+/// [`PlanDeleteOutcome::Failed`] naming it, with nothing removed either.
 ///
 /// Only an `.html` file directly inside `plans/` is ever removed, never a
 /// folder there: those hold mockups that tasks link to. A page already gone
@@ -324,11 +329,21 @@ pub(crate) fn delete_plan(repo: &Repo, page: &Path) -> PlanDeleteOutcome {
             };
         }
     };
+    let elsewhere = match plans_named_by_other_clones(repo) {
+        Ok(named) => named,
+        Err(err) => {
+            return PlanDeleteOutcome::Failed {
+                error: format!("{err:#}"),
+                kind: None,
+            };
+        }
+    };
     let path = page.to_string_lossy();
-    if groups
-        .iter()
-        .flat_map(|group| &group.tasks)
-        .any(|task| task.plan.as_deref() == Some(path.as_ref()))
+    if elsewhere.contains(path.as_ref())
+        || groups
+            .iter()
+            .flat_map(|group| &group.tasks)
+            .any(|task| task.plan.as_deref() == Some(path.as_ref()))
     {
         return PlanDeleteOutcome::Named;
     }
@@ -695,6 +710,63 @@ mod tests {
         .unwrap();
 
         assert_eq!(delete_plan(&repo, &page), PlanDeleteOutcome::Named);
+        assert!(page.exists());
+    }
+
+    /// In a workspace, a task in another clone naming the page keeps it:
+    /// `shop-2` cannot delete what `shop`'s task links to.
+    #[test]
+    fn a_plan_another_clones_task_names_is_left_alone() {
+        let (shop, shop_2, _root) = crate::commands::testutil::two_clones("pdel-plan-clones");
+        let page = plan(&shop, "2026-10-21-search.html");
+        let extra = format!("plan: {}\n", page.display());
+        std::fs::write(
+            shop.pending_dir().join("search-index.md"),
+            doc("search-index", "search", &extra),
+        )
+        .unwrap();
+
+        assert_eq!(delete_plan(&shop_2, &page), PlanDeleteOutcome::Named);
+        assert!(page.exists());
+    }
+
+    /// Another clone's task folder that will not list removes nothing, and
+    /// the error names that folder.
+    #[test]
+    fn another_clones_unreadable_folder_removes_no_plan() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pdel-plan-clones-broken");
+        let page = plan(&shop, "2026-10-21-search.html");
+        let queue = shop.home.join(crate::config::QUEUE_DIR);
+        // A file where the folder should be, which `read_dir` fails on.
+        std::fs::write(&queue, "").unwrap();
+
+        let outcome = delete_plan(&shop_2, &page);
+        let PlanDeleteOutcome::Failed { error, kind } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(kind, None);
+        assert!(error.contains(&queue.display().to_string()), "{error}");
+        assert!(page.exists());
+    }
+
+    /// Another clone's home that cannot be searched removes nothing either:
+    /// it is not read as a clone with no tasks.
+    #[test]
+    fn another_clones_unsearchable_home_removes_no_plan() {
+        let (shop, shop_2, _root) = crate::commands::testutil::two_clones("pdel-plan-clones-home");
+        let page = plan(&shop, "2026-10-21-search.html");
+        std::fs::remove_dir_all(&shop.home).unwrap();
+        // A file in the home's place, which fails the way a home this user
+        // cannot search does.
+        std::fs::write(&shop.home, "").unwrap();
+
+        let outcome = delete_plan(&shop_2, &page);
+        let PlanDeleteOutcome::Failed { error, kind } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(kind, None);
+        assert!(error.contains(&shop.home.display().to_string()), "{error}");
         assert!(page.exists());
     }
 

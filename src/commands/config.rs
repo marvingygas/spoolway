@@ -194,12 +194,12 @@ fn shadow_note(
 
 /// `spoolway config path`: every place this project's own setup lives — the
 /// setup folder (`.spoolway/` in repo mode, a workspace's `config/` in home
-/// mode), the private layer's `local/` (repo mode only — home mode has none,
-/// since the whole setup is already private), the override layer's
-/// `overrides/`, the routines folder and both cron-job stores — plus this
-/// checkout's own workspace and every workspace on the machine, so the
-/// skill can propose `spoolway init --workspace <name>` without building a
-/// path by hand.
+/// mode), the plans folder, the private layer's `local/` (repo mode only —
+/// home mode has none, since the whole setup is already private), the
+/// override layer's `overrides/`, the routines folder and both cron-job
+/// stores — plus this checkout's own workspace and every workspace on the
+/// machine, so the skill can propose `spoolway init --workspace <name>`
+/// without building a path by hand.
 ///
 /// This is what `spoolway-config`'s "never reach past" rule names, and the
 /// skill reads every path from here instead of building them itself, so a
@@ -246,6 +246,7 @@ fn print_config_paths(paths: &ConfigPaths, json: bool) -> Result<()> {
 
     println!("mode:      {}", paths.mode.unwrap_or("-"));
     println!("setup:     {}", display_opt(paths.setup.as_deref()));
+    println!("plans:     {}", display_opt(paths.plans.as_deref()));
     if let Some(local) = &paths.local {
         println!("local:     {}", local.display());
     }
@@ -301,13 +302,16 @@ struct JobPaths {
 ///
 /// Every field but `mode` and `workspaces` is `None`/empty only in
 /// [`ConfigPaths::unclaimed`]: an ordinary project, repo mode or home mode,
-/// fills in all of them, so the three keys `config path` printed before this
-/// task keep their old values for a project that already has one — only an
-/// unclaimed checkout sees the new `null`s.
+/// fills in all of them, so a project keeps every value `config path`
+/// printed for it before — only an unclaimed checkout sees the `null`s.
 #[derive(Debug, PartialEq, Serialize)]
 struct ConfigPaths {
     mode: Option<&'static str>,
     setup: Option<PathBuf>,
+    /// Where plan pages are written and listed: the workspace's `plans/` in
+    /// home mode, the project home's in repo mode — see [`Repo::plans_dir`].
+    /// The planning skills read it here instead of building the path.
+    plans: Option<PathBuf>,
     /// `None` in home mode or when unclaimed: home mode's whole setup is
     /// already private, so there is no second private layer to report — see
     /// [`crate::local::is_repo_mode`].
@@ -342,6 +346,7 @@ impl ConfigPaths {
         ConfigPaths {
             mode,
             setup: Some(repo.setup_dir()),
+            plans: Some(repo.plans_dir()),
             local: crate::local::is_repo_mode(&repo.checkout).then(|| repo.local_dir()),
             overrides: Some(repo.overrides_dir()),
             routines: Some(repo.routines_dir()),
@@ -362,6 +367,7 @@ impl ConfigPaths {
         ConfigPaths {
             mode: None,
             setup: None,
+            plans: None,
             local: None,
             overrides: None,
             routines: None,
@@ -643,6 +649,7 @@ mod tests {
         let paths = ConfigPaths::for_repo(&repo);
         assert_eq!(paths.mode, Some("repo"));
         assert_eq!(paths.setup, Some(repo.checkout.join(".spoolway")));
+        assert_eq!(paths.plans, Some(repo.home.join("plans")));
         assert_eq!(paths.overrides, Some(repo.home.join("overrides")));
         assert_eq!(paths.local, Some(repo.home.join("local")));
         assert_eq!(paths.routines, Some(repo.routines_dir()));
@@ -659,6 +666,7 @@ mod tests {
         let json = serde_json::to_value(&paths).unwrap();
         assert_eq!(json["mode"], "repo");
         assert_eq!(json["setup"], repo.setup_dir().display().to_string());
+        assert_eq!(json["plans"], repo.plans_dir().display().to_string());
         assert_eq!(
             json["overrides"],
             repo.overrides_dir().display().to_string()
@@ -709,6 +717,7 @@ mod tests {
             let paths = ConfigPaths::for_repo(&repo);
             assert_eq!(paths.mode, Some("home"));
             assert_eq!(paths.setup, Some(clone.config_dir()));
+            assert_eq!(paths.plans, Some(clone.workspace.join("plans")));
             assert_eq!(paths.local, None);
             assert_eq!(
                 paths.workspace.as_deref(),

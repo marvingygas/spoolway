@@ -377,6 +377,9 @@ fn sample_placeholders(session: &str) -> std::collections::BTreeMap<&'static str
             "worktree_git_dir",
             "/<repo>/.git/worktrees/<task>".to_string(),
         ),
+        // The plans folder — see `crate::repo::Repo::plans_dir`. Under the
+        // workspace in home mode; this sample shows the repo-mode shape.
+        ("plans_dir", "/<home>/.spoolway/<project>/plans".to_string()),
     ])
 }
 
@@ -775,6 +778,12 @@ fn agent_verify_live(
     // if that init above was swallowed and never ran.
     let git_dir = crate::repo::git_dir(&dir).unwrap_or_else(|_| dir.join(".git"));
     let worktree_git_dir = crate::repo::worktree_git_dir(&dir).unwrap_or_else(|_| dir.join(".git"));
+    // `Repo::plans_dir` creates the folder it names, so a real lane is never
+    // granted a path that is missing; a verify that granted one would launch
+    // the CLI in a shape no lane has.
+    let plans_dir = dir.join("plans");
+    std::fs::create_dir_all(&plans_dir)
+        .with_context(|| format!("creating {}", plans_dir.display()))?;
     let values = std::collections::BTreeMap::from([
         ("model", model.clone()),
         ("session_id", session.clone()),
@@ -786,6 +795,7 @@ fn agent_verify_live(
         ("project_home", dir.display().to_string()),
         ("git_dir", git_dir.display().to_string()),
         ("worktree_git_dir", worktree_git_dir.display().to_string()),
+        ("plans_dir", plans_dir.display().to_string()),
     ]);
     let rendered_args = profile.render_args(&values)?;
     // Composed by the adapter, exactly as a headless lane's first turn is —

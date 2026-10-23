@@ -2,8 +2,10 @@
 //! nobody reads.
 //!
 //! A spoolway home mixes two kinds of directory. `queue/`, `pending/`,
-//! `worktrees/`, `plans/` and `overrides/` hold work in flight — losing an
-//! entry there loses work, and a patch under `overrides/` swept after
+//! `worktrees/`, `plans/` (in repo mode; in home mode it sits in the
+//! workspace, outside any home, and the sweep never reaches it) and
+//! `overrides/` hold work in flight — losing an entry there loses work,
+//! and a patch under `overrides/` swept after
 //! `retention.days` would silently change how a project runs rather than
 //! merely lose a record of one. `system-prompts/`, `commands/`, `tracking/`,
 //! `headless/` and `scratch/` hold what a pass left behind — a composed

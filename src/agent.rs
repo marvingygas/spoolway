@@ -63,7 +63,7 @@ pub struct Adapter {
 
     /// The argv template a lane of this kind is started with. Placeholders —
     /// `{model}`, `{prompt_file}`, `{task_file}`, `{worktree}`, `{repo}`,
-    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{worktree_git_dir}`, `{session_id}` — are
+    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{worktree_git_dir}`, `{plans_dir}`, `{session_id}` — are
     /// substituted by [`crate::config::AgentProfile::render_args`] from what a lane start
     /// already computes; see that function's doc comment for what each one
     /// carries. Empty on a kind nobody has wired up yet — a profile naming
@@ -590,9 +590,9 @@ pub const ADAPTERS: &[Adapter] = &[
             // enterprise policy may forbid `bypassPermissions` outright and a
             // pipeline that only runs where that is allowed is not one to
             // depend on. `{state_dir}` and `{project_home}` rather than
-            // `{repo}` because together they are the whole of what a lane
-            // legitimately reads outside its worktree — the task file and
-            // its prompts.
+            // `{repo}` because together they are what a lane reads outside
+            // its worktree for its task file and its prompts. The plans
+            // folder it also reads is granted below.
             "--add-dir",
             "{state_dir}",
             "--add-dir",
@@ -607,6 +607,14 @@ pub const ADAPTERS: &[Adapter] = &[
             // `crate::repo::git_dir`.
             "--add-dir",
             "{git_dir}",
+            // A task links the plan page and mockup folders it came from, and
+            // those sit in the plans folder, which in home mode is in the
+            // workspace and under none of the grants above. Without this one the
+            // lane stops on a permission prompt the first time it opens the
+            // plan, and nobody is there to answer it. See
+            // `crate::repo::Repo::plans_dir`.
+            "--add-dir",
+            "{plans_dir}",
         ],
         // Takes the id spoolway mints, so it needs no home of its own.
         home: None,
@@ -744,6 +752,11 @@ pub const ADAPTERS: &[Adapter] = &[
             // `crate::repo::worktree_git_dir`.
             "--add-dir",
             "{worktree_git_dir}",
+            // The plans folder, for the reason claude's row gives: a plan page
+            // and its mockups sit outside the other grants. See
+            // `crate::repo::Repo::plans_dir`.
+            "--add-dir",
+            "{plans_dir}",
             // codex checks for a newer release of itself on startup, and a
             // newer one stops the lane dead: `✨ Update available! 0.153.4 ->
             // 0.153.6`, then `1. Update now (runs npm install -g

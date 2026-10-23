@@ -5591,7 +5591,7 @@ pub(crate) struct ScreenState {
 struct NamedFiles {
     dir: std::path::PathBuf,
     files: std::collections::BTreeSet<std::path::PathBuf>,
-    /// Why `plans/` would not read, as last named — see
+    /// Why the plan pages could not be listed, as last named — see
     /// [`announce_plans_error`].
     plans: Option<String>,
 }
@@ -6553,7 +6553,7 @@ struct QueueSnapshot {
     /// The pending files [`super::pending::list_groups_and_skipped`] passed
     /// over, read in the same pass as `groups`.
     unreadable: Vec<std::path::PathBuf>,
-    /// Why `plans/` would not read in that pass — see
+    /// Why the plan pages could not be listed in that pass — see
     /// [`super::pending::Rows::plans_error`].
     plans_error: Option<String>,
 }
@@ -6599,7 +6599,9 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 ///
 /// A reading looks at the pending, queue, archive and plans directories, the
 /// files in the first two, the `plans-since` stamp, and the checkout's
-/// `HEAD`. [`crate::watch::Stamp`] records all of them before each reading,
+/// `HEAD`. In home mode it also looks at the workspace's `project.toml` and
+/// every other clone's pending, queue and archive directories, since a task
+/// there takes a plan row off this screen. [`crate::watch::Stamp`] records all of them before each reading,
 /// and a tick whose stamp equals the last settled one returns [`Attempt::Unchanged`] without starting a
 /// process, reading a file or building a snapshot. The reader keeps the
 /// snapshot it already holds, so [`refresh_from_reader`] sees no new
@@ -6607,7 +6609,8 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 ///
 /// A reading that fails is [`Attempt::Failed`] and keeps no stamp, so the
 /// next tick tries again rather than treating the failure as the current
-/// state.
+/// state. A reading whose plan list failed is fresh but keeps no stamp
+/// either, for the same reason.
 #[derive(Default)]
 struct IdleCheck {
     stamp: Option<crate::watch::Stamp>,
@@ -6617,14 +6620,36 @@ struct IdleCheck {
 impl IdleCheck {
     fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Attempt<QueueSnapshot> {
         let head = self.branch.head_path(cwd);
+        // The other clones' folders decide which plan pages are listed. A
+        // list of them that will not read stamps none: the reading then
+        // names that error and keeps no stamp, so the next tick reads again.
+        let others = repo.other_clone_homes().unwrap_or_default();
+        let deep: Vec<std::path::PathBuf> = [repo.pending_dir(), repo.queue_dir()]
+            .into_iter()
+            .chain(others.iter().flat_map(|home| {
+                [
+                    home.join(crate::config::PENDING_DIR),
+                    home.join(crate::config::QUEUE_DIR),
+                ]
+            }))
+            .collect();
         let stamp = crate::watch::Stamp::capture(
-            &[repo.pending_dir(), repo.queue_dir()],
+            &deep,
             &[
                 repo.archive_dir(),
                 repo.plans_dir(),
-                repo.home().join(super::pending::PLANS_SINCE),
+                repo.plans_since_file(),
             ]
             .into_iter()
+            .chain(
+                others
+                    .iter()
+                    .map(|home| home.join(crate::config::ARCHIVE_DIR)),
+            )
+            .chain(
+                repo.workspace_dir()
+                    .map(|workspace| workspace.join(crate::repo::BINDING_FILE)),
+            )
             .chain(head)
             .collect::<Vec<_>>(),
         );
@@ -6637,7 +6662,13 @@ impl IdleCheck {
         let Some(snapshot) = build_queue_snapshot(repo, cwd, &mut self.branch) else {
             return Attempt::Failed;
         };
-        self.stamp = Some(stamp);
+        // A plan list that failed keeps no stamp. The usual fix is a chmod,
+        // and a stamp compares inode, length and modified time, none of which
+        // a chmod moves, so a kept stamp would skip every tick after the fix
+        // and leave the plan rows missing.
+        if snapshot.plans_error.is_none() {
+            self.stamp = Some(stamp);
+        }
         Attempt::Fresh(snapshot)
     }
 }
@@ -6730,23 +6761,26 @@ fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: 
     }
 }
 
-/// The notice that names why `plans/` would not read: the plan rows are
-/// missing until it reads again, which the next reading tries.
+/// The notice that names why the plan pages could not be listed: `plans/`,
+/// or in home mode another clone's pending, queue or archive folder or the
+/// workspace's `project.toml`, would not read. The plan rows are missing
+/// until it reads again, which the next reading tries. The remedy covers a
+/// `project.toml` that reads but will not parse, which no permission fixes.
 fn plans_notice(err: &str) -> Mode {
     outcome(
         "plans not listed",
         format!(
             "Plan pages are missing from this list, because {err}.\n\n\
-             Make that path a folder this user can read, and the next read \
-             lists them."
+             Make that path one this user can read, or repair it if it will \
+             not parse, and the next read lists them."
         ),
     )
 }
 
-/// Name why `plans/` would not read, once for each error, by the rules
-/// [`announce_unreadable`] keeps: only over plain browsing, and forgotten
-/// once the folder reads again, so breaking it again is named again. A tab
-/// with no [`NamedFiles`] names nothing.
+/// Name why the plan pages could not be listed, once for each error, by the
+/// rules [`announce_unreadable`] keeps: only over plain browsing, and
+/// forgotten once the plan list reads again, so breaking it again is named
+/// again. A tab with no [`NamedFiles`] names nothing.
 fn announce_plans_error(error: Option<&String>, state: &mut ScreenState) {
     let browsing = matches!(state.mode, Mode::Browsing);
     let Some(named) = state.named.as_mut() else {
@@ -10381,8 +10415,9 @@ fn highlighted_plan_page<'a>(groups: &'a [Group], state: &ScreenState) -> Option
 }
 
 /// A plan page as its popups name it: `plans/` and the file's name, which
-/// is all that tells two plans apart, since every page sits in that one
-/// folder of the project home.
+/// is all that tells two plans apart, since every page sits in the one
+/// folder [`Repo::plans_dir`] names: the project home's in repo mode, the
+/// workspace's in home mode.
 fn plan_file(page: &Path) -> String {
     let name = page.file_name().map_or_else(
         || page.display().to_string(),
@@ -14345,7 +14380,7 @@ mod tests {
         let mut idle = IdleCheck::default();
         let git_runs = || crate::repo::runs_here_under(&repo.root);
         let file_reads = || super::pending::pending_reads_here_under(&repo.pending_dir());
-        let since = repo.home().join(super::pending::PLANS_SINCE);
+        let since = repo.plans_since_file();
         std::fs::write(&since, "0").unwrap();
         for dir in [
             repo.pending_dir(),
@@ -14397,6 +14432,110 @@ mod tests {
             matches!(idle.read(&repo, &repo.root), Attempt::Fresh(_)),
             "a new plan page is read again"
         );
+    }
+
+    /// In a workspace, [`IdleCheck::read`] stamps the other clones' folders:
+    /// with nothing changed in any clone it reads no task file, and a task
+    /// another clone writes naming a listed plan is read on the next tick and
+    /// takes that plan's row off this clone's screen.
+    #[test]
+    fn an_idle_reading_watches_the_other_clones_folders() {
+        let (shop, shop_2, _root_guard) =
+            crate::commands::testutil::two_clones("queue-idle-clones");
+        let page = shop.plans_dir().join("2026-10-20-search.html");
+        std::fs::write(&page, "<html></html>").unwrap();
+        let other = write_pending(&shop, "wire", &task_text("wire", "group: demo\n", BODY));
+        let mut idle = IdleCheck::default();
+        let file_reads = || super::pending::pending_reads_here_under(&shop.home);
+        for path in [
+            shop_2.pending_dir(),
+            shop_2.queue_dir(),
+            shop_2.archive_dir(),
+            shop.pending_dir(),
+            shop.queue_dir(),
+            shop.archive_dir(),
+            shop_2.plans_dir(),
+            shop_2.plans_since_file(),
+            shop_2
+                .workspace_dir()
+                .unwrap()
+                .join(crate::repo::BINDING_FILE),
+            other,
+        ] {
+            age(&path);
+        }
+        if let Some(head) = idle.branch.head_path(&shop_2.root) {
+            age(&head);
+        }
+        let plan_rows = |attempt: Attempt<QueueSnapshot>| match attempt {
+            Attempt::Fresh(snapshot) => snapshot
+                .groups
+                .iter()
+                .filter(|group| group.state == GroupState::Plan)
+                .count(),
+            _ => panic!("expected a fresh reading"),
+        };
+
+        assert_eq!(plan_rows(idle.read(&shop_2, &shop_2.root)), 1);
+        let reads = file_reads();
+        assert!(reads > 0, "the other clone's task is read the first time");
+        for _ in 0..3 {
+            assert!(
+                matches!(idle.read(&shop_2, &shop_2.root), Attempt::Unchanged),
+                "nothing changed"
+            );
+        }
+        assert_eq!(file_reads(), reads, "an idle reading must read no file");
+
+        write_pending(
+            &shop,
+            "index",
+            &task_text(
+                "index",
+                &format!("group: search\nplan: {}\n", page.display()),
+                BODY,
+            ),
+        );
+        assert_eq!(plan_rows(idle.read(&shop_2, &shop_2.root)), 0);
+    }
+
+    /// A reading whose plan list failed keeps no stamp, so the next tick
+    /// reads again even with nothing on disk moved: a chmod that mends the
+    /// folder moves nothing a stamp compares.
+    #[test]
+    fn a_reading_with_a_plan_error_is_read_again_next_tick() {
+        let (shop, shop_2, _root_guard) =
+            crate::commands::testutil::two_clones("queue-idle-plan-error");
+        // A page to list, without which the other clones are never read.
+        std::fs::write(shop.plans_dir().join("2026-10-20-search.html"), "").unwrap();
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        // A file where the folder should be, which `read_dir` fails on.
+        std::fs::write(&pending, "").unwrap();
+        for path in [
+            shop_2.pending_dir(),
+            shop_2.queue_dir(),
+            shop_2.archive_dir(),
+            shop_2.plans_dir(),
+            shop_2.plans_since_file(),
+            shop_2
+                .workspace_dir()
+                .unwrap()
+                .join(crate::repo::BINDING_FILE),
+            pending,
+        ] {
+            age(&path);
+        }
+        let mut idle = IdleCheck::default();
+        if let Some(head) = idle.branch.head_path(&shop_2.root) {
+            age(&head);
+        }
+
+        for tick in 0..2 {
+            let Attempt::Fresh(snapshot) = idle.read(&shop_2, &shop_2.root) else {
+                panic!("tick {tick} skipped a reading whose plan list failed");
+            };
+            assert!(snapshot.plans_error.is_some(), "tick {tick}");
+        }
     }
 
     /// A file that breaks while the queue tab stays open is named when the
@@ -17768,7 +17907,7 @@ mod tests {
     /// the last so creation times order the pages. The `plans-since` stamp
     /// is set to the earliest instant, so the page's time never hides it.
     fn plan_page(repo: &Repo, file: &str) -> String {
-        std::fs::write(repo.home().join("plans-since"), "1").unwrap();
+        std::fs::write(repo.plans_since_file(), "1").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
         let path = repo.plans_dir().join(file);
         std::fs::write(&path, "<html></html>").unwrap();
@@ -18007,7 +18146,7 @@ mod tests {
     fn a_plans_folder_that_will_not_read_is_named_once() {
         let (repo, _root_guard) = fixture("screen-plan-unreadable");
         write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
-        let plans = repo.home().join(crate::config::PLANS_DIR);
+        let plans = repo.plans_dir();
         std::fs::create_dir_all(repo.home()).unwrap();
         let _ = std::fs::remove_dir_all(&plans);
         // A file where the folder should be: `read_dir` fails on it the same
@@ -18031,7 +18170,12 @@ mod tests {
         };
         assert!(notice.text.contains(&err), "{}", notice.text);
         assert!(
-            notice.text.contains("a folder this user can read"),
+            notice.text.contains("one this user can read"),
+            "{}",
+            notice.text
+        );
+        assert!(
+            notice.text.contains("or repair it if it will not parse"),
             "{}",
             notice.text
         );

@@ -13,9 +13,10 @@
 # `init --setup home` writes a workspace itself now, and the last section runs
 # it for real: in a fresh git repository, and again from a second clone that
 # joins the same workspace, checking that neither checkout nor its `.git` is
-# touched. Then a third clone takes over the queue of the second once its
-# folder is gone, and the first moves into a new workspace and back, the
-# emptied workspace removed. Which questions it asks and what each flag
+# touched. A plan page in the workspace is listed by both clones until the
+# first has a task naming it. Then a third clone takes over the queue of the
+# second once its folder is gone, and the first moves into a new workspace and
+# back, the emptied workspace removed. Which questions it asks and what each flag
 # answers is unit-tested in src/commands/init.rs. The lane pass above it still builds its workspace
 # by hand, by moving an ordinary setup out of the checkout, because the
 # harness's fixture helpers rewrite a checkout's own `.spoolway/` in place.
@@ -79,6 +80,11 @@ works "config path lists the workspace this checkout joined, its config/ and its
   jq -e --arg name "$(basename "$WS")" --arg config "$WS/config" \
   'any(.workspaces[]; .name == $name and .config == $config and .clones == 1 and (has("error") | not))' \
   "$CONFIG_PATH"
+
+# The plans folder is the workspace's own, whichever clone asks, so the
+# planning skills can read it from here instead of building a path.
+says "config path names the workspace's plans folder" "plans:     $WS/plans" \
+  "$SPOOLWAY" config path
 
 # ------------------------------------------------------- one real pass
 BODY="$LIVE/body.md"
@@ -147,6 +153,57 @@ has "sync kept the value the workspace's config.toml already had" 'lane_quiet = 
 has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gitignore
 has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
   .claude/skills/spoolway-config/SKILL.md
+
+# A plan page written before plans moved to the workspace sits in the clone's
+# own dispatcher folder, and a pending task names it by that absolute path.
+# `sync` moves the page into the workspace's plans/ and points the task there.
+OLD_PAGE="$WS/dispatchers/proj/plans/2026-10-12-moved.html"
+NEW_PAGE="$WS/plans/2026-10-12-moved.html"
+mkdir -p "$WS/dispatchers/proj/plans" "$WS/dispatchers/proj/pending"
+echo "<html>a page the clone already had</html>" > "$OLD_PAGE"
+printf -- '---\nid: moved\ngroup: moved\ntitle: a task naming the old page\nplan: %s\n---\n\nbody\n' \
+  "$OLD_PAGE" > "$WS/dispatchers/proj/pending/moved.md"
+says "a dry-run sync would move the page" "would move" "$SPOOLWAY" sync --dry-run
+says "a dry-run sync keeps a space before the rewritten task" "would rewrite ~/" \
+  "$SPOOLWAY" sync --dry-run
+if [ -e "$OLD_PAGE" ] && [ ! -e "$NEW_PAGE" ]; then ok "a dry-run sync moves nothing"
+else bad "a dry-run sync moves nothing"; fi
+says "sync reports the move and the rewrite" "rewrote" "$SPOOLWAY" sync
+if [ -e "$NEW_PAGE" ] && [ ! -e "$OLD_PAGE" ]; then ok "sync moved the page into the workspace's plans/"
+else bad "sync moved the page into the workspace's plans/"; fi
+has "the pending task now names the page in the workspace" "plan: $NEW_PAGE" \
+  "$WS/dispatchers/proj/pending/moved.md"
+rm -f "$WS/dispatchers/proj/pending/moved.md"
+
+# A second page whose name the workspace already has is refused, with the
+# task that names it and the remedy, and the workspace's page is untouched.
+CLASH_OLD="$WS/dispatchers/proj/plans/2026-10-12-clash.html"
+echo "<html>the clone's copy</html>" > "$CLASH_OLD"
+echo "<html>the workspace's copy</html>" > "$WS/plans/2026-10-12-clash.html"
+printf -- '---\nid: clash\ngroup: clash\ntitle: a task naming the clashing page\nplan: %s\n---\n\nbody\n' \
+  "$CLASH_OLD" > "$WS/dispatchers/proj/pending/clash.md"
+says "sync refuses a page whose name the workspace has" "refused  ~/" "$SPOOLWAY" sync
+says "the refusal names the task and the remedy" \
+  "rename the page and that task's plan: line to a free name, then run spoolway sync again" \
+  "$SPOOLWAY" sync
+has "the workspace's page is kept" "the workspace's copy" "$WS/plans/2026-10-12-clash.html"
+has "the clone's page stays where it was" "the clone's copy" "$CLASH_OLD"
+rm -f "$WS/dispatchers/proj/pending/clash.md" "$CLASH_OLD" "$WS/plans/2026-10-12-clash.html"
+
+# A sync killed between rewriting a task and moving its page leaves the task
+# naming the workspace path while the page is still in the clone's folder.
+# The next sync must finish the move and leave the task alone.
+HALF_OLD="$WS/dispatchers/proj/plans/2026-10-12-half.html"
+HALF_NEW="$WS/plans/2026-10-12-half.html"
+echo "<html>a page whose move was cut short</html>" > "$HALF_OLD"
+printf -- '---\nid: half\ngroup: half\ntitle: a task already relinked\nplan: %s\n---\n\nbody\n' \
+  "$HALF_NEW" > "$WS/dispatchers/proj/pending/half.md"
+"$SPOOLWAY" sync >/dev/null 2>&1
+if [ -e "$HALF_NEW" ] && [ ! -e "$HALF_OLD" ]; then ok "a sync finishes a move whose task was already relinked"
+else bad "a sync finishes a move whose task was already relinked"; fi
+has "the relinked task still names the workspace page" "plan: $HALF_NEW" \
+  "$WS/dispatchers/proj/pending/half.md"
+rm -f "$WS/dispatchers/proj/pending/half.md" "$HALF_NEW"
 
 # `--replace` takes a path spelled under `.spoolway/`, which in home mode is
 # the workspace's `config/` and not a folder of the checkout. The checkout has
@@ -246,6 +303,26 @@ else bad "git status shows nothing in the second clone"; git status --porcelain 
 if ls -A .git | diff -q "$LIVE/review.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
   ok ".git holds nothing in the second clone"
 else bad ".git holds nothing in the second clone"; fi
+
+# ------------------------------------------- a plan is the workspace's
+# A plan page in the workspace's plans/ is listed by both clones until a task
+# in either one names it. `group list` lists plans by the rule the queue
+# screen lists its plan rows by, and which folders that rule reads is
+# unit-tested in src/commands/pending.rs. What a unit test cannot reach is two
+# checkouts that `init` registered finding each other through project.toml.
+# The first listing runs before the page exists, so the `plans-since` stamp it
+# writes cannot hide the page.
+(cd "$FRESH" && must "a first listing of the plans" "$SPOOLWAY" group list)
+PAGE="$WS2/plans/2026-10-20-search.html"
+echo '<html></html>' >"$PAGE"
+(cd "$FRESH" && says "the first clone lists the plan no task names" "0 open — plan $PAGE" \
+  "$SPOOLWAY" group list)
+says "the second clone lists the same plan" "0 open — plan $PAGE" "$SPOOLWAY" group list
+task_doc "$WS2/dispatchers/api/pending/search-index.md" search-index "$BODY" \
+  "group: search" "plan: $PAGE"
+silent_about "the second clone drops the plan once the first clone has a task naming it" \
+  "plan $PAGE" "$SPOOLWAY" group list
+rm -f "$WS2/dispatchers/api/pending/search-index.md" "$PAGE"
 
 # ------------------------------------- a project job fires once per workspace
 # Both clones run a real dispatcher over the one shared `config/jobs.toml`. A

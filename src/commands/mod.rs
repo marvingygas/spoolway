@@ -88,7 +88,7 @@ mod issue;
 mod jobs;
 mod lanes;
 mod r#override;
-mod pending;
+pub(crate) mod pending;
 mod pending_delete;
 mod pipeline;
 mod queue;

@@ -659,11 +659,104 @@ impl Repo {
         self.home_subdir(crate::config::ARCHIVE_DIR)
     }
 
-    /// Where plan pages are written: `plans/` under [`Repo::home`], created
-    /// silently like its siblings. Only `.html` files directly inside it are
-    /// plans; the folders in it hold mockups copied for tasks.
+    /// The workspace folder this project's home sits in, in home mode only.
+    ///
+    /// A home-mode `home` is `<workspace>/dispatchers/<name>/` (see
+    /// [`WorkspaceClone::home_dir`]), so the workspace is read off the path
+    /// this `Repo` already holds rather than asked of the registry again.
+    /// That keeps the plans folder cheap enough for the queue screen to
+    /// resolve every second, and lets a test fixture stand in for a clone by
+    /// setting `home`. A repo-mode home is `~/.spoolway/<label>-<id>/`, which
+    /// never sits in a `dispatchers` folder.
+    pub(crate) fn workspace_dir(&self) -> Option<PathBuf> {
+        let dispatchers = self.home.parent()?;
+        if dispatchers.file_name()? != "dispatchers" {
+            return None;
+        }
+        dispatchers.parent().map(Path::to_path_buf)
+    }
+
+    /// The dispatcher folder of every other clone in this project's
+    /// workspace, as its `project.toml` lists them, and none in repo mode.
+    ///
+    /// The plans folder is the workspace's, so whether a page still waits for
+    /// tasks depends on every clone's pending, queue and archive folders, not
+    /// only this one's. A `project.toml` that is missing answers no other
+    /// clone, since this checkout found its workspace through that file and a
+    /// workspace without it lists nobody. One that will not read or parse, or
+    /// that names a dispatcher that is not one plain name, is an error:
+    /// answering no clones then would show a page as having no tasks while
+    /// another clone's tasks still link to it.
+    pub(crate) fn other_clone_homes(&self) -> Result<Vec<PathBuf>> {
+        let Some(workspace) = self.workspace_dir() else {
+            return Ok(Vec::new());
+        };
+        let record = workspace.join(BINDING_FILE);
+        let raw = match std::fs::read_to_string(&record) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "reading {}, the workspace's list of clones",
+                        record.display()
+                    )
+                });
+            }
+        };
+        let toml: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+            format!(
+                "parsing {}, the workspace's list of clones",
+                record.display()
+            )
+        })?;
+        // A dispatcher is joined straight onto the workspace folder, so one
+        // that is not a plain name would have this read, and an archive index
+        // rebuild write, outside the workspace.
+        if let Some(bad) = bad_dispatcher(&toml) {
+            return Err(bad_dispatcher_error(&record, bad));
+        }
+        let mut homes: Vec<PathBuf> = toml
+            .clones
+            .into_iter()
+            .map(|clone| {
+                WorkspaceClone {
+                    workspace: workspace.clone(),
+                    dispatcher: clone.dispatcher,
+                }
+                .home_dir()
+            })
+            .filter(|home| *home != self.home)
+            .collect();
+        homes.sort();
+        homes.dedup();
+        Ok(homes)
+    }
+
+    /// The folder `plans/` and `plans-since` sit in: the workspace in home
+    /// mode, so every clone lists the same pages under one cutoff, and
+    /// [`Repo::home`] in repo mode.
+    fn plans_root(&self) -> PathBuf {
+        self.workspace_dir()
+            .unwrap_or_else(|| self.home().to_path_buf())
+    }
+
+    /// Where plan pages are written: `plans/` in the workspace in home mode,
+    /// under [`Repo::home`] in repo mode, created silently like its siblings.
+    /// Only `.html` files directly inside it are plans; the folders in it
+    /// hold mockups copied for tasks.
     pub fn plans_dir(&self) -> PathBuf {
-        self.home_subdir(crate::config::PLANS_DIR)
+        let dir = self.plans_root().join(crate::config::PLANS_DIR);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// The file holding when plan listing began, beside [`Repo::plans_dir`]:
+    /// one per workspace in home mode, one per project in repo mode. Every
+    /// reader of the stamp asks here, so none can keep reading the old
+    /// place.
+    pub(crate) fn plans_since_file(&self) -> PathBuf {
+        self.plans_root().join(crate::config::PLANS_SINCE)
     }
 
     /// Where a producer leaves tasks for the queue screen to list:

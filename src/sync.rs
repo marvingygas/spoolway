@@ -45,10 +45,17 @@
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
 //!
-//! The private override layer is the one file this command writes outside
-//! the checkout. A lane leaves it alone: a retired key stays there and the
-//! report says so, because the layer is the person's and sits in no git
-//! branch to revert from.
+//! The private override layer and, in a home-mode clone, the plan pages,
+//! `plans-since` and the `plan:` lines of pending and queued tasks are this
+//! command's writes outside the checkout. A lane leaves the layer alone: a
+//! retired key stays there and the report says so, because the layer is the
+//! person's and sits in no git branch to revert from.
+//!
+//! In a home-mode clone, sync also moves the clone's plan pages into the
+//! workspace and relinks the tasks that name them. That is
+//! [`crate::sync_plans`]'s work and it happens in [`run`] only: it writes
+//! outside the checkout, under the workspace, and [`scan`] stays the read of
+//! what spoolway owns that `init`, `install` and `doctor` also call.
 //!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
@@ -229,6 +236,23 @@ fn closing_line(dry_run: bool, nothing_to_do: bool, refused: Refused) -> &'stati
     }
 }
 
+/// The closing line of a run, which has to know whether it also seeded, moved
+/// or refused plan pages. The plan lines say what they did, and `KEPT` and
+/// `NOOP` speak of config files, so a run whose only changes were plan pages
+/// closes with the dry run's line or none at all. A refused plan page picks
+/// the refused-only line like any other refusal.
+fn closing(
+    dry_run: bool,
+    nothing_else: bool,
+    refused: Refused,
+    plans_changed: bool,
+) -> Option<&'static str> {
+    if nothing_else && plans_changed && refused == Refused::Nothing {
+        return dry_run.then_some(DRY_RUN);
+    }
+    Some(closing_line(dry_run, nothing_else, refused))
+}
+
 pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     if repo.borrowed {
         bail!(
@@ -314,12 +338,19 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
         }
     }
 
+    // After the file lines, and before the closing line, which has to know
+    // whether this also seeded, moved or refused a plan page.
+    let plans = crate::sync_plans::run(repo, args.dry_run)?;
+
     println!();
     let nothing_else = wrote.is_empty() && removed.is_empty();
-    println!(
-        "{}",
-        closing_line(args.dry_run, nothing_else, Refused::of(&refused))
-    );
+    let refused = match plans.refused {
+        true => Refused::Files,
+        false => Refused::of(&refused),
+    };
+    if let Some(line) = closing(args.dry_run, nothing_else, refused, plans.changed) {
+        println!("{line}");
+    }
 
     if !args.dry_run {
         remove_skill_stamp(&repo.home);
@@ -3755,6 +3786,23 @@ mod tests {
         assert_eq!(closing_line(false, true, Refused::Files), REFUSED_ONLY);
         assert_eq!(closing_line(false, false, Refused::Files), KEPT);
         assert!(!NOOP.contains("--dry-run"), "{NOOP}");
+    }
+
+    /// A run whose only changes are plan pages must not close with `KEPT` or
+    /// `NOOP`, which talk about config files: a dry run says `DRY_RUN`, a real
+    /// run says nothing, and a refused plan page still picks `REFUSED_ONLY`.
+    #[test]
+    fn a_run_that_only_moved_plan_pages_closes_without_a_config_line() {
+        assert_eq!(closing(true, true, Refused::Nothing, true), Some(DRY_RUN));
+        assert_eq!(closing(false, true, Refused::Nothing, true), None);
+        assert_eq!(
+            closing(false, true, Refused::Files, true),
+            Some(REFUSED_ONLY)
+        );
+        // Config files were written too, or nothing at all happened: the
+        // ordinary lines stand.
+        assert_eq!(closing(false, false, Refused::Nothing, true), Some(KEPT));
+        assert_eq!(closing(false, true, Refused::Nothing, false), Some(NOOP));
     }
 
     /// The deprecation note prints under its own `note` word, each sentence

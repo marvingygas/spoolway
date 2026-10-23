@@ -331,7 +331,8 @@ reading the file whole.
    page, a screenshot, anything the person named or pasted — is linked from the task, never
    copied or translated into Markdown. A lane reads nothing outside its worktree and the
    project home, so a file anywhere else is first copied into
-   `<home>/plans/<group>/` and linked there.
+   `<plans>/<group>/` and linked there. `<plans>` is the folder on the `plans:` line of
+   `spoolway config path`.
 
    **Write the task's `## Risks` yourself.** Work out each task's risks from what its own
    change could break. The plan page lists none. List each risk with what the task does about
@@ -403,7 +404,7 @@ reading the file whole.
   false, or one that contradicts the task's intent, goes back to the person, not into the task.
 - Never write a task anywhere but the pending directory, and never write anything else
   there — it is a queue of tasks, not a scratch directory. The one other place this skill
-  writes is `<home>/plans/<group>/`, and only a source file copied in
+  writes is `<plans>/<group>/`, and only a source file copied in
   to be linked.
 - Never redraw a source in a task. A figure, a panel or a screenshot that exists as a file
   is linked; only what exists nowhere else is written out.
