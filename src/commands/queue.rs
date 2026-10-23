@@ -8969,7 +8969,8 @@ fn two_pane_frame(
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeleteJob`],
-/// [`Mode::DeletePending`], [`Mode::DeletePlan`], [`Mode::NewJob`] — none
+/// [`Mode::DeletePending`], [`Mode::DeletePlan`], [`Mode::NewJob`],
+/// [`Mode::PickRoutine`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
 /// reads only `enter` to close it, or only `esc` for
@@ -8986,6 +8987,9 @@ fn two_pane_frame(
 /// focus — so this draws the filter's own line instead, naming exactly the
 /// one key [`handle_filter_key`] does not simply append to the query:
 /// `enter`, which leaves it.
+///
+/// `on_orphan` is whether the routines pane's cursor sits on a job row
+/// rather than a routine, which [`screen_footer`] works out.
 fn footer(state: &ScreenState, on_orphan: bool) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
@@ -9006,6 +9010,15 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
             TrialStage::PickPipelines => key_hint(PICK_KEYS),
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
         },
+        // A job row under the routines can be neither ticked, queued nor
+        // tabbed into, so its line is `o` and `q` alone.
+        _ if on_orphan && routines_beneath(&state.mode).is_some() => key_hint(
+            &[
+                [("o", "options")].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         // Its own screen, not an overlay over the pending one — so its own
         // line, naming exactly the keys `handle_routine_key` and
         // `run_screen`'s own `Mode::Routines` arm read, rather than the
@@ -9020,15 +9033,6 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
         // details pane it goes back to the list, which `tab` already names.
         // The same line under a notice or the options menu drawn over the
         // pane.
-        // A job row under the routines can be neither ticked, queued nor
-        // tabbed into, so its line is `o` and `q` alone.
-        _ if on_orphan && routines_beneath(&state.mode).is_some() => key_hint(
-            &[
-                [("o", "options")].as_slice(),
-                crate::screen::shell::quit_hint(),
-            ]
-            .concat(),
-        ),
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
                 Focus::Groups => &[("o", "options"), ("tab", "details")],
@@ -9132,8 +9136,8 @@ fn fit_keys(row: String, width: usize) -> String {
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
 /// notice opened from it, the options menu opened on it, delete routine's
-/// and delete job's popups, new job's and edit job's popups and the notice
-/// they end on, or the tool-requirements gate or the issue question
+/// and delete job's popups, the routine picker, new job's and edit job's
+/// popups and the notice they end on, or the tool-requirements gate or the issue question
 /// a routine submit stopped at. `None` for everything drawn over
 /// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
