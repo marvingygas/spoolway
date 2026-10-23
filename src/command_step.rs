@@ -560,34 +560,59 @@ impl Runs {
     /// pid with no readable start time: the file then stays as the wrapper
     /// wrote it.
     ///
-    /// `started` is appended by the command's own shell a moment after the pid
-    /// file appears, and an append that lands between the read and the rename
-    /// here would be lost. The effect would be a `TERM` that arrives after the
-    /// command finished with `0` losing that code, which reads as interrupted.
-    /// The window is a few microseconds, and this runs only after the file has
-    /// been seen, by which time the append has nearly always happened.
+    /// The rewrite waits for the `started` mark first. The command's own shell
+    /// appends it once, and an append that landed after the rename, or on the
+    /// old file just before it, would be lost; without the mark a `TERM` that
+    /// reaches a command that caught it and exited `0` would find no mark, and
+    /// the run would read as interrupted and run again. After the mark nothing
+    /// appends any more. A mark that never comes within the five seconds
+    /// [`crate::headless::await_pid_file`] allows a pid file leaves the line
+    /// empty, as does a pid file that is gone by then.
+    ///
+    /// A stop in another process removes the pid file, or rewrites it without
+    /// the mark, and must not be undone by a rename that lands after it. So the
+    /// file is read again just before the rename and the fill is dropped if it
+    /// changed. A stop landing in the few microseconds between that read and
+    /// the rename still loses to the rename; the file then holds the pid, the
+    /// time and the mark of a run that is being stopped, and the next arrival
+    /// at the step clears it as it clears any run's files.
     fn fill_in_start_time(&self, key: &str, pid: u32) {
         let path = self.pid_path(key);
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return;
+        let waited = std::time::Instant::now();
+        let raw = loop {
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            let mut lines = raw.lines();
+            let first = lines.next().unwrap_or_default().trim();
+            let recorded = lines.next().unwrap_or_default().trim();
+            if first.parse() != Ok(pid) || !recorded.is_empty() {
+                return;
+            }
+            if lines.any(|line| line == "started") {
+                break raw;
+            }
+            if waited.elapsed() >= std::time::Duration::from_secs(5) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        let mut lines = raw.lines();
-        let (Some(first), recorded) = (lines.next(), lines.next().unwrap_or_default()) else {
-            return;
-        };
-        if first.trim().parse() != Ok(pid) || !recorded.trim().is_empty() {
-            return;
-        }
         let Some(started) = crate::lock::started_at(pid) else {
             return;
         };
-        let mut filled = format!("{}\n{started}\n", first.trim());
-        for rest in lines {
+        let mut filled = format!("{pid}\n{started}\n");
+        for rest in raw.lines().skip(2) {
             filled.push_str(rest);
             filled.push('\n');
         }
-        let tmp = self.dir.join(format!("{key}.pid.tmp"));
-        if std::fs::write(&tmp, filled).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        // Not `<key>.pid.tmp`: `stop_in_place` writes that name, and the two
+        // could overwrite each other's file.
+        let tmp = self.dir.join(format!("{key}.pid.fill"));
+        if std::fs::write(&tmp, filled).is_err() {
+            return;
+        }
+        let unchanged = std::fs::read_to_string(&path).is_ok_and(|now| now == raw);
+        if !unchanged || std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -1926,6 +1951,11 @@ mod tests {
         let expected = crate::lock::started_at(pid).expect("the run's wrapper is alive");
         let pid_file = f.runs.pid_path("bench-demo");
 
+        // The real child appends `started` once. A hand-written file made
+        // before that would take a second one.
+        while !std::fs::read_to_string(&pid_file).is_ok_and(|raw| raw.contains("started")) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         std::fs::write(&pid_file, format!("{pid}\n\nstarted\n")).unwrap();
         f.runs.await_started("bench-demo").unwrap();
         let filled = std::fs::read_to_string(&pid_file).unwrap();
