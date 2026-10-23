@@ -1,6 +1,6 @@
 ---
 domain: cli
-covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**", "src/watch.rs"]
+covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**", "src/sync_plans.rs", "src/watch.rs"]
 ---
 
 # CLI reference
@@ -1923,6 +1923,43 @@ it kept, each group of settings it added, and each group of retired settings it 
 When a step runs the deprecated stack command, the report ends with a `note` that names
 each `pipeline · step`, above the closing line. See
 [Keeping a project's files current](installation.md#keeping-a-projects-files-current).
+
+#### Plan pages in a home-mode clone
+
+In a home-mode clone, `sync` also moves the clone's plan pages into the workspace. It moves each
+`.html` file directly inside `<workspace>/dispatchers/<name>/plans/` to `<workspace>/plans/`.
+Folders inside it stay, and so do the pages of every other clone.
+
+`sync` then rewrites `plan:` in each pending and queued task of that clone that named a moved
+page. It changes only that line. Archived tasks keep their old `plan:`.
+
+If `<workspace>/plans-since` is missing, `sync` writes it before it moves any page. See
+[Home mode](concepts.md#home-mode).
+
+`sync` never overwrites a page. A page whose file name is already in `<workspace>/plans/` with
+different content stays where it is. Every other page still moves.
+
+Each entry starts with a word, then a path:
+
+| Word | With `--dry-run` | What it reports |
+|---|---|---|
+| `seeded` | `would seed` | The `plans-since` file, with its number and where the number came from |
+| `moved` | `would move` | A page, with its old and new path |
+| `rewrote` | `would rewrite` | A task file whose `plan:` line names the new path |
+| `refused` | `refused` | A page that did not move, with both paths and each task that names it |
+
+A refused entry looks like this:
+
+```
+refused  ~/.spoolway/shop-8mg3gx/dispatchers/shop/plans/2026-10-20-search.html
+         — ~/.spoolway/shop-8mg3gx/plans/2026-10-20-search.html is already there
+         this task names it: ~/.spoolway/shop-8mg3gx/dispatchers/shop/pending/search-api.md
+         rename the page and that task's plan: line to a free name, then run spoolway sync again
+```
+
+Run `spoolway sync` again after the rename. In a lane, `sync` moves and rewrites nothing. It
+prints one line that says to run `spoolway sync` in the main checkout. In a repo-mode project,
+`sync` does none of this.
 
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
 a project that `sync` would change.

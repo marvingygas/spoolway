@@ -93,6 +93,8 @@ file sits beside it. When the workspace has none yet, it is written from the old
 `plans-since` any clone's dispatcher folder holds, so pages people were already waiting on
 stay listed. `spoolway config path` prints the folder on its `plans:` line. A page stays listed
 on every clone until a pending, queued or archived task in any clone names it in `plan:`.
+`spoolway sync` in a clone moves that clone's own plan pages into the workspace folder and relinks
+its tasks. See [`spoolway sync`](cli-reference.md#spoolway-sync).
 
 The workspace's project jobs fire once for all its clones. Their firing record is the
 workspace's own `jobs.state.json`. See [Jobs](jobs.md#a-project-job-in-a-home-mode-workspace).
