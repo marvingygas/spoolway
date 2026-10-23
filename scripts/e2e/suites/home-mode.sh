@@ -175,6 +175,21 @@ has "the pending task now names the page in the workspace" "plan: $NEW_PAGE" \
   "$WS/dispatchers/proj/pending/moved.md"
 rm -f "$WS/dispatchers/proj/pending/moved.md"
 
+# A second page whose name the workspace already has is refused, with the
+# task that names it and the remedy, and the workspace's page is untouched.
+CLASH_OLD="$WS/dispatchers/proj/plans/2026-10-12-clash.html"
+echo "<html>the clone's copy</html>" > "$CLASH_OLD"
+echo "<html>the workspace's copy</html>" > "$WS/plans/2026-10-12-clash.html"
+printf -- '---\nid: clash\ngroup: clash\ntitle: a task naming the clashing page\nplan: %s\n---\n\nbody\n' \
+  "$CLASH_OLD" > "$WS/dispatchers/proj/pending/clash.md"
+says "sync refuses a page whose name the workspace has" "refused  ~/" "$SPOOLWAY" sync
+says "the refusal names the task and the remedy" \
+  "rename the page and that task's plan: line to a free name, then run spoolway sync again" \
+  "$SPOOLWAY" sync
+has "the workspace's page is kept" "the workspace's copy" "$WS/plans/2026-10-12-clash.html"
+has "the clone's page stays where it was" "the clone's copy" "$CLASH_OLD"
+rm -f "$WS/dispatchers/proj/pending/clash.md" "$CLASH_OLD" "$WS/plans/2026-10-12-clash.html"
+
 # `--replace` takes a path spelled under `.spoolway/`, which in home mode is
 # the workspace's `config/` and not a folder of the checkout. The checkout has
 # no such file, so before this resolved through the setup folder the command

@@ -45,8 +45,9 @@
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
 //!
-//! The private override layer is the one file this command writes outside
-//! the checkout. A lane leaves it alone: a retired key stays there and the
+//! The private override layer is the one file in the project home this command
+//! writes, and the plan pages below are its other writes outside the checkout.
+//! A lane leaves the layer alone: a retired key stays there and the
 //! report says so, because the layer is the person's and sits in no git
 //! branch to revert from.
 //!
@@ -235,6 +236,23 @@ fn closing_line(dry_run: bool, nothing_to_do: bool, refused: Refused) -> &'stati
     }
 }
 
+/// The closing line of a run, which has to know whether it also seeded, moved
+/// or refused plan pages. The plan lines say what they did, and `KEPT` and
+/// `NOOP` speak of config files, so a run whose only changes were plan pages
+/// closes with the dry run's line or none at all. A refused plan page picks
+/// the refused-only line like any other refusal.
+fn closing(
+    dry_run: bool,
+    nothing_else: bool,
+    refused: Refused,
+    plans_changed: bool,
+) -> Option<&'static str> {
+    if nothing_else && plans_changed && refused == Refused::Nothing {
+        return dry_run.then_some(DRY_RUN);
+    }
+    Some(closing_line(dry_run, nothing_else, refused))
+}
+
 pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     if repo.borrowed {
         bail!(
@@ -330,15 +348,8 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
         true => Refused::Files,
         false => Refused::of(&refused),
     };
-    // The plan lines say what they did. `KEPT` and `NOOP` speak of config
-    // files, so a run whose only changes were plan pages closes with the dry
-    // run's line or none at all.
-    if nothing_else && plans.changed && refused == Refused::Nothing {
-        if args.dry_run {
-            println!("{DRY_RUN}");
-        }
-    } else {
-        println!("{}", closing_line(args.dry_run, nothing_else, refused));
+    if let Some(line) = closing(args.dry_run, nothing_else, refused, plans.changed) {
+        println!("{line}");
     }
 
     if !args.dry_run {
@@ -3775,6 +3786,23 @@ mod tests {
         assert_eq!(closing_line(false, true, Refused::Files), REFUSED_ONLY);
         assert_eq!(closing_line(false, false, Refused::Files), KEPT);
         assert!(!NOOP.contains("--dry-run"), "{NOOP}");
+    }
+
+    /// A run whose only changes are plan pages must not close with `KEPT` or
+    /// `NOOP`, which talk about config files: a dry run says `DRY_RUN`, a real
+    /// run says nothing, and a refused plan page still picks `REFUSED_ONLY`.
+    #[test]
+    fn a_run_that_only_moved_plan_pages_closes_without_a_config_line() {
+        assert_eq!(closing(true, true, Refused::Nothing, true), Some(DRY_RUN));
+        assert_eq!(closing(false, true, Refused::Nothing, true), None);
+        assert_eq!(
+            closing(false, true, Refused::Files, true),
+            Some(REFUSED_ONLY)
+        );
+        // Config files were written too, or nothing at all happened: the
+        // ordinary lines stand.
+        assert_eq!(closing(false, false, Refused::Nothing, true), Some(KEPT));
+        assert_eq!(closing(false, true, Refused::Nothing, false), Some(NOOP));
     }
 
     /// The deprecation note prints under its own `note` word, each sentence

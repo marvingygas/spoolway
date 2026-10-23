@@ -8,10 +8,16 @@
 //!
 //! Each page is therefore handled in this order: the tasks naming it are
 //! rewritten first, and the page moves second. A crash between the two leaves
-//! tasks naming a path that exists, never one that has gone, and the next sync
-//! finishes the page. A task naming a page that is already gone from the
-//! clone's folder, while the same name is in the workspace, is rewritten too,
-//! which covers a crash part-way through a page's several tasks.
+//! tasks naming the workspace path while the page is still in the clone's
+//! folder, and the next sync moves it. A crash part-way through a page's several
+//! tasks leaves the page in place too, so that run finishes the rest the same
+//! way. A task that names the clone's path for a page that is already in the
+//! workspace, because it came to name it after the page moved, is rewritten as
+//! well.
+//!
+//! A lane does not do any of this. The pages and tasks are outside git, so a
+//! lane's rewrite of them cannot be reviewed or undone, and it only reports
+//! that a person runs `spoolway sync` in the main checkout.
 //!
 //! Nothing is overwritten. A page whose name is taken in the workspace folder
 //! stays where it is and is reported with the tasks that name it, and the other
@@ -22,9 +28,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
-use crate::commands::pending::{StampSource, front_str, md_files, missing_plans_since};
+use crate::commands::pending::{StampSource, front_str, md_files, missing_plans_since, plan_of};
 use crate::repo::{Repo, shorten_home};
 
 /// What a plan-page sync did, or with `--dry-run` would do.
@@ -82,6 +88,17 @@ pub(crate) fn run(repo: &Repo, dry_run: bool) -> Result<Summary> {
 
     let (pages, clashes) = plan(repo, &own, &shared)?;
 
+    if repo.in_lane_worktree() {
+        let seed = missing_plans_since(repo, true).is_some();
+        if seed || !pages.is_empty() || !clashes.is_empty() {
+            println!(
+                "plan pages: a lane does not move plan pages or rewrite task files, which sit \
+                 outside git — a person runs `spoolway sync` in the main checkout to move them"
+            );
+        }
+        return Ok(summary);
+    }
+
     // Before any page moves: the stamp hides pages older than it, and a page
     // that arrived under a fresh one would read as already cut into tasks.
     let any_page = !pages.is_empty() || has_html(&shared);
@@ -113,8 +130,8 @@ pub(crate) fn run(repo: &Repo, dry_run: bool) -> Result<Summary> {
             ));
         }
         for task in &page.tasks {
-            // A task that changed under us no longer names the page, and has
-            // nothing to rewrite.
+            // A task that changed or left under us no longer names the page,
+            // and has nothing to rewrite.
             if dry_run || rewrite_task(repo, task, &page.from, &page.to)? {
                 lines.push(format!("{rewrote}{} (plan:)", shorten_home(task)));
             }
@@ -129,18 +146,32 @@ pub(crate) fn run(repo: &Repo, dry_run: bool) -> Result<Summary> {
     }
 
     for clash in &clashes {
-        println!("{refused}{}", shorten_home(&clash.from));
-        println!("{indent}— {} is already there", shorten_home(&clash.to));
-        for task in &clash.tasks {
-            println!("{indent}this task names it: {}", shorten_home(task));
+        for line in refusal_lines(clash, refused) {
+            println!("{line}");
         }
-        println!(
-            "{indent}rename the page and that task's plan: line to a free name, then run \
-             spoolway sync again"
-        );
         summary.refused = true;
     }
     Ok(summary)
+}
+
+/// The lines of one refused page, led by `word` and indented under it.
+fn refusal_lines(clash: &Clash, word: &str) -> Vec<String> {
+    let indent = " ".repeat(word.len());
+    let mut lines = vec![
+        format!("{word}{}", shorten_home(&clash.from)),
+        format!("{indent}— {} is already there", shorten_home(&clash.to)),
+    ];
+    for task in &clash.tasks {
+        lines.push(format!(
+            "{indent}this task names it: {}",
+            shorten_home(task)
+        ));
+    }
+    lines.push(format!(
+        "{indent}rename the page and that task's plan: line to a free name, then run \
+         spoolway sync again"
+    ));
+    lines
 }
 
 /// Whether `dir` holds an `.html` file directly inside it.
@@ -167,11 +198,16 @@ fn html_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Work out which pages move, which clash, and which tasks name each.
 fn plan(repo: &Repo, own: &Path, shared: &Path) -> Result<(Vec<Page>, Vec<Clash>)> {
+    // A clone folder that is a link to the workspace's has its pages there
+    // already, and "moving" one would remove the only name it has.
+    if same_folder(own, shared) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     // Old path -> the task files whose `plan:` is exactly that path.
     let mut naming: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for dir in [repo.pending_dir(), repo.queue_dir()] {
         for task in md_files(&dir)? {
-            let Some(plan) = read_plan(&task) else {
+            let Some(plan) = plan_of(&task) else {
                 continue;
             };
             let plan = PathBuf::from(plan);
@@ -200,7 +236,8 @@ fn plan(repo: &Repo, own: &Path, shared: &Path) -> Result<(Vec<Page>, Vec<Clash>
         let to = shared.join(name);
         let tasks = naming.remove(&from).unwrap_or_default();
         let taken = std::fs::symlink_metadata(&to).is_ok();
-        if from.is_file() {
+        // A link is not a page: only a regular file moves, as in `html_files`.
+        if std::fs::symlink_metadata(&from).is_ok_and(|meta| meta.is_file()) {
             // A page that is the very same file as the one in the workspace is
             // what a crash between linking and unlinking leaves. Nothing is
             // lost by finishing that move.
@@ -226,11 +263,13 @@ fn plan(repo: &Repo, own: &Path, shared: &Path) -> Result<(Vec<Page>, Vec<Clash>
     Ok((pages, clashes))
 }
 
-/// A task file's `plan:`, or `None` when it cannot be read or parsed.
-fn read_plan(task: &Path) -> Option<String> {
-    let doc = std::fs::read_to_string(task).ok()?;
-    let (yaml, _) = crate::task::split_fence(&doc).ok()?;
-    front_str(&serde_norway::from_str(yaml).ok()?, "plan")
+/// Whether two folders are one folder, by where each really is. A missing one
+/// is nothing in common with the other.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Whether two paths are one file. Only Unix can tell; elsewhere a clash is
@@ -256,28 +295,58 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// A rename would silently replace a page another process wrote there since
 /// the plan was made. A hard link fails instead, and the old name is removed
 /// only once the new one is in place, so the page is never missing from both.
+/// A filesystem that cannot hard link gets a copy that also refuses an existing
+/// name. Only a hard link keeps the page's creation time, which the plan list
+/// compares with `plans-since`, so the copy is the fallback and not the rule.
 fn move_page(from: &Path, to: &Path) -> Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && same_file(from, to) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+    let taken = |to: &Path| {
+        anyhow::anyhow!(
             "{} appeared while sync ran, so {} was not moved\n  rename the page to a free name \
              and fix the plan: line of any task that names it, then run spoolway sync again",
             shorten_home(to),
             shorten_home(from)
-        ),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "moving {} to {}\n  check that the folder is writable, then run spoolway \
-                     sync again",
-                    shorten_home(from),
-                    shorten_home(to)
-                )
-            });
-        }
+        )
+    };
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {}
+        // Plan-time checks keep the two names in different folders, so one
+        // inode under both is what a crash between linking and removing leaves.
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && same_file(from, to) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken(to)),
+        Err(_) => match copy_no_clobber(from, to) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(taken(to));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "moving {} to {}: this folder cannot hard link and copying failed\n  \
+                         check that {} is writable and has room, then run spoolway sync again",
+                        shorten_home(from),
+                        shorten_home(to),
+                        shorten_home(to.parent().unwrap_or(to))
+                    )
+                });
+            }
+        },
     }
     std::fs::remove_file(from).with_context(|| format!("removing {}", shorten_home(from)))
+}
+
+/// Copy `from` to a `to` that must not exist yet. A partial copy is removed,
+/// so a failed one never leaves half a page under the final name.
+fn copy_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
+    if copied.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    copied
 }
 
 /// Point one task's `plan:` at `to`, and say whether it was changed.
@@ -297,8 +366,20 @@ fn rewrite_task(repo: &Repo, task: &Path, from: &Path, to: &Path) -> Result<bool
             shorten_home(task)
         )
     })?;
-    let doc =
-        std::fs::read_to_string(task).with_context(|| format!("reading {}", task.display()))?;
+    // Listed before the lock was held, so the task may have left the folder
+    // since: queued, archived or deleted. It then has nothing to rewrite here.
+    let doc = match std::fs::read_to_string(task) {
+        Ok(doc) => doc,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "reading {}\n  check that the file is readable, then run spoolway sync again",
+                    shorten_home(task)
+                )
+            });
+        }
+    };
     let Some(new) = with_plan(&doc, from, to) else {
         return Ok(false);
     };
@@ -457,8 +538,8 @@ mod tests {
         assert!(shared_plans(&shop).join("e.html").exists());
     }
 
-    /// Fails before the change: no sync step finished a page a crash had
-    /// left half-done.
+    /// Fails before the change: no sync step relinked a task that names a
+    /// clone path whose page is already in the workspace.
     #[test]
     fn a_second_run_rewrites_a_task_whose_page_already_moved() {
         let (shop, _shop_2, _root) = two_clones("sync-plans-resume");
@@ -474,18 +555,112 @@ mod tests {
         assert!(!again.changed);
     }
 
-    /// Fails before the change: mockup folders and archived tasks had no
-    /// rule saying sync leaves them alone.
+    /// Fails before the change: mockup folders, other clones' pages and
+    /// archived tasks had no rule saying sync leaves them alone.
     #[test]
-    fn folders_and_other_clones_stay_put() {
+    fn folders_other_clones_and_archived_tasks_stay_put() {
         let (shop, shop_2, _root) = two_clones("sync-plans-scope");
         let folder = own_plans(&shop).join("mock");
         std::fs::create_dir_all(&folder).unwrap();
         let theirs = page(&own_plans(&shop_2), "g.html", "G");
+        let moving = page(&own_plans(&shop), "h.html", "H");
+        let archived = task(&shop, "archive", "a", &moving);
+        let before = std::fs::read_to_string(&archived).unwrap();
 
         run(&shop, false).unwrap();
 
         assert!(folder.is_dir());
         assert!(theirs.exists());
+        assert!(shared_plans(&shop).join("h.html").exists());
+        assert_eq!(std::fs::read_to_string(&archived).unwrap(), before);
+    }
+
+    /// Fails before the change: nothing stopped a lane from moving pages and
+    /// rewriting tasks that sit outside git.
+    #[test]
+    fn a_lane_moves_nothing() {
+        let (mut shop, _shop_2, _root) = two_clones("sync-plans-lane");
+        let old = page(&own_plans(&shop), "i.html", "I");
+        let pending = task(&shop, "pending", "p", &old);
+        let before = std::fs::read_to_string(&pending).unwrap();
+        shop.checkout = shop.worktree_root().join("some-task");
+
+        let summary = run(&shop, false).unwrap();
+
+        assert!(!summary.changed && !summary.refused);
+        assert!(old.exists());
+        assert_eq!(std::fs::read_to_string(&pending).unwrap(), before);
+    }
+
+    /// Fails before the change: a clone folder linked to the workspace's had
+    /// its only copy of a page removed by the finishing step of a move.
+    #[cfg(unix)]
+    #[test]
+    fn a_plans_folder_linked_to_the_workspace_loses_nothing() {
+        let (shop, _shop_2, _root) = two_clones("sync-plans-linked");
+        let kept = page(&shared_plans(&shop), "j.html", "J");
+        std::os::unix::fs::symlink(shared_plans(&shop), own_plans(&shop)).unwrap();
+        let pending = task(&shop, "pending", "p", &own_plans(&shop).join("j.html"));
+        let before = std::fs::read_to_string(&pending).unwrap();
+
+        let summary = run(&shop, false).unwrap();
+
+        assert!(!summary.refused);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "J");
+        assert_eq!(std::fs::read_to_string(&pending).unwrap(), before);
+    }
+
+    /// Fails before the change: a task that left its folder between the
+    /// listing and the rewrite aborted the whole sync with a bare read error.
+    #[test]
+    fn a_task_that_left_its_folder_is_not_an_error() {
+        let (shop, _shop_2, _root) = two_clones("sync-plans-gone");
+        let old = own_plans(&shop).join("k.html");
+        let gone = task(&shop, "pending", "p", &old);
+        std::fs::remove_file(&gone).unwrap();
+
+        let changed = rewrite_task(&shop, &gone, &old, &shared_plans(&shop).join("k.html"));
+
+        assert!(!changed.unwrap());
+    }
+
+    /// Fails before the change: the refused entry's wording and columns had
+    /// no test, so any edit to them passed.
+    #[test]
+    fn a_refusal_names_both_paths_each_task_and_the_remedy() {
+        let clash = Clash {
+            from: PathBuf::from("/nowhere/own/plans/a.html"),
+            to: PathBuf::from("/nowhere/plans/a.html"),
+            tasks: vec![PathBuf::from("/nowhere/own/pending/t.md")],
+        };
+
+        assert_eq!(
+            refusal_lines(&clash, "refused  "),
+            [
+                "refused  /nowhere/own/plans/a.html",
+                "         — /nowhere/plans/a.html is already there",
+                "         this task names it: /nowhere/own/pending/t.md",
+                "         rename the page and that task's plan: line to a free name, then run \
+                 spoolway sync again",
+            ]
+        );
+    }
+
+    /// Fails before the change: there was no copy to fall back on when a
+    /// filesystem cannot hard link, and nothing checked it refuses a taken name.
+    #[test]
+    fn the_copy_fallback_never_replaces_a_page() {
+        let (shop, _shop_2, _root) = two_clones("sync-plans-copy");
+        let from = page(&own_plans(&shop), "l.html", "NEW");
+        let to = shared_plans(&shop).join("l.html");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+
+        copy_no_clobber(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "NEW");
+
+        std::fs::write(&to, "OLD").unwrap();
+        let err = copy_no_clobber(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "OLD");
     }
 }
