@@ -849,7 +849,7 @@ works "and the routine file is untouched" test -f .spoolway/routines/nightly/nig
 # The reach this task adds: the unblocker can be mid-turn on a `blocked` row
 # exactly as an implementer can be mid-turn on `implement`, once the run is
 # unattended, and pause interrupts that turn the same way. This needs a
-# restart — `unattended.enabled` is fixed in the lock at launch and
+# restart — `unattended.enabled` is written into the lock at launch and
 # `blocked_agent` is baked into the pipelines when they load — so this task
 # is queued straight into the live queue directory, on `blocked` already,
 # with `blocked_from` set the way a real block leaves it; `routines.sh` and
