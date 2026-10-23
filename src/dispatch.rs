@@ -4930,28 +4930,40 @@ impl<'a> Dispatcher<'a> {
             let slot_key = slot_key(&self.repo.config.models, &model_name);
 
             // Under `reserve`, a group that has never run may start only
-            // while the lanes running on this cap plus the slots held on it
-            // stay under the cap. A group that is open is never held against,
-            // so it is not asked.
-            if candidate.gated
-                && let Some((cap, limit)) = step_cap(&self.repo.config, &step)
-            {
-                let running = match &cap {
-                    Cap::Model(key) => model_in_flight.get(key),
-                    Cap::Profile(name) => in_flight.get(name),
-                }
-                .copied()
-                .unwrap_or(0);
-                if let Some(holder) = holds.get(&cap).and_then(|groups| groups.first()) {
-                    let held = holds[&cap].len();
-                    if running + held >= limit {
-                        report.actions.push(format!(
-                            "{}: waiting for a `{cap}` slot held for group `{holder}` \
-                             ({running} running + {held} held of {limit})",
-                            tasks[candidate.task_index].id()
-                        ));
-                        continue;
-                    }
+            // while the lanes running on a cap plus the slots held on it stay
+            // under that cap. A group that is open is never held against, so
+            // it is not asked. Every cap the new lane would be counted on is
+            // asked, the profile's included even when a model row or
+            // `slot: false` keeps the check below from applying it: the lane
+            // still counts in `in_flight`, and would take the slot a started
+            // group is holding.
+            //
+            // Only a hold that keeps this task out is named. A cap already
+            // full of running lanes falls through to the ordinary check
+            // below, which says so without blaming a group.
+            if candidate.gated {
+                let held_out = counted_caps(&self.repo.config, &step, &model_name)
+                    .into_iter()
+                    .find_map(|(cap, limit)| {
+                        let running = match &cap {
+                            Cap::Model(key) => model_in_flight.get(key),
+                            Cap::Profile(name) => in_flight.get(name),
+                        }
+                        .copied()
+                        .unwrap_or(0);
+                        let holders = holds.get(&cap).filter(|groups| !groups.is_empty())?;
+                        (running < limit && running + holders.len() >= limit)
+                            .then(|| (cap, limit, running, holders.clone()))
+                    });
+                if let Some((cap, limit, running, holders)) = held_out {
+                    report.actions.push(format!(
+                        "{}: waiting for a `{cap}` slot held for group `{}` \
+                         ({running} running + {} held of {limit})",
+                        tasks[candidate.task_index].id(),
+                        holders[0],
+                        holders.len()
+                    ));
+                    continue;
                 }
             }
 
@@ -9460,14 +9472,17 @@ pub(crate) fn slot_holds(
             continue;
         }
         // The task the chain is at: one already past `queued`, else the next
-        // one waiting. A task on `done` is finished and only awaits archiving.
+        // one waiting. Tasks load in id order, not chain order, so the next
+        // one is the queued task that is ready, or failing that the
+        // shallowest. A task on `done` is finished and only awaits archiving.
         let current = members
             .iter()
             .find(|t| t.stage() != crate::pipeline::QUEUED && t.stage() != crate::pipeline::DONE)
             .or_else(|| {
                 members
                     .iter()
-                    .find(|t| t.stage() == crate::pipeline::QUEUED)
+                    .filter(|t| t.stage() == crate::pipeline::QUEUED)
+                    .min_by_key(|t| (!graph.ready(t.id()), graph.depth(t.id())))
             });
         let Some(task) = current else {
             continue;
@@ -9505,6 +9520,30 @@ pub(crate) fn slot_holds(
         }
     }
     holds
+}
+
+/// Every cap a lane on `step` would be counted on in `start_lanes`: the
+/// model's `slots` row when it has one, and the profile's `concurrency` too,
+/// whatever the row or `slot: false` say, because the lane lands in the
+/// profile's running count either way.
+fn counted_caps(config: &crate::config::Config, step: &Step, model: &str) -> Vec<(Cap, usize)> {
+    let mut caps = Vec::new();
+    if let Some(price) = crate::models::resolve(&config.models, model)
+        .price
+        .filter(|p| p.slots > 0)
+    {
+        caps.push((
+            Cap::Model(slot_key(&config.models, model)),
+            price.slots as usize,
+        ));
+    }
+    if let Some(agent) = step.agent.as_deref()
+        && let Ok(profile) = config.agent(agent)
+        && profile.concurrency > 0
+    {
+        caps.push((Cap::Profile(agent.to_string()), profile.concurrency));
+    }
+    caps
 }
 
 /// The cap a lane on `step` is counted against, and its size, if it has one:
@@ -23680,9 +23719,8 @@ mod tests {
         );
     }
 
-    /// A cap held by `slot_holds` for the open group `cart`, whose task sits
-    /// on a command step: `test` and `suite` take no agent slot, so the hold
-    /// sits on the agent step the `on_pass` path reaches.
+    /// `slot_holds` against the queue as it stands, with nothing archived this
+    /// pass and `running` as the lanes the multiplexer lists.
     fn holds_for(
         repo: &Repo,
         pipelines: &Pipelines,
@@ -23693,6 +23731,9 @@ mod tests {
         slot_holds(repo, pipelines, false, &graph, &tasks, &[], running)
     }
 
+    /// Two command steps and then an agent step. A task on `test` takes no
+    /// agent slot, so its group's hold sits on the agent step the `on_pass`
+    /// path reaches.
     const COMMAND_THEN_AGENT: &str = "steps:\n  \
          - id: test\n    run: true\n    on_pass: suite\n  \
          - id: suite\n    run: true\n    on_pass: shots\n  \
@@ -23773,6 +23814,179 @@ mod tests {
             let holds = holds_for(&repo, &pipelines, &[]);
             assert_eq!(holds.len(), 1, "resumed from {parked}: {holds:?}");
         }
+    }
+
+    #[test]
+    fn a_hold_also_keeps_out_a_step_whose_model_row_leaves_the_profile_unchecked() {
+        let (mut repo, _root_guard) = fixture("reserve-model-row-candidate");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "row-model".into(),
+            crate::usage::ModelPrice {
+                slots: 4,
+                ..Default::default()
+            },
+        );
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        for (name, model) in [("solo", "test-model"), ("rowed", "row-model")] {
+            pipelines.pipelines.insert(
+                name.into(),
+                crate::pipeline::Pipeline::parse(
+                    name,
+                    &format!(
+                        "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                         model: {model}\n    on_pass: done\n"
+                    ),
+                )
+                .unwrap(),
+            );
+        }
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        add_task_with(&repo, "bill", "work", |f| {
+            f.group = Some("bill".into());
+            f.pipeline = Some("solo".into());
+        });
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("rowed".into());
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        // `zed`'s lane would count against the profile too, and take the
+        // slot `cart` is waiting to use.
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with("zed:") && a.contains("group `cart`")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    #[test]
+    fn a_cap_full_of_running_lanes_is_not_blamed_on_a_hold() {
+        let (mut repo, _root_guard) = fixture("reserve-full-by-running");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: test-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        for id in ["bill", "ann"] {
+            add_task_with(&repo, id, "work", |f| {
+                f.group = Some(id.into());
+                f.pipeline = Some("solo".into());
+            });
+        }
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("solo".into());
+        });
+        let mux = FakeMux::new(vec![
+            lane(&repo, "bill · work", LaneStatus::Working),
+            lane(&repo, "ann · work", LaneStatus::Working),
+        ]);
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        let said = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("zed:"))
+            .unwrap_or_else(|| panic!("{:?}", report.actions));
+        assert!(!said.contains("held for"), "{said}");
+        assert!(said.contains("(2/2)"), "{said}");
+    }
+
+    #[test]
+    fn the_hold_follows_the_chains_next_task_not_the_first_queued_by_id() {
+        let (mut repo, _root_guard) = fixture("hold-chain-order");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "row-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "rowed".into(),
+            crate::pipeline::Pipeline::parse(
+                "rowed",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: row-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        // An earlier task of the group is archived, so the group is open
+        // with both of these still queued. `api-client` sorts first by id,
+        // but waits on `api-schema`.
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("api-base.md"),
+            "---\nid: api-base\nstage: done\n---\n",
+        )
+        .unwrap();
+        add_task_with(&repo, "api-schema", crate::pipeline::QUEUED, |f| {
+            f.group = Some("api".into());
+            f.depends_on = vec!["api-base".into()];
+        });
+        add_task_with(&repo, "api-client", crate::pipeline::QUEUED, |f| {
+            f.group = Some("api".into());
+            f.depends_on = vec!["api-schema".into()];
+            f.pipeline = Some("rowed".into());
+        });
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["api".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_blocked_task_nobody_staffs_holds_nothing_and_a_staffed_one_holds_its_step() {
+        let (mut repo, _root_guard) = fixture("hold-blocked-staffing");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    prompt: implementer\n    model: test-model\n",
+        );
+        add_task_with(&repo, "cart", crate::pipeline::BLOCKED, |f| {
+            f.group = Some("cart".into());
+            f.blocked_from = Some("work".into());
+        });
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        // Attended, a person answers a block, so the group gives its slot
+        // back; the unblocker's step would otherwise hold a slot overnight.
+        let attended = slot_holds(&repo, &pipelines, false, &graph, &tasks, &[], &[]);
+        assert!(attended.is_empty(), "{attended:?}");
+        // Unattended, the `blocked` step is staffed and the group waits on it.
+        let unattended = slot_holds(&repo, &pipelines, true, &graph, &tasks, &[], &[]);
+        assert_eq!(
+            unattended,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
     }
 
     #[test]
@@ -23925,7 +24139,9 @@ mod tests {
         assert!(holds_for(&repo, &opted_out, &[]).is_empty());
     }
 
-    /// The plan's mockup, steps 2 to 5, on one two-slot profile.
+    /// A started group keeps its slot from its command step, through the gap
+    /// between its two tasks, until its last task is archived, on one two-slot
+    /// profile.
     ///
     /// `cart` is on a command step and keeps a slot, `bill` takes the other,
     /// and `zed` — a group that never ran — waits though one slot is free.

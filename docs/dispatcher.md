@@ -201,12 +201,13 @@ the cap. A started group is never kept out by another group's hold, so turning `
 with more started groups than slots cannot stall them.
 
 A started group holds its slot while no lane is running on its current step. That covers a
-command step, the pause between two tasks of its chain, and a lane that is still starting. The
-slot is on the cap of the first agent step the group's `on_pass` path reaches. That is the
-model's `slots` row when the model has one. Otherwise it is the profile's `concurrency`, which a
-step with `slot: false` does not count against. A group whose task is `paused`, `hook_failed`
-or `blocked` with no unblocker lane holds nothing until it is resumed. A task kept out by a
-hold logs a line naming the cap and the group that holds it.
+command step and the pause between two tasks of its chain. Once a lane for its current step is
+listed, that lane takes the slot and the group holds nothing. The held slot is on the cap of the
+first agent step the group's `on_pass` path reaches. That is the model's `slots` row when the
+model has one. Otherwise it is the profile's `concurrency`, which a step with `slot: false` does
+not count against. A group whose task is `paused`, `hook_failed` or `blocked` with no unblocker
+lane holds nothing until it is resumed. A task kept out by a hold logs a line naming the cap and
+the group that holds it.
 
 A task that reaches a command step whose id some pipeline marks `serial: true` waits there
 unstarted while another task's run of that step id, on any pipeline, is going. The task's own

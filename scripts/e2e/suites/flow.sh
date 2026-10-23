@@ -534,19 +534,21 @@ else
   bad "a free slot is kept from the never-run group, and the pass names the holder"
   tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
-if grep -qF "started late · implement" "$E2E_DISPATCH_LOG" \
-  && ! grep -qF "started held · finish" "$E2E_DISPATCH_LOG"; then
-  bad "the never-run group does not start before the holder's agent step has"
-else
-  ok "the never-run group does not start before the holder's agent step has"
-fi
-
 if wait_for_text 60 "$E2E_DISPATCH_LOG" "started held · finish" \
   && wait_for_text 60 "$E2E_DISPATCH_LOG" "started late · implement"; then
-  ok "the holder runs its agent step, and the never-run group starts after it"
+  ok "the holder runs its agent step, and the never-run group starts"
 else
-  bad "the holder runs its agent step, and the never-run group starts after it"
+  bad "the holder runs its agent step, and the never-run group starts"
   tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+# The order is the point: a hold that lapsed during the command would let
+# `late` start first, and both lines would still appear.
+held_line=$(grep -nF "started held · finish" "$E2E_DISPATCH_LOG" | head -1 | cut -d: -f1)
+late_line=$(grep -nF "started late · implement" "$E2E_DISPATCH_LOG" | head -1 | cut -d: -f1)
+if [ -n "$held_line" ] && [ -n "$late_line" ] && [ "$held_line" -lt "$late_line" ]; then
+  ok "the never-run group starts only after the holder's agent step has"
+else
+  bad "the never-run group starts only after the holder's agent step has (held at line ${held_line:-none}, late at ${late_line:-none})"
 fi
 
 # Back to the shipped defaults for the scenarios below.
