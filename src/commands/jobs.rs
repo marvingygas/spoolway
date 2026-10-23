@@ -3,8 +3,10 @@
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
 //! are the only thing that write a job — the jobs tab walks the routine, the
 //! cron expression and the pipeline, then saves through
-//! [`crate::jobs::write`]; the routines tab's new job skips the routine and
-//! goes through the same last two and the same save, [`NewJobWalk`]. No
+//! [`crate::jobs::write`]; the routines tab's new job and edit job skip the
+//! routine and go through the same last two and the same save,
+//! [`NewJobWalk`]. Pause, resume and delete are [`set_enabled`] and
+//! [`delete_job`] on both tabs. No
 //! `jobs add`, no config key. A job only schedules: nothing here queues its
 //! routine, which fires when the dispatcher's clock crosses the schedule —
 //! running a routine now is the routines tab's `enter`.
@@ -352,8 +354,8 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the routine → schedule → pipeline
-/// walk. `editing` is `Some` for the options menu's edit over an existing job
-/// and `None` for `n`;
+/// walk. `editing` is `Some` for either tab's edit over an existing job and
+/// `None` for a new one;
 /// a new job takes its name from the routine's own leaf, an edited one keeps
 /// the name it had.
 #[derive(Debug, Clone)]
@@ -411,12 +413,13 @@ impl Draft {
 }
 
 /// The schedule popup and then the pipeline popup, and the save at the end
-/// of them — the part of writing a job that both the jobs tab's walk and the
-/// routines tab's new job go through. Each tab keeps its own way in (the jobs
-/// tab picks a routine first, the routines tab uses the highlighted one) and
-/// its own way out; what happens between the two lives only here, so the two tabs
-/// cannot drift apart on what a schedule or a pipeline accepts, or on which
-/// names a save refuses.
+/// of them — the part of writing a job that both the jobs tab's walk and
+/// the routines tab's new job and edit job go through. Each tab keeps its
+/// own way in (the jobs tab picks a routine first, the routines tab uses the
+/// highlighted one, or the edited job's own) and its own way out; what
+/// happens between the two lives only here, so the two tabs cannot drift
+/// apart on what a schedule or a pipeline accepts, or on which names a save
+/// refuses.
 #[derive(Debug, Clone)]
 pub(super) enum NewJobWalk {
     /// The cron field: `draft.schedule` is the editable buffer.
@@ -573,8 +576,8 @@ impl NewJobWalk {
 /// The schedule popup's keys, in the popup and on the line under the frame.
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
 
-/// The routines tab's popup once its `n` has saved a job: what it runs, when,
-/// on which pipeline, and where to change it.
+/// The routines tab's popup once its new job or edit job has saved a job:
+/// what it runs, when, on which pipeline, and where to change it.
 pub(super) fn saved_notice(draft: &Draft) -> Notice {
     let schedule = draft.schedule.trim();
     let when = match crate::cron::Cron::parse(schedule) {

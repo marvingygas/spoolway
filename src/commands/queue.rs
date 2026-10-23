@@ -4685,7 +4685,7 @@ enum Mode {
     /// the tab, the same way `groups` is read once up front rather than
     /// carried on the mode, and read again after delete removes one.
     Routines(RoutineNav),
-    /// The options menu's delete popup over the routines pane `nav`
+    /// The options menu's delete routine popup over the routines pane `nav`
     /// describes: the routine
     /// and every job that points into it, deleted together on `enter` on its
     /// one answer, `delete` — see [`delete_routine`] — and all kept on
@@ -8719,8 +8719,8 @@ pub(super) fn two_pane_frame(
 /// group's actions from the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
-/// [`Mode::DeletePlan`], [`Mode::NewJob`] — none
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeleteJob`],
+/// [`Mode::DeletePending`], [`Mode::DeletePlan`], [`Mode::NewJob`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
 /// reads only `enter` to close it, or only `esc` for
@@ -8761,8 +8761,9 @@ fn footer(state: &ScreenState) -> String {
         // `run_screen`'s own `Mode::Routines` arm read, rather than the
         // ordinary line's `f` and `h`, neither of which applies here. One
         // line per pane, as the pending screen's is, each naming the menu
-        // for its own row: new job and delete over the list, open over a
-        // task in the details pane — see `routine_options`. `tab` over the
+        // for its own row: the routine's job items and delete routine over
+        // the list, open over a task in the details pane — see
+        // `routine_options`. `tab` over the
         // list is named `details`, the pane it leads to, whose cursor stops
         // on the routine's tasks. No `esc`: over the list it does nothing,
         // since this pane is the routines tab's whole screen, and over the
@@ -8860,8 +8861,9 @@ fn fit_keys(row: String, width: usize) -> String {
 }
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
-/// notice opened from it, the options menu opened on it, delete's popup,
-/// new job's popups and the notice they end on, or the tool-requirements gate or the issue question
+/// notice opened from it, the options menu opened on it, delete routine's
+/// and delete job's popups, new job's and edit job's popups and the notice
+/// they end on, or the tool-requirements gate or the issue question
 /// a routine submit stopped at. `None` for everything drawn over
 /// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
@@ -22129,7 +22131,10 @@ mod tests {
                 panic!("{item:?}: {mode:?}");
             };
             assert_eq!(notice.title, "job not changed");
-            assert!(notice.text.contains("no longer in the project store"), "{notice:?}");
+            assert!(
+                notice.text.contains("no longer in the project store"),
+                "{notice:?}"
+            );
             assert!(routines.is_some(), "over the routines pane");
         }
         assert!(job_names(&repo).is_empty(), "nothing written back");
