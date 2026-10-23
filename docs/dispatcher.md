@@ -192,7 +192,8 @@ When more tasks are ready than there are free slots, the pass sorts them:
 
 With `dispatch.priority = "group"`, the default, a task from a group that has not started yet
 ranks behind every task from a group that is already running. It still takes a slot when no
-running group has ready work. With `dispatch.priority = "any"` only the three rules apply.
+running group has ready work. `dispatch.priority = "reserve"` ranks tasks the same way as `group`.
+With `dispatch.priority = "any"` only the three rules apply.
 
 A task that reaches a command step whose id some pipeline marks `serial: true` waits there
 unstarted while another task's run of that step id, on any pipeline, is going. The task's own
