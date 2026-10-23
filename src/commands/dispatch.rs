@@ -253,8 +253,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     crate::usage::registry::register(&repo.root);
 
     // Trimmed once, here, rather than on every append below — see
-    // `crate::problem_log::open`. A run that never hits a problem never
-    // touches this file at all.
+    // `crate::problem_log::open`.
     crate::problem_log::open(repo);
 
     let interval = crate::dispatch::PROBE_INTERVAL;
@@ -394,6 +393,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 eprintln!("{}", screen_stop_reason(&ceiling));
                 return Ok(0);
             }
+            crate::problem_log::append(
+                repo,
+                &stop_line("stopped on a spend ceiling", &ceiling.reached),
+            );
             println!("  {}", ceiling.note);
             println!("  spoolway dispatch    # picks the queue back up where it stands");
             return Ok(0);
@@ -408,6 +411,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
             stop(&live, pipelines, mux.as_ref())?;
+            if let Some(line) = ctrl_c_line(args.screen) {
+                crate::problem_log::append(repo, &line);
+            }
             println!("  stopped.");
             return Ok(0);
         }
@@ -422,6 +428,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // on the queue read before the loop.
                 if idle_may_end(repo) && !args.screen {
                     stop(&live, pipelines, mux.as_ref())?;
+                    crate::problem_log::append(
+                        repo,
+                        &stop_line("stopped on an empty queue", "every task is done"),
+                    );
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
                 }
@@ -479,6 +489,25 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             }
         }
     }
+}
+
+/// The problem-log line for a dispatcher started in a terminal that ends
+/// itself: its own pid, then why, then `detail` when there is any. The lost
+/// lock writes its own line, and a run the screen started writes none of
+/// these, since the screen logs every exit of its child.
+fn stop_line(why: &str, detail: &str) -> String {
+    let pid = std::process::id();
+    match detail.is_empty() {
+        true => format!("dispatcher {pid} {why}"),
+        false => format!("dispatcher {pid} {why}: {detail}"),
+    }
+}
+
+/// The problem-log line for a stop on `ctrl-c`, or none for a run the
+/// screen started: the screen writes that one, since it knows who asked and
+/// is the only one that sees a kill. One exit, one line.
+fn ctrl_c_line(screen: bool) -> Option<String> {
+    (!screen).then(|| stop_line("stopped on ctrl-c", ""))
 }
 
 /// Whether the files [`reload_config`] reads have moved since it last ran, so
@@ -1872,6 +1901,37 @@ mod tests {
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_EMPTY_QUEUE
         );
+    }
+
+    /// The line a terminal dispatcher writes for its own stop names its pid,
+    /// then why, then the detail when there is one. The run loop itself is
+    /// too heavy to drive here, so the stop sites are read in review and the
+    /// line's shape is pinned here.
+    #[test]
+    fn a_terminal_dispatchers_stop_line_names_its_pid_and_why() {
+        let pid = std::process::id();
+        assert_eq!(
+            stop_line("stopped on ctrl-c", ""),
+            format!("dispatcher {pid} stopped on ctrl-c")
+        );
+        assert_eq!(
+            stop_line("stopped on a spend ceiling", "max reached"),
+            format!("dispatcher {pid} stopped on a spend ceiling: max reached")
+        );
+    }
+
+    /// A terminal dispatcher logs its own `ctrl-c` stop; one the screen
+    /// started leaves it to the screen, so the exit is not logged twice.
+    #[test]
+    fn only_a_terminal_dispatcher_logs_its_own_ctrl_c() {
+        assert_eq!(
+            ctrl_c_line(false),
+            Some(format!(
+                "dispatcher {} stopped on ctrl-c",
+                std::process::id()
+            ))
+        );
+        assert_eq!(ctrl_c_line(true), None);
     }
 
     /// An empty queue with no job still keeps the dispatcher up while an

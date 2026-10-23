@@ -1,5 +1,5 @@
-//! One line per problem, per project, kept for the window a person could
-//! plausibly still want it.
+//! One line per problem, and one per dispatcher stop, per project, kept for
+//! the window a person could plausibly still want it.
 //!
 //! The board used to carry a pass's own trouble as an amber ticker line —
 //! see the removed `RecentEvent::Note` in `src/status.rs`. That line pushed
@@ -74,6 +74,12 @@ pub fn open(repo: &Repo) {
 /// there are no keys to read without a board to read them for.
 pub fn append(repo: &Repo, message: &str) {
     let _ = write_line(&path(repo), message);
+}
+
+/// [`append`], for a caller that holds the log's path but not the `Repo` —
+/// the dispatch tab's child, which outlives the call that started it.
+pub fn append_at(path: &Path, message: &str) {
+    let _ = write_line(path, message);
 }
 
 fn write_line(path: &Path, message: &str) -> Result<()> {

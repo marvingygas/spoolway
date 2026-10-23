@@ -1011,13 +1011,19 @@ mod tests {
     fn every_popup_that_asks_closes_on_confirm_and_close() {
         let popups = [
             crate::status::asking_panels(),
-            vec![("stop dispatching", dispatcher::stop_panel(0))],
+            vec![
+                ("stop dispatching", dispatcher::stop_panel(0)),
+                (
+                    "stop dispatching, tasks queued",
+                    dispatcher::stop_queued_panel(1, 0),
+                ),
+            ],
             crate::commands::dispatch_asking_panels(),
             crate::commands::queue_asking_panels(),
             crate::commands::jobs_asking_panels(),
         ]
         .concat();
-        assert_eq!(popups.len(), 21, "every popup is walked");
+        assert_eq!(popups.len(), 22, "every popup is walked");
         let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
         for (name, panel) in popups {
             let drawn = panel.join("\n");

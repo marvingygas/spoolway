@@ -2411,6 +2411,20 @@ pub(crate) fn anything_running_for_stop(repo: &Repo, pipelines: &Pipelines) -> b
     !live_aborts(repo, &tasks, pipelines, &lanes).is_empty()
 }
 
+/// How many tasks sit on `queued` — what a stop leaves waiting, and what the
+/// dispatch tab's `enter` names before it stops a dispatcher with no step
+/// running. `None` when the queue cannot be read, which the caller takes the
+/// way [`anything_running_for_stop`] takes a failed read: as a reason to ask.
+pub(crate) fn queued_for_stop(repo: &Repo) -> Option<usize> {
+    let tasks = repo.tasks().ok()?;
+    Some(
+        tasks
+            .iter()
+            .filter(|task| task.stage() == crate::pipeline::QUEUED)
+            .count(),
+    )
+}
+
 /// Resume every task a stop's interrupt parked — [`crate::task::Frontmatter::
 /// parked_by_stop`] set and still on `paused` — through [`resume_task`],
 /// the same code the board's `r` sends one row through, which spends the

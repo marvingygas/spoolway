@@ -267,7 +267,7 @@ dispatcher has started a lane or a command step, the tab covers the board with a
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is
-running. Queued tasks and scheduled jobs do not count as running. When at least one agent lane
+running and no task is on `queued`. Scheduled jobs do not count. When at least one agent lane
 or command step is running, `enter` opens the stop popup instead:
 
 ```
@@ -290,6 +290,26 @@ lane keeps running. `enter` on `interrupt them now` interrupts every live agent 
 every running command step first, parking each of those tasks on `paused` with a mark saying
 the stop parked it, then stops the child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
 nothing: there is nothing left to ask.
+
+When no step is running and at least one task is on `queued`, `enter` opens a different popup. It names
+how many tasks are queued, because stopping the dispatcher leaves them waiting:
+
+```
+╭─ stop dispatching ───────────────────────╮
+│                                          │
+│  1 task is queued and will not start.    │
+│                                          │
+│  > stop dispatching                      │
+│    keep it running                       │
+│                                          │
+│  [enter] confirm   [esc] close           │
+╰──────────────────────────────────────────╯
+```
+
+With several tasks the line reads `3 tasks are queued and will not start.`. The cursor opens on
+`stop dispatching`, and `↑` and `↓` move it. `enter` on `stop dispatching` stops the child the way
+`ctrl-c` does. `enter` on `keep it running` and `esc` close the popup and leave the dispatcher
+running. A task that is paused, blocked or between steps is not counted.
 
 Starting dispatching again, from the tab or with `spoolway dispatch`, resumes every task the
 stop parked, back onto the step it was on, before its first pass.
@@ -466,7 +486,24 @@ A panel's body still names a file by the task's id.
 | `could not launch <step>, moved to <step>` | The launch failed and the task file does not say why. A pane that never got ready reads this way. |
 | `passed <step>, moved to blocked (uncommitted work)` | The last step passed, and the worktree held work that could not be committed. |
 
-Errors from a pass go to `~/.spoolway/logs/<project>.log`.
+### The problem log
+
+Errors from a pass go to `~/.spoolway/logs/<project>.log`. The same file gets one line for every
+stop of a dispatcher. Each line starts with the time and the dispatcher's pid.
+
+| Who writes it | When | The line reads |
+|---|---|---|
+| The board | The dispatcher it started exits on its own. | `dispatcher 70211 exited with signal: 9 (SIGKILL) and said nothing`, or `dispatcher 70211 exited with exit status: 1, last said: <last 5 stderr lines joined by " / ">` |
+| The board | `enter` on the dispatch tab stops the dispatcher. | `dispatcher 70211 stopped: asked by the board (enter on the dispatch tab); it exited with exit status: 0` |
+| The board | The board quits and stops the dispatcher. | `dispatcher 70211 stopped: asked by the board, which was quitting; the board left before it exited` |
+| A dispatcher run in a terminal | `ctrl-c` | `dispatcher 70211 stopped on ctrl-c` |
+| A dispatcher run in a terminal | The queue is empty. | `dispatcher 70211 stopped on an empty queue: every task is done` |
+| A dispatcher run in a terminal | A spend ceiling is reached. | `dispatcher 70211 stopped on a spend ceiling: <the ceiling reached>` |
+
+The board writes the line for the dispatcher it started, so a dispatcher that was killed still
+leaves one. That dispatcher writes no line of its own for `ctrl-c`, an empty queue or a spend
+ceiling. A lost lock writes the line shown under
+[When the lock file is lost](#when-the-lock-file-is-lost).
 
 ### Keys
 

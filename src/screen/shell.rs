@@ -386,6 +386,10 @@ enum Popup {
     /// How to stop the running dispatcher — [`super::dispatcher::stop_panel`],
     /// its cursor on the answer this holds.
     Stop(usize),
+    /// Whether to stop a dispatcher with no step running while `queued`
+    /// tasks wait — [`super::dispatcher::stop_queued_panel`], naming how
+    /// many, its cursor on the answer `cursor` holds.
+    StopQueued { queued: usize, cursor: usize },
 }
 
 impl Popup {
@@ -395,6 +399,9 @@ impl Popup {
         match self {
             Popup::Overrides(gate) | Popup::Warnings(gate) => gate.panel(),
             Popup::Stop(cursor) => super::dispatcher::stop_panel(*cursor),
+            Popup::StopQueued { queued, cursor } => {
+                super::dispatcher::stop_queued_panel(*queued, *cursor)
+            }
             Popup::Ended(panel) | Popup::Starting { panel, .. } => panel.clone(),
         }
     }
@@ -476,34 +483,43 @@ impl DispatchTab {
     /// to stop it when a step is running, in place of the keyless `Starting`
     /// popup if that is still up. With no agent lane or command step running
     /// — [`crate::status::anything_running_for_stop`] — the popup's two
-    /// answers would do the same thing, so the child is stopped at once and
-    /// nothing is asked. With no child, ask the start gates, each only when
-    /// it has something to say, and start one. A child already asked to stop
-    /// is left to finish going, and `enter` over it does nothing: there is
-    /// nothing left to ask. Stopped before its first pass, the child is gone
-    /// with nothing starting, and [`DispatchTab::reap`] clears any `Starting`
-    /// popup once it has exited.
+    /// answers would do the same thing, so it is not asked. Then a queue
+    /// holding `queued` tasks asks once more whether to stop, naming how
+    /// many, since a stop there is silent and they just wait; a queue that
+    /// cannot be read asks the step popup, as a failed read always has. With
+    /// an empty queue the child is stopped at once and nothing is asked.
+    /// With no child, ask the start gates, each only when it has something
+    /// to say, and start one. A child already asked to stop is left to
+    /// finish going, and `enter` over it does nothing: there is nothing left
+    /// to ask. Stopped before its first pass, the child is gone with nothing
+    /// starting, and [`DispatchTab::reap`] clears any `Starting` popup once
+    /// it has exited.
     fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
         match self.child.as_ref() {
             Some(child) if child.stopping() => {}
             Some(_) if crate::status::anything_running_for_stop(repo, pipelines) => {
                 self.popup = Some(Popup::Stop(0))
             }
-            Some(_) => {
-                self.popup = None;
-                self.stop();
-            }
+            Some(_) => match crate::status::queued_for_stop(repo) {
+                Some(0) => {
+                    self.popup = None;
+                    self.stop();
+                }
+                Some(queued) => self.popup = Some(Popup::StopQueued { queued, cursor: 0 }),
+                None => self.popup = Some(Popup::Stop(0)),
+            },
             None => self.overrides_then_start(repo, cwd),
         }
     }
 
     /// Stop the child, if one is still up — the stop popup's answer either
-    /// way, and `enter`'s own when no step is running. A child that exited
-    /// while the popup was open has already been reaped, and its own popup
-    /// replaced this one.
+    /// way, the queued stop popup's first, and `enter`'s own when no step is
+    /// running and nothing is queued. A child that exited while the popup
+    /// was open has already been reaped, and its own popup replaced this
+    /// one.
     fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {
-            child.stop();
+            child.stop(super::dispatcher::Asked::Enter);
         }
     }
 
@@ -541,13 +557,16 @@ impl DispatchTab {
         };
         match crate::commands::warnings_popup(repo, &pipelines) {
             Some(gate) => self.popup = Some(Popup::Warnings(gate)),
-            None => self.start(cwd),
+            None => self.start(repo, cwd),
         }
     }
 
-    fn start(&mut self, cwd: &Path) {
+    fn start(&mut self, repo: &Repo, cwd: &Path) {
         let since = std::time::SystemTime::now();
-        self.started(super::dispatcher::Dispatcher::start(cwd), since);
+        self.started(
+            super::dispatcher::Dispatcher::start(cwd, crate::problem_log::path(repo)),
+            since,
+        );
     }
 
     /// What [`DispatchTab::start`] got back from starting the child at
@@ -584,6 +603,8 @@ impl DispatchTab {
     /// same way; `esc` backs out having started nothing. On the stop popup,
     /// `enter` on the first answer stops the child and leaves every running
     /// step to finish, on the second it interrupts them first, and `esc`
+    /// leaves the dispatcher running. On the queued stop popup, `enter` on
+    /// the first answer stops the child, and on the second, like `esc`, it
     /// leaves the dispatcher running. Every other key is ignored.
     fn answer(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path, key: Key) {
         let Some(popup) = self.popup.take() else {
@@ -602,7 +623,7 @@ impl DispatchTab {
                 if gate.hides() {
                     let _ = gate.hide(repo);
                 }
-                self.start(cwd);
+                self.start(repo, cwd);
             }
             // `let running steps finish`, the first of `STOP_ANSWERS`.
             (Popup::Stop(0), Key::Enter) => self.stop(),
@@ -621,8 +642,17 @@ impl DispatchTab {
                     )));
                 }
             }
-            (Popup::Overrides(_) | Popup::Warnings(_) | Popup::Stop(_), Key::Esc)
-            | (Popup::Ended(_), Key::Enter) => {}
+            // `stop dispatching`, the first of `STOP_QUEUED_ANSWERS`.
+            (Popup::StopQueued { cursor: 0, .. }, Key::Enter) => self.stop(),
+            // `keep it running` closes the popup the way `esc` does.
+            (
+                Popup::Overrides(_)
+                | Popup::Warnings(_)
+                | Popup::Stop(_)
+                | Popup::StopQueued { .. },
+                Key::Esc,
+            )
+            | (Popup::StopQueued { .. } | Popup::Ended(_), Key::Enter) => {}
             (Popup::Overrides(mut gate), key) => {
                 gate.move_cursor(key);
                 self.popup = Some(Popup::Overrides(gate));
@@ -635,6 +665,13 @@ impl DispatchTab {
                 let answers = super::dispatcher::STOP_ANSWERS.len();
                 self.popup = Some(Popup::Stop(super::move_cursor(cursor, answers, key)));
             }
+            (Popup::StopQueued { queued, cursor }, key) => {
+                let answers = super::dispatcher::STOP_QUEUED_ANSWERS.len();
+                self.popup = Some(Popup::StopQueued {
+                    queued,
+                    cursor: super::move_cursor(cursor, answers, key),
+                });
+            }
             (popup, _) => self.popup = Some(popup),
         }
     }
@@ -644,10 +681,11 @@ impl DispatchTab {
 /// the ledger exactly as `spoolway dispatch` draws it, with the board's own
 /// keys. `enter` starts dispatching — a `spoolway dispatch` child, see
 /// [`super::dispatcher`] — and `enter` again stops it, asking how first when
-/// a step is running. The board is drawn from what that child writes; this
-/// tab runs no pass itself. Redrawn every [`crate::status::POLL`] while no
-/// key is typed, the same wait the board keeps under a dispatcher, and that
-/// redraw is also where a child that has exited is noticed.
+/// a step is running, and whether to when tasks are queued. The board is
+/// drawn from what that child writes; this tab runs no pass itself. Redrawn
+/// every [`crate::status::POLL`] while no key is typed, the same wait the
+/// board keeps under a dispatcher, and that redraw is also where a child that
+/// has exited is noticed.
 ///
 /// `writer` pushes this past clippy's default argument count, but every
 /// argument here is a distinct piece of the tab's own state — see
@@ -1995,14 +2033,15 @@ mod tests {
         runs.stop(&key);
     }
 
-    // With no agent lane or command step running, `enter` stops the
-    // dispatcher at once and asks nothing, whether or not tasks are queued.
+    // With no agent lane or command step running and nothing queued, `enter`
+    // stops the dispatcher at once and asks nothing. A task past `queued` that
+    // is not running — here one parked on `paused` — does not count.
     #[cfg(unix)]
     #[test]
     fn enter_with_no_step_running_stops_at_once_and_opens_no_popup() {
         let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-idle");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
-        crate::status::testutil::add(&repo, "login", &[], None);
+        crate::status::testutil::add(&repo, "login", &[], Some(crate::pipeline::PAUSED));
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
         tab.enter(&repo, &pipelines, &repo.root);
@@ -2012,7 +2051,84 @@ mod tests {
             tab.popup.as_ref().map(Popup::panel)
         );
         assert!(stopping(&tab));
+    }
+
+    // With no step running but a task queued, `enter` asks before it stops,
+    // naming the count, and `esc` leaves the dispatcher running.
+    #[cfg(unix)]
+    #[test]
+    fn enter_with_a_task_queued_asks_and_esc_leaves_it_running() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-esc");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::status::testutil::add(&repo, "login", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(
+            matches!(
+                tab.popup,
+                Some(Popup::StopQueued {
+                    queued: 1,
+                    cursor: 0
+                })
+            ),
+            "{:?}",
+            tab.popup.as_ref().map(Popup::panel)
+        );
+        let panel = tab.popup.as_ref().unwrap().panel().join("\n");
+        assert!(
+            panel.contains("1 task is queued and will not start."),
+            "{panel}"
+        );
+        assert!(panel.contains("> stop dispatching"), "{panel}");
+        assert!(!stopping(&tab), "nothing is stopped before it is answered");
+
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('q'));
+        assert!(matches!(tab.popup, Some(Popup::StopQueued { .. })));
+
+        tab.answer(&repo, &pipelines, &repo.root, Key::Esc);
+        assert!(tab.popup.is_none());
+        assert!(!stopping(&tab));
+        assert!(tab.dispatching());
         assert_eq!(repo.task("login").unwrap().stage(), "queued");
+    }
+
+    // The queued stop popup's first answer stops the dispatcher; its second,
+    // `keep it running`, closes the popup and leaves it running.
+    #[cfg(unix)]
+    #[test]
+    fn the_queued_stop_popup_stops_on_its_first_answer_and_keeps_on_its_second() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-answer");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::status::testutil::add(&repo, "login", &[], None);
+        crate::status::testutil::add(&repo, "logout", &["login"], None);
+        let pipelines = Pipelines::builtin();
+
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        let panel = tab.popup.as_ref().unwrap().panel().join("\n");
+        assert!(
+            panel.contains("2 tasks are queued and will not start."),
+            "{panel}"
+        );
+        tab.answer(&repo, &pipelines, &repo.root, Key::Down);
+        let panel = tab.popup.as_ref().unwrap().panel().join("\n");
+        assert!(panel.contains("> keep it running"), "{panel}");
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        assert!(tab.popup.is_none());
+        assert!(!stopping(&tab));
+        assert!(tab.dispatching());
+
+        tab.enter(&repo, &pipelines, &repo.root);
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        assert!(
+            tab.popup.is_none(),
+            "{:?}",
+            tab.popup.as_ref().map(Popup::panel)
+        );
+        assert!(stopping(&tab));
+        assert_eq!(repo.task("login").unwrap().stage(), "queued");
+        assert_eq!(repo.task("logout").unwrap().stage(), "queued");
     }
 
     // When the queue cannot be read, nothing says no step is running, so
