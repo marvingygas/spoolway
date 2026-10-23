@@ -7005,7 +7005,9 @@ fn task_file_moved_away(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
 /// disagrees — and the fix, so a caller can join the two its own way rather
 /// than this saying it differently for each: [`crate::commands::dispatch::check_task_bases`]'s
 /// multi-line refusal before a start, and [`Dispatcher::collect_candidates`]'s
-/// one-line hold on the problem list while a run is already going. `None`
+/// one-line hold on the problem list while a run is already going. The
+/// refusal before a start is built from [`base_existence_problem`] alone; a
+/// chain whose bases disagree is left to the hold. `None`
 /// covers a task with nothing wrong; a task with no `base:` at all is
 /// [`ensure_workspace`]'s own check, not this one's, and reads as `None`
 /// here too, off the leading `?` below — [`Dispatcher::collect_candidates`]
@@ -7035,10 +7037,11 @@ pub(crate) fn base_problem(
     task: &Task,
     remote_cache: &mut RemoteCache,
 ) -> Option<(String, String)> {
-    base_problem_when_unasked(repo, task, remote_cache, WhenOriginUnasked::Hold)
+    chain_base_problem(repo, task)
+        .or_else(|| base_existence_problem(repo, task, remote_cache, WhenOriginUnasked::Hold))
 }
 
-/// What [`base_problem_when_unasked`] makes of a base that exists nowhere
+/// What [`base_existence_problem`] makes of a base that exists nowhere
 /// local when `origin` could not be asked about it: offline, refused, or
 /// given up on at the ask's time bound.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7053,18 +7056,6 @@ pub(crate) enum WhenOriginUnasked {
     Allow,
 }
 
-/// [`base_problem`], with a say in what an `origin` that could not be asked
-/// means.
-pub(crate) fn base_problem_when_unasked(
-    repo: &Repo,
-    task: &Task,
-    remote_cache: &mut RemoteCache,
-    when_unasked: WhenOriginUnasked,
-) -> Option<(String, String)> {
-    chain_base_problem(repo, task)
-        .or_else(|| base_existence_problem(repo, task, remote_cache, when_unasked))
-}
-
 /// The chain half of [`base_problem`]: this task's `base:` against that of
 /// every dependency still in the queue. It is its own function because the
 /// start-up check leaves it to the running pass, which holds the one task,
@@ -7077,8 +7068,8 @@ fn chain_base_problem(repo: &Repo, task: &Task) -> Option<(String, String)> {
     // listed: a mismatch on the second would otherwise go unreported. A
     // dependency at `done` is skipped, wherever its file sits: it hands its
     // dependents a branch (or a base) of its own, so its `base:` string is
-    // no longer part of the chain, and holding a task over it, or refusing
-    // to start the dispatcher, would block work nothing is wrong with.
+    // no longer part of the chain, and holding a task over it would block
+    // work nothing is wrong with.
     for dep in &task.front.depends_on {
         let Ok(dep_task) = repo.task(dep) else {
             continue;
@@ -11242,11 +11233,11 @@ mod tests {
             "and does not send a person to edit a task that is right: {fix}"
         );
         assert!(
-            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_none()
+            base_existence_problem(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_none()
         );
         cache.insert("ghost".to_string(), Some(false));
         assert!(
-            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_some(),
+            base_existence_problem(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_some(),
             "an origin that answered `no` still refuses"
         );
     }
