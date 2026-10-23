@@ -595,8 +595,7 @@ than blank wins.
 | 3 | `vim` |
 
 spoolway has no editor setting of its own. To use another editor, name it once in your shell
-profile, for example `export VISUAL=notepad.exe`. A file at `~/.spoolway/editor.toml` from an
-earlier version is not read, and nothing warns about it.
+profile, for example `export VISUAL=notepad.exe`.
 
 The same choice serves every item that opens a task file in the terminal screens. These are
 `open task` on the board and on the queue screen's tasks and routines panes, and `open` on the jobs
