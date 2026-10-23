@@ -25390,6 +25390,42 @@ mod tests {
         );
     }
 
+    /// A dependent whose `base:` disagrees with its dependency's is held on
+    /// the pass's problem list with the "A chain has one base" line, and a
+    /// task outside that chain still launches. That list is what reaches the
+    /// problem log, so this is the line a person starting the dispatcher
+    /// reads.
+    #[test]
+    fn a_pass_holds_a_chain_base_mismatch_and_launches_the_other_task() {
+        let (repo, _root_guard) = fixture("pass-holds-chain-mismatch");
+        add_task_with(&repo, "first", "queued", |f| {
+            f.base = Some("work".into());
+        });
+        let held = add_task_with(&repo, "held", "queued", |f| {
+            f.base = Some("elsewhere".into());
+            f.depends_on = vec!["first".into()];
+        });
+        let free = add_task_with(&repo, "free", "queued", |f| {
+            f.base = Some("work".into());
+        });
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(
+            report.problems.contains(
+                &"task `held` is based on `elsewhere` but depends on `first`, which is based on \
+                  `work` — A chain has one base. Set `base:` in held to `work`."
+                    .to_string()
+            ),
+            "{:?}",
+            report.problems
+        );
+        assert_eq!(reload(&held).stage(), "queued");
+        assert!(reload(&held).front.worktree_path.is_none());
+        assert_ne!(reload(&free).stage(), "queued", "{:?}", report.problems);
+    }
+
     /// A queued task whose own `starts_from:` exists nowhere is not launched:
     /// it pauses with the branch recorded, no worktree cut, and exactly one
     /// line on the dispatch output.
