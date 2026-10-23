@@ -365,26 +365,73 @@ Nothing creates the directory for you. `spoolway task contract` prints this shap
 project's own routines directory, for a producer writing a routine by hand. A routine is
 never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
-Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane,
-titled `routines`, lists one row per routine. Its right pane, titled `tasks`, lists the
-highlighted routine's tasks.
+Bare `spoolway` has a routines tab, between the queue and eval tabs. Its left pane,
+titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
+pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
+
+```
+┌ routines ────────────────┬ details ──────────────────────────────────────────────────────────────┐
+│ > [ ] dependabot         │                                                                       │
+│   [ ] release-spoolway   │   Schedule:    0 */2 * * *                                            │
+│                          │   Pipeline:    dependabot                                             │
+│                          │   Scope:       project                                                │
+│                          │   Next:        Fri 23 Oct, 18:00                                      │
+│                          │   Last:        Fri 23 Oct, 16:00  ok                                  │
+│                          │   Job:         dependabot-review                                      │
+│                          │                                                                       │
+│                          │   tasks                                                               │
+│                          │     review-dependabot-prs                                             │
+│                          │       Pipeline:    dependabot                                         │
+│                          │       Depends on:  -                                                  │
+│                          │       Description: chore(deps): review and merge open Dependabot pull │
+│                          │                    requests                                           │
+└──────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+ [space] select   [enter] queue   [o] options   [tab] details   [q] quit
+```
+
+What the job rows say depends on how many jobs point at the routine:
+
+| Jobs on the routine | What the pane shows |
+|---|---|
+| None | One row, `Schedule:    none`. |
+| One | `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and `Job:` rows. |
+| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `paused` on a paused one, and a line saying which to delete. |
+| A job store that will not load | A `Jobs:` row, `will not load:` and the error. The tasks are still drawn. |
+
+Two enabled jobs on one routine fire neither. The `Jobs:` row then reads
+`2 run this routine, so neither fires`. With one enabled and one paused job it reads
+`2 run this routine; only <name> fires`. Resuming the paused job stops both.
+
+A job whose routine is not a routine the list shows gets a row of its own at the bottom of the
+list, under a blank line, where it can be edited or deleted. See
+[A job without a routine](jobs.md#a-job-without-a-routine).
+
+The pane reads both job stores again while the list sits idle, so a job edited by hand shows
+without a key.
 
 | Key | What it does |
 |---|---|
 | `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
 | `enter` | Queue every task under every ticked routine as one batch. |
 | `o` | Open the options menu of the row the focused pane highlights. |
-| `tab` | Switch focus between the routine list and the tasks pane. |
-| `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
+| `tab` | Switch focus between the routine list and the details pane. |
+| `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |
 
 The options menu follows focus the same way it does on the queue screen, and is titled with the
 highlighted row's name:
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `new job` | A routine. | Make a job from the routine. See [Jobs](jobs.md). |
-| `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
-| `open task` | A task in the tasks pane. | Open the task in your editor. |
+| `new job` | A routine with no job. | Make a job from the routine. See [Jobs](jobs.md). |
+| `edit job` | A routine with one job. | Change the job's schedule and pipeline. |
+| `pause job` | A routine with one enabled job. | Pause the job. |
+| `resume job` | A routine with one paused job. | Resume the job. |
+| `delete job` | A routine with one job. | Delete the job after a popup. The routine stays. |
+| `delete job <name>` | A routine with two or more jobs. One item per job, sorted by name. | Delete that job after a popup. The routine stays. |
+| `delete routine` | A routine. | Delete the routine and every job that points into it, after a popup. |
+| `open task` | A task in the details pane. | Open the task in your editor. |
+
+A routine with a job store that will not load offers only `delete routine`.
 
 A task `id:` is unique across all routine folders. When two routine files hold one id, the
 routines tab shows a `Problem:` row beside the task. The row names both files and an id to give
@@ -441,7 +488,7 @@ Pick `save as routine` from a pending group's options menu to save it as a routi
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
 run are removed on the way. A folder that already holds tasks is refused.
 
-Pick `delete` from a routine's options menu to delete it. The popup names the routine, its task count, and every
+Pick `delete routine` from a routine's options menu to delete it. The popup names the routine, its task count, and every
 job whose routine path is that folder or a task inside it. Each job is listed beside its
 store, `user` or `project`. Its one answer is `delete`: `enter` deletes those jobs first, then
 the folder. `esc` keeps everything. The folder leaves disk without touching git, so only git can bring it back. A job
@@ -449,8 +496,14 @@ store that will not read refuses the delete before anything is removed, naming t
 `spoolway doctor`.
 
 A job queues a routine on a cron schedule. Pick `new job` from a routine's options menu to make
-one: it opens the jobs tab's own schedule and pipeline panels for that routine, and `enter` on
-the pipeline panel saves it. `esc` on either panel cancels and writes nothing. See [Jobs](jobs.md).
+one: it opens the schedule and pipeline panels for that routine, and `enter` on
+the pipeline panel saves it. `edit job` opens the same two panels filled with the job's own
+values and saves the job back to the store it came from. `esc` on either panel cancels and writes
+nothing. See [Jobs](jobs.md).
+
+`pause job` and `resume job` write the job back to its own store with the schedule unchanged.
+`delete job` opens a popup titled `delete this job` whose one answer is `delete`. `enter` deletes
+the job and `esc` keeps it.
 
 ## Closing a plan out
 

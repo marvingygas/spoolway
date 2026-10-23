@@ -10,6 +10,11 @@ covers:
 A job runs a routine on a schedule. It is a cron expression, a pipeline, and a routine saved
 under `.spoolway/routines/`.
 
+A job runs a whole routine, which is a top-level folder under `.spoolway/routines/`. A routine
+has at most one job. A job on a task file, on a folder inside a routine, or on a routine that
+another enabled job also runs never fires. The dispatcher names it once per matching minute, and
+`spoolway doctor` fails a check for it. To fire again, delete or repoint the job.
+
 ## Overview
 
 spoolway has no clock of its own. The dispatcher fires a due job at the top of its pass.
@@ -36,8 +41,7 @@ flowchart LR
   J -- yes --> F[queue the routine<br/>on the job's pipeline] --> G[record the minute] --> E
 ```
 
-A folder routine is queued as one batch with fresh ids. A single `.md` routine is queued alone
-with its `depends_on` emptied. The same pass dispatches what it queued.
+A routine is queued as one batch with fresh ids. The same pass dispatches what it queued.
 
 The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. If
 that file cannot be written, the job still fires once per matching minute while the dispatcher
@@ -53,6 +57,16 @@ The dispatcher names each such skip once per matching minute, with the step the 
 ```
 job nightly · due now · skipped, audit is still in the queue, at step queued
 ```
+
+The dispatcher names a job that cannot fire in the same way, once per matching minute:
+
+```
+job dependabot-weekly · due now · skipped, dependabot-review runs routine dependabot too; delete one on the routines tab (o → delete job)
+job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; pick a routine folder, or delete it, on the routines tab (o)
+job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit or delete the job on the routines tab (o)
+```
+
+A project joined to a workspace keeps its routines elsewhere. Its lines, and the details of a job's own row on the routines tab, name that directory's full path in place of `.spoolway/routines/`.
 
 A firing that fails is recorded for its minute and is not tried again on every pass. This covers
 a failing `open` hook, one that is stopped after 60 seconds, and a routine that cannot be queued, such as one with a `gate_at:` that
@@ -145,49 +159,50 @@ The board shows the greeting and `Nothing queued`, and under them the job ledger
 With no job enabled and both stores parsing, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
 
-## The jobs screen
+## Writing a job
 
-<img src="screenshots/jobs.png" alt="the jobs screen">
+Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. A
+routine's details pane shows its job above its tasks, and the routine's options menu acts on
+that job. See [Routines](planning.md#routines).
 
-Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edited, paused or
-deleted. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
-`details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
-
-The routines tab writes a job too, with `new job` in a routine's options menu. See
-[Routines](planning.md#routines).
-
-| Key | What it does |
-|---|---|
-| `↑` `↓` | Move. |
-| `n` | Write a new job. |
-| `o` | Open the options menu of the highlighted job, titled with its name. With no jobs it does nothing. |
-| `ctrl-c` | Leave the screen. |
-
-The options menu offers these items, in this order. `↑` `↓` move the cursor, `enter` runs the
-item under it, and `esc` closes the menu.
+A routine's options menu offers these items for its job.
 
 | Item | What it does |
 |---|---|
-| `edit` | Edit the job. |
-| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it. |
-| `delete` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
+| `new job` | Write a job for the routine. Offered only while the routine has no job. |
+| `edit job` | Edit the routine's job. |
+| `pause job` | Pause the job. A paused job shows `resume job` here instead, which resumes it. |
+| `delete job` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
 
-### The three choices
+### The two choices
 
-`n` and the options menu's `edit` walk three panels. `esc` on any of them writes nothing.
+`new job` and `edit job` walk two panels. `esc` on either writes nothing.
 
-1. The routine. This is the same routines browser as the routines tab, listing one
-   row per routine. `space` ticks a routine and `enter` picks it. `tab` moves focus onto the
-   tasks pane, where `space` picks the highlighted task. There, `o` opens a menu titled with the
-   task's id whose one item, `open`, opens the task in your editor. `esc` cancels the picker from
-   either pane.
-2. The schedule. The field states the expression in words and shows its next three firings as
+1. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
-3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
+2. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
-The routines tab's `new job` starts on the schedule panel, for the routine its options menu was
-opened on, then walks the same pipeline panel and save.
+`new job` writes a job for the routine its options menu was opened on. `edit job` opens with
+the job's own schedule and pipeline filled in, and the job keeps its name, routine and store.
+
+### A job without a routine
+
+A job whose `routine` is not a routine the tab lists gets a row of its own at the bottom of the
+routines list, under a blank line. The row is named after the job's `routine` value. It is
+marked `missing` when nothing has that path, and `not a routine` when the path is a task file, a
+folder inside a routine, or outside `.spoolway/routines/`. A name too long for the row is cut.
+
+The row's details show the job's schedule, pipeline, scope, next firing, last firing and name,
+then why it never fires. The row takes no tick, so `space` and `enter` do nothing on it, and
+`tab` does nothing either. Its key line is `[o] options   [q] quit`.
+
+Its options menu offers two items:
+
+| Item | What it does |
+|---|---|
+| `edit job` | Open the routine picker, which lists the routine folders and nothing else. `enter` picks the folder under the cursor, then the schedule and pipeline panels follow. The save points the job at that routine and keeps its name and store. `esc` on the picker writes nothing. |
+| `delete job` | Delete the job, after the same popup as a routine's `delete job`. |
 
 ### What the screen decides for you
 
@@ -196,9 +211,9 @@ the store file by hand when the routine's tasks set no `base:`. Editing a job on
 a `base` already in the file.
 
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
-gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. This is the same
-whether the walk started on the jobs tab or the routines tab. A job in the project store is
-written by hand once; the screen then edits it in place.
+gives the job `nightly`. A save is refused, with a notice naming the job, when the routine
+already has a job in either store. A job in the project store is written by hand once; the
+screen then edits it in place.
 
 ## The cron grammar
 
@@ -231,7 +246,7 @@ A store file holds `[jobs.<name>]` tables:
 [jobs.nightly-audit]
 schedule = "0 3 * * 1-5"
 pipeline = "impl_fast"
-routine  = "nightly"     # a folder or a single .md under .spoolway/routines/
+routine  = "nightly"     # a top-level folder under .spoolway/routines/
 enabled  = true          # optional; absent means enabled
 base     = "plan/demo"   # optional; the branch the routine's tasks are cut from
 ```
@@ -264,7 +279,8 @@ spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 ```
 
-Bare `spoolway`'s jobs tab is where a job is written, edited, paused or deleted.
+Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. See
+[Writing a job](#writing-a-job).
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST
@@ -300,6 +316,8 @@ not parse.
 | job `<name>` has no unknown keys | The job's table holds a key no job reads. |
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
+| job `<name>` routine is a whole routine folder | The routine path is a task file, a folder inside a routine, or the routines directory itself. |
+| job `<name>` is the only job on its routine | Another enabled job runs the same routine. The check names that job and its store. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
 | job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step, a `*.md` file that does not parse, or a folder with no task. |
 | job `<name>` base exists | `base` is set, and it starts with `-`, is not a valid branch name, or names a branch that neither the repository nor `origin` has. |

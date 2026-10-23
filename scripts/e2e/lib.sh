@@ -319,7 +319,7 @@ wait_for_said() {
 
 # Bare `spoolway` — the one screen — with `keys` typed into it, and every
 # frame it drew written to `out`. It opens on the queue tab; `\033[C` from
-# there is the routines tab, a second one the jobs tab, and `\033[D` the
+# there is the routines tab, a second one the eval tab, and `\033[D` the
 # dispatch tab. The screen draws only with stdout on a terminal, so `script`
 # gives it a pty for stdout while the keys still arrive on an ordinary pipe,
 # and the screen ends the moment that pipe runs dry. The keys and the binary

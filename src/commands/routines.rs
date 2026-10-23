@@ -40,9 +40,8 @@ pub(crate) struct RoutineFolder {
     /// under.
     pub(crate) path: PathBuf,
     /// Every `*.md` at or below this folder — its own tasks first, then
-    /// each subfolder's, recursively depth-first. What the left pane's own
-    /// "N tasks" tail counts, what the right pane lists for the highlighted
-    /// folder, and what `enter` queues whole.
+    /// each subfolder's, recursively depth-first. What the right pane lists
+    /// for the highlighted folder, and what `enter` queues whole.
     pub(crate) tasks: Vec<RoutineTask>,
     /// Every `*.md` at or below this folder that [`read_task`] could not
     /// read, in the same order as [`Self::tasks`]. Queueing the folder is

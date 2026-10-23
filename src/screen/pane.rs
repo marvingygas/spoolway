@@ -1,8 +1,9 @@
-//! The scrolling window the queue and jobs screens cut a tall pane down to.
+//! The scrolling window the queue screen and the dispatch board cut a tall
+//! pane down to.
 //!
-//! The queue screen, its routines view and the jobs screen each draw a pane
-//! that can be taller than the terminal, and the dispatch board's task table
-//! can outgrow the rows its pane leaves it. This module decides which lines of
+//! The queue screen and its routines view each draw a pane that can be
+//! taller than the terminal, and the dispatch board's task table can outgrow
+//! the rows its pane leaves it. This module decides which lines of
 //! the pane stay in view and spends the pane's bottom row on a marker that
 //! says how many items are out of sight. It lives here, outside any one
 //! screen, so the screens' markers read the same and cannot drift apart.
@@ -24,9 +25,8 @@ pub(crate) struct Items<'a> {
     /// The line each item starts on, in ascending order.
     pub(crate) starts: &'a [usize],
     /// The singular noun the marker counts in (`"task"`, `"group"`,
-    /// `"folder"`), or `None` for the jobs screen, which passes one item per
-    /// line and keeps the one-sided `↓ N below` it has always drawn.
-    pub(crate) noun: Option<&'static str>,
+    /// `"folder"`).
+    pub(crate) noun: &'static str,
 }
 
 /// The slice of `lines` a pane `rows` rows tall shows, with the block at
@@ -118,18 +118,9 @@ pub(crate) fn hidden_items(
 /// form is drawn whatever the width, as nothing shorter still says both
 /// counts.
 ///
-/// With no noun this is the jobs screen's marker exactly as it has always
-/// read: one direction only, below whenever anything is.
-///
 /// Nothing out of sight on either side — every hidden line was a separator
 /// — draws an empty row rather than a `↓ 0 below` that says nothing.
-pub(crate) fn marker_row(above: usize, below: usize, noun: Option<&str>, width: usize) -> String {
-    let Some(noun) = noun else {
-        return match below {
-            0 => format!("↑ {above} above"),
-            _ => format!("↓ {below} below"),
-        };
-    };
+pub(crate) fn marker_row(above: usize, below: usize, noun: &str, width: usize) -> String {
     // 0 is the full row, 1 drops the noun, 2 drops the words as well.
     let form = |short: u8| {
         let side = |arrow: &str, n: usize, word: &str| match short {
@@ -161,8 +152,7 @@ mod tests {
     use crate::commands::{MIN_LEFT_PANE, ScreenState, tasks_pane_lines};
     use crate::pipeline::Pipelines;
 
-    /// `Items` for a pane of `len` lines where every line is an item and the
-    /// marker names no noun — what the jobs screen passes to [`window`].
+    /// `Items` starts for a pane of `len` lines where every line is an item.
     fn per_line(len: usize) -> Vec<usize> {
         (0..len).collect()
     }
@@ -170,24 +160,19 @@ mod tests {
     /// A pane taller than the terminal scrolls to the highlighted block and
     /// says how much is out of sight, rather than letting the frame run off
     /// the bottom of the screen.
-    ///
-    /// Passed one item per line and no noun, the way the jobs screen calls
-    /// it, so this also pins that screen's marker text exactly as it was
-    /// before panes counted items: one direction only, below whenever
-    /// anything is, even with lines hidden above as well.
     #[test]
     fn a_pane_taller_than_its_rows_scrolls_to_the_focused_block() {
         let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
         let starts = per_line(lines.len());
         let items = Items {
             starts: &starts,
-            noun: None,
+            noun: "line",
         };
 
         let top = window(&lines, items, (0, 0), Some(5), 40);
         assert_eq!(top.len(), 5);
         assert_eq!(top[0], "line 0");
-        assert_eq!(top[4], "↓ 16 below");
+        assert_eq!(top[4], "↓ 16 lines below");
 
         let middle = window(&lines, items, (11, 12), Some(5), 40);
         assert_eq!(middle.len(), 5);
@@ -195,11 +180,11 @@ mod tests {
             middle.contains(&"line 11".to_string()) && middle.contains(&"line 12".to_string()),
             "the focused block must stay in view, got {middle:?}"
         );
-        assert_eq!(middle[4], "↓ 7 below", "the jobs screen never shows above");
+        assert_eq!(middle[4], "↑ 9 lines above · ↓ 7 lines below");
 
         let bottom = window(&lines, items, (19, 19), Some(5), 40);
         assert_eq!(bottom[3], "line 19");
-        assert_eq!(bottom[4], "↑ 16 above");
+        assert_eq!(bottom[4], "↑ 16 lines above");
 
         assert_eq!(
             window(&lines, items, (0, 0), None, 40).len(),
@@ -209,7 +194,7 @@ mod tests {
         let short = per_line(3);
         let items = Items {
             starts: &short,
-            noun: None,
+            noun: "line",
         };
         assert_eq!(window(&lines[..3], items, (0, 0), Some(9), 40).len(), 3);
     }
@@ -219,17 +204,17 @@ mod tests {
     #[test]
     fn the_marker_row_names_its_items_and_shows_both_directions() {
         assert_eq!(
-            marker_row(11, 19, Some("group"), 80),
+            marker_row(11, 19, "group", 80),
             "↑ 11 groups above · ↓ 19 groups below"
         );
-        assert_eq!(marker_row(0, 4, Some("task"), 80), "↓ 4 tasks below");
-        assert_eq!(marker_row(0, 1, Some("task"), 80), "↓ 1 task below");
+        assert_eq!(marker_row(0, 4, "task", 80), "↓ 4 tasks below");
+        assert_eq!(marker_row(0, 1, "task", 80), "↓ 1 task below");
         assert_eq!(
-            marker_row(3, 1, Some("task"), 80),
+            marker_row(3, 1, "task", 80),
             "↑ 3 tasks above · ↓ 1 task below"
         );
-        assert_eq!(marker_row(2, 0, Some("folder"), 80), "↑ 2 folders above");
-        assert_eq!(marker_row(0, 0, Some("group"), 80), "");
+        assert_eq!(marker_row(2, 0, "folder", 80), "↑ 2 folders above");
+        assert_eq!(marker_row(0, 0, "group", 80), "");
     }
 
     /// The tasks pane's marker counts tasks, not lines, at every scroll
@@ -279,7 +264,7 @@ mod tests {
                     &lines,
                     Items {
                         starts: &starts,
-                        noun: Some("task"),
+                        noun: "task",
                     },
                     (line, line),
                     Some(rows),
@@ -300,7 +285,7 @@ mod tests {
                     .filter(|&&(first, end)| first >= top && end >= bottom)
                     .count();
                 let marker = shown.last().unwrap();
-                let expected = marker_row(above, below, Some("task"), 200);
+                let expected = marker_row(above, below, "task", 200);
                 assert_eq!(
                     marker, &expected,
                     "rows {rows}, focus line {line}: view {view:?}"
@@ -316,14 +301,14 @@ mod tests {
     #[test]
     fn the_marker_row_shortens_itself_to_fit_the_pane() {
         assert_eq!(
-            marker_row(11, 19, Some("group"), MIN_LEFT_PANE),
+            marker_row(11, 19, "group", MIN_LEFT_PANE),
             "↑ 11 above · ↓ 19 below"
         );
-        assert_eq!(marker_row(11, 19, Some("group"), 12), "↑ 11 · ↓ 19");
+        assert_eq!(marker_row(11, 19, "group", 12), "↑ 11 · ↓ 19");
         for noun in ["group", "task", "folder"] {
             for above in [0, 1, 9, 11, 99, 111] {
                 for below in [0, 1, 9, 19, 99, 199] {
-                    let row = marker_row(above, below, Some(noun), MIN_LEFT_PANE);
+                    let row = marker_row(above, below, noun, MIN_LEFT_PANE);
                     assert!(
                         row.chars().count() <= MIN_LEFT_PANE,
                         "{row:?} is wider than {MIN_LEFT_PANE} columns"

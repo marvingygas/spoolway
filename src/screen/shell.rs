@@ -1,10 +1,9 @@
-//! Bare `spoolway`: one screen holding five tabs — dispatch, queue, routines,
-//! jobs and eval, in that order — with one terminal guard, one key reader and
-//! one quit.
+//! Bare `spoolway`: one screen holding four tabs — dispatch, queue, routines
+//! and eval, in that order — with one terminal guard, one key reader and one
+//! quit.
 //!
 //! A tab carries no logic of its own. Each one calls the code its CLI command
 //! already draws with — `commands::queue_tab`, `commands::routines_tab`,
-//! `commands::jobs_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
 //! adds only the strip across the top and the keys that move between tabs.
 //! The one exception is the dispatch tab's `enter`, which starts a
@@ -56,19 +55,12 @@ pub(crate) enum Tab {
     Dispatch,
     Queue,
     Routines,
-    Jobs,
     Eval,
 }
 
 /// Every tab, left to right — the order the strip draws them and `←`/`→`
 /// walk them in. Routines sit beside queue, the tab `s` saves them from.
-const TABS: [Tab; 5] = [
-    Tab::Dispatch,
-    Tab::Queue,
-    Tab::Routines,
-    Tab::Jobs,
-    Tab::Eval,
-];
+const TABS: [Tab; 4] = [Tab::Dispatch, Tab::Queue, Tab::Routines, Tab::Eval];
 
 impl Tab {
     /// The tab's name on the strip, in capitals so the strip reads as the
@@ -78,7 +70,6 @@ impl Tab {
             Tab::Dispatch => "DISPATCH",
             Tab::Queue => "QUEUE",
             Tab::Routines => "ROUTINES",
-            Tab::Jobs => "JOBS",
             Tab::Eval => "EVAL",
         }
     }
@@ -211,7 +202,7 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: the five tabs centred, each in a
+/// The strip itself, `width` columns wide: the four tabs centred, each in a
 /// slot one column wider than its label on either side, and `←` and `→`
 /// one space outside the first and last slot. The open tab fills its slot's
 /// spare columns with `[` and `]`, the same mark the key line gives a key;
@@ -337,7 +328,6 @@ fn host(
                 Tab::Routines => {
                     crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
-                Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, &mut writer, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out)?,
             }
         };
@@ -1006,10 +996,9 @@ mod tests {
         assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
-    // The mockup's own strip for each open tab, drawn to the 80 columns the
-    // routines tab's mockup is drawn to, column for column: every label in
-    // the column it held before the brackets, routines between queue and
-    // jobs. The bold takes no column, so it is taken out before the columns
+    // The strip for each open tab, drawn to 80 columns: every label in the
+    // column it holds before the brackets, routines between queue and eval.
+    // The bold takes no column, so it is taken out before the columns
     // are read.
     #[test]
     fn the_strip_lands_every_label_where_the_mockup_draws_it() {
@@ -1017,11 +1006,10 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "      ← [DISPATCH]       QUEUE        ROUTINES        JOBS        EVAL  →",
-                "      ←  DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL  →",
-                "      ←  DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL  →",
-                "      ←  DISPATCH        QUEUE        ROUTINES       [JOBS]       EVAL  →",
-                "      ←  DISPATCH        QUEUE        ROUTINES        JOBS       [EVAL] →",
+                "            ← [DISPATCH]       QUEUE        ROUTINES        EVAL  →",
+                "            ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →",
+                "            ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →",
+                "            ←  DISPATCH        QUEUE        ROUTINES       [EVAL] →",
             ]
         );
     }
@@ -1053,9 +1041,8 @@ mod tests {
         assert_eq!(Tab::Queue.toward(Toward::Left), Tab::Dispatch);
         assert_eq!(Tab::Queue.toward(Toward::Right), Tab::Routines);
         assert_eq!(Tab::Routines.toward(Toward::Left), Tab::Queue);
-        assert_eq!(Tab::Routines.toward(Toward::Right), Tab::Jobs);
-        assert_eq!(Tab::Jobs.toward(Toward::Left), Tab::Routines);
-        assert_eq!(Tab::Jobs.toward(Toward::Right), Tab::Eval);
+        assert_eq!(Tab::Routines.toward(Toward::Right), Tab::Eval);
+        assert_eq!(Tab::Eval.toward(Toward::Left), Tab::Routines);
         assert_eq!(Tab::Dispatch.toward(Toward::Left), Tab::Dispatch);
         assert_eq!(Tab::Eval.toward(Toward::Right), Tab::Eval);
     }
@@ -1095,7 +1082,7 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
-            first.contains("DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL"),
+            first.contains("DISPATCH       [QUEUE]       ROUTINES        EVAL"),
             "{first}"
         );
         assert!(first.contains("─ groups"), "{first}");
@@ -1153,20 +1140,17 @@ mod tests {
     #[test]
     fn every_tab_forgets_the_last_one_going_round_and_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-tab-cycle");
-        // Queue (open) → Dispatch → Queue → Routines → Jobs → Eval → Jobs →
-        // Routines → Queue → Dispatch → Queue: forward through all five, then
-        // back through all five, both with a real switch behind every arrow.
-        let frames = drive_host_raw_frames(
-            &repo,
-            "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[D\x1b[C",
-        );
+        // Queue (open) → Dispatch → Queue → Routines → Eval → Routines →
+        // Queue → Dispatch → Queue: forward through all four, then back
+        // through all four, both with a real switch behind every arrow.
+        let frames =
+            drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[C");
         const DISPATCH: &str = "dispatcher stopped";
         const QUEUE: &str = "─ groups";
         const ROUTINES: &str = "[ROUTINES]";
-        const JOBS: &str = "no jobs yet";
         let eval: &str = &format!("{TOP_LEFT}─ eval ·");
         let visited = [
-            QUEUE, DISPATCH, QUEUE, ROUTINES, JOBS, eval, JOBS, ROUTINES, QUEUE, DISPATCH, QUEUE,
+            QUEUE, DISPATCH, QUEUE, ROUTINES, eval, ROUTINES, QUEUE, DISPATCH, QUEUE,
         ];
         assert_eq!(frames.len(), visited.len(), "{frames:?}");
 
@@ -1204,9 +1188,9 @@ mod tests {
         crate::status::testutil::add(&repo, "wire", &[], None);
         let (width, height) = (100, 24);
         let _terminal = crate::screen::test_terminal((width, height));
-        // Queue (open) → Dispatch → Queue → Routines → Jobs → Eval.
-        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C");
-        let names = ["queue", "dispatch", "queue", "routines", "jobs", "eval"];
+        // Queue (open) → Dispatch → Queue → Routines → Eval.
+        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C");
+        let names = ["queue", "dispatch", "queue", "routines", "eval"];
         assert_eq!(frames.len(), names.len(), "{frames:?}");
 
         for (frame, name) in frames.iter().zip(names) {
@@ -1423,9 +1407,10 @@ mod tests {
 
     // `→` from the queue tab opens routines, reading the routine folders on
     // that visit: a routine saved with save as routine a moment earlier on
-    // the queue tab is already listed. `→` again moves on to jobs.
+    // the queue tab is already listed. `→` again moves on to eval, the tab
+    // beside it now that routines hold their own jobs.
     #[test]
-    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_jobs() {
+    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_eval() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
         std::fs::write(
             repo.pending_dir().join("audit-deps.md"),
@@ -1439,20 +1424,22 @@ mod tests {
         let frames = drive_host(&repo, "o\x1b[B\r\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL"),
+            last.contains("DISPATCH        QUEUE       [ROUTINES]       EVAL"),
             "{last}"
         );
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
+            last.contains(
+                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
+            ),
             "{last}"
         );
 
         let frames = drive_host(&repo, "\x1b[C\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("DISPATCH        QUEUE        ROUTINES       [JOBS]       EVAL"),
+            last.contains("DISPATCH        QUEUE        ROUTINES       [EVAL]"),
             "{last}"
         );
     }
@@ -2270,7 +2257,7 @@ mod tests {
     #[test]
     fn hosting_a_tab_makes_the_arrows_and_q_leave_until_it_is_dropped() {
         {
-            let _hosting = Hosting::open(Tab::Jobs);
+            let _hosting = Hosting::open(Tab::Routines);
             assert_eq!(leave_on(Key::Left), Some(Leave::Switch(Toward::Left)));
             assert_eq!(leave_on(Key::Right), Some(Leave::Switch(Toward::Right)));
             assert_eq!(leave_on(Key::Char('q')), Some(Leave::Quit));
@@ -2279,7 +2266,7 @@ mod tests {
             let strip = strip();
             assert_eq!(strip.len(), 3);
             assert_eq!(strip[0], "");
-            assert!(plain(&strip[1]).contains("[JOBS]"), "{:?}", strip[1]);
+            assert!(plain(&strip[1]).contains("[ROUTINES]"), "{:?}", strip[1]);
             assert_eq!(strip[2], "");
         }
         assert_eq!(hosted(), None);

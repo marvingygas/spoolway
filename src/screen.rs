@@ -626,8 +626,8 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// and [`crate::status::GUTTER`] rather than writing either out again, so a
 /// screen that switches over stops deciding its own spelling.
 ///
-/// Called by the queue screen's own `footer`, the jobs screen's own
-/// `jobs_footer`, the board's own key line in `src/status/mod.rs`'s
+/// Called by the queue screen's own `footer`, the job popups'
+/// `NewJobWalk::footer`, the board's own key line in `src/status/mod.rs`'s
 /// `render`, `spoolway eval`'s own `footer` in `src/eval.rs`, and
 /// [`shell`]'s own `message_frame`.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
@@ -1023,7 +1023,7 @@ mod tests {
             crate::commands::jobs_asking_panels(),
         ]
         .concat();
-        assert_eq!(popups.len(), 22, "every popup is walked");
+        assert_eq!(popups.len(), 23, "every popup is walked");
         let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
         for (name, panel) in popups {
             let drawn = panel.join("\n");

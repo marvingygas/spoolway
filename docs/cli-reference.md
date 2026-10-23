@@ -51,8 +51,8 @@ say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt
 
 ### `spoolway`
 
-At a terminal, with no other command typed, opens one screen: five tabs, dispatch, queue,
-routines, jobs and eval, in that order. It opens on the queue tab.
+At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
+routines and eval, in that order. It opens on the queue tab.
 
 ```
 spoolway
@@ -97,8 +97,8 @@ The screen checks for changes once a second. The queue tab reads the pending and
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
 with no title, as wide and as tall as the margin allows, from a `spoolway dispatch` child
-it starts and stops. The key line draws under the box, the same as under the queue, routines,
-jobs and eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens
+it starts and stops. The key line draws under the box, the same as under the queue, routines
+and eval screens. The queue and eval tabs draw the queue and eval screens
 described below; the routines tab draws the routine list, see
 [Routines](planning.md#routines). Typed bare, `spoolway queue`, `spoolway jobs` and `spoolway
 eval` print their usage or their tables instead.
@@ -798,24 +798,10 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
-Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writes a cron job.
-The left pane is titled `jobs` and the right pane `details`. While a new job is being written,
-the right pane is titled `new job`.
-
-<img src="screenshots/jobs.png" alt="the jobs screen">
-
-| Key | What it does |
-|---|---|
-| `n` | Write a new job: pick the routine, type the schedule, pick the pipeline |
-| `o` | Open the options menu of the highlighted job, titled with its name |
-
-The options menu offers these items for the highlighted job, in this order:
-
-| Item | What it does |
-|---|---|
-| `edit` | Edit the job through the same three panels |
-| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it |
-| `delete` | Delete the job, after a popup whose one answer is `delete` |
+Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
+menu offers `new job`, `edit job`, `pause job` or `resume job`, and `delete job`. A job whose
+routine is not a listed one gets a row of its own under the routines, whose menu offers
+`edit job` and `delete job`.
 
 See [Jobs](jobs.md).
 

@@ -1,8 +1,8 @@
 //! Which editor the TUI's open runs, and how it is started.
 //!
-//! Every open in the TUI — the board's, the pending screen's, the routines
-//! pane's and the jobs picker's — goes through [`open`], so the four can never
-//! resolve different editors. `spoolway config edit` does not: it waits for
+//! Every open in the TUI — the board's, the pending screen's and the
+//! routines pane's — goes through [`open`], so the three can never resolve
+//! different editors. `spoolway config edit` does not: it waits for
 //! the editor and validates afterwards, so it keeps its own `$VISUAL`,
 //! `$EDITOR`, `vi` order in `commands::config`.
 //!

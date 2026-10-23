@@ -19,7 +19,7 @@ Create YAML pipelines that mix agents and commands, cloud and local models. Plan
 however you like, then cut spoolway tasks and assign each to a suitable pipeline.
 Measurable, comparable, repeatable.
 
-<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
+<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines tab" width="100%">
 
 Supported providers:
 
@@ -129,7 +129,7 @@ of work. See **[Tasks](docs/tasks.md)**.
 ### 4. Queue
 
 `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
-`enter` to queue it. The tab strip runs dispatch, queue, routines, jobs and eval, and `←` and
+`enter` to queue it. The tab strip runs dispatch, queue, routines and eval, and `←` and
 `→` move between them.
 
 <img src="docs/screenshots/queue.png" alt="the queue tab" width="100%">
@@ -230,10 +230,11 @@ A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`:
 [jobs.nightly-audit]
 schedule = "0 3 * * 1-5"   # weekdays at 03:00, local time
 pipeline = "impl_fast"
-routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
+routine  = "nightly"       # a top-level folder under .spoolway/routines/
 ```
 
-<img src="docs/screenshots/jobs.png" alt="the jobs tab" width="100%">
+The routines tab shows a routine's job above its tasks. Press `o` on the routine to edit,
+pause or delete it.
 
 ## Trials
 

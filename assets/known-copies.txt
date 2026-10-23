@@ -86,6 +86,7 @@ skill claude/spoolway-config/SKILL.md f9f58d90
 skill claude/spoolway-config/SKILL.md a75ed70d
 skill claude/spoolway-config/SKILL.md 0aae3845
 skill claude/spoolway-config/SKILL.md 86d6b2a5
+skill claude/spoolway-config/SKILL.md 4b02bf92
 skill claude/spoolway-doctor/SKILL.md 51b1e72b
 skill claude/spoolway-doctor/SKILL.md e56abc6f
 skill claude/spoolway-doctor/SKILL.md f7d3e04f
@@ -212,6 +213,7 @@ skill codex/spoolway-config/SKILL.md d654bab7
 skill codex/spoolway-config/SKILL.md d916dc32
 skill codex/spoolway-config/SKILL.md 88b0c79b
 skill codex/spoolway-config/SKILL.md f6e37fb2
+skill codex/spoolway-config/SKILL.md fe4de86f
 skill codex/spoolway-doctor/SKILL.md 3fd8b216
 skill codex/spoolway-doctor/SKILL.md de788d4c
 skill codex/spoolway-doctor/SKILL.md 04175029
@@ -304,6 +306,7 @@ skill pi/spoolway-config/SKILL.md 4ae4b32c
 skill pi/spoolway-config/SKILL.md 9e6bfc54
 skill pi/spoolway-config/SKILL.md fe7ca8ca
 skill pi/spoolway-config/SKILL.md 043e42a4
+skill pi/spoolway-config/SKILL.md a8ece573
 skill pi/spoolway-doctor/SKILL.md 2f0fe32b
 skill pi/spoolway-doctor/SKILL.md 83e779a1
 skill pi/spoolway-doctor/SKILL.md 402d519f
