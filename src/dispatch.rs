@@ -8619,8 +8619,9 @@ fn prepare_boot(
     // name would make the second attempt reopen the first one's transcript and
     // bill its tokens twice.
     //
-    // A task coming back from `blocked` to the step it stopped on is the one
-    // exception, and it is not a retry — it is the same attempt, continued. Its
+    // A task coming back from `blocked` to a step that declares `session: true`
+    // is the one exception, and it is not a retry — it is the same attempt,
+    // continued. On any other step it opens fresh, like every visit. Its
     // lane had read the task, walked the tree and often finished the work
     // before something outside it got in the way, and a fresh session pays for
     // all of that again to arrive back where that one already was. So the
@@ -8633,9 +8634,7 @@ fn prepare_boot(
     // a task back to where it stopped, and the step's own standing
     // `session:` — its prompt already holds one on this task, still under
     // the declared size. Only for a kind whose resume flag was established
-    // against the real binary, either way. The one-shot flag is honoured
-    // only on a step that declares `session: true`; any other step opens
-    // fresh on a resume, as it does on every visit.
+    // against the real binary, either way.
     let adapter = crate::agent::adapter(&profile.kind);
     let resuming = task.front.resume.as_deref() == Some(step.id.as_str());
     // A restart is the one road that ends the step's conversation instead of
@@ -8664,12 +8663,12 @@ fn prepare_boot(
     // carries what the old lane knew; a park leaves its Handoff and commits.
     let resolved = crate::models::resolve(&repo.config.models, &model);
     let (price, lifetime) = (resolved.price, resolved.lifetime);
-    //
-    // Only a step that declares `session: true` has a conversation worth
-    // walking back into. Any other step opens fresh on a resume, as it does
-    // on every visit, so the one-shot flag is still spent but finds nothing
-    // to continue. The unattended `blocked` step takes its `session:` from
-    // `dispatch.blocked_session`, so it is covered by the same test.
+    // The one-shot flag is honoured only on a step that declares
+    // `session: true`: any other step has no conversation worth walking back
+    // into and opens fresh on a resume, as it does on every visit. No session
+    // is looked up for it, and `finish_launch_bookkeeping` still spends the
+    // flag. The unattended `blocked` step takes its `session:` from
+    // `unattended.blocked_session`, so the same `step.session` check covers it.
     let one_shot = (resuming && !restarting && step.session)
         .then(|| lane_session_in(repo, ledger, &name, &key))
         .flatten()

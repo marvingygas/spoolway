@@ -169,7 +169,7 @@ must "one cloud lane at a time"  "$SPOOLWAY" config set agents.claude.concurrenc
 must "the model's window"        "$SPOOLWAY" config set "models.$MODEL.context_window" 200000
 must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_reuse_ctx 90
 
-# Four visits by one prompt, with a gate after each of the first three.
+# Five visits by one prompt, with a gate after each of them.
 #
 # The gate is the sequencing, and it is the only way to get one: the decision
 # under test is taken when the next lane starts, in the same pass that banks the
@@ -178,7 +178,7 @@ must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_re
 # `paused` with the lane's spend banked, the suite waits a real while, and
 # `spoolway resume` starts the next lane.
 cat > .spoolway/pipelines/warmth.yml <<YAML
-# Written by scripts/e2e/suites/warmth.sh. Four steps, one prompt, three gates.
+# Written by scripts/e2e/suites/warmth.sh. Five steps, one prompt, five gates.
 steps:
   - id: first
     description: Write the note, and stop for a person.

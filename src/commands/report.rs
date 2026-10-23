@@ -2086,7 +2086,10 @@ pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
 /// counts start again rather than walking the task into the same wall.
 ///
 /// The lane that stopped is marked to be *continued* rather than replaced,
-/// when the task is going back to where it actually stopped. Whatever was in
+/// when the task is going back to where it actually stopped. That holds on a
+/// step that declares `session: true`; on any other step the key this sets
+/// still leads to a fresh conversation, since such a step opens fresh on
+/// every visit. Whatever was in
 /// the way was outside that lane's control — that is what a block is — so its
 /// work stands, and it is often work that was already finished when it stopped.
 /// A task being sent somewhere else has been rerouted rather than resumed, and
@@ -3117,9 +3120,10 @@ fn back_onto_its_step(
 /// in `src/dispatch.rs` is what spends both once that answer is known, the
 /// same moment it spends `resume`.
 fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task, step: String) -> Result<()> {
-    // A continuing lane picks up its own session rather than opening a fresh
-    // one — the same one-shot flag a real resume sets, so the launch cannot
-    // tell a park from a block apart any other way.
+    // On a step that declares `session: true` a continuing lane picks up its
+    // own session rather than opening a fresh one; any other step opens
+    // fresh. Either way it is the same one-shot flag a real resume sets, so
+    // the launch cannot tell a park from a block apart any other way.
     task.front.resume = Some(step.clone());
     task.set_stage_unbanked(&step, "put back from the board");
     task.save()?;
@@ -3280,9 +3284,10 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
 /// runs a command has no conversation, so there the command is stopped and
 /// the step runs again from the start.
 ///
-/// Every other road back onto a step continues the conversation the step
-/// already has, so a conversation that is itself the problem is walked back
-/// into by a resume and by the next retry alike. On a step that holds a
+/// On a step that declares `session: true`, every other road back onto it
+/// continues the conversation the step already has, so a conversation that is
+/// itself the problem is walked back into by a resume and by the next retry
+/// alike. Any other step opens fresh on a resume anyway. On a step that holds a
 /// conversation, this writes `restart:` for the dispatcher's next launch of
 /// the step to read. Either way it sends the task back to the step it was
 /// already on.

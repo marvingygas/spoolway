@@ -324,9 +324,10 @@ pub struct Frontmatter {
     /// The step to start over on, for exactly one launch: a fresh
     /// conversation even where the step declares `session: true`.
     ///
-    /// Every other road onto a step continues a conversation the step
-    /// already has, so a conversation that cannot work is walked back into
-    /// by resume and by the next retry alike. This one ends it. `prepare_boot`
+    /// On a `session: true` step, every other road onto it continues a
+    /// conversation the step already has, so a conversation that cannot work
+    /// is walked back into by resume and by the next retry alike. This one
+    /// ends it. Any other step opens fresh on a resume anyway. `prepare_boot`
     /// reads it as `restarting` when it names the step being started, skips
     /// both session lookups, and briefs the lane as if the step had never
     /// run, plus a sentence saying the worktree is not clean.
