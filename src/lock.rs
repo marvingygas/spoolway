@@ -839,8 +839,9 @@ pub(crate) fn is_same_process(pid: u32, recorded: &str) -> bool {
 /// (`Runs::wrapper_body` in `command_step.rs`) computes the same field in
 /// shell and writes it to the run's pid file, and [`is_same_process`] compares
 /// the two. Where the shell cannot (macOS), `Runs::fill_in_start_time` writes
-/// this function's value into the file instead. Changing the unit or the source here without changing that script
-/// makes every live command run read as interrupted.
+/// this function's value into the file instead. Changing the unit or the
+/// source here without changing that script makes every live command run read
+/// as interrupted.
 #[cfg(target_os = "linux")]
 pub(crate) fn started_at(pid: u32) -> Option<String> {
     // Field 22 of /proc/<pid>/stat, in clock ticks since boot. Counted from the
