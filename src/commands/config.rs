@@ -196,10 +196,10 @@ fn shadow_note(
 /// setup folder (`.spoolway/` in repo mode, a workspace's `config/` in home
 /// mode), the plans folder, the private layer's `local/` (repo mode only —
 /// home mode has none, since the whole setup is already private), the
-/// override layer's `overrides/`, the routines folder and both cron-job stores — plus this
-/// checkout's own workspace and every workspace on the machine, so the
-/// skill can propose `spoolway init --workspace <name>` without building a
-/// path by hand.
+/// override layer's `overrides/`, the routines folder and both cron-job
+/// stores — plus this checkout's own workspace and every workspace on the
+/// machine, so the skill can propose `spoolway init --workspace <name>`
+/// without building a path by hand.
 ///
 /// This is what `spoolway-config`'s "never reach past" rule names, and the
 /// skill reads every path from here instead of building them itself, so a
@@ -302,9 +302,8 @@ struct JobPaths {
 ///
 /// Every field but `mode` and `workspaces` is `None`/empty only in
 /// [`ConfigPaths::unclaimed`]: an ordinary project, repo mode or home mode,
-/// fills in all of them, so a project that already has one keeps every value
-/// `config path` printed for it before — only an unclaimed checkout sees the
-/// `null`s.
+/// fills in all of them, so a project keeps every value `config path`
+/// printed for it before — only an unclaimed checkout sees the `null`s.
 #[derive(Debug, PartialEq, Serialize)]
 struct ConfigPaths {
     mode: Option<&'static str>,
