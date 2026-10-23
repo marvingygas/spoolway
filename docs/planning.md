@@ -102,9 +102,9 @@ writes a task into the pending directory works too.
 
 The plan page is one self-contained HTML file. A person reads it once to approve the shape.
 The binary never reads it. It lives outside the checkout, in the `plans:` folder that
-`spoolway config path` prints. In repo mode that is
-`~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`. In home mode it is the workspace's own
-`plans/`, shared by every clone of the workspace.
+`spoolway config path` prints, in repo mode and in home mode alike. A page is at
+`<plans>/<YYYY-MM-DD>-<slug>.html`, where `<plans>` is that `plans:` line. In home mode the folder
+is the workspace's own `plans/`, shared by every clone of the workspace.
 
 Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
 the one sentence a person can approve or reject, then two or three sentences on what is true
@@ -128,7 +128,7 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Non-goals | Name the tempting wrong thing next door: the refactor, the extra endpoint, the framework swap. |
 | Reference paths | Point at files and examples. Do not paste prose that will go stale. |
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
-| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `~/.spoolway/<label>-<id>/plans/<group>/` first, and the task links the copy. |
+| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `<plans>/<group>/` first, where `<plans>` is the `plans:` line of `spoolway config path`,, and the task links the copy. |
 | Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
 | Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Work that does not chain goes in a group of its own. |
 
