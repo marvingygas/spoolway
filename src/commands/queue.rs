@@ -6599,7 +6599,9 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 ///
 /// A reading looks at the pending, queue, archive and plans directories, the
 /// files in the first two, the `plans-since` stamp, and the checkout's
-/// `HEAD`. [`crate::watch::Stamp`] records all of them before each reading,
+/// `HEAD`. In home mode it also looks at the workspace's `project.toml` and
+/// every other clone's pending, queue and archive directories, since a task
+/// there takes a plan row off this screen. [`crate::watch::Stamp`] records all of them before each reading,
 /// and a tick whose stamp equals the last settled one returns [`Attempt::Unchanged`] without starting a
 /// process, reading a file or building a snapshot. The reader keeps the
 /// snapshot it already holds, so [`refresh_from_reader`] sees no new
@@ -6617,14 +6619,37 @@ struct IdleCheck {
 impl IdleCheck {
     fn read(&mut self, repo: &Repo, cwd: &std::path::Path) -> Attempt<QueueSnapshot> {
         let head = self.branch.head_path(cwd);
+        // The other clones' folders decide which plan pages are listed. A
+        // list of them that will not read stamps none: the reading then
+        // names that error, and the workspace's `project.toml`, stamped
+        // below, moves once it is mended.
+        let others = repo.other_clone_homes().unwrap_or_default();
+        let deep: Vec<std::path::PathBuf> = [repo.pending_dir(), repo.queue_dir()]
+            .into_iter()
+            .chain(others.iter().flat_map(|home| {
+                [
+                    home.join(crate::config::PENDING_DIR),
+                    home.join(crate::config::QUEUE_DIR),
+                ]
+            }))
+            .collect();
         let stamp = crate::watch::Stamp::capture(
-            &[repo.pending_dir(), repo.queue_dir()],
+            &deep,
             &[
                 repo.archive_dir(),
                 repo.plans_dir(),
                 repo.plans_since_file(),
             ]
             .into_iter()
+            .chain(
+                others
+                    .iter()
+                    .map(|home| home.join(crate::config::ARCHIVE_DIR)),
+            )
+            .chain(
+                repo.workspace_dir()
+                    .map(|workspace| workspace.join(crate::repo::BINDING_FILE)),
+            )
             .chain(head)
             .collect::<Vec<_>>(),
         );
@@ -14398,6 +14423,71 @@ mod tests {
             matches!(idle.read(&repo, &repo.root), Attempt::Fresh(_)),
             "a new plan page is read again"
         );
+    }
+
+    /// In a workspace, [`IdleCheck::read`] stamps the other clones' folders:
+    /// with nothing changed in any clone it reads no task file, and a task
+    /// another clone writes naming a listed plan is read on the next tick and
+    /// takes that plan's row off this clone's screen.
+    #[test]
+    fn an_idle_reading_watches_the_other_clones_folders() {
+        let (shop, shop_2, _root_guard) =
+            crate::commands::testutil::two_clones("queue-idle-clones");
+        let page = shop.plans_dir().join("2026-10-20-search.html");
+        std::fs::write(&page, "<html></html>").unwrap();
+        let other = write_pending(&shop, "wire", &task_text("wire", "group: demo\n", BODY));
+        let mut idle = IdleCheck::default();
+        let file_reads = || super::pending::pending_reads_here_under(&shop.home);
+        for path in [
+            shop_2.pending_dir(),
+            shop_2.queue_dir(),
+            shop_2.archive_dir(),
+            shop.pending_dir(),
+            shop.queue_dir(),
+            shop.archive_dir(),
+            shop_2.plans_dir(),
+            shop_2.plans_since_file(),
+            shop_2
+                .workspace_dir()
+                .unwrap()
+                .join(crate::repo::BINDING_FILE),
+            other,
+        ] {
+            age(&path);
+        }
+        if let Some(head) = idle.branch.head_path(&shop_2.root) {
+            age(&head);
+        }
+        let plan_rows = |attempt: Attempt<QueueSnapshot>| match attempt {
+            Attempt::Fresh(snapshot) => snapshot
+                .groups
+                .iter()
+                .filter(|group| group.state == GroupState::Plan)
+                .count(),
+            _ => panic!("expected a fresh reading"),
+        };
+
+        assert_eq!(plan_rows(idle.read(&shop_2, &shop_2.root)), 1);
+        let reads = file_reads();
+        assert!(reads > 0, "the other clone's task is read the first time");
+        for _ in 0..3 {
+            assert!(
+                matches!(idle.read(&shop_2, &shop_2.root), Attempt::Unchanged),
+                "nothing changed"
+            );
+        }
+        assert_eq!(file_reads(), reads, "an idle reading must read no file");
+
+        write_pending(
+            &shop,
+            "index",
+            &task_text(
+                "index",
+                &format!("group: search\nplan: {}\n", page.display()),
+                BODY,
+            ),
+        );
+        assert_eq!(plan_rows(idle.read(&shop_2, &shop_2.root)), 0);
     }
 
     /// A file that breaks while the queue tab stays open is named when the

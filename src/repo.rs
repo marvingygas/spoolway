@@ -676,6 +676,56 @@ impl Repo {
         dispatchers.parent().map(Path::to_path_buf)
     }
 
+    /// The dispatcher folder of every other clone in this project's
+    /// workspace, as its `project.toml` lists them, and none in repo mode.
+    ///
+    /// The plans folder is the workspace's, so whether a page still waits for
+    /// tasks depends on every clone's pending, queue and archive folders, not
+    /// only this one's. A `project.toml` that is missing answers no other
+    /// clone, since this checkout found its workspace through that file and a
+    /// workspace without it lists nobody. One that will not read or parse is
+    /// an error: answering no clones then would show a page as having no
+    /// tasks while another clone's tasks still link to it.
+    pub(crate) fn other_clone_homes(&self) -> Result<Vec<PathBuf>> {
+        let Some(workspace) = self.workspace_dir() else {
+            return Ok(Vec::new());
+        };
+        let record = workspace.join(BINDING_FILE);
+        let raw = match std::fs::read_to_string(&record) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "reading {}, the workspace's list of clones",
+                        record.display()
+                    )
+                });
+            }
+        };
+        let toml: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+            format!(
+                "parsing {}, the workspace's list of clones",
+                record.display()
+            )
+        })?;
+        let mut homes: Vec<PathBuf> = toml
+            .clones
+            .into_iter()
+            .map(|clone| {
+                WorkspaceClone {
+                    workspace: workspace.clone(),
+                    dispatcher: clone.dispatcher,
+                }
+                .home_dir()
+            })
+            .filter(|home| *home != self.home)
+            .collect();
+        homes.sort();
+        homes.dedup();
+        Ok(homes)
+    }
+
     /// The folder `plans/` and `plans-since` sit in: the workspace in home
     /// mode, so every clone lists the same pages under one cutoff, and
     /// [`Repo::home`] in repo mode.

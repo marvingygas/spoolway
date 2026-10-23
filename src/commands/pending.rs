@@ -458,9 +458,98 @@ fn oldest_clone_stamp(repo: &Repo) -> Option<u128> {
         .min()
 }
 
-/// Every plan page that no pending, queued or archived task in `groups`
-/// names in `plan:` and that was created after the `plans-since` stamp,
-/// newest first.
+/// Every `plan:` the pending, queued and archived tasks of the other clones
+/// in `repo`'s workspace name, and none in repo mode — see
+/// [`Repo::other_clone_homes`].
+///
+/// A thin wrapper over [`plans_named_by_other_clones_in`], holding its
+/// [`ListFrontCache`] in a static the same way [`list_groups_and_skipped`]
+/// holds its own, so every reload in the process shares one.
+pub(crate) fn plans_named_by_other_clones(
+    repo: &Repo,
+) -> Result<std::collections::HashSet<String>> {
+    static CACHE: OnceLock<Mutex<ListFrontCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut parsed = 0; // Nothing in production reads this.
+    let Ok(mut guard) = cache.lock() else {
+        // A poisoned lock costs this one call its cache, as it does in
+        // `list_groups_and_skipped`.
+        return plans_named_by_other_clones_in(repo, &mut HashMap::new(), &mut parsed);
+    };
+    plans_named_by_other_clones_in(repo, &mut guard, &mut parsed)
+}
+
+/// [`plans_named_by_other_clones`]'s own logic, taking the cache and the
+/// parse counter as arguments for the reason [`list_groups_in`] does.
+///
+/// A task counts by the rule [`list_groups_in`] lists this clone's by: a
+/// pending task needs a `group:` and an `id:`, a queued one a `group:`, and
+/// an archived one a `group:` in the archive index. So a page leaves every
+/// clone's screen at the same moment, whichever clone the task is in.
+///
+/// Pending and queue files go through [`list_front_in`], so a file whose
+/// bytes did not change is not parsed again, and the archive is read from
+/// its index alone. A file that will not read is passed over, as this
+/// clone's own listing passes one over. A folder that is missing has no
+/// tasks; one that exists and will not list is an error naming it, since
+/// a page could otherwise read as having no tasks while that folder's tasks
+/// still link to it.
+pub(crate) fn plans_named_by_other_clones_in(
+    repo: &Repo,
+    front_cache: &mut ListFrontCache,
+    parsed: &mut usize,
+) -> Result<std::collections::HashSet<String>> {
+    let mut named = std::collections::HashSet::new();
+    let mut seen_paths: std::collections::HashSet<PathBuf> = Default::default();
+    for home in repo.other_clone_homes()? {
+        for (dir, needs_id) in [
+            (home.join(crate::config::PENDING_DIR), true),
+            (home.join(crate::config::QUEUE_DIR), false),
+        ] {
+            if !dir.exists() {
+                continue;
+            }
+            for path in md_files(&dir)? {
+                // Counted here, the one line that actually touches the disk
+                // — see [`PENDING_READS`].
+                #[cfg(test)]
+                if let Ok(mut reads) = PENDING_READS.lock() {
+                    reads.push((path.clone(), std::thread::current().id()));
+                }
+                let Ok(doc) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                seen_paths.insert(path.clone());
+                let Some(front) = list_front_in(&path, &doc, front_cache, parsed) else {
+                    continue;
+                };
+                let listed = front_str(&front, "group").is_some()
+                    && (!needs_id || front_str(&front, "id").is_some());
+                if let Some(plan) = front_str(&front, "plan").filter(|_| listed) {
+                    named.insert(plan);
+                }
+            }
+        }
+        let archive = home.join(crate::config::ARCHIVE_DIR);
+        if archive.exists() {
+            named.extend(
+                crate::archive_index::read_at(&archive)?
+                    .into_iter()
+                    .filter(|entry| !entry.group.trim().is_empty())
+                    .filter_map(|entry| {
+                        Some(entry.plan?.trim().to_string()).filter(|plan| !plan.is_empty())
+                    }),
+            );
+        }
+    }
+    front_cache.retain(|path, _| seen_paths.contains(path));
+    Ok(named)
+}
+
+/// Every plan page that no pending, queued or archived task names in
+/// `plan:` and that was created after the `plans-since` stamp, newest
+/// first. The tasks are those in `groups`, and in home mode every other
+/// clone's too — see [`plans_named_by_other_clones`].
 ///
 /// Only the folder's file names and creation times are read, never a page.
 /// Only `.html` files directly inside `plans/` count. A page whose creation
@@ -473,6 +562,9 @@ fn oldest_clone_stamp(repo: &Repo) -> Option<u128> {
 /// pending and queue files are parsed again only when their bytes change,
 /// and the archive comes from its index. A task with no `group:` is not in
 /// that listing, so a page only it names still counts as having no task.
+///
+/// An error when `plans/` will not list, or when another clone's task
+/// folders will not, since a page cannot then be shown to have no tasks.
 pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<PlanPage>> {
     let plans = repo.plans_dir();
     let mut pages: Vec<PathBuf> = std::fs::read_dir(&plans)
@@ -487,10 +579,12 @@ pub(crate) fn plans_without_tasks(repo: &Repo, groups: &[Group]) -> Result<Vec<P
         return Ok(Vec::new());
     }
 
+    let elsewhere = plans_named_by_other_clones(repo)?;
     let named: std::collections::HashSet<&str> = groups
         .iter()
         .flat_map(|group| &group.tasks)
         .filter_map(|task| task.plan.as_deref())
+        .chain(elsewhere.iter().map(String::as_str))
         .collect();
 
     let mut out: Vec<PlanPage> = pages
@@ -557,16 +651,18 @@ pub(crate) fn list_rows(repo: &Repo) -> Result<Rows> {
     })
 }
 
-/// Every file [`list_groups_in`] has read the bytes of so far in this
-/// process, with the thread that read it — test-only, the same shape as
-/// [`crate::status::QUEUE_READS`] and [`crate::repo::PROCESS_RUNS`]: scoped
-/// by path so a test counts only its own fixture, and by thread so it can
-/// tell a key's own thread's reads from a reader thread's.
+/// Every file [`list_groups_in`] and [`plans_named_by_other_clones_in`] have
+/// read the bytes of so far in this process, with the thread that read it —
+/// test-only, the same shape as [`crate::status::QUEUE_READS`] and
+/// [`crate::repo::PROCESS_RUNS`]: scoped by path so a test counts only its
+/// own fixture, and by thread so it can tell a key's own thread's reads from
+/// a reader thread's.
 #[cfg(test)]
 static PENDING_READS: Mutex<Vec<(PathBuf, std::thread::ThreadId)>> = Mutex::new(Vec::new());
 
-/// How many files under `dir` [`list_groups_in`] has read so far on the
-/// calling thread — see [`PENDING_READS`].
+/// How many files under `dir` [`list_groups_in`] and
+/// [`plans_named_by_other_clones_in`] have read so far on the calling thread
+/// — see [`PENDING_READS`].
 #[cfg(test)]
 pub(crate) fn pending_reads_here_under(dir: &Path) -> usize {
     let here = std::thread::current().id();
@@ -2113,6 +2209,111 @@ mod tests {
 
         assert!(names(&repo).is_empty());
         assert!(read_stamp(&repo.plans_since_file()).unwrap() > 1);
+    }
+
+    /// A page no task names is listed in both clones, and a pending, a
+    /// queued or an archived task in `shop` naming it takes it off `shop-2`'s
+    /// listing too.
+    #[test]
+    fn a_task_in_one_clone_takes_the_plan_off_every_clone() {
+        use crate::archive_index::testutil::*;
+        let (shop, shop_2, _root) = crate::commands::testutil::two_clones("pending-plans-clones");
+        let pages = plan_pages(
+            &shop,
+            &[
+                "2026-01-01-pending.html",
+                "2026-01-02-queued.html",
+                "2026-01-03-archived.html",
+                "2026-01-04-search.html",
+            ],
+        );
+        let all = ["search", "archived", "queued", "pending"];
+        assert_eq!(names(&shop), all);
+        assert_eq!(names(&shop_2), all);
+
+        let task =
+            |id: &str, plan: &str| format!("---\nid: {id}\ngroup: g\nplan: {plan}\n---\nbody\n");
+        std::fs::write(shop.pending_dir().join("p.md"), task("p", &pages[0])).unwrap();
+        std::fs::write(shop.queue_dir().join("q.md"), task("q", &pages[1])).unwrap();
+        archive(&shop, "a", &format!("group: g\nplan: {}\n", pages[2]));
+
+        assert_eq!(names(&shop), ["search"]);
+        assert_eq!(names(&shop_2), ["search"]);
+    }
+
+    /// A second read with nothing changed in the other clone parses no task
+    /// file there, counted the way `list_groups_in` counts its own.
+    #[test]
+    fn a_second_read_of_the_other_clones_parses_nothing() {
+        use crate::archive_index::testutil::*;
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-parse");
+        let task = |id: &str| format!("---\nid: {id}\ngroup: g\nplan: /x/{id}.html\n---\nb\n");
+        std::fs::write(shop.pending_dir().join("p.md"), task("p")).unwrap();
+        std::fs::write(shop.queue_dir().join("q.md"), task("q")).unwrap();
+        archive(&shop, "a", "group: g\nplan: /x/a.html\n");
+        let mut cache = ListFrontCache::new();
+
+        let mut parsed = 0;
+        let named = plans_named_by_other_clones_in(&shop_2, &mut cache, &mut parsed).unwrap();
+        assert_eq!(parsed, 2);
+        let mut named: Vec<String> = named.into_iter().collect();
+        named.sort();
+        assert_eq!(named, ["/x/a.html", "/x/p.html", "/x/q.html"]);
+
+        let mut parsed = 0;
+        plans_named_by_other_clones_in(&shop_2, &mut cache, &mut parsed).unwrap();
+        assert_eq!(parsed, 0);
+    }
+
+    /// Another clone's task folder that will not list stops the plan rows
+    /// with an error naming it, and the groups are still listed.
+    #[test]
+    fn another_clones_unreadable_folder_is_named_and_the_groups_stay() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-broken");
+        plan_pages(&shop, &["2026-01-01-search.html"]);
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        // A file where the folder should be: `read_dir` fails on it the same
+        // way it fails on a folder this user cannot read.
+        std::fs::write(&pending, "").unwrap();
+        std::fs::write(
+            shop_2.pending_dir().join("wire.md"),
+            "---\nid: wire\ngroup: cart\n---\nbody\n",
+        )
+        .unwrap();
+
+        let rows = list_rows(&shop_2).unwrap();
+
+        let err = rows.plans_error.expect("the read error is handed back");
+        assert!(err.contains(&pending.display().to_string()), "{err}");
+        let listed: Vec<&str> = rows.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(listed, ["cart"]);
+    }
+
+    /// A workspace whose `project.toml` lists nobody but this clone, or is
+    /// missing, has no other clone to read; one that will not parse is an
+    /// error naming it.
+    #[test]
+    fn the_workspace_list_of_clones_decides_what_is_read() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-list");
+        let record = shop
+            .workspace_dir()
+            .unwrap()
+            .join(crate::repo::BINDING_FILE);
+        assert_eq!(
+            shop_2.other_clone_homes().unwrap(),
+            std::slice::from_ref(&shop.home)
+        );
+
+        std::fs::write(&record, "id = \"ws\"\nclones = []\n").unwrap();
+        assert!(shop_2.other_clone_homes().unwrap().is_empty());
+        std::fs::remove_file(&record).unwrap();
+        assert!(shop_2.other_clone_homes().unwrap().is_empty());
+        std::fs::write(&record, "not toml").unwrap();
+        let err = format!("{:#}", shop_2.other_clone_homes().unwrap_err());
+        assert!(err.contains(&record.display().to_string()), "{err}");
     }
 
     /// Only an exact path counts: a task naming another folder's page of the
