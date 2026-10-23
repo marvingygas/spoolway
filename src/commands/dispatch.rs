@@ -2029,6 +2029,33 @@ mod tests {
         assert!(message.contains("Nothing was dispatched."), "{message}");
     }
 
+    /// One task's chain-base mismatch does not stop the dispatcher from
+    /// starting: the running pass holds that one task with the "A chain has
+    /// one base" line, and every other task goes on.
+    #[test]
+    fn a_chain_base_mismatch_does_not_stop_the_dispatcher_from_starting() {
+        let (repo, _root_guard) = fixture("bases-chain-mismatch-starts");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
+        crate::commands::testutil::add(&repo, "cart-receipts", &["cart-discounts"]);
+        let mut discounts = repo.task("cart-discounts").unwrap();
+        discounts.front.base = Some("main".to_string());
+        discounts.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let started = check_task_bases(&repo, &tasks);
+        assert!(started.is_ok(), "{:#}", started.unwrap_err());
+
+        let mut remote_cache = crate::dispatch::RemoteCache::new();
+        let held = crate::dispatch::base_problem(
+            &repo,
+            &repo.task("cart-discounts").unwrap(),
+            &mut remote_cache,
+        )
+        .expect("the running pass still holds the mismatched task");
+        assert!(held.1.contains("A chain has one base."), "{}", held.1);
+    }
+
     /// A cut task with no dependency whose `starts_from:` differs from its
     /// `base:` starts the dispatcher: a person may set where a task starts
     /// apart from where it lands, so the two differing is no edit to refuse.
