@@ -18,8 +18,8 @@ directory — see `SKILL.md`'s step 7 — never markup appended here.
 
 **`<plans>` is the folder on the `plans:` line of `spoolway config path`, and never a path built
 from the repo's name.** A folder named after the repo alone is one no lane can read, so every task
-cut from the page would have to copy it in first. Run `spoolway config path` and take the folder
-from its `plans:` line. It names the right folder in repo mode and in home mode.
+cut from the page would have to copy it in first. That line names the right folder in repo
+mode and in home mode.
 
 **The date belongs to the filename alone.** The slug is what is left once it comes off —
 `e2e-runtime`, never `2026-09-19-e2e-runtime`. That is the string the page carries and the string
