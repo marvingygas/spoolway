@@ -22328,6 +22328,27 @@ mod tests {
         assert!(!sent.contains("a person has cleared it"), "{sent}");
         let task = reload(&path);
         assert_eq!(task.front.resume, None, "spent by the launch");
+
+        // The lane goes away and a later arrival launches the step again, as a
+        // plain visit and not a second resume. The arrival is what zeroes
+        // `attempts`, so the test zeroes it.
+        let mut task = reload(&path);
+        task.front.attempts = 0;
+        task.save().unwrap();
+        let again = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &session_pipelines(), &again)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(again.did("start"), ["start demo · implement"]);
+        assert_ne!(
+            load_lane_records(&repo)["demo · implement"].session,
+            session,
+            "the second launch is its own conversation"
+        );
+        let sent = again.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(!sent.contains("its changes are still here"), "{sent}");
+        assert!(!sent.contains("a person has cleared it"), "{sent}");
     }
 
     /// The park road onto the same kind of step: a fresh conversation with
@@ -22360,6 +22381,30 @@ mod tests {
         let task = reload(&path);
         assert_eq!(task.front.parked_from, None);
         assert_eq!(task.front.resume, None);
+
+        // The lane goes away and a later arrival launches the step again, as a
+        // plain visit and not a second park. The arrival is what zeroes
+        // `attempts`, so the test zeroes it.
+        let mut task = reload(&path);
+        task.front.attempts = 0;
+        task.save().unwrap();
+        let again = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &session_pipelines(), &again)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(again.did("start"), ["start demo · implement"]);
+        assert_ne!(
+            load_lane_records(&repo)["demo · implement"].session,
+            session,
+            "the second launch is its own conversation"
+        );
+        let sent = again.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(!sent.contains("its changes are still here"), "{sent}");
+        assert!(
+            !sent.contains("A person stopped this lane's turn"),
+            "{sent}"
+        );
     }
 
     /// The counterpart on a `session: true` step: the one-shot resume still
