@@ -1490,8 +1490,8 @@ fn routine_tasks(path: &Path) -> Vec<(String, String)> {
     }
 }
 
-/// The detail pane's `Next:` value.
-fn detail_next(job: &Job) -> String {
+/// The `Next:` value, on this tab's detail pane and on the routines tab's.
+pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
         return "paused".to_string();
     }
@@ -1504,8 +1504,8 @@ fn detail_next(job: &Job) -> String {
     }
 }
 
-/// The detail pane's `Last:` value.
-fn detail_last(repo: &Repo, name: &str) -> String {
+/// The `Last:` value, on this tab's detail pane and on the routines tab's.
+pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
         Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
             Some(when) => format!(

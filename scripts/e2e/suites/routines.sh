@@ -10,7 +10,8 @@
 # the right task files in the queue directory, under minted ids, with their
 # bodies untouched, that save as routine copies a pending group's documents back
 # into the checkout, that delete removes a routine with the jobs that point
-# into it, and that new job saves a job for a routine to the user store. No
+# into it, that new job saves a job for a routine to the user store, and that
+# the details pane draws a routine's job above its tasks. No
 # `new_forge`/`install_agents` needed for the same reason `trials.sh` needs
 # none.
 #
@@ -277,6 +278,24 @@ has "new job on a routine whose job exists is refused" "already exists" "$REFUSE
 works "and the store keeps the one job" \
   bash -c '[ "$(grep -c "^\[jobs.release\]" "$1")" = 1 ] && grep -qF "schedule = \"0 3 * * 1-5\"" "$1"' \
   _ "$USER_STORE"
+
+# The right pane is titled details and draws the highlighted routine's job
+# above its tasks. `archived-reuse`, first under the cursor, has no job, so
+# its schedule reads none; `jj` reaches `release`, whose job was saved above.
+DETAILS="$LIVE/routine-details.txt"
+LAST="$LIVE/routine-details-last.txt"
+on_screen '\x1b[C' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
+has "a routine with no job says its schedule is none" "Schedule:    none" "$LAST"
+has "and the list's key line names tab details" "[tab] details" "$LAST"
+lacks "a routine row carries no task count" "1 task" "$LAST"
+on_screen '\x1b[Cjj' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "a routine with a job draws the job's schedule" "Schedule:    0 3 * * 1-5" "$LAST"
+has "and names the job" "Job:         release" "$LAST"
 
 # A routine folder holding a file that will not parse is refused whole, and
 # the refusal names the file: queueing it any other way would leave the

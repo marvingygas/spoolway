@@ -319,7 +319,7 @@ has "→ reaches the routines tab" \
 has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
-  "[space] select   [enter] queue   [o] options   [tab] tasks   [q] quit" "$LAST"
+  "[space] select   [enter] queue   [o] options   [tab] details   [q] quit" "$LAST"
 
 # A full board in a short pane scrolls its task table rather than cutting the
 # frame off at the bottom. Thirty queued tasks in six groups are more than a

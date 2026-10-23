@@ -5582,7 +5582,16 @@ pub(crate) struct ScreenState {
     /// about. `None` on a tab that does not name them — the routines tab,
     /// which does not draw the pending groups they would be missing from.
     named: Option<NamedFiles>,
+    /// Both job stores as the routines pane last read them, for the job
+    /// config drawn above a routine's tasks. Re-read by [`reload_jobs`]
+    /// while that pane is up, so a job edited elsewhere shows without a key.
+    jobs: LoadedJobs,
 }
+
+/// Both job stores merged, or why they would not load. A store that will not
+/// load still lets the routines tab open: the error is drawn where a
+/// routine's job config would go, and its tasks are drawn under it.
+type LoadedJobs = std::result::Result<Vec<crate::jobs::Job>, String>;
 
 /// What the queue tab has already named of the pending directory's
 /// unparseable files, so a file that appears or breaks while the screen is
@@ -5614,6 +5623,7 @@ impl ScreenState {
             board_branch: None,
             waiting: Default::default(),
             named: None,
+            jobs: Ok(Vec::new()),
         }
     }
 
@@ -5980,7 +5990,9 @@ fn run_screen_from(
         // from whatever the reader last landed rather than a read of its
         // own.
         refresh_from_reader(&reader, &mut known_reading, &mut groups, &mut state);
+        reload_jobs(repo, &mut state);
         let panes = Panes {
+            repo,
             routines: &routines,
             routines_dir: &routines_dir,
             pipelines,
@@ -6479,7 +6491,19 @@ fn wait_for_key(
             return read_key(input);
         }
         refresh_from_reader(reader, known, groups, state);
+        reload_jobs(panes.repo, state);
         draw(groups, panes, state, writer, out);
+    }
+}
+
+/// Re-read both job stores into `state` while the routines list is up, the
+/// way the jobs tab re-reads them while its list sits idle, so a job edited
+/// on that tab or by hand shows here without a key. Nothing is read on the
+/// queue tab, which draws no job, or under a popup over the routines pane,
+/// which is drawn from the last reading.
+fn reload_jobs(repo: &Repo, state: &mut ScreenState) {
+    if matches!(state.mode, Mode::Routines(_)) {
+        state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
     }
 }
 
@@ -8070,8 +8094,8 @@ pub(crate) fn tasks_pane_lines(
 }
 
 /// The routines pane's own left-hand rows: one per routine, each with its
-/// checkbox and how many tasks sit at or below it — the same `N tasks` tail
-/// the mockup draws, and what `enter` on a ticked one queues whole.
+/// checkbox and its name. The right pane lists what `enter` on a ticked one
+/// queues whole, so the row carries no task count.
 ///
 /// No routines at all names `routines_dir` directly rather than drawing an
 /// empty pane a person could mistake for a project with nothing under it
@@ -8085,7 +8109,6 @@ fn routine_folder_lines(
     routines_dir: &std::path::Path,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
-    width: usize,
 ) -> (Vec<String>, Vec<usize>) {
     if routines.is_empty() {
         return (
@@ -8107,16 +8130,8 @@ fn routine_folder_lines(
         } else {
             "[ ]"
         };
-        // Same tail-then-name budget `groups_pane_lines` gives a queued
-        // group's own row — see that function's own comment on why the
-        // name gets a floor no tail is allowed to shrink it past.
-        let tail = format!(" {}", plural(folder.tasks.len(), "task"));
-        let name_budget = width
-            .saturating_sub(tail.chars().count() + ROW_PREFIX_COLUMNS)
-            .max(MIN_NAME_COLUMN);
-        let name = pad_to(&folder.name, name_budget);
         starts.push(lines.len());
-        lines.push(format!("{marker} {box_} {name}{tail}"));
+        lines.push(format!("{marker} {box_} {}", folder.name));
     }
     (lines, starts)
 }
@@ -8148,7 +8163,12 @@ fn routine_task_lines(
     let mut starts = Vec::with_capacity(folder.tasks.len());
     let mut focus = (0, 0);
     for (i, task) in folder.tasks.iter().enumerate() {
-        lines.push(String::new());
+        // The first task sits straight under the `tasks` line
+        // [`render_routines`] draws above it, so only later ones open on a
+        // blank row.
+        if i > 0 {
+            lines.push(String::new());
+        }
         let opened = lines.len();
         starts.push(opened);
         let marker = if i == nav.task_cursor && nav.focus == Focus::Tasks {
@@ -8188,28 +8208,158 @@ fn routine_task_lines(
     (lines, starts, focus)
 }
 
+/// The routines pane's job config for `folder`, the top of the details pane:
+/// a blank row, then the rows below, then a blank row before the tasks.
+///
+/// - No job on the routine: `Schedule:` reads `none`.
+/// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
+///   `Job:` rows, the jobs tab's own values for each.
+/// - Two or more enabled jobs on it: [`crate::jobs::Job::clashing_jobs`],
+///   the rule the dispatcher skips both by, lists them under a `Jobs:` row.
+/// - Stores that will not load: one `Jobs:` row naming the error.
+///
+/// A job is on the routine when [`crate::jobs::Job::target`] is the folder's
+/// own path, so `nightly` and `nightly/` both count. A paused job never
+/// clashes, so a routine holding one paused and one enabled job draws the
+/// enabled one, and one holding only paused jobs draws the first.
+fn routine_job_lines(
+    repo: &Repo,
+    folder: &RoutineFolder,
+    jobs: &LoadedJobs,
+    width: usize,
+) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    let jobs = match jobs {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            lines.extend(config_row("Jobs:", &format!("will not load: {err}"), width));
+            lines.push(String::new());
+            return lines;
+        }
+    };
+    let on: Vec<&crate::jobs::Job> = jobs
+        .iter()
+        .filter(|job| job.target(repo).is_ok_and(|target| target == folder.path))
+        .collect();
+    let Some(job) = on.iter().find(|job| job.spec.enabled).or(on.first()) else {
+        lines.extend(config_row("Schedule:", "none", width));
+        lines.push(String::new());
+        return lines;
+    };
+
+    let others = job.clashing_jobs(repo, jobs);
+    if others.is_empty() {
+        lines.extend(config_row("Schedule:", &job.spec.schedule, width));
+        lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
+        lines.extend(config_row("Scope:", job.scope.label(), width));
+        lines.extend(config_row("Next:", &super::jobs::detail_next(job), width));
+        lines.extend(config_row(
+            "Last:",
+            &super::jobs::detail_last(repo, &job.name),
+            width,
+        ));
+        lines.extend(config_row("Job:", &job.name, width));
+    } else {
+        let mut clash: Vec<&crate::jobs::Job> = others;
+        clash.push(job);
+        clash.sort_by(|a, b| a.name.cmp(&b.name));
+        let (none, fix) = if clash.len() == 2 {
+            ("neither", "Delete one with o to fire the other.")
+        } else {
+            ("none", "Delete all but one with o to fire it.")
+        };
+        let headline = format!("{} run this routine, so {none} fires", clash.len());
+        lines.extend(config_row("Jobs:", &headline, width));
+        // The names line up under the headline's text, two columns in, and
+        // the scopes line up three columns past the longest name.
+        let name_width = clash
+            .iter()
+            .map(|job| job.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let under = " ".repeat(CONFIG_INDENT.len() + LABEL_FIELD);
+        for job in &clash {
+            lines.push(format!(
+                "{under}  {:<name_width$}   {}",
+                job.name,
+                job.scope.label()
+            ));
+        }
+        lines.extend(wrapped(&under, fix, width));
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// How far the job config rows sit in from the pane's edge: two columns,
+/// where a task's own rows sit four in and the task block itself two more.
+const CONFIG_INDENT: &str = "  ";
+
+/// One job config row: [`labeled_row`]'s layout, label column and narrow
+/// fallback included, at [`CONFIG_INDENT`] rather than a task row's indent.
+fn config_row(label: &str, value: &str, width: usize) -> Vec<String> {
+    if width < NARROW_RIGHT_PANE {
+        let mut lines = vec![format!("{CONFIG_INDENT}{label}")];
+        lines.extend(wrapped(&format!("{CONFIG_INDENT}  "), value, width));
+        lines
+    } else {
+        wrapped(
+            &format!("{CONFIG_INDENT}{label:<LABEL_FIELD$}"),
+            value,
+            width,
+        )
+    }
+}
+
+/// The routines pane's details for the highlighted routine: its job config
+/// from [`routine_job_lines`], then a `tasks` line with its tasks indented
+/// under it. Empty with no routine to highlight.
+///
+/// The tasks are the pane's only cursor stops, so the config is never one:
+/// each task's start and the highlighted one's range come back moved down
+/// past it, for [`window`] to cut a pane taller than the terminal around the
+/// task as it did before the config sat above them.
+fn routine_details_lines(
+    panes: &Panes,
+    jobs: &LoadedJobs,
+    nav: &RoutineNav,
+    width: usize,
+) -> (Vec<String>, Vec<usize>, (usize, usize)) {
+    let Some(folder) = panes.routines.get(nav.folder_cursor) else {
+        return (Vec::new(), Vec::new(), (0, 0));
+    };
+    // The tasks sit one indent in under the `tasks` line, so they wrap that
+    // many columns short of the pane.
+    let (tasks, starts, focus) = routine_task_lines(
+        Some(folder),
+        panes.routines,
+        panes.routines_dir,
+        panes.pipelines,
+        nav,
+        width.saturating_sub(CONFIG_INDENT.len()),
+    );
+    let mut lines = routine_job_lines(panes.repo, folder, jobs, width);
+    lines.push(format!("{CONFIG_INDENT}tasks"));
+    let above = lines.len();
+    lines.extend(tasks.iter().map(|line| format!("{CONFIG_INDENT}{line}")));
+    let starts = starts.iter().map(|start| start + above).collect();
+    (lines, starts, (focus.0 + above, focus.1 + above))
+}
+
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
-/// [`two_pane_frame`] lays the pending screen out with, folders on the left
-/// and the highlighted one's own tasks on the right, titled with fixed words
-/// the same way [`pending_frame`] titles its own.
+/// [`two_pane_frame`] lays the pending screen out with, routines on the left
+/// and the highlighted one's [`routine_details_lines`] on the right, both
+/// titled with fixed words the same way [`pending_frame`] titles its own.
 fn render_routines(
-    routines: &[RoutineFolder],
-    routines_dir: &std::path::Path,
-    pipelines: &Pipelines,
+    panes: &Panes,
+    jobs: &LoadedJobs,
     nav: &RoutineNav,
     footer: &str,
 ) -> Vec<String> {
+    let routines = panes.routines;
     let layout = layout(footer);
-    let (left, left_starts) = routine_folder_lines(routines_dir, routines, nav, layout.left);
-    let highlighted = routines.get(nav.folder_cursor);
-    let (right, right_starts, focus) = routine_task_lines(
-        highlighted,
-        routines,
-        routines_dir,
-        pipelines,
-        nav,
-        layout.right,
-    );
+    let (left, left_starts) = routine_folder_lines(panes.routines_dir, routines, nav);
+    let (right, right_starts, focus) = routine_details_lines(panes, jobs, nav, layout.right);
 
     let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
     two_pane_frame(
@@ -8234,7 +8384,7 @@ fn render_routines(
             layout.right,
         ),
         "routines",
-        "tasks",
+        "details",
         layout,
     )
 }
@@ -8368,7 +8518,7 @@ fn footer(state: &ScreenState) -> String {
         // drawn over the pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("o", "options"), ("tab", "tasks")],
+                Focus::Groups => &[("o", "options"), ("tab", "details")],
                 Focus::Tasks => &[("o", "options"), ("tab", "routines")],
             };
             key_hint(
@@ -8411,8 +8561,10 @@ fn footer(state: &ScreenState) -> String {
 /// so `render`, `draw` and `wait_for_key` stay under the same argument count
 /// every other function in this module is held to, rather than each
 /// threading `routines`, `routines_dir` and `pipelines` through as three
-/// separate parameters.
+/// separate parameters. `repo` is for [`reload_jobs`] while the screen sits
+/// idle, and for the routines pane's `Last:` row.
 struct Panes<'a> {
+    repo: &'a Repo,
     routines: &'a [RoutineFolder],
     routines_dir: &'a std::path::Path,
     pipelines: &'a Pipelines,
@@ -8502,13 +8654,7 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
 /// popup on it and no key line under it.
 fn beneath(groups: &[Group], panes: &Panes, state: &ScreenState, footer: &str) -> Vec<String> {
     match routines_beneath(&state.mode) {
-        Some(nav) => render_routines(
-            panes.routines,
-            panes.routines_dir,
-            panes.pipelines,
-            nav,
-            footer,
-        ),
+        Some(nav) => render_routines(panes, &state.jobs, nav, footer),
         None => pending_frame(groups, panes.pipelines, state, layout(footer)),
     }
 }
@@ -15786,7 +15932,7 @@ mod tests {
         );
         assert!(last.contains("│  > new job  "), "{last}");
         assert!(last.contains("│    delete  "), "{last}");
-        assert!(last.contains("[o] options   [tab] tasks"), "{last}");
+        assert!(last.contains("[o] options   [tab] details"), "{last}");
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
         assert!(last.contains("│  > open task  "), "{last}");
@@ -15848,8 +15994,9 @@ mod tests {
         let (exit, drawn) = routines_exit(&repo, "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
-            last_frame(&drawn)
-                .contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
+            last_frame(&drawn).contains(
+                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
+            ),
             "{drawn}"
         );
         assert!(last_frame(&drawn).contains("[ROUTINES]"), "{drawn}");
@@ -18333,6 +18480,7 @@ mod tests {
         let routines = Vec::new();
         let routines_dir = repo.routines_dir();
         let panes = Panes {
+            repo: &repo,
             routines: &routines,
             routines_dir: &routines_dir,
             pipelines: &pipelines,
@@ -18365,6 +18513,7 @@ mod tests {
         let routines = Vec::new();
         let routines_dir = repo.routines_dir();
         let panes = Panes {
+            repo: &repo,
             routines: &routines,
             routines_dir: &routines_dir,
             pipelines: &pipelines,
@@ -20770,13 +20919,13 @@ mod tests {
 
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(
-            last.contains("─ tasks ─") && !last.contains("─ nightly"),
+            last.contains("─ details ─") && !last.contains("─ nightly"),
             "the right title names the pane, not the highlighted routine: {last}"
         );
         assert!(last.contains("nightly"), "{last}");
-        assert!(last.contains("1 task"), "{last}");
+        assert!(!last.contains("1 task"), "no task count on the row: {last}");
         assert!(
-            last.contains("[space] select   [enter] queue   [o] options   [tab] tasks"),
+            last.contains("[space] select   [enter] queue   [o] options   [tab] details"),
             "{last}"
         );
         assert!(!last.contains("[esc] back"), "{last}");
@@ -20942,7 +21091,9 @@ mod tests {
         assert!(back.contains("─ routines ─"), "still in the view: {back}");
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(" [space] select   [enter] queue   [o] options   [tab] tasks   [q] quit"),
+            back.contains(
+                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
+            ),
             "{back}"
         );
     }
@@ -21431,7 +21582,7 @@ mod tests {
         let back = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r\r")).to_string();
         assert!(!back.contains("job saved"), "{back}");
         assert!(back.contains("> [ ] maintenance"), "{back}");
-        assert!(back.contains("[o] options   [tab] tasks"), "{back}");
+        assert!(back.contains("[o] options   [tab] details"), "{back}");
     }
 
     /// A routine whose job name is taken is refused at the save with the
@@ -21568,6 +21719,266 @@ mod tests {
         );
     }
 
+    /// The `dependabot` routine the details pane tests draw: one task, on
+    /// the `dependabot` pipeline, whose title wraps in the right pane.
+    fn write_dependabot_routine(repo: &Repo) {
+        write_routine(
+            repo,
+            "dependabot",
+            "review-dependabot-prs",
+            "---\nid: review-dependabot-prs\ntitle: \"chore(deps): review and merge open \
+             Dependabot pull requests\"\npipeline: dependabot\ngroup: dependabot\n---\nbody\n",
+        );
+    }
+
+    /// A job on `routine`, every two hours on the `dependabot` pipeline.
+    fn write_dependabot_job(repo: &Repo, scope: crate::jobs::Scope, name: &str, routine: &str) {
+        crate::jobs::write(
+            repo,
+            scope,
+            name,
+            &crate::jobs::JobSpec {
+                schedule: "0 */2 * * *".to_string(),
+                pipeline: "dependabot".to_string(),
+                routine: routine.to_string(),
+                ..crate::jobs::JobSpec::neutral()
+            },
+        )
+        .unwrap();
+    }
+
+    /// The details pane for the first routine, 69 columns wide: the right
+    /// pane the routines tab's mockups draw inside their 100-column frame,
+    /// so a row wraps where the mockup wraps it.
+    fn details_at_mockup_width(repo: &Repo) -> Vec<String> {
+        let routines = super::super::routines::list_routines(repo).unwrap();
+        let routines_dir = repo.routines_dir();
+        let pipelines = Pipelines::builtin();
+        let panes = Panes {
+            repo,
+            routines: &routines,
+            routines_dir: &routines_dir,
+            pipelines: &pipelines,
+        };
+        let jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+        let (lines, _, _) = routine_details_lines(&panes, &jobs, &RoutineNav::new(), 69);
+        lines
+            .into_iter()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    }
+
+    /// The right pane's rows of the routines tab's last frame, each with the
+    /// border's space and the padding after it cut off.
+    fn details_pane(repo: &Repo) -> Vec<String> {
+        let drawn = routines_screen(repo, "");
+        let last = last_frame(&drawn);
+        assert!(last.contains("─ details ─"), "{last}");
+        last.lines()
+            .filter_map(|row| row.split('│').nth(2))
+            .map(|cell| {
+                cell.strip_prefix(' ')
+                    .unwrap_or(cell)
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A routine with one job draws that job's config, the jobs tab's own
+    /// values for each row, then `tasks` with the routine's tasks indented
+    /// under it.
+    #[test]
+    fn the_details_pane_draws_a_routines_job_above_its_tasks() {
+        let (repo, _root_guard) = fixture("routines-details-scheduled");
+        write_dependabot_routine(&repo);
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::Project,
+            "dependabot-review",
+            "dependabot",
+        );
+        let job = &crate::jobs::load(&repo).unwrap()[0];
+
+        let pane = details_at_mockup_width(&repo);
+        let next = format!("  Next:        {}", super::super::jobs::detail_next(job));
+        assert_eq!(
+            pane,
+            [
+                "",
+                "  Schedule:    0 */2 * * *",
+                "  Pipeline:    dependabot",
+                "  Scope:       project",
+                &next,
+                "  Last:        never",
+                "  Job:         dependabot-review",
+                "",
+                "  tasks",
+                "    review-dependabot-prs",
+                "      Pipeline:    dependabot",
+                "      Depends on:  -",
+                "      Description: chore(deps): review and merge open Dependabot pull",
+                "                   requests",
+            ],
+            "{pane:#?}"
+        );
+    }
+
+    /// A routine no job runs says so in place of the config.
+    #[test]
+    fn the_details_pane_says_schedule_none_for_a_routine_with_no_job() {
+        let (repo, _root_guard) = fixture("routines-details-unscheduled");
+        write_dependabot_routine(&repo);
+
+        let pane = details_pane(&repo);
+        assert_eq!(
+            pane[..5],
+            [
+                "",
+                "  Schedule:    none",
+                "",
+                "  tasks",
+                "    review-dependabot-prs"
+            ],
+            "{pane:#?}"
+        );
+    }
+
+    /// Two enabled jobs on one routine, one in each store and one spelt with
+    /// a trailing slash, draw the clash in place of either's config.
+    #[test]
+    fn the_details_pane_names_both_jobs_that_clash_on_a_routine() {
+        let (repo, _root_guard) = fixture("routines-details-clash");
+        write_dependabot_routine(&repo);
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::User,
+            "dependabot-weekly",
+            "dependabot/",
+        );
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::Project,
+            "dependabot-review",
+            "dependabot",
+        );
+
+        let pane = details_at_mockup_width(&repo);
+        assert_eq!(
+            pane[..8],
+            [
+                "",
+                "  Jobs:        2 run this routine, so neither fires",
+                "                 dependabot-review   project",
+                "                 dependabot-weekly   user",
+                "               Delete one with o to fire the other.",
+                "",
+                "  tasks",
+                "    review-dependabot-prs",
+            ],
+            "{pane:#?}"
+        );
+    }
+
+    /// A paused job never fires, so it does not clash with the enabled job on
+    /// the same routine, whose config is drawn.
+    #[test]
+    fn the_details_pane_draws_the_enabled_job_beside_a_paused_one() {
+        let (repo, _root_guard) = fixture("routines-details-paused");
+        write_dependabot_routine(&repo);
+        crate::jobs::write(
+            &repo,
+            crate::jobs::Scope::User,
+            "a-paused",
+            &crate::jobs::JobSpec {
+                routine: "dependabot".to_string(),
+                enabled: false,
+                ..crate::jobs::JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        write_dependabot_job(&repo, crate::jobs::Scope::Project, "b-live", "dependabot");
+
+        let pane = details_pane(&repo);
+        assert!(
+            pane.contains(&"  Job:         b-live".to_string()),
+            "{pane:#?}"
+        );
+        assert!(!pane.iter().any(|row| row.contains("Jobs:")), "{pane:#?}");
+    }
+
+    /// Job stores that will not load still open the tab: one row names the
+    /// error where the config would go, and the tasks are drawn under it.
+    #[test]
+    fn the_details_pane_names_a_job_store_that_will_not_load_and_draws_the_tasks() {
+        let (repo, _root_guard) = fixture("routines-details-load-error");
+        write_dependabot_routine(&repo);
+        std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
+        std::fs::write(repo.jobs_file(), "[jobs.broken\n").unwrap();
+
+        let pane = details_pane(&repo);
+        assert!(
+            pane[1].starts_with("  Jobs:        will not load: "),
+            "{pane:#?}"
+        );
+        let tasks = pane
+            .iter()
+            .position(|row| row == "  tasks")
+            .expect("tasks line");
+        assert_eq!(pane[tasks - 1], "", "{pane:#?}");
+        assert_eq!(pane[tasks + 1], "    review-dependabot-prs", "{pane:#?}");
+    }
+
+    /// A job written while the routines list is up is read on the next
+    /// reload, and nothing is read while the queue tab is up.
+    #[test]
+    fn the_routines_list_rereads_the_job_stores_and_the_queue_tab_does_not() {
+        let (repo, _root_guard) = fixture("routines-details-reload");
+        let mut state = ScreenState::new();
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::Project,
+            "dependabot-review",
+            "dependabot",
+        );
+
+        reload_jobs(&repo, &mut state);
+        assert_eq!(state.jobs.as_ref().map(Vec::len), Ok(0), "queue tab");
+
+        state.mode = Mode::Routines(RoutineNav::new());
+        reload_jobs(&repo, &mut state);
+        assert_eq!(state.jobs.as_ref().map(Vec::len), Ok(1), "routines list");
+    }
+
+    /// The tasks are the details pane's cursor stops: each start is its own
+    /// task's row, below the config, and the highlighted task's range runs
+    /// from its row to its last.
+    #[test]
+    fn the_details_pane_cursor_stops_are_the_tasks_below_the_config() {
+        let (repo, _root_guard) = fixture("routines-details-stops");
+        for id in ["alpha", "beta"] {
+            write_routine(&repo, "nightly", id, &task_text(id, "", BODY));
+        }
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let routines_dir = repo.routines_dir();
+        let pipelines = Pipelines::builtin();
+        let panes = Panes {
+            repo: &repo,
+            routines: &routines,
+            routines_dir: &routines_dir,
+            pipelines: &pipelines,
+        };
+        let mut nav = RoutineNav::new();
+        nav.focus = Focus::Tasks;
+        nav.task_cursor = 1;
+
+        let (lines, starts, focus) = routine_details_lines(&panes, &Ok(Vec::new()), &nav, 70);
+        assert_eq!(starts.len(), 2, "{lines:#?}");
+        assert_eq!(lines[starts[0]], "    alpha", "{lines:#?}");
+        assert_eq!(lines[starts[1]], "  > beta", "{lines:#?}");
+        assert_eq!(focus, (starts[1], lines.len() - 1), "{lines:#?}");
+    }
+
     /// The one non-goal this feature draws a hard line at: the empty
     /// routines tab names `.spoolway/routines/` rather than opening onto a
     /// blank pane a person could mistake for a project with no keys to press.
@@ -21580,7 +21991,7 @@ mod tests {
         // columns — the same width the mockup itself draws — would truncate
         // a scratch test repo's own long path well before this could tell
         // "named the path" apart from "named nothing at all".
-        let (lines, _) = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new(), 200);
+        let (lines, _) = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new());
         assert_eq!(
             lines,
             vec![format!("  nothing under {}", repo.routines_dir().display())]
