@@ -37,9 +37,6 @@ pub(crate) struct Dispatcher {
     /// never exits. The thread's result is joined only once the child has
     /// exited.
     reason: Option<JoinHandle<String>>,
-    /// Whether the screen asked it to stop. A child that exits after that
-    /// did what it was told, and it gets no popup.
-    stopping: bool,
     /// Whether the child was ever seen holding the dispatch lock. This is
     /// what tells a run that stopped from a start that was refused before
     /// it got that far.
@@ -48,10 +45,16 @@ pub(crate) struct Dispatcher {
     /// [`crate::problem_log::path`]. Held as a path because the child
     /// outlives the call that started it.
     log: PathBuf,
-    /// Who asked it to stop, once someone has.
+    /// Who asked it to stop, once someone has. A child that exits after that
+    /// did what it was told, and it gets no popup.
     asked: Option<Asked>,
     /// Whether its exit already has a line in the log. One exit, one line.
     logged: bool,
+    /// The scratch directory a stand-in child's log sits in, kept alive as
+    /// long as the child: a [`crate::scratch::ScratchRoot`] removes its
+    /// directory when dropped, and the child writes there when it exits.
+    #[cfg(test)]
+    scratch: Option<crate::scratch::ScratchRoot>,
 }
 
 /// Who asked the child to stop, as the log line names it.
@@ -143,11 +146,12 @@ impl Dispatcher {
         Ok(Dispatcher {
             process,
             reason,
-            stopping: false,
             ran: false,
             log,
             asked: None,
             logged: false,
+            #[cfg(test)]
+            scratch: None,
         })
     }
 
@@ -155,8 +159,10 @@ impl Dispatcher {
     /// for the dispatch tab's own tests — see [`Dispatcher::spawn`].
     #[cfg(test)]
     pub(crate) fn stand_in(script: &str) -> Dispatcher {
-        let log = crate::scratch::root("dispatcher-stand-in-log").join("problems.log");
-        Dispatcher::stand_in_logging(script, log)
+        let root = crate::scratch::root("dispatcher-stand-in-log");
+        let mut child = Dispatcher::stand_in_logging(script, root.join("problems.log"));
+        child.scratch = Some(root);
+        child
     }
 
     /// [`Dispatcher::stand_in`], writing its exit to `log`.
@@ -178,15 +184,15 @@ impl Dispatcher {
     /// leaving every lane running. Asked once. A second `SIGINT` would find
     /// the default action restored and kill the child where it stands.
     pub(crate) fn stop(&mut self, by: Asked) {
-        if self.stopping {
+        if self.asked.is_some() {
             return;
         }
-        self.stopping = true;
         self.asked = Some(by);
 
         #[cfg(unix)]
-        // SAFETY: `kill` takes no pointers; a child that has already exited
-        // earns ESRCH, which is the answer the next `ended` reads anyway.
+        // SAFETY: `kill` takes no pointers. A child that has exited but not
+        // been reaped is a zombie, and signalling it succeeds and does
+        // nothing; the next `ended` reads its exit either way.
         unsafe {
             libc::kill(self.process.id() as i32, libc::SIGINT);
         }
@@ -198,7 +204,7 @@ impl Dispatcher {
     /// still settling after that has nothing left to ask, so the tab's
     /// `enter` does nothing over it rather than opening the stop popup again.
     pub(crate) fn stopping(&self) -> bool {
-        self.stopping
+        self.asked.is_some()
     }
 
     /// `None` while the child is still running. Once it has exited, the
@@ -617,9 +623,12 @@ mod tests {
         assert_eq!(wait_ended(&mut child), None);
     }
 
-    /// A fresh log path under a scratch directory, and what is in it.
-    fn log_in(name: &str) -> PathBuf {
-        crate::scratch::root(name).join("logs").join("p.log")
+    /// A fresh scratch directory and a log path inside it. The directory is
+    /// removed when the first is dropped, so each test holds it to the end.
+    fn log_in(name: &str) -> (crate::scratch::ScratchRoot, PathBuf) {
+        let root = crate::scratch::root(name);
+        let log = root.join("logs").join("p.log");
+        (root, log)
     }
 
     fn logged(log: &Path) -> String {
@@ -630,7 +639,7 @@ mod tests {
     /// and the last of what it said.
     #[test]
     fn an_unasked_exit_is_logged_with_its_status_and_stderr() {
-        let log = log_in("dispatcher-log-unasked");
+        let (_root, log) = log_in("dispatcher-log-unasked");
         let mut child = Dispatcher::stand_in_logging("echo boom >&2; exit 4", log.clone());
         let pid = child.pid();
         wait_ended(&mut child).expect("an unasked exit gets a popup");
@@ -647,7 +656,7 @@ mod tests {
     /// A child that said nothing is logged as having said nothing.
     #[test]
     fn a_silent_exit_is_logged_as_saying_nothing() {
-        let log = log_in("dispatcher-log-silent");
+        let (_root, log) = log_in("dispatcher-log-silent");
         let mut child = Dispatcher::stand_in_logging("exit 0", log.clone());
         wait_ended(&mut child);
         assert!(
@@ -660,7 +669,7 @@ mod tests {
     /// A panic's worth of stderr keeps only its last lines, on one line.
     #[test]
     fn a_long_stderr_is_cut_to_its_last_lines() {
-        let log = log_in("dispatcher-log-long");
+        let (_root, log) = log_in("dispatcher-log-long");
         let mut child = Dispatcher::stand_in_logging(
             "i=1; while [ $i -le 40 ]; do echo line$i >&2; i=$((i+1)); done; exit 1",
             log.clone(),
@@ -680,7 +689,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stop_enter_asked_for_is_logged_with_its_reason() {
-        let log = log_in("dispatcher-log-enter");
+        let (_root, log) = log_in("dispatcher-log-enter");
         let mut child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
         let pid = child.pid();
         child.stop(Asked::Enter);
@@ -701,7 +710,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_board_that_quits_logs_the_stop_it_asked_for() {
-        let log = log_in("dispatcher-log-quit");
+        let (_root, log) = log_in("dispatcher-log-quit");
         let child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
         let pid = child.pid();
         drop(child);
@@ -721,7 +730,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_quit_over_a_stop_enter_asked_for_keeps_that_reason() {
-        let log = log_in("dispatcher-log-enter-then-quit");
+        let (_root, log) = log_in("dispatcher-log-enter-then-quit");
         let mut child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
         child.stop(Asked::Enter);
         drop(child);
@@ -739,7 +748,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_exit_never_reaped_is_logged_when_the_board_quits() {
-        let log = log_in("dispatcher-log-unreaped");
+        let (_root, log) = log_in("dispatcher-log-unreaped");
         let mut child = Dispatcher::stand_in_logging("echo gone >&2; exit 7", log.clone());
         let pid = child.pid();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -765,7 +774,7 @@ mod tests {
     /// the board quits.
     #[test]
     fn a_reaped_exit_is_not_logged_again_on_quit() {
-        let log = log_in("dispatcher-log-reaped-then-quit");
+        let (_root, log) = log_in("dispatcher-log-reaped-then-quit");
         let mut child = Dispatcher::stand_in_logging("exit 3", log.clone());
         wait_ended(&mut child);
         drop(child);

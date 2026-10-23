@@ -1,5 +1,5 @@
-//! One line per problem, per project, kept for the window a person could
-//! plausibly still want it.
+//! One line per problem, and one per dispatcher stop, per project, kept for
+//! the window a person could plausibly still want it.
 //!
 //! The board used to carry a pass's own trouble as an amber ticker line —
 //! see the removed `RecentEvent::Note` in `src/status.rs`. That line pushed

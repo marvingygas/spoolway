@@ -250,8 +250,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     crate::usage::registry::register(&repo.root);
 
     // Trimmed once, here, rather than on every append below — see
-    // `crate::problem_log::open`. A run that never hits a problem never
-    // touches this file at all.
+    // `crate::problem_log::open`.
     crate::problem_log::open(repo);
 
     let interval = crate::dispatch::PROBE_INTERVAL;
