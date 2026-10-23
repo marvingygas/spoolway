@@ -5263,8 +5263,14 @@ impl<'a> Dispatcher<'a> {
         for (&i, prompt_result) in ready.iter().zip(prompt_results) {
             let task = &mut tasks[pending[i].candidate.task_index];
             // Its boot has returned, whichever way — the lane is up and
-            // listed, or the failure below settles the task.
-            claims.release(task.id());
+            // listed, or the failure below settles the task. The mark is
+            // dropped here on a failure, and in the `Ok` arm only once the
+            // new lane's record is on disk: the board reads a lane with no
+            // mark and an old `kept` record as idle, so releasing earlier
+            // showed a lane that had just started as `queued`.
+            if prompt_result.is_err() {
+                claims.release(task.id());
+            }
             match prompt_result {
                 Ok(started) => {
                     // The launch actually started, so whatever this step's
@@ -5277,9 +5283,14 @@ impl<'a> Dispatcher<'a> {
                     // skips its write.
                     let cleared_failures = task.clear_launch_failures(&pending[i].step.id);
                     let cleared_busy = task.clear_launch_busy(&pending[i].step.id);
-                    if cleared_failures || cleared_busy {
-                        self.persist(task)?;
-                    }
+                    // Held back until the record below is saved and the
+                    // mark released, so a failed write cannot leave the mark
+                    // behind.
+                    let cleared = if cleared_failures || cleared_busy {
+                        self.persist(task).map(|_| ())
+                    } else {
+                        Ok(())
+                    };
                     let name = started.name;
                     let action = match &started.note {
                         Some(note) => format!("started {name} — {note}"),
@@ -5326,6 +5337,8 @@ impl<'a> Dispatcher<'a> {
                     // restarted with a lane that had its first skill and
                     // nothing else — see `LaneRecord::opening`.
                     self.save_lanes("after starting a lane");
+                    claims.release(task.id());
+                    cleared?;
                     report.actions.push(action);
                     // `Ok(Started)` alone does not say the stage move
                     // landed — `finish_launch_bookkeeping`'s own
@@ -9399,6 +9412,19 @@ pub(crate) fn peek_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+/// The names of the lanes whose record says they are `kept`: over, with only
+/// their pane left open. The dispatcher leaves them out of every count of
+/// what is running, so each board reader that asks "is this name the step's
+/// live lane" leaves them out too. Read like [`peek_lane_records`], and empty
+/// for the same absent or corrupt file.
+pub(crate) fn kept_lane_names(repo: &Repo) -> HashSet<String> {
+    peek_lane_records(repo)
+        .into_iter()
+        .filter(|(_, record)| record.is_kept())
+        .map(|(name, _)| name)
+        .collect()
 }
 
 pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
