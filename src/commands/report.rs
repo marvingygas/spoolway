@@ -9527,6 +9527,61 @@ mod tests {
         );
     }
 
+    /// Resuming a task past a gate closes the settled lane on the step it is
+    /// sent to, the same as every other road out of a stop. A task an unblocker
+    /// paused from `blocked` goes back onto the gated step, whose old lane is
+    /// still open and idle; left there, the dispatcher would take it for a lane
+    /// still waiting on an answer and never start a fresh one.
+    #[test]
+    fn resuming_past_a_gate_frees_the_stale_lane_on_the_step_it_goes_to() {
+        let (mut repo, _root_guard) = fixture("gate-resume-stale-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("deploy".into());
+        task.front.paused_at = Some("deploy".into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "paused by the unblocker");
+        task.save().unwrap();
+
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
+        for step in ["build", "deploy"] {
+            headless
+                .start_lane(
+                    &crate::mux::LaneSpec {
+                        name: &crate::mux::run_key(step, "ship"),
+                        key: &crate::mux::run_key(step, "ship"),
+                        label: step,
+                        kind: "pi",
+                        pane_id: "p1",
+                        args: &[],
+                        env: &std::collections::BTreeMap::new(),
+                        path_prefix: None,
+                    },
+                    &mut || {},
+                )
+                .unwrap();
+        }
+
+        resume(&repo, &pipelines, &resume_args("ship", None), None).unwrap();
+
+        assert_eq!(queued(&repo, "ship").stage(), "deploy");
+        let left: Vec<String> = headless
+            .list_lanes()
+            .unwrap()
+            .into_iter()
+            .map(|lane| lane.name)
+            .collect();
+        assert_eq!(
+            left,
+            [crate::mux::run_key("build", "ship")],
+            "the lane on the step the gate sent the task to is closed, the one on another step stays"
+        );
+    }
+
     /// A resume closes the settled lane on the step it sends the task to, and
     /// no other. The task's lanes on steps it has already run are kept open
     /// until it is done, so a person can read what they said; closing them
