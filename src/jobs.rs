@@ -300,7 +300,20 @@ impl Job {
                 self.spec.routine
             ),
         };
-        if !target.exists() || depth == 0 {
+        // `.`, `./` and an empty `routine` resolve to the routines directory
+        // itself, which exists but is no routine; it is not reported as
+        // missing, since `doctor`'s existence check passes for it.
+        if depth == 0 {
+            return Some(RoutineFault {
+                missing: false,
+                clause: format!(
+                    "routine `{}` is the routines directory itself, not a routine; pick a \
+                     routine folder, or delete the job, on the routines tab (o)",
+                    self.spec.routine
+                ),
+            });
+        }
+        if !target.exists() {
             return Some(missing());
         }
         let advice = if depth == 1 {
@@ -326,8 +339,10 @@ impl Job {
     }
 
     /// The target below the routines directory, `/`-separated with a
-    /// trailing slash or `./` dropped. `None` when `routine` escapes it.
-    fn relative_target(&self, repo: &Repo) -> Option<String> {
+    /// trailing slash or `./` dropped, so `nightly` and `nightly/` read the
+    /// same wherever a message names the routine. `None` when `routine`
+    /// escapes it.
+    pub fn relative_target(&self, repo: &Repo) -> Option<String> {
         let target = self.target(repo).ok()?;
         let rel = target.strip_prefix(repo.routines_dir()).ok()?;
         let parts: Vec<String> = rel
@@ -342,8 +357,9 @@ impl Job {
 /// [`Job::routine_fault`] found, as a sentence the dispatcher and `doctor`
 /// both print.
 pub struct RoutineFault {
-    /// True when nothing is there, which `doctor` already reports as the
-    /// routine not existing.
+    /// True when the path names nothing under the routines directory, which
+    /// `doctor` already reports as the routine not existing. False for a
+    /// path that exists but is not a routine folder.
     pub missing: bool,
     /// The reason and the fix, to follow `skipped, ` in the dispatcher's line.
     pub clause: String,
@@ -2377,6 +2393,26 @@ mod tests {
             actions.is_empty() && problems.is_empty(),
             "named once per minute: {actions:?} {problems:?}"
         );
+    }
+
+    /// A `routine` of `.` or an empty string is the routines directory
+    /// itself: refused, and not reported as missing since it exists.
+    #[test]
+    fn a_job_on_the_routines_directory_itself_is_a_fault_that_is_not_missing() {
+        let (repo, _root_guard) = fixture("jobs-routines-dir");
+        std::fs::create_dir_all(repo.routines_dir()).unwrap();
+        for routine in [".", "./", ""] {
+            write_user_store(&repo, &job_table("whole", routine));
+            let jobs = load(&repo).unwrap();
+            let fault = jobs[0].routine_fault(&repo).expect(routine);
+            assert!(!fault.missing, "{routine}: {}", fault.clause);
+            assert!(
+                fault.clause.contains("routines directory itself"),
+                "{}",
+                fault.clause
+            );
+            assert!(jobs[0].refusal(&repo, &jobs).is_some(), "{routine}");
+        }
     }
 
     /// A paused job fires nowhere, so it does not take its routine from the

@@ -80,9 +80,9 @@ lacks "the menu's delete then enter deletes the job" "[jobs.nightly]" "$STORE"
 # A job runs a whole routine, so the tasks pane no longer picks one task: two
 # `→`s open the jobs tab; n opens the routines browser; `tab` moves the cursor
 # onto `nightly`'s tasks pane, on `audit-deps`; space is pressed there and the
-# expression typed. The store already holds a job on `nightly` under another
-# name, so a save would be refused anyway; what is checked is that no
-# single-task target is written.
+# expression typed. The store is seeded with a job on `nightly` for the
+# refusal case below; what is checked here is that no single-task target is
+# written, because space no longer picks a task.
 cat >"$STORE" <<'EOF'
 [jobs.first-job]
 schedule = "0 3 * * *"

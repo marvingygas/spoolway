@@ -10864,7 +10864,9 @@ pub(crate) fn check_routine_target(
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
 /// one batch, exactly as `enter` does, and a single `.md` file queues that
-/// task alone with its `depends_on` emptied, exactly as `space` does. Every
+/// task alone with its `depends_on` emptied, exactly as `space` does on the
+/// routines tab. A job always hands it a top-level routine folder, since
+/// [`crate::jobs::Job::refusal`] stops any other target first. Every
 /// queued task is put on `pipeline` — a job names its own, where the `r`
 /// pane leaves each task on whatever it carried. The batch goes through
 /// [`validate_batch`] all-or-nothing and the saved tasks are handed back so

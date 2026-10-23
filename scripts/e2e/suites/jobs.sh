@@ -389,7 +389,7 @@ routine = "weekly/release-check.md"
 TOML
 says "a clash is named for the first job" \
   "job \`nightly-audit\` is the only job on its routine" "$SPOOLWAY" doctor
-says "— naming the other job" "\`nightly-twin\`" "$SPOOLWAY" doctor
+says "— naming the other job and its store" "\`nightly-twin\` (in" "$SPOOLWAY" doctor
 says "a job on a task file is named" \
   "job \`one-task\` routine is a whole routine folder" "$SPOOLWAY" doctor
 

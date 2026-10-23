@@ -2859,7 +2859,8 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
                      tab (o → delete job) or point it at another routine",
                     named.join(", "),
                     if named.len() == 1 { "s" } else { "" },
-                    job.spec.routine
+                    job.relative_target(repo)
+                        .unwrap_or_else(|| job.spec.routine.clone())
                 ))
             },
         ));
@@ -3687,10 +3688,15 @@ mod tests {
             clash.contains("`two`") && clash.contains("jobs.toml"),
             "{clash}"
         );
+        let second = check("job `two` is the only job on its routine")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("the clash is named for both jobs");
+        // `dup` and `dup/` are one routine, named the same in both rows.
+        assert!(clash.contains("routine `dup`,"), "{clash}");
         assert!(
-            check("job `two` is the only job on its routine")
-                .expect("the check exists")
-                .is_err()
+            format!("{second:#}").contains("routine `dup`,"),
+            "{second:#}"
         );
         assert!(
             check("job `solo` is the only job on its routine")
