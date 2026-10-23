@@ -486,7 +486,24 @@ A panel's body still names a file by the task's id.
 | `could not launch <step>, moved to <step>` | The launch failed and the task file does not say why. A pane that never got ready reads this way. |
 | `passed <step>, moved to blocked (uncommitted work)` | The last step passed, and the worktree held work that could not be committed. |
 
-Errors from a pass go to `~/.spoolway/logs/<project>.log`.
+### The problem log
+
+Errors from a pass go to `~/.spoolway/logs/<project>.log`. The same file gets one line for every
+stop of a dispatcher. Each line starts with the time and the dispatcher's pid.
+
+| Who writes it | When | The line reads |
+|---|---|---|
+| The board | The dispatcher it started exits on its own. | `dispatcher 70211 exited with signal: 9 (SIGKILL) and said nothing`, or `dispatcher 70211 exited with exit status: 1, last said: <last 5 stderr lines joined by " / ">` |
+| The board | `enter` on the dispatch tab stops the dispatcher. | `dispatcher 70211 stopped: asked by the board (enter on the dispatch tab); it exited with exit status: 0` |
+| The board | The board quits and stops the dispatcher. | `dispatcher 70211 stopped: asked by the board, which was quitting; the board left before it exited` |
+| A dispatcher run in a terminal | `ctrl-c` | `dispatcher 70211 stopped on ctrl-c` |
+| A dispatcher run in a terminal | The queue is empty. | `dispatcher 70211 stopped on an empty queue: every task is done` |
+| A dispatcher run in a terminal | A spend ceiling is reached. | `dispatcher 70211 stopped on a spend ceiling: <the ceiling reached>` |
+
+The board writes the line for the dispatcher it started, so a dispatcher that was killed still
+leaves one. That dispatcher writes no line of its own for `ctrl-c`, an empty queue or a spend
+ceiling. A lost lock writes the line shown under
+[When the lock file is lost](#when-the-lock-file-is-lost).
 
 ### Keys
 
