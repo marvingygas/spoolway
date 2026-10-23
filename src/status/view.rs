@@ -1916,7 +1916,7 @@ pub(super) fn table_window(
         return shown;
     }
     let room = pane.saturating_sub(MARGIN.len() + CURSOR_GUTTER_WIDTH);
-    let marker = crate::screen::pane::marker_row(above, below, Some("task"), room);
+    let marker = crate::screen::pane::marker_row(above, below, "task", room);
     shown.extend(window);
     shown.push(format!("{MARGIN}{NO_CURSOR}{marker}"));
     shown

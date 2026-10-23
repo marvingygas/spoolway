@@ -204,8 +204,8 @@ pub enum Command {
     Group(GroupCommand),
 
     /// Read cron jobs — routines the dispatcher runs on a schedule.
-    /// Bare `spoolway`'s jobs tab is the screen a person writes a job from;
-    /// this prints its usage with no subcommand.
+    /// Bare `spoolway`'s routines tab is the screen a person writes a job
+    /// from; this prints its usage with no subcommand.
     #[command(subcommand)]
     Jobs(JobsCommand),
 

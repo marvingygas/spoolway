@@ -16,8 +16,8 @@
 //! exception: its store is shared by every clone, so its history is one file
 //! in the workspace, and the clone that holds its copy is named there.
 //!
-//! Reads dominate. The two stores are written by bare `spoolway`'s jobs tab
-//! and routines tab, through [`write`] and [`delete_in`], and by `spoolway
+//! Reads dominate. The two stores are written by bare `spoolway`'s routines
+//! tab, through [`write`] and [`delete_in`], and by `spoolway
 //! pipeline rename`, which moves a renamed pipeline's jobs onto the new
 //! name. The routines tab's job items act on the routine's own job, and its
 //! delete routine deletes every job pointing into the routine it removes.
@@ -1778,7 +1778,8 @@ mod tests {
              pipeline = \"impl\"\nroutine = \"nightly\"\nnotify = \"slack\"\n",
         );
 
-        // Re-save with a changed schedule, the way the jobs tab's edit does.
+        // Re-save with a changed schedule, the way the routines tab's edit
+        // job does.
         write(
             &repo,
             Scope::User,

@@ -47,8 +47,8 @@ use view::{
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
-/// The redraw rate every screen's own wait polls stdin at — the jobs screen,
-/// the queue screen, and the dispatcher board, whose wait slices its whole
+/// The redraw rate every screen's own wait polls stdin at — the queue
+/// screen and the dispatcher board, whose wait slices its whole
 /// interval into stretches of this on every target. The board's wait also
 /// watches the commands directory (see `crate::screen::DirWatch`), which
 /// ends a slice early; it never lengthens one.
@@ -16258,7 +16258,7 @@ mod tests {
                     shown.last().unwrap() - shown[0] + 1,
                     "the drawn tasks run unbroken: {drawn:#?}"
                 );
-                let marker = crate::screen::pane::marker_row(above, below, Some("task"), 200);
+                let marker = crate::screen::pane::marker_row(above, below, "task", 200);
                 match (above, below) {
                     (0, 0) => assert!(
                         !drawn.iter().any(|r| r.starts_with(['↑', '↓'])),

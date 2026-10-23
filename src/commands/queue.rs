@@ -4593,12 +4593,8 @@ use super::pending_delete::{
 use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
-///
-/// `pub(super)` because bare `spoolway`'s jobs tab reuses this module's
-/// routines browser — its keys and its navigation — to pick a job's target
-/// — see [`super::jobs::jobs_tab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Focus {
+enum Focus {
     Groups,
     Tasks,
 }
@@ -4726,7 +4722,7 @@ enum Mode {
     /// `esc` and nothing else, which its own key row says.
     PlanNotDeleted(Notice),
     /// The options menu's delete job popup over the routines pane `nav`
-    /// describes: the jobs tab's own popup, [`super::jobs::delete_panel`].
+    /// describes: [`super::jobs::delete_panel`].
     /// `enter` on its one answer, `delete`, removes `job` from its own
     /// store through [`super::jobs::delete_job`], and leaves the routine
     /// and every other job alone. `esc` keeps it. Every other key does
@@ -4739,8 +4735,8 @@ enum Mode {
     /// over the routines pane `nav` describes: new job writing a job for
     /// the routine highlighted when it was picked, edit job rewriting that
     /// routine's job, opened on its own values. The popups, their keys and
-    /// the save are the jobs tab's own — see [`super::jobs::NewJobWalk`] —
-    /// so `esc` on either comes back here having written nothing.
+    /// the save live in [`super::jobs::NewJobWalk`], and `esc` on either
+    /// comes back here having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
@@ -4822,8 +4818,7 @@ impl OptionsMenu {
 /// focused row. Each runs what its own key used to: `o` open task, `g`
 /// gate, `t` trial, `s` save as routine, and the routines tab's `n` new job
 /// and `x` delete routine. Delete on the pending screen and open plan never
-/// had a key of their own, and neither did the routines tab's job items,
-/// which do what the jobs tab's own menu does to the same job.
+/// had a key of their own, and neither did the routines tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
@@ -5479,21 +5474,21 @@ fn selectable(group: &Group) -> bool {
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
 ///
-/// `pub(super)` along with its fields so the `spoolway jobs` screen can drive
-/// the same browser and then read back which folder or task was picked.
+/// `folder_cursor` runs past the routines onto the job rows under them —
+/// see [`Orphan`].
 #[derive(Debug, Clone)]
-pub(super) struct RoutineNav {
-    pub(super) focus: Focus,
-    pub(super) folder_cursor: usize,
-    pub(super) task_cursor: usize,
+struct RoutineNav {
+    focus: Focus,
+    folder_cursor: usize,
+    task_cursor: usize,
     /// Ticked folders, by their own absolute path — the same identity
     /// [`RoutineFolder::path`] carries, so two folders that happen to share
     /// a name in different parents are never confused for one another.
-    pub(super) selected: std::collections::BTreeSet<std::path::PathBuf>,
+    selected: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl RoutineNav {
-    pub(super) fn new() -> RoutineNav {
+    fn new() -> RoutineNav {
         RoutineNav {
             focus: Focus::Groups,
             folder_cursor: 0,
@@ -6371,8 +6366,8 @@ fn run_screen_from(
                         nav,
                         notice: super::jobs::saved_notice(&draft),
                     },
-                    // The jobs tab's own title and message for a refused
-                    // save, a name already taken among them.
+                    // A refused save, a name already taken among them,
+                    // in a popup titled `not saved`.
                     WalkStep::Refused(message) => outcome_over(Some(&nav), "not saved", message),
                 };
             }
@@ -7251,8 +7246,8 @@ fn job_not_changed(nav: &RoutineNav, text: String) -> Mode {
 }
 
 /// Pause job or resume job off a routine's menu: [`find_job`], then
-/// [`super::jobs::set_enabled`], the jobs tab's own pause and resume, which
-/// writes the job back to its own store. Back on the routines pane, whose
+/// [`super::jobs::set_enabled`], which writes the job back to its own
+/// store. Back on the routines pane, whose
 /// details show the new state as the stores are read again, or a popup over
 /// it saying why the store was not written.
 fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -> Mode {
@@ -7351,7 +7346,7 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
 }
 
 /// The routine the left pane's cursor sits on.
-pub(super) fn highlighted_routine_folder<'a>(
+fn highlighted_routine_folder<'a>(
     routines: &'a [RoutineFolder],
     nav: &RoutineNav,
 ) -> Option<&'a RoutineFolder> {
@@ -7361,7 +7356,7 @@ pub(super) fn highlighted_routine_folder<'a>(
 /// The task the right pane's cursor sits on — `None` with no routine
 /// highlighted, or a folder with fewer tasks than
 /// `nav.task_cursor` names.
-pub(super) fn highlighted_routine_task<'a>(
+fn highlighted_routine_task<'a>(
     routines: &'a [RoutineFolder],
     nav: &RoutineNav,
 ) -> Option<&'a RoutineTask> {
@@ -7866,13 +7861,13 @@ fn selected_tasks(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, String
 /// for one frame. The widths do not count the border or the one space of
 /// padding on either side of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Layout {
-    pub(super) left: usize,
-    pub(super) right: usize,
+struct Layout {
+    left: usize,
+    right: usize,
     /// How many rows the panes are cut to, or `None` where there is no
     /// terminal to measure. Output that is not a terminal has no bottom to
     /// fall off, so it keeps every row it was going to write.
-    pub(super) rows: Option<usize>,
+    rows: Option<usize>,
 }
 
 /// The widths a run with no terminal to measure falls back to. `left` is
@@ -7942,14 +7937,13 @@ const PANE_CHROME_ROWS: usize = 4;
 /// The layout for this frame, measured fresh every draw so a resized
 /// terminal reflows on the next one, against the drawing area every tab
 /// shares (see [`crate::screen::drawing_area`]) — less the rows bare
-/// `spoolway`'s tab strip takes off the top when it hosts this screen or the
-/// jobs screen, which lays itself out through this too (zero everywhere
-/// else; see `crate::screen::shell::strip_rows`), and less every row past
-/// the first that `footer` wraps onto. The queue's own key line is wider
-/// than a 100-column terminal, and each row it wraps onto pushes the
+/// `spoolway`'s tab strip takes off the top when it hosts this screen (zero
+/// everywhere else; see `crate::screen::shell::strip_rows`), and less every
+/// row past the first that `footer` wraps onto. The queue's own key line is
+/// wider than a 100-column terminal, and each row it wraps onto pushes the
 /// frame's top row — the strip, or the box's own border — off the top of
 /// the screen.
-pub(super) fn layout(footer: &str) -> Layout {
+fn layout(footer: &str) -> Layout {
     match crate::screen::drawing_area() {
         Some((width, height)) => layout_for(
             width,
@@ -8006,7 +8000,7 @@ const NARROW_RIGHT_PANE: usize = 40;
 /// left for a value beside its label at all, so the label gets its own line
 /// and the value wraps beneath it, indented two — every label stays on
 /// screen either way, which a shrinking label column could not promise.
-pub(super) fn labeled_row(label: &str, value: &str, width: usize) -> Vec<String> {
+fn labeled_row(label: &str, value: &str, width: usize) -> Vec<String> {
     if width < NARROW_RIGHT_PANE {
         let mut lines = vec![format!("    {label}")];
         lines.extend(wrapped("      ", value, width));
@@ -8523,7 +8517,7 @@ fn routine_task_lines(
 ///
 /// - No job on the routine: `Schedule:` reads `none`.
 /// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
-///   `Job:` rows, the jobs tab's own values for each.
+///   `Job:` rows, the values `spoolway jobs list` gives each.
 /// - Two or more jobs on it, paused or not: every one of them, listed by
 ///   [`routine_jobs_lines`].
 /// - Stores that will not load: one `Jobs:` row naming the error.
@@ -8872,7 +8866,7 @@ fn render_routines(
             &left,
             Items {
                 starts: &left_starts,
-                noun: Some("folder"),
+                noun: "folder",
             },
             (folder_line, folder_line),
             layout.rows,
@@ -8882,7 +8876,7 @@ fn render_routines(
             &right,
             Items {
                 starts: &right_starts,
-                noun: Some("task"),
+                noun: "task",
             },
             focus,
             layout.rows,
@@ -8898,7 +8892,7 @@ fn render_routines(
 /// the layout the acceptance criteria and the mockup both call for: the
 /// pending groups on the left, the highlighted group's tasks on the right,
 /// rather than the two stacked one above the other.
-pub(super) fn two_pane_frame(
+fn two_pane_frame(
     left: &[String],
     right: &[String],
     left_title: &str,
@@ -9317,7 +9311,7 @@ fn pending_frame(
             &left,
             Items {
                 starts: &left_starts,
-                noun: Some("group"),
+                noun: "group",
             },
             (group_line, group_line),
             layout.rows,
@@ -9327,7 +9321,7 @@ fn pending_frame(
             &right,
             Items {
                 starts: &right_starts,
-                noun: Some("task"),
+                noun: "task",
             },
             focus,
             layout.rows,
@@ -16946,7 +16940,7 @@ mod tests {
             &lines,
             Items {
                 starts: &starts,
-                noun: Some("group"),
+                noun: "group",
             },
             (lines.len() - 1, lines.len() - 1),
             Some(rows),
@@ -16965,7 +16959,7 @@ mod tests {
             &lines,
             Items {
                 starts: &starts,
-                noun: Some("group"),
+                noun: "group",
             },
             (lines.len() - 1, lines.len() - 1),
             Some(rows),
@@ -21709,7 +21703,8 @@ mod tests {
     /// stops on the last item rather than wrapping.
     const DOWN_TO_LAST: &str = "\x1b[B\x1b[B\x1b[B\x1b[B";
 
-    /// A job on `routine` in `scope`'s store, as the jobs tab would write it.
+    /// A job on `routine` in `scope`'s store, as the routines tab would
+    /// write it.
     fn write_job(repo: &Repo, scope: crate::jobs::Scope, name: &str, routine: &str) {
         crate::jobs::write(
             repo,
@@ -22054,7 +22049,7 @@ mod tests {
         assert!(job_names(&repo).is_empty());
     }
 
-    /// New job over the list opens the jobs tab's schedule popup, titled for
+    /// New job over the list opens the schedule popup, titled for
     /// the highlighted routine, with its keys on the line under the frame —
     /// and writes nothing yet.
     #[test]
@@ -22175,8 +22170,8 @@ mod tests {
         assert!(back.contains("[o] options   [tab] details"), "{back}");
     }
 
-    /// A routine whose job name is taken is refused at the save with the
-    /// jobs tab's own message, and the job already there is left as it was.
+    /// A routine whose job name is taken is refused at the save, and the job
+    /// already there is left as it was.
     #[test]
     fn new_job_on_a_routine_whose_job_name_is_taken_is_refused() {
         use crate::jobs::Scope;
@@ -22892,8 +22887,7 @@ mod tests {
         assert!(last.contains("> nightly-old"), "{last}");
     }
 
-    /// A routine with one job draws that job's config, the jobs tab's own
-    /// values for each row, then `tasks` with the routine's tasks indented
+    /// A routine with one job draws that job's config, then `tasks` with the routine's tasks indented
     /// under it.
     #[test]
     fn the_details_pane_draws_a_routines_job_above_its_tasks() {

@@ -202,7 +202,7 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: the five tabs centred, each in a
+/// The strip itself, `width` columns wide: the four tabs centred, each in a
 /// slot one column wider than its label on either side, and `←` and `→`
 /// one space outside the first and last slot. The open tab fills its slot's
 /// spare columns with `[` and `]`, the same mark the key line gives a key;
