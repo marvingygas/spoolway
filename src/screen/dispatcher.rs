@@ -1,6 +1,7 @@
 //! The `spoolway dispatch` child bare `spoolway`'s dispatch tab starts on
-//! `enter`, and stops once the popup the next `enter` opens — see
-//! [`stop_panel`] — is answered.
+//! `enter`, and stops on the next `enter` — once the popup it opens, when
+//! there is one, is answered: [`stop_panel`] with a step running, or
+//! [`stop_queued_panel`] with tasks queued.
 //!
 //! The screen never runs a pass itself. It starts a child with
 //! `--from-screen`, and the child dispatches exactly as `spoolway dispatch`
@@ -223,8 +224,9 @@ pub(crate) const STOP_ANSWERS: [&str; 2] = ["let running steps finish", "interru
 /// The popup `enter` opens over a running dispatcher: whether its running
 /// steps finish, or are interrupted now, with the cursor on the
 /// `cursor`th of [`STOP_ANSWERS`]. Asked only while an agent lane or command
-/// step is running — with none, the two answers would do the same thing and
-/// `enter` stops the dispatcher without asking. The choice is the person's
+/// step is running — with none, the two answers would do the same thing, and
+/// `enter` asks [`stop_queued_panel`] instead when tasks are queued, or stops
+/// the dispatcher without asking when none are. The choice is the person's
 /// each time, never remembered. Laid out line by line rather than wrapped, so
 /// the explanation keeps the line breaks it was written with.
 pub(crate) fn stop_panel(cursor: usize) -> Vec<String> {
@@ -238,6 +240,37 @@ pub(crate) fn stop_panel(cursor: usize) -> Vec<String> {
         "stop dispatching",
         &body.map(str::to_string),
         &STOP_ANSWERS.map(str::to_string),
+        cursor,
+    )
+}
+
+/// The answers of the popup `enter` opens over a dispatcher with no step
+/// running and tasks queued, in the order [`stop_queued_panel`] lists them:
+/// the first stops the dispatcher, the second leaves it running.
+pub(crate) const STOP_QUEUED_ANSWERS: [&str; 2] = ["stop dispatching", "keep it running"];
+
+/// The popup `enter` opens over a running dispatcher when no step is running
+/// but `queued` tasks are waiting, with the cursor on the `cursor`th of
+/// [`STOP_QUEUED_ANSWERS`]. A stop then is silent and those tasks just wait,
+/// so the count is said before the one key that does it. Not asked with an
+/// empty queue, where `enter` stops at once, nor with a step running, where
+/// [`stop_panel`] asks instead.
+pub(crate) fn stop_queued_panel(queued: usize, cursor: usize) -> Vec<String> {
+    let verb = match queued {
+        1 => "is",
+        _ => "are",
+    };
+    let body = [
+        String::new(),
+        format!(
+            "{} {verb} queued and will not start.",
+            super::plural(queued, "task")
+        ),
+    ];
+    super::ask(
+        "stop dispatching",
+        &body,
+        &STOP_QUEUED_ANSWERS.map(str::to_string),
         cursor,
     )
 }
@@ -326,6 +359,34 @@ mod tests {
                 format!("{BOTTOM_LEFT}─────────────────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
+    }
+
+    /// The popup over a dispatcher with tasks queued and no step running,
+    /// border and all: the count, then its two answers with the cursor on
+    /// the stop.
+    #[test]
+    fn the_queued_stop_popup_names_the_count_over_its_answers() {
+        assert_eq!(
+            stop_queued_panel(1, 0),
+            [
+                format!("{TOP_LEFT}─ stop dispatching ─────────────────────{TOP_RIGHT}").as_str(),
+                "│                                        │",
+                "│  1 task is queued and will not start.  │",
+                "│                                        │",
+                "│  > stop dispatching                    │",
+                "│    keep it running                     │",
+                "│                                        │",
+                "│  [enter] confirm   [esc] close         │",
+                format!("{BOTTOM_LEFT}────────────────────────────────────────{BOTTOM_RIGHT}")
+                    .as_str(),
+            ]
+        );
+        let many = stop_queued_panel(3, 1).join("\n");
+        assert!(
+            many.contains("3 tasks are queued and will not start."),
+            "{many}"
+        );
+        assert!(many.contains("> keep it running"), "{many}");
     }
 
     fn child(script: &str) -> Dispatcher {

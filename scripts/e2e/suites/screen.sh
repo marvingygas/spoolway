@@ -7,7 +7,8 @@
 #
 # What is asserted is the order of the frames it drew: the first is the queue
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
-# a dispatcher and, with no step running, stops it at once with no popup.
+# a dispatcher and, with no step running and nothing queued, stops it at once
+# with no popup. With a task queued it asks first.
 # While one screen is open, a second `spoolway` or `spoolway dispatch` in
 # the same project refuses. A refusal on the queue tab is drawn in a popup
 # over the tab, and so is what a clean submission queued, ending on whether a
@@ -153,6 +154,52 @@ child_gone() {
 }
 if poll_until 10 child_gone; then ok "the child is gone once the screen has ended"
 else bad "the child is gone once the screen has ended"; fi
+
+# With a task queued and no step running, `enter` asks before it stops: a
+# stop then is silent, and the task just waits. `held-after` waits on
+# `held-gate`, which sits on `paused`, so the dispatcher started here claims
+# nothing and the one task on `queued` stays there. Both are written straight
+# into the queue, the same way a suite seeds any task past `queued`. `esc`
+# leaves the dispatcher running; `enter` on the popup's first answer stops it.
+# Both files go once the screen is down, so the cases below see the queue
+# this suite left them.
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" held-gate "$BODY" \
+  "group: held" "stage: paused" "paused_at: implement"
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/held-after.md" held-after "$BODY" \
+  "group: held" "stage: queued" "depends_on: [held-gate]"
+HELD_STOP="$LIVE/held-stop.txt"
+# Whether the frame on screen now, colour taken out, says `$1`. Fed to
+# `grep -q` through a process substitution rather than a pipe: `-q` exits at
+# the first match, and under `pipefail` the `sed` it leaves writing to a closed
+# pipe would fail the whole check.
+now_says() { grep -qaF -- "$1" < <(screen_last_frame | sed 's/\x1b\[[0-9;]*m//g'); }
+now_lacks() { ! now_says "$1"; }
+screen_start "$HELD_STOP"
+screen_dispatch
+screen_press $'\r'
+if poll_until 10 now_says "1 task is queued and will not start."
+then ok "enter with a task queued asks before it stops, naming the count"
+else bad "enter with a task queued asks before it stops, naming the count"; fi
+screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "under the stop popup's title" "─ stop dispatching " "$LAST"
+has "the cursor on the stop" "> stop dispatching" "$LAST"
+has "with keeping it running under it" "keep it running" "$LAST"
+lacks "not the popup for a running step" "let running steps finish" "$LAST"
+screen_press $'\x1b'
+if poll_until 10 now_lacks "keep it running"; then ok "esc closes it"
+else bad "esc closes it"; fi
+screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "and leaves the dispatcher running" "dispatcher running · pid " "$LAST"
+screen_press $'\r'
+poll_until 10 now_says "> stop dispatching"
+screen_press $'\r'
+if poll_until 10 now_says "[enter] start dispatching"
+then ok "enter on stop dispatching stops it"
+else bad "enter on stop dispatching stops it"; fi
+works "and the queued task is still queued" grep -q '^stage: queued' \
+  "$SPOOLWAY_PROJECT_HOME/queue/held-after.md"
+screen_stop
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/held-after.md"
 
 # The warnings gate checks the pipelines on disk when `enter` is pressed, not
 # the copy the screen opened with. A pipeline written while the screen is up,
