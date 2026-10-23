@@ -13,9 +13,10 @@
 # `init --setup home` writes a workspace itself now, and the last section runs
 # it for real: in a fresh git repository, and again from a second clone that
 # joins the same workspace, checking that neither checkout nor its `.git` is
-# touched. Then a third clone takes over the queue of the second once its
-# folder is gone, and the first moves into a new workspace and back, the
-# emptied workspace removed. Which questions it asks and what each flag
+# touched. A plan page in the workspace is listed by both clones until the
+# first has a task naming it. Then a third clone takes over the queue of the
+# second once its folder is gone, and the first moves into a new workspace and
+# back, the emptied workspace removed. Which questions it asks and what each flag
 # answers is unit-tested in src/commands/init.rs. The lane pass above it still builds its workspace
 # by hand, by moving an ordinary setup out of the checkout, because the
 # harness's fixture helpers rewrite a checkout's own `.spoolway/` in place.
@@ -251,6 +252,26 @@ else bad "git status shows nothing in the second clone"; git status --porcelain 
 if ls -A .git | diff -q "$LIVE/review.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
   ok ".git holds nothing in the second clone"
 else bad ".git holds nothing in the second clone"; fi
+
+# ------------------------------------------- a plan is the workspace's
+# A plan page in the workspace's plans/ is listed by both clones until a task
+# in either one names it. `group list` lists plans by the rule the queue
+# screen lists its plan rows by, and which folders that rule reads is
+# unit-tested in src/commands/pending.rs. What a unit test cannot reach is two
+# checkouts that `init` registered finding each other through project.toml.
+# The first listing runs before the page exists, so the `plans-since` stamp it
+# writes cannot hide the page.
+(cd "$FRESH" && must "a first listing of the plans" "$SPOOLWAY" group list)
+PAGE="$WS2/plans/2026-10-20-search.html"
+echo '<html></html>' >"$PAGE"
+(cd "$FRESH" && says "the first clone lists the plan no task names" "0 open — plan $PAGE" \
+  "$SPOOLWAY" group list)
+says "the second clone lists the same plan" "0 open — plan $PAGE" "$SPOOLWAY" group list
+task_doc "$WS2/dispatchers/api/pending/search-index.md" search-index "$BODY" \
+  "group: search" "plan: $PAGE"
+silent_about "the second clone drops the plan once the first clone has a task naming it" \
+  "plan $PAGE" "$SPOOLWAY" group list
+rm -f "$WS2/dispatchers/api/pending/search-index.md" "$PAGE"
 
 # ------------------------------------- a project job fires once per workspace
 # Both clones run a real dispatcher over the one shared `config/jobs.toml`. A
