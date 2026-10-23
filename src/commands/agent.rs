@@ -782,7 +782,8 @@ fn agent_verify_live(
     // granted a path that is missing; a verify that granted one would launch
     // the CLI in a shape no lane has.
     let plans_dir = dir.join("plans");
-    std::fs::create_dir_all(&plans_dir)?;
+    std::fs::create_dir_all(&plans_dir)
+        .with_context(|| format!("creating {}", plans_dir.display()))?;
     let values = std::collections::BTreeMap::from([
         ("model", model.clone()),
         ("session_id", session.clone()),
