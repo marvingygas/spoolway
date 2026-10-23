@@ -739,8 +739,10 @@ pub struct UnattendedConfig {
     /// answers it; leaving `blocked` by any road starts every step's `loop:`
     /// count again, so a spent limit never stops the run. Only where nothing
     /// staffs `blocked` does every road to it instead resume the lane that hit
-    /// it — the same session, the blocker in its prompt, continued rather than
-    /// replaced — which is exactly what `spoolway resume` does by hand, minus
+    /// it — on a `session: true` step the same session, the blocker in its
+    /// prompt, continued rather than replaced; on any other step a fresh
+    /// conversation with the opening prompt and the not-clean notice — which
+    /// is exactly what `spoolway resume` does by hand, minus
     /// the person. A task never sits on `blocked` in that case, so no count is
     /// reset and nothing this resumes hands any budget back.
     ///

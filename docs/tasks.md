@@ -372,10 +372,13 @@ below the line, so the last entry with no `Cleared` line under it is the current
 that goes back onto `blocked` gets no line.
 
 Press `r` on the blocked row. The picker preselects the step the task stopped on, and `enter`
-continues the blocked lane's own session there, if that session's last reply is within the
-model's [`prompt_cache_ttl`](agents.md#cache-warmth-is-a-models-fact). Past it, `enter` opens
-a fresh session at the same step. The same check applies to a task that comes back from a
-park. Pick another step and `enter` starts a fresh session at that step. A task that leaves
+continues the blocked lane's own session there, if the step declares
+[`session: true`](dispatcher.md#a-step-that-carries-its-own-session) and that session's last reply
+is within the model's [`prompt_cache_ttl`](agents.md#cache-warmth-is-a-models-fact). Past it,
+`enter` opens a fresh session at the same step. A step with no `session:` key, or
+`session: false`, always opens a fresh session on a resume, and its lane is told the worktree
+already holds earlier work. The same rules apply to a task that comes back from a park or a
+gate. Pick another step and `enter` starts a fresh session at that step. A task that leaves
 `blocked` by any road starts every
 step's [`loop:`](pipelines.md#loops) count again from zero.
 

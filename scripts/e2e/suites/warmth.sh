@@ -38,6 +38,8 @@
 #           the project then sets `prompt_cache_ttl = "5m"`
 #    14:00  resume → a fresh session, because the set five minutes have
 #           passed since the last reply
+#           a step with no `session:` key is then run, blocked by hand and
+#           resumed: a fresh session again, however recent its last reply
 #
 # The suite checks spoolway's call at eight and fourteen minutes and does not
 # assert the cache is cold then: Claude Code often writes to the one-hour
@@ -46,7 +48,7 @@
 # cache. A failure prints the turn's usage, which tells an early eviction on
 # Anthropic's side from a bug here.
 #
-# **Cost.** Six turns of `claude-haiku-4-5` — four through the pipeline
+# **Cost.** Eight turns of `claude-haiku-4-5` — six through the pipeline
 # scenario, two more through `agent verify --live` at the end — each a few
 # thousand tokens against a fixture repo of two files. Fractions of a cent, and
 # it is opt-in either way: nothing here runs unless `SPOOLWAY_E2E_CLOUD=1` is
@@ -58,7 +60,7 @@
 # scratch tree — the same thing running `claude` in a new directory does. It
 # edits nothing of yours, and nothing of its own either.
 #
-# covers: models.<glob>.prompt_cache_ttl — against a real claude session, aged by waiting: unset, a resume continues the session at any age, and reads the cache while it is warm; once a limit is set, a resume past it is refused
+# covers: models.<glob>.prompt_cache_ttl — against a real claude session, aged by waiting: unset, a resume continues the session at any age, and reads the cache while it is warm; once a limit is set, a resume past it is refused; a resume onto a step with no `session:` key opens fresh
 # covers: agent.verify.live — every transcript reading, off a real turn and a resumed one, named one by one
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -167,7 +169,7 @@ must "one cloud lane at a time"  "$SPOOLWAY" config set agents.claude.concurrenc
 must "the model's window"        "$SPOOLWAY" config set "models.$MODEL.context_window" 200000
 must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_reuse_ctx 90
 
-# Four visits by one prompt, with a gate after each of the first three.
+# Five visits by one prompt, with a gate after each of them.
 #
 # The gate is the sequencing, and it is the only way to get one: the decision
 # under test is taken when the next lane starts, in the same pass that banks the
@@ -176,7 +178,7 @@ must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_re
 # `paused` with the lane's spend banked, the suite waits a real while, and
 # `spoolway resume` starts the next lane.
 cat > .spoolway/pipelines/warmth.yml <<YAML
-# Written by scripts/e2e/suites/warmth.sh. Four steps, one prompt, three gates.
+# Written by scripts/e2e/suites/warmth.sh. Five steps, one prompt, five gates.
 steps:
   - id: first
     description: Write the note, and stop for a person.
@@ -210,6 +212,15 @@ steps:
     prompt: builder
     model: $MODEL
     session: true
+    gate: true
+    on_pass: fifth
+
+  - id: fifth
+    description: A step with no `session:` key, resumed from a block — it opens fresh whatever its first lane left.
+    agent: claude
+    prompt: builder
+    model: $MODEL
+    gate: true
     on_pass: done
 YAML
 must "the pipeline loads" "$SPOOLWAY" pipeline check
@@ -278,9 +289,11 @@ transcript_of() {
 # and a carried session writes no such line at all. See `session_miss` in
 # `dispatch::prepare_boot`.
 #
-# Read out of the archive, since a landed task has left the queue.
+# Read out of the queue while the task is still in it, and out of the archive
+# once it has landed.
 opened_fresh() {
-  local task=$1 step=$2 what=$3 file="$SPOOLWAY_PROJECT_HOME/archive/$1.md"
+  local task=$1 step=$2 what=$3 file="$SPOOLWAY_PROJECT_HOME/queue/$1.md"
+  [ -f "$file" ] || file="$SPOOLWAY_PROJECT_HOME/archive/$1.md"
   if grep -qE "\`$step\`.*opened fresh" "$file" 2>/dev/null; then
     ok "$what"
   else
@@ -472,7 +485,7 @@ PY
       must "a five-minute limit" "$SPOOLWAY" config set "models.$MODEL.prompt_cache_ttl" 5m
       age 360
       must "resume waits a last time" "$SPOOLWAY" resume waits
-      if drive waits gone 600; then
+      if reach_gate waits fourth; then
         fourth_sid=$(session_of waits fourth)
         if [ -n "$fourth_sid" ] && [ "$fourth_sid" != "$third_sid" ]; then
           ok "a resume past the set 5m limit opened a fresh session"
@@ -482,7 +495,32 @@ PY
         fi
         opened_fresh waits fourth "and the task file says the fourth step opened fresh"
         has "and which bound refused it" \
-          "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/waits.md"
+          "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/queue/waits.md"
+
+        # A step that does not declare `session: true` has no conversation to
+        # walk back into, so a resume onto it opens fresh however recently its
+        # lane stopped. The fifth step runs once and holds at its gate. The
+        # suite then writes that stop down as a block on the step by hand, as
+        # the `stuck` task above does, and resumes it: the ledger holds a
+        # session for this step, and the new lane must not be it.
+        must "resume waits onto the fifth step" "$SPOOLWAY" resume waits
+        if reach_gate waits fifth; then
+          fifth_sid=$(session_of waits fifth)
+          sed -i -e 's/^stage: .*/stage: blocked/' \
+                 -e 's/^paused_at: .*/blocked_from: fifth/' \
+                 -e '/^paused_by: /d' "$SPOOLWAY_PROJECT_HOME/queue/waits.md"
+          must "resume the blocked fifth step" "$SPOOLWAY" resume waits
+          if reach_gate waits fifth; then
+            again_sid=$(session_of waits fifth)
+            if [ -n "$fifth_sid" ] && [ -n "$again_sid" ] && [ "$fifth_sid" != "$again_sid" ]; then
+              ok "a resume onto a step with no \`session:\` key opened a fresh session"
+            else
+              bad "a resume onto a step with no \`session:\` key opened a fresh session (before \`$fifth_sid\`, after \`$again_sid\`)"
+              grep '"task":"waits"' "$SPOOLWAY_PROJECT_HOME/usage.jsonl" | sed 's/^/        /'
+            fi
+          fi
+        fi
+        must "close waits" "$SPOOLWAY" resume waits --stage done
       else
         bad "a resume past the set 5m limit opened a fresh session (the task stopped at \`$(stage_of waits)\`)"
         tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/waits · fourth.log" 2>/dev/null | sed 's/^/        /'

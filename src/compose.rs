@@ -1003,9 +1003,10 @@ pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, _step: &Step) ->
 ///
 /// A step without `skills:` gets exactly one message, the briefing.
 ///
-/// `restarting` is a launch that begins a new conversation on a step that has
-/// already run, so its worktree is not clean. The briefing then gains one
-/// paragraph saying so. It joins the briefing message rather than arriving as
+/// `not_clean` is a launch that begins a new conversation on a step that has
+/// already run, so its worktree is not clean: a restart, or a resume that
+/// found no session to continue. The briefing then gains one paragraph saying
+/// so. It joins the briefing message rather than arriving as
 /// one of its own, because a message of its own would be a second turn, and
 /// the skill messages ahead of the briefing are untouched. The briefing is
 /// then more than one line, so herdr delivers it as one paste, wrapped in
@@ -1017,10 +1018,10 @@ pub(crate) fn opening_messages(
     task: &Task,
     pipeline: &Pipeline,
     step: &Step,
-    restarting: bool,
+    not_clean: bool,
 ) -> Vec<String> {
     let mut briefing = opening_prompt(task, pipeline, step);
-    if restarting {
+    if not_clean {
         briefing.push_str(
             "\n\nAn earlier attempt on this step ran in this worktree, and its changes are \
              still here — some of them committed. Read what it did in the `## Status Log` \

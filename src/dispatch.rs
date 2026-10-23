@@ -534,6 +534,13 @@ impl LaneRecord {
         })
     }
 
+    /// Whether this lane is over and only its pane is left open: the board
+    /// reads it so a task that came back to the step reads `queued` until a
+    /// new lane for it starts, rather than `running` on an idle pane.
+    pub(crate) fn is_kept(&self) -> bool {
+        self.kept
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and
@@ -5256,8 +5263,14 @@ impl<'a> Dispatcher<'a> {
         for (&i, prompt_result) in ready.iter().zip(prompt_results) {
             let task = &mut tasks[pending[i].candidate.task_index];
             // Its boot has returned, whichever way — the lane is up and
-            // listed, or the failure below settles the task.
-            claims.release(task.id());
+            // listed, or the failure below settles the task. The mark is
+            // dropped here on a failure, and in the `Ok` arm only once the
+            // new lane's record is on disk: the board reads a lane with no
+            // mark and an old `kept` record as idle, so releasing earlier
+            // showed a lane that had just started as `queued`.
+            if prompt_result.is_err() {
+                claims.release(task.id());
+            }
             match prompt_result {
                 Ok(started) => {
                     // The launch actually started, so whatever this step's
@@ -5270,9 +5283,14 @@ impl<'a> Dispatcher<'a> {
                     // skips its write.
                     let cleared_failures = task.clear_launch_failures(&pending[i].step.id);
                     let cleared_busy = task.clear_launch_busy(&pending[i].step.id);
-                    if cleared_failures || cleared_busy {
-                        self.persist(task)?;
-                    }
+                    // Held back until the record below is saved and the
+                    // mark released, so a failed write cannot leave the mark
+                    // behind.
+                    let cleared = if cleared_failures || cleared_busy {
+                        self.persist(task).map(|_| ())
+                    } else {
+                        Ok(())
+                    };
                     let name = started.name;
                     let action = match &started.note {
                         Some(note) => format!("started {name} — {note}"),
@@ -5319,6 +5337,8 @@ impl<'a> Dispatcher<'a> {
                     // restarted with a lane that had its first skill and
                     // nothing else — see `LaneRecord::opening`.
                     self.save_lanes("after starting a lane");
+                    claims.release(task.id());
+                    cleared?;
                     report.actions.push(action);
                     // `Ok(Started)` alone does not say the stage move
                     // landed — `finish_launch_bookkeeping`'s own
@@ -8626,8 +8646,9 @@ fn prepare_boot(
     // name would make the second attempt reopen the first one's transcript and
     // bill its tokens twice.
     //
-    // A task coming back from `blocked` to the step it stopped on is the one
-    // exception, and it is not a retry — it is the same attempt, continued. Its
+    // A task coming back from `blocked` to a step that declares `session: true`
+    // is the one exception, and it is not a retry — it is the same attempt,
+    // continued. On any other step it opens fresh, like every visit. Its
     // lane had read the task, walked the tree and often finished the work
     // before something outside it got in the way, and a fresh session pays for
     // all of that again to arrive back where that one already was. So the
@@ -8669,7 +8690,13 @@ fn prepare_boot(
     // carries what the old lane knew; a park leaves its Handoff and commits.
     let resolved = crate::models::resolve(&repo.config.models, &model);
     let (price, lifetime) = (resolved.price, resolved.lifetime);
-    let one_shot = (resuming && !restarting)
+    // The one-shot flag is honoured only on a step that declares
+    // `session: true`: any other step has no conversation worth walking back
+    // into and opens fresh on a resume, as it does on every visit. No session
+    // is looked up for it, and `finish_launch_bookkeeping` still spends the
+    // flag. The unattended `blocked` step takes its `session:` from
+    // `unattended.blocked_session`, so the same `step.session` check covers it.
+    let one_shot = (resuming && !restarting && step.session)
         .then(|| lane_session_in(repo, ledger, &name, &key))
         .flatten()
         .filter(|(kind, session)| !session_is_cold(lifetime, kind, session));
@@ -8905,7 +8932,12 @@ fn prepare_boot(
                 repo.unattended(),
             )]
         }
-        (false, _, _) => crate::compose::opening_messages(task, pipeline, step, restarting),
+        // A resume that opens fresh comes back to a worktree that already
+        // holds the earlier lane's work, which the new lane has no memory of.
+        // It gets the same notice a restart does.
+        (false, _, _) => {
+            crate::compose::opening_messages(task, pipeline, step, restarting || resuming)
+        }
     };
 
     Ok(Boot {
@@ -9419,6 +9451,19 @@ pub(crate) fn peek_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+/// The names of the lanes whose record says they are `kept`: over, with only
+/// their pane left open. The dispatcher leaves them out of every count of
+/// what is running, so each board reader that asks "is this name the step's
+/// live lane" leaves them out too. Read like [`peek_lane_records`], and empty
+/// for the same absent or corrupt file.
+pub(crate) fn kept_lane_names(repo: &Repo) -> HashSet<String> {
+    peek_lane_records(repo)
+        .into_iter()
+        .filter(|(_, record)| record.is_kept())
+        .map(|(name, _)| name)
+        .collect()
 }
 
 pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
@@ -22262,6 +22307,151 @@ mod tests {
             );
             assert_eq!(reload(&path).front.resume, None, "spent either way");
         }
+    }
+
+    /// A resume onto a step with no `session:` key opens a new conversation,
+    /// on the block road: the session the lane stopped on is in the ledger
+    /// and is not continued. The lane is briefed with the opening prompt plus
+    /// the notice that the worktree already holds earlier work, and the
+    /// one-shot `resume:` is spent so the next launch is an ordinary visit.
+    #[test]
+    fn a_resume_onto_a_step_without_session_opens_fresh_and_says_the_worktree_is_not_clean() {
+        let (repo, _root_guard) = fixture("resume-fresh-block");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.blocked_from = Some("implement".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · implement", "the-session-that-blocked", &kind);
+        crate::commands::resume(
+            &repo,
+            &session_pipelines(),
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+                skip_hook: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(reload(&path).front.resume.as_deref(), Some("implement"));
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let session = load_lane_records(&repo)["demo · implement"].session.clone();
+        assert!(!session.is_empty());
+        assert_ne!(
+            session, "the-session-that-blocked",
+            "a step that does not declare `session: true` has no conversation \
+             to walk back into"
+        );
+        let sent = mux.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(sent.contains("its changes are still here"), "{sent}");
+        assert!(!sent.contains("a person has cleared it"), "{sent}");
+        let task = reload(&path);
+        assert_eq!(task.front.resume, None, "spent by the launch");
+
+        // The lane goes away and a later arrival launches the step again, as a
+        // plain visit and not a second resume. The arrival is what zeroes
+        // `attempts`, so the test zeroes it.
+        let mut task = reload(&path);
+        task.front.attempts = 0;
+        task.save().unwrap();
+        let again = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &session_pipelines(), &again)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(again.did("start"), ["start demo · implement"]);
+        assert_ne!(
+            load_lane_records(&repo)["demo · implement"].session,
+            session,
+            "the second launch is its own conversation"
+        );
+        let sent = again.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(!sent.contains("its changes are still here"), "{sent}");
+        assert!(!sent.contains("a person has cleared it"), "{sent}");
+    }
+
+    /// The park road onto the same kind of step: a fresh conversation with
+    /// the opening prompt rather than `park_prompt`, and both one-shot keys
+    /// spent.
+    #[test]
+    fn resuming_a_park_onto_a_step_without_session_opens_fresh() {
+        let (repo, _root_guard) = fixture("resume-fresh-park");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.parked_from = Some("implement".into());
+            f.resume = Some("implement".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · implement", "parked-session", &kind);
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let session = load_lane_records(&repo)["demo · implement"].session.clone();
+        assert_ne!(session, "parked-session");
+        let sent = mux.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(sent.contains("its changes are still here"), "{sent}");
+        assert!(
+            !sent.contains("A person stopped this lane's turn"),
+            "a fresh lane is not told it was parked: {sent}"
+        );
+        let task = reload(&path);
+        assert_eq!(task.front.parked_from, None);
+        assert_eq!(task.front.resume, None);
+
+        // The lane goes away and a later arrival launches the step again, as a
+        // plain visit and not a second park. The arrival is what zeroes
+        // `attempts`, so the test zeroes it.
+        let mut task = reload(&path);
+        task.front.attempts = 0;
+        task.save().unwrap();
+        let again = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &session_pipelines(), &again)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(again.did("start"), ["start demo · implement"]);
+        assert_ne!(
+            load_lane_records(&repo)["demo · implement"].session,
+            session,
+            "the second launch is its own conversation"
+        );
+        let sent = again.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(!sent.contains("its changes are still here"), "{sent}");
+        assert!(
+            !sent.contains("A person stopped this lane's turn"),
+            "{sent}"
+        );
+    }
+
+    /// The counterpart on a `session: true` step: the one-shot resume still
+    /// continues the session the lane stopped on.
+    #[test]
+    fn a_resume_onto_a_session_step_still_continues_its_session() {
+        let (repo, _root_guard) = fixture("resume-session-step");
+        add_task_with(&repo, "demo", "fix", |f| {
+            f.resume = Some("fix".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · fix", "the-session-that-blocked", &kind);
+
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(
+            load_lane_records(&repo)["demo · fix"].session,
+            "the-session-that-blocked"
+        );
     }
 
     /// A restart opens a new conversation on a `session: true` step whose

@@ -139,8 +139,9 @@ pub enum Command {
     /// the task back to that same step. The step's conversation is discarded:
     /// the new lane is briefed from scratch, whatever `session:` the step
     /// declares, and is told the worktree is not clean. Nothing in the
-    /// worktree is touched. Use it when a conversation cannot do the work —
-    /// `resume` would walk back into it.
+    /// worktree is touched. Use it when a conversation cannot do the work.
+    /// On a step that declares `session: true`, `resume` would walk back into
+    /// it; on any other step `resume` also opens a fresh conversation.
     ///
     /// On a step that runs a command there is no conversation. A command
     /// still running is stopped, with everything it started, and the step

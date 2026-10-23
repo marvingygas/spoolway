@@ -3009,6 +3009,7 @@ pub(crate) fn live_agent_lane_tasks(
     lanes: &[crate::mux::Lane],
 ) -> Vec<usize> {
     let mine = crate::dispatch::our_checkouts(repo, tasks);
+    let kept = crate::dispatch::kept_lane_names(repo);
     let mut out = Vec::new();
     for (i, task) in tasks.iter().enumerate() {
         if task.stage() == crate::pipeline::PAUSED {
@@ -3024,10 +3025,9 @@ pub(crate) fn live_agent_lane_tasks(
             continue;
         }
         let name = crate::mux::lane_name(task.stage(), task);
-        if lanes
-            .iter()
-            .any(|l| l.name == name && crate::dispatch::owns_cwd(&mine, &l.cwd))
-        {
+        if lanes.iter().any(|l| {
+            l.name == name && !kept.contains(&name) && crate::dispatch::owns_cwd(&mine, &l.cwd)
+        }) {
             out.push(i);
         }
     }
@@ -4147,9 +4147,13 @@ fn slots_used<'a>(
 ) -> SlotsUsed<'a> {
     let step_ids = pipelines.all_step_ids();
     let mine = crate::dispatch::our_checkouts(repo, tasks);
+    // A kept lane holds no slot: the dispatcher partitions it out before it
+    // counts, so the footer must too or it reads a profile as busy while
+    // nothing runs.
+    let kept = crate::dispatch::kept_lane_names(repo);
     let mut out = SlotsUsed::default();
     for lane in lanes {
-        if !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
+        if kept.contains(&lane.name) || !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
             continue;
         }
         let Some((step_id, task)) = crate::mux::parse_lane(&lane.name, &step_ids, tasks) else {
@@ -4694,7 +4698,17 @@ fn build_rows(
         let key = crate::mux::run_key(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
         // checkout path is no test of ownership here the way it is in a pass.
-        let live_lane = lanes.iter().find(|l| l.name == lane);
+        //
+        // A lane whose record says `kept` is not the step's live lane: it is
+        // an idle pane left open from an earlier visit, and the dispatcher
+        // leaves it out of every count of what is running. Reading it as
+        // live made a task the dispatcher was holding show `running` for as
+        // long as the hold lasted. A fresh lane's record is written with
+        // `kept: false`, so the row turns to running when one starts.
+        let live_lane = lanes
+            .iter()
+            .find(|l| l.name == lane)
+            .filter(|_| !lane_records.get(&lane).is_some_and(|r| r.is_kept()));
         let live = live_lane.is_some();
         // One read of the transcript, for the three figures that come off it.
         let session = live
@@ -5188,6 +5202,10 @@ fn finish_settled(
     frozen: &mut BTreeMap<String, Option<i64>>,
 ) -> usize {
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    // A kept lane is an idle pane left from an earlier visit to the step, not
+    // this visit's lane: matched here it would turn a `queued` row into
+    // `finished` while dispatching is stopped.
+    let kept = crate::dispatch::kept_lane_names(repo);
     let mut working = 0;
     let mut finished: BTreeSet<String> = BTreeSet::new();
     for row in rows.iter_mut() {
@@ -5209,7 +5227,10 @@ fn finish_settled(
         // figure: a lane's own `now - launched_at`, already on the row, or an
         // exited run's time since it started, which `build_rows` never put
         // there because it only times a run still in flight.
-        let time = match lanes.iter().find(|l| Some(&l.name) == lane.as_ref()) {
+        let time = match lanes
+            .iter()
+            .find(|l| Some(&l.name) == lane.as_ref() && !kept.contains(&l.name))
+        {
             Some(live) if live.status.is_settled() => row.lane_time,
             Some(_) => {
                 working += 1;
@@ -7812,6 +7833,140 @@ mod tests {
         }
         assert!(!repo.lanes_file().with_extension("json.bad").exists());
         assert!(!crate::problem_log::path(&repo).exists());
+    }
+
+    /// A task whose only lane for its current step is one the dispatcher has
+    /// marked `kept` — over, with its pane left open and idle — reads
+    /// `Queued`, because nothing is running for it. The same task reads
+    /// `Running` once a new lane for that step has a record with `kept`
+    /// false.
+    #[test]
+    fn a_task_whose_only_lane_for_its_step_is_kept_reads_queued_not_running() {
+        let (repo, _root_guard) = fixture("kept-lane-queued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let now = chrono::Utc::now().timestamp();
+        let write_record = |kept: bool| {
+            let records = serde_json::json!({ "login · implement": {
+                "started_at": now - 7200,
+                "last_progress": now - 600,
+                "output_hash": 0,
+                "kept": kept,
+            }});
+            std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+        };
+        let state = || {
+            let mut l = lane("login · implement", &repo.root);
+            l.status = crate::mux::LaneStatus::Idle;
+            let rows = build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                &[l],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+            rows.into_iter().find(|r| r.id == "login").unwrap()
+        };
+
+        write_record(true);
+        let row = state();
+        assert!(matches!(row.state, State::Queued), "{}", row.state.word());
+
+        write_record(false);
+        let row = state();
+        assert!(matches!(row.state, State::Running), "{}", row.state.word());
+    }
+
+    /// Writes a `lanes.json` holding one record for `name`, `kept` as given.
+    fn write_kept_record(repo: &Repo, name: &str, kept: bool) {
+        let now = chrono::Utc::now().timestamp();
+        let records = serde_json::json!({ name: {
+            "started_at": now - 7200,
+            "last_progress": now - 600,
+            "output_hash": 0,
+            "kept": kept,
+        }});
+        std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+    }
+
+    /// The footer reads the dispatcher's own count, and the dispatcher leaves
+    /// a kept lane out of it. Counted here, a held task whose old lane is
+    /// still open would show a busy profile with nothing running.
+    #[test]
+    fn a_kept_lane_on_the_tasks_own_step_takes_no_footer_slot() {
+        let (repo, _root_guard) = fixture("slots-kept-own-step");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let mut l = lane("login · implement", &repo.root);
+        l.status = crate::mux::LaneStatus::Idle;
+
+        write_kept_record(&repo, "login · implement", false);
+        let used = slots_used(&repo, &tasks, &pipelines, &[l.clone()]);
+        assert_eq!(used.agents.get("pi").copied(), Some(1), "{used:#?}");
+
+        write_kept_record(&repo, "login · implement", true);
+        let used = slots_used(&repo, &tasks, &pipelines, &[l]);
+        assert!(used.agents.is_empty(), "{used:#?}");
+    }
+
+    /// With no dispatcher up, a settled lane on the task's step turns its row
+    /// to `Finished`. A kept lane is not this visit's lane, so the row the
+    /// board read as `Queued` stays `Queued` and is not counted as working.
+    #[test]
+    fn a_kept_lane_does_not_finish_a_queued_row() {
+        let (repo, _root_guard) = fixture("finish-kept-lane");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let mut l = lane("login · implement", &repo.root);
+        l.status = crate::mux::LaneStatus::Idle;
+        write_kept_record(&repo, "login · implement", true);
+
+        let mut rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &[l.clone()],
+            &Default::default(),
+            None,
+        )
+        .unwrap();
+        let working = finish_settled(&repo, &tasks, &mut rows, &[l], &mut BTreeMap::new());
+        assert!(
+            matches!(rows[0].state, State::Queued),
+            "{}",
+            rows[0].state.word()
+        );
+        assert_eq!(working, 0);
+    }
+
+    /// `pause` and the stop popup interrupt the lanes this returns. A kept
+    /// lane is idle, and the board shows its task as queued, so it must not
+    /// be named as an agent turn to interrupt.
+    #[test]
+    fn a_kept_lane_is_not_a_live_agent_lane() {
+        let (repo, _root_guard) = fixture("live-agent-kept");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let mut l = lane("login · implement", &repo.root);
+        l.status = crate::mux::LaneStatus::Idle;
+
+        write_kept_record(&repo, "login · implement", false);
+        let live = live_agent_lane_tasks(&repo, &tasks, &pipelines, &[l.clone()]);
+        assert_eq!(live, vec![0]);
+
+        write_kept_record(&repo, "login · implement", true);
+        let live = live_agent_lane_tasks(&repo, &tasks, &pipelines, &[l]);
+        assert!(live.is_empty(), "{live:?}");
     }
 
     /// With no dispatcher up, a lane still in its turn counts — `Working`, a

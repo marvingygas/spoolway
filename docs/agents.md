@@ -80,8 +80,9 @@ and its transcript is read from the agent's own home.
 ### Cache warmth is a model's fact
 
 A session is continued only while its last reply is recent enough. The check applies to a
-`session: true` carry and to the one-shot resume after `blocked` or a park. A resume past the
-limit opens a fresh session at the same step.
+`session: true` carry and to a resume after `blocked`, a park or a gate onto a `session: true` step.
+A resume past the limit opens a fresh session at the same step. A resume onto a step without
+`session: true` always opens a fresh session.
 
 Age is the time since the last line in the transcript that carries model usage, read as UTC.
 Lines that never reach the model do not count. A transcript with no such timestamp uses the

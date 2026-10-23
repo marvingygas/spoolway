@@ -10,6 +10,9 @@
 # once the fourth starts and leaves the other three, and with `all`, which
 # closes none.
 #
+# A task held at a gate is resumed onto a step whose old lane is still standing. The resume must close that lane, so
+# the dispatcher starts a fresh one instead of waiting on the old pane.
+#
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
 # process, so the suite stands in for each lane's agent and reports for it:
@@ -243,6 +246,56 @@ if drive every gone 60; then ok "the task with every lane kept is done and archi
 else bad "the task with every lane kept is done and archived"; fi
 must "the limit back at its default" "$SPOOLWAY" config set dispatch.visible_lanes 3
 
+# ------------------------------------------------------ resume past a gate
+# `second` is gated and routes its pass back to `first`, whose lane is kept
+# open and idle while `second` runs. A person resuming the task held at the
+# gate sends it onto `first`, and the resume must close that stale lane. The dispatcher
+# is held down so the check reads the resume's own work, before a fresh lane
+# for `first` is started in its place.
+cat > .spoolway/pipelines/gatepair.yml <<YML
+description: A gated second step that routes back to the first.
+
+steps:
+  - id: first
+    description: The step the gate sends the task back to.
+    agent: pi
+    prompt: builder
+    model: $MODEL
+    on_pass: second
+
+  - id: second
+    description: Gated, so its pass waits for a person.
+    agent: pi
+    prompt: judge
+    model: $MODEL
+    gate: true
+    loop: 3
+    on_pass: first
+YML
+works "the gated pipeline checks out" "$SPOOLWAY" pipeline check
+task_doc "$LIVE/gated-pair.md" gatedpair "$BODY" "group: gatedpair" "pipeline: gatepair"
+must "a task queued on the gated pipeline" "$SPOOLWAY" queue add --from "$LIVE/gated-pair.md"
+if drive gatedpair first 60 && poll_until 60 lane_listed "gatedpair · first"; then
+  ok "the gated task's first step starts"
+else bad "the gated task's first step starts"; fi
+must "the first step reports" report_as gatedpair first
+if drive gatedpair second 60 && poll_until 60 lane_listed "gatedpair · second"; then
+  ok "the gated task moves on to the second step"
+else bad "the gated task moves on to the second step"; fi
+dispatcher_stop
+must "the second step reports" report_as gatedpair second
+says "the pass waits at the gate" "paused" "$SPOOLWAY" queue show gatedpair
+says "the first step's lane is still standing" "gatedpair · first" "$SPOOLWAY" lane
+must "the task is resumed past the gate" "$SPOOLWAY" resume gatedpair
+if [ "$(stage_of gatedpair)" = first ]; then ok "the resume sends it back to the first step"
+else bad "the resume sends it back to the first step (at \`$(stage_of gatedpair)\`)"; fi
+silent_about "the first step's stale lane is closed by the resume" "gatedpair · first" \
+  "$SPOOLWAY" lane
+says "and the second step's lane stays for a person to read" "gatedpair · second" \
+  "$SPOOLWAY" lane
+# Parked, so the dispatcher the next section starts leaves it alone.
+must "the gated task is parked" "$SPOOLWAY" queue pause gatedpair
+
 # ------------------------------------------------------ command steps
 # A command step opens a pane by default, and opens none with
 # `dispatch.hide_commands` set to `true`. Every `pane run` the double is asked
@@ -308,6 +361,6 @@ unset GATE_RELEASE
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 rm -f .spoolway/pipelines/twostep.yml .spoolway/pipelines/fourstep.yml \
-  .spoolway/pipelines/gated.yml
+  .spoolway/pipelines/gated.yml .spoolway/pipelines/gatepair.yml
 
 finish
