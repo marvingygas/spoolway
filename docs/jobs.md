@@ -10,6 +10,11 @@ covers:
 A job runs a routine on a schedule. It is a cron expression, a pipeline, and a routine saved
 under `.spoolway/routines/`.
 
+A job runs a whole routine, which is a top-level folder under `.spoolway/routines/`. A routine
+has at most one job. A job on a task file, on a folder inside a routine, or on a routine that
+another enabled job also runs never fires. The dispatcher names it once per matching minute, and
+`spoolway doctor` fails a check for it. To fire again, delete or repoint the job.
+
 ## Overview
 
 spoolway has no clock of its own. The dispatcher fires a due job at the top of its pass.
@@ -36,8 +41,7 @@ flowchart LR
   J -- yes --> F[queue the routine<br/>on the job's pipeline] --> G[record the minute] --> E
 ```
 
-A folder routine is queued as one batch with fresh ids. A single `.md` routine is queued alone
-with its `depends_on` emptied. The same pass dispatches what it queued.
+A routine is queued as one batch with fresh ids. The same pass dispatches what it queued.
 
 The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. If
 that file cannot be written, the job still fires once per matching minute while the dispatcher
@@ -177,10 +181,10 @@ item under it, and `esc` closes the menu.
 `n` and the options menu's `edit` walk three panels. `esc` on any of them writes nothing.
 
 1. The routine. This is the same routines browser as the routines tab, listing one
-   row per routine. `space` ticks a routine and `enter` picks it. `tab` moves focus onto the
-   tasks pane, where `space` picks the highlighted task. There, `o` opens a menu titled with the
-   task's id whose one item, `open`, opens the task in your editor. `esc` cancels the picker from
-   either pane.
+   row per routine. `space` ticks a routine and `enter` picks it. A job runs a whole routine, so
+   no single task can be picked. `tab` moves focus onto the tasks pane, which shows what the
+   routine holds. There, `o` opens a menu titled with the task's id whose one item, `open`, opens
+   the task in your editor. `esc` cancels the picker from either pane.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
@@ -196,8 +200,9 @@ the store file by hand when the routine's tasks set no `base:`. Editing a job on
 a `base` already in the file.
 
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
-gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. This is the same
-whether the walk started on the jobs tab or the routines tab. A job in the project store is
+gives the job `nightly`. This is the same whether the walk started on the jobs tab or the
+routines tab. A save is refused, with a notice naming the job, when the routine already has a
+job in either store. A job in the project store is
 written by hand once; the screen then edits it in place.
 
 ## The cron grammar
@@ -231,7 +236,7 @@ A store file holds `[jobs.<name>]` tables:
 [jobs.nightly-audit]
 schedule = "0 3 * * 1-5"
 pipeline = "impl_fast"
-routine  = "nightly"     # a folder or a single .md under .spoolway/routines/
+routine  = "nightly"     # a top-level folder under .spoolway/routines/
 enabled  = true          # optional; absent means enabled
 base     = "plan/demo"   # optional; the branch the routine's tasks are cut from
 ```
@@ -300,6 +305,8 @@ not parse.
 | job `<name>` has no unknown keys | The job's table holds a key no job reads. |
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
+| job `<name>` routine is a whole routine folder | The routine path is a task file, or a folder inside a routine. |
+| job `<name>` is the only job on its routine | Another enabled job runs the same routine. The check names that job and its store. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
 | job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step, a `*.md` file that does not parse, or a folder with no task. |
 | job `<name>` base exists | `base` is set, and it starts with `-`, is not a valid branch name, or names a branch that neither the repository nor `origin` has. |

@@ -397,8 +397,7 @@ impl Draft {
     }
 
     /// The name the job is saved under: the original when editing, else the
-    /// file stem of the routine it points at (`nightly/audit.md` → `audit`,
-    /// the folder `nightly` → `nightly`).
+    /// file stem of the routine folder it points at (`nightly` → `nightly`).
     fn name(&self) -> String {
         if let Some(name) = &self.editing {
             return name.clone();
@@ -843,13 +842,6 @@ fn run_jobs_screen(
                         state.mode = JobMode::Walk(NewJobWalk::schedule(draft));
                     }
                 }
-                Key::Char(' ') if nav.focus == Focus::Tasks => {
-                    if let Some(rel) = picked_task(&routines, nav, &routines_dir) {
-                        let mut draft = draft.clone();
-                        draft.routine = rel;
-                        state.mode = JobMode::Walk(NewJobWalk::schedule(draft));
-                    }
-                }
                 // `o` over the tasks pane: the menu for the highlighted
                 // task, titled with its id, offering open — the same menu
                 // the queue screen's own routines pane opens on a routine's
@@ -1034,6 +1026,24 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         ));
     }
 
+    // A routine has at most one job. The dispatcher would name both and fire
+    // neither, so the second is refused here, whichever store holds the
+    // first. Targets are compared as resolved paths, so `nightly/` and
+    // `nightly` are one routine.
+    let wanted = repo.routines_dir().join(&draft.routine);
+    if let Some(holder) = current.iter().find(|job| {
+        draft.editing.as_deref() != Some(job.name.as_str())
+            && job.target(repo).is_ok_and(|target| target == wanted)
+    }) {
+        return Err(format!(
+            "Routine `{}` already has the job `{}`, in `{}`. A routine has at most one job: \
+             delete that job first, or pick another routine.",
+            draft.routine,
+            holder.name,
+            store_label(repo, &holder.source),
+        ));
+    }
+
     let spec = JobSpec {
         schedule: draft.schedule.trim().to_string(),
         pipeline: draft.pipeline,
@@ -1078,17 +1088,6 @@ fn picked_folder(
         return None;
     }
     relative_routine(&folder.path, routines_dir)
-}
-
-/// The highlighted task in the browser's tasks pane, same relative form.
-fn picked_task(
-    routines: &[RoutineFolder],
-    nav: &RoutineNav,
-    routines_dir: &Path,
-) -> Option<String> {
-    let folder = highlighted_routine_folder(routines, nav)?;
-    let task = folder.tasks.get(nav.task_cursor)?;
-    relative_routine(&task.path, routines_dir)
 }
 
 /// The routine picker's open, picked off the menu `o` opens over its own
@@ -2679,6 +2678,40 @@ mod tests {
 
         assert!(!last.contains("which routine"), "picker closed: {last}");
         assert!(last.contains("[n] new"), "back on the list: {last}");
+    }
+
+    /// A save naming a routine that already has a job is refused, whichever
+    /// store holds that job, and the notice names the job. Editing that job
+    /// over its own routine is not a second job on it.
+    #[test]
+    fn a_save_on_a_routine_that_already_has_a_job_is_refused() {
+        let (repo, _root_guard) = fixture("jobs-save-one-per-routine");
+        seed_routines(&repo);
+        jobs::write(
+            &repo,
+            Scope::Project,
+            "first",
+            &JobSpec {
+                schedule: "@daily".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                ..JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        let mut draft = Draft::new(&Pipelines::builtin());
+        draft.routine = "nightly/".to_string();
+        draft.schedule = "@weekly".to_string();
+
+        let refusal = commit_draft(&repo, draft.clone()).unwrap_err();
+        assert!(
+            refusal.contains("`first`") && refusal.contains("at most one job"),
+            "{refusal}"
+        );
+        assert_eq!(jobs::load(&repo).unwrap().len(), 1, "nothing was written");
+
+        draft.editing = Some("first".to_string());
+        assert_eq!(commit_draft(&repo, draft), Ok("first".to_string()));
     }
 
     #[test]

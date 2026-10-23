@@ -2828,6 +2828,42 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
             },
         ));
 
+        // The existence check above names a missing routine, so only a task
+        // file or a nested folder is named here.
+        findings.push(Finding::Check(
+            format!("job `{name}` routine is a whole routine folder"),
+            match job.routine_fault(repo) {
+                Some(fault) if !fault.missing => Err(anyhow::anyhow!(
+                    "{} — it will not fire until it is fixed (in {})",
+                    fault.clause,
+                    job.source.display()
+                )),
+                _ => Ok(None),
+            },
+        ));
+
+        // Two enabled jobs on one routine fire neither. Each of the two is
+        // named, with the other's store, so whichever is deleted is found.
+        let others = job.clashing_jobs(repo, &jobs);
+        findings.push(Finding::Check(
+            format!("job `{name}` is the only job on its routine"),
+            if others.is_empty() || job.routine_fault(repo).is_some() {
+                Ok(None)
+            } else {
+                let named: Vec<String> = others
+                    .iter()
+                    .map(|other| format!("`{}` (in {})", other.name, other.source.display()))
+                    .collect();
+                Err(anyhow::anyhow!(
+                    "{} also run{} routine `{}`, so neither fires — delete one on the routines \
+                     tab (o → delete job) or point it at another routine",
+                    named.join(", "),
+                    if named.len() == 1 { "s" } else { "" },
+                    job.spec.routine
+                ))
+            },
+        ));
+
         findings.push(Finding::Check(
             format!("job `{name}` pipeline is defined"),
             if pipelines.pipelines.contains_key(&job.spec.pipeline) {
@@ -3601,6 +3637,76 @@ mod tests {
         assert!(format!("{failure:#}").contains("enable"), "{failure:#}");
         assert!(
             check("job `clean` has no unknown keys")
+                .expect("the check exists")
+                .is_ok()
+        );
+    }
+
+    /// Two enabled jobs on one routine each fail the clash check, naming the
+    /// other and its store; a job on a task file fails the whole-routine
+    /// check, and a job alone on a routine folder passes both.
+    #[test]
+    fn a_clash_and_a_job_on_a_task_file_each_fail_their_doctor_check() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-job-one-per-routine");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        let routines = repo.routines_dir();
+        for rel in ["dup/a.md", "solo/a.md"] {
+            std::fs::create_dir_all(routines.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(routines.join(rel), "---\nid: a\ntitle: a\n---\nGo.\n").unwrap();
+        }
+        let table = |name: &str, routine: &str| {
+            format!(
+                "[jobs.{name}]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"{routine}\"\n"
+            )
+        };
+        std::fs::write(
+            repo.user_jobs_file(),
+            format!(
+                "{}{}{}{}",
+                table("one", "dup"),
+                table("two", "dup/"),
+                table("solo", "solo"),
+                table("file", "solo/a.md")
+            ),
+        )
+        .unwrap();
+
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin(), false);
+        let check = |label: &str| {
+            findings.iter().find_map(|f| match f {
+                Finding::Check(l, result) if l == label => Some(result),
+                _ => None,
+            })
+        };
+        let clash = check("job `one` is the only job on its routine")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("two jobs on `dup` clash");
+        let clash = format!("{clash:#}");
+        assert!(
+            clash.contains("`two`") && clash.contains("jobs.toml"),
+            "{clash}"
+        );
+        assert!(
+            check("job `two` is the only job on its routine")
+                .expect("the check exists")
+                .is_err()
+        );
+        assert!(
+            check("job `solo` is the only job on its routine")
+                .expect("the check exists")
+                .is_ok()
+        );
+        let task = check("job `file` routine is a whole routine folder")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("a task file is not a routine");
+        assert!(
+            format!("{task:#}").contains("point the job at solo"),
+            "{task:#}"
+        );
+        assert!(
+            check("job `solo` routine is a whole routine folder")
                 .expect("the check exists")
                 .is_ok()
         );

@@ -77,13 +77,28 @@ has "the menu's delete then esc keeps the job" "[jobs.nightly]" "$STORE"
 on_screen '\033[C\033[Co\033[B\033[B\r\r' /dev/null
 lacks "the menu's delete then enter deletes the job" "[jobs.nightly]" "$STORE"
 
-# One task on its own: two `→`s open the jobs tab; n opens the routines
-# browser; `tab` moves the cursor onto `nightly`'s tasks pane, on
-# `audit-deps`; space picks that task; the expression is typed and accepted,
-# and the pipeline picker's own first entry chosen, as above.
+# A job runs a whole routine, so the tasks pane no longer picks one task: two
+# `→`s open the jobs tab; n opens the routines browser; `tab` moves the cursor
+# onto `nightly`'s tasks pane, on `audit-deps`; space is pressed there and the
+# expression typed. The store already holds a job on `nightly` under another
+# name, so a save would be refused anyway; what is checked is that no
+# single-task target is written.
+cat >"$STORE" <<'EOF'
+[jobs.first-job]
+schedule = "0 3 * * *"
+pipeline = "bugfix"
+routine = "nightly"
+EOF
 on_screen '\033[C\033[Cn\t 0 4 * * *\r\r' /dev/null
+lacks "space on the tasks pane picks no single task" 'audit-deps.md' "$STORE"
+lacks "and writes no job for one" "[jobs.audit-deps]" "$STORE"
 
-has "tab reaches the tasks pane, and space picks one task" \
-  'routine = "nightly/audit-deps.md"' "$STORE"
+# A save naming a routine that already has a job is refused with a notice
+# naming that job, and writes nothing: n; space ticks `nightly`; enter uses
+# it; the expression; the pipeline.
+REFUSED="$LIVE/jobs-refused.txt"
+on_screen '\033[C\033[Cn \r0 4 * * *\r\r' "$REFUSED"
+lacks "a second job on the routine is refused" "[jobs.nightly]" "$STORE"
+has "naming the job that already has it" "first-job" "$REFUSED"
 
 finish

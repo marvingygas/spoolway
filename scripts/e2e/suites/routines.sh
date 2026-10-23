@@ -202,8 +202,8 @@ works "never the earlier run's own bare id" \
   _ "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"
 
 # Delete (`o`, down, `enter`) deletes a routine and every job that points into it: a user job on the
-# whole `nightly` folder, a project job on one task inside it, and a user job
-# on `maintenance` that has to survive. The folders sort `archived-reuse`,
+# whole `nightly` folder, a second project job on the same folder (the clash a
+# hand edit can make), and a user job on `maintenance` that has to survive. The folders sort `archived-reuse`,
 # `maintenance`, `nightly`, `release`, so `jj` puts the cursor on `nightly`.
 USER_STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
 PROJECT_STORE=.spoolway/jobs.toml
@@ -222,7 +222,7 @@ cat >"$PROJECT_STORE" <<'EOF'
 [jobs.audit-docs]
 schedule = "0 5 * * *"
 pipeline = "bugfix"
-routine = "nightly/audit-docs.md"
+routine = "nightly"
 EOF
 
 # Delete asks, esc keeps everything.
@@ -231,13 +231,13 @@ LAST="$LIVE/routine-delete-popup.txt"
 on_screen '\x1b[Cjjo\x1b[B\r\x1b' "$DELETE"
 works "delete then esc keeps the routine" test -d .spoolway/routines/nightly
 has "and its whole-folder job" "[jobs.nightly-audit]" "$USER_STORE"
-has "and its single-task job" "[jobs.audit-docs]" "$PROJECT_STORE"
+has "and its second job" "[jobs.audit-docs]" "$PROJECT_STORE"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete this routine/ { last = $0 } END { print last }' \
   "$DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "delete opens the delete popup" "delete this routine" "$LAST"
 has "naming the routine and its task count" "nightly · 2 tasks" "$LAST"
 has "the whole-folder job beside its store" "nightly-audit   user" "$LAST"
-has "the single-task job beside its store" "audit-docs      project" "$LAST"
+has "the second job beside its store" "audit-docs      project" "$LAST"
 lacks "never a job on another routine" "weekly-prune" "$LAST"
 has "its one answer under the cursor" "> delete" "$LAST"
 has "under the shared key row" "[enter] confirm   [esc] close" "$LAST"
@@ -247,7 +247,7 @@ on_screen '\x1b[Cjjo\x1b[B\r\r' /dev/null
 works "delete then enter removes the routine folder" \
   test ! -e .spoolway/routines/nightly
 lacks "and its whole-folder job from the user store" "[jobs.nightly-audit]" "$USER_STORE"
-lacks "and its single-task job from the project store" "[jobs.audit-docs]" "$PROJECT_STORE"
+lacks "and its second job from the project store" "[jobs.audit-docs]" "$PROJECT_STORE"
 has "a job on another routine is left alone" "[jobs.weekly-prune]" "$USER_STORE"
 works "the other routines stay" test -d .spoolway/routines/maintenance
 works "nothing is staged" \

@@ -51,6 +51,10 @@ task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nig
 task_doc .spoolway/routines/nightly/audit-docs.md audit-docs "$BODY" \
   "group: nightly" "depends_on: [audit-deps]"
 
+# A routine of its own for the second job: a routine has at most one job.
+mkdir -p .spoolway/routines/weekly
+task_doc .spoolway/routines/weekly/release-check.md release-check "$BODY" "group: weekly"
+
 # The job, written straight into the user-scoped store — the screen that
 # writes one is a later task, so the suite writes the TOML itself. A second,
 # always-enabled job alongside it — never due during this suite's run — so
@@ -66,7 +70,7 @@ base = "plan/live"
 [jobs.release-readiness]
 schedule = "0 8 * * 1"
 pipeline = "default"
-routine = "nightly"
+routine = "weekly"
 TOML
 
 works "jobs list shows the job" \
@@ -271,7 +275,7 @@ routine = "nightly"
 [jobs.release-readiness]
 schedule = "0 8 * * 1"
 pipeline = "default"
-routine = "nightly"
+routine = "weekly"
 TOML
 task_doc "$LIVE/ledger-busy.md" ledger-busy "$BODY" "group: ledger-busy"
 must "a plain task queues, to keep the board busy" \
@@ -368,5 +372,25 @@ says "— naming the routine that is gone" "job \`broken\` routine exists" \
   "$SPOOLWAY" doctor
 says "— naming the pipeline that is not defined" "job \`broken\` pipeline is defined" \
   "$SPOOLWAY" doctor
+
+# A second enabled job on `nightly`, which `nightly-audit` already runs, and
+# one on a single task file: `doctor` names each, and neither would fire.
+cat >> "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
+
+[jobs.nightly-twin]
+schedule = "0 9 * * *"
+pipeline = "default"
+routine = "nightly/"
+
+[jobs.one-task]
+schedule = "0 9 * * *"
+pipeline = "default"
+routine = "weekly/release-check.md"
+TOML
+says "a clash is named for the first job" \
+  "job \`nightly-audit\` is the only job on its routine" "$SPOOLWAY" doctor
+says "— naming the other job" "\`nightly-twin\`" "$SPOOLWAY" doctor
+says "a job on a task file is named" \
+  "job \`one-task\` routine is a whole routine folder" "$SPOOLWAY" doctor
 
 finish

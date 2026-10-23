@@ -1,8 +1,12 @@
 //! A job: a five-field cron expression plus a pipeline, pointed at a routine
 //! target. The dispatcher's own pass fires a job when the local clock crosses
 //! its expression, queueing the routine through the same path the
-//! routines tab runs — a folder as one batch, a single task alone
-//! with its `depends_on` emptied.
+//! routines tab runs, as one batch.
+//!
+//! A job runs one whole top-level routine folder, and a routine has at most
+//! one job. A job on a task file, on a folder below a routine, or on a
+//! routine another enabled job also runs is named and never fires, by
+//! [`Job::refusal`], so the routines tab can show one job beside each routine.
 //!
 //! A job lives in one of two TOML stores: `jobs.toml` in this machine's
 //! per-project home ([`Scope::User`], the default) or `.spoolway/jobs.toml`
@@ -74,8 +78,8 @@ pub struct JobSpec {
     pub schedule: String,
     /// The pipeline every task of the routine is queued under.
     pub pipeline: String,
-    /// A path under `.spoolway/routines/`, relative: a folder queued as one
-    /// batch, or a single `.md` file queued alone.
+    /// A top-level folder under `.spoolway/routines/`, relative, queued as one
+    /// batch. A task file or a nested folder is refused by [`Job::refusal`].
     pub routine: String,
     /// A paused job is listed but never fired. Absent means enabled.
     #[serde(default = "enabled_default")]
@@ -138,8 +142,8 @@ pub(crate) const JOB_KEYS: &[JobKey] = &[
     JobKey {
         name: "routine",
         required: true,
-        text: "A path under {routines_dir}, relative: a folder queued as one batch, or a \
-               single `.md` file queued alone.",
+        text: "A top-level routine folder under {routines_dir}, relative, queued as one batch. \
+               A routine has at most one job.",
     },
     JobKey {
         name: "enabled",
@@ -234,6 +238,115 @@ impl Job {
         }
         Ok(repo.routines_dir().join(rel))
     }
+
+    /// Why this job must not fire, as the clause that follows `skipped, ` in
+    /// the dispatcher's line, or `None` when it runs a whole top-level
+    /// routine folder that no other enabled job runs. A `routine` that
+    /// escapes the routines directory is `None` here: [`Job::target`] names
+    /// that one.
+    ///
+    /// A job that runs a task file or a nested folder is named before a
+    /// clash is, since neither is a routine to share.
+    pub fn refusal(&self, repo: &Repo, jobs: &[Job]) -> Option<String> {
+        if let Some(fault) = self.routine_fault(repo) {
+            return Some(fault.clause);
+        }
+        let others = self.clashing_jobs(repo, jobs);
+        if others.is_empty() {
+            return None;
+        }
+        let names: Vec<&str> = others.iter().map(|job| job.name.as_str()).collect();
+        Some(format!(
+            "{} run{} routine {} too; delete one on the routines tab (o → delete job)",
+            names.join(", "),
+            if names.len() == 1 { "s" } else { "" },
+            self.relative_target(repo)?,
+        ))
+    }
+
+    /// The other enabled jobs whose target is this job's, in `jobs`' order.
+    /// Empty for a disabled job, which fires nowhere, and for one whose
+    /// `routine` escapes the routines directory.
+    ///
+    /// Targets are compared as the resolved paths [`Job::target`] returns,
+    /// not as the raw strings: `nightly`, `nightly/` and `./nightly` name one
+    /// folder, and a path compares by component.
+    pub fn clashing_jobs<'a>(&self, repo: &Repo, jobs: &'a [Job]) -> Vec<&'a Job> {
+        let Ok(mine) = self.target(repo) else {
+            return Vec::new();
+        };
+        if !self.spec.enabled {
+            return Vec::new();
+        }
+        jobs.iter()
+            .filter(|other| other.name != self.name && other.spec.enabled)
+            .filter(|other| other.target(repo).is_ok_and(|theirs| theirs == mine))
+            .collect()
+    }
+
+    /// Whether the `routine` is not a top-level routine folder that exists:
+    /// missing, a task file, or a folder below a routine. `None` for a
+    /// whole routine, and for one that escapes the routines directory.
+    pub fn routine_fault(&self, repo: &Repo) -> Option<RoutineFault> {
+        let target = self.target(repo).ok()?;
+        let rel = self.relative_target(repo)?;
+        let depth = rel.split('/').filter(|part| !part.is_empty()).count();
+        let top = rel.split('/').next().unwrap_or_default();
+        let missing = || RoutineFault {
+            missing: true,
+            clause: format!(
+                "routine {} is not under .spoolway/routines/; edit or delete the job on the \
+                 routines tab (o)",
+                self.spec.routine
+            ),
+        };
+        if !target.exists() || depth == 0 {
+            return Some(missing());
+        }
+        let advice = if depth == 1 {
+            "pick a routine folder".to_string()
+        } else {
+            format!("point the job at {top}")
+        };
+        if target.is_file() {
+            return Some(RoutineFault {
+                missing: false,
+                clause: format!(
+                    "{rel} is a task, not a routine; {advice}, or delete it, on the routines tab (o)"
+                ),
+            });
+        }
+        (depth > 1).then(|| RoutineFault {
+            missing: false,
+            clause: format!(
+                "{rel} is inside routine {top}, not a routine itself; {advice}, or delete it, on \
+                 the routines tab (o)"
+            ),
+        })
+    }
+
+    /// The target below the routines directory, `/`-separated with a
+    /// trailing slash or `./` dropped. `None` when `routine` escapes it.
+    fn relative_target(&self, repo: &Repo) -> Option<String> {
+        let target = self.target(repo).ok()?;
+        let rel = target.strip_prefix(repo.routines_dir()).ok()?;
+        let parts: Vec<String> = rel
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        Some(parts.join("/"))
+    }
+}
+
+/// A job's `routine` that is not a whole routine folder: what
+/// [`Job::routine_fault`] found, as a sentence the dispatcher and `doctor`
+/// both print.
+pub struct RoutineFault {
+    /// True when nothing is there, which `doctor` already reports as the
+    /// routine not existing.
+    pub missing: bool,
+    /// The reason and the fix, to follow `skipped, ` in the dispatcher's line.
+    pub clause: String,
 }
 
 /// Both stores merged into one list: the user store first, then the project
@@ -984,6 +1097,16 @@ pub fn fire_due(
             record.skipped_minute = Some(minute.clone());
             *dirty = true;
             problems.push(note);
+            continue;
+        }
+
+        // A job that is not a whole routine, or shares its routine with
+        // another enabled job, is named once per window like any skip and
+        // never fires until the store is mended.
+        if let Some(clause) = job.refusal(repo, &jobs) {
+            record.skipped_minute = Some(minute.clone());
+            *dirty = true;
+            actions.push(format!("job {} · due now · skipped, {clause}", job.name));
             continue;
         }
 
@@ -2198,6 +2321,122 @@ mod tests {
             actions.is_empty() && problems.is_empty(),
             "{actions:?} {problems:?}"
         );
+    }
+
+    /// Writes a task into `repo`'s routines directory at `rel`, for the
+    /// refusals that look at what a job's target is.
+    fn routine_file(repo: &Repo, rel: &str) {
+        let path = repo.routines_dir().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "---\nid: audit\ntitle: audit, done\ngroup: demo\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+    }
+
+    /// One `[jobs.<name>]` table over `routine`, every minute.
+    fn job_table(name: &str, routine: &str) -> String {
+        format!(
+            "[jobs.{name}]\nschedule = \"* * * * *\"\npipeline = \"default\"\n\
+             routine = \"{routine}\"\nbase = \"plan/demo\"\n"
+        )
+    }
+
+    /// Two jobs on one routine — one in each store, and one spelt with a
+    /// trailing slash — fire neither. Each says which job it clashes with,
+    /// once for the due minute, and nothing reaches the queue.
+    #[test]
+    fn two_jobs_on_one_routine_fire_neither_and_each_names_the_other() {
+        let (repo, _root_guard) = fixture("jobs-clash");
+        settled_now();
+        routine_file(&repo, "dependabot/review.md");
+        write_user_store(&repo, &job_table("dependabot-weekly", "dependabot/"));
+        std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
+        std::fs::write(
+            repo.jobs_file(),
+            job_table("dependabot-review", "dependabot"),
+        )
+        .unwrap();
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            [
+                "job dependabot-weekly · due now · skipped, dependabot-review runs routine \
+                 dependabot too; delete one on the routines tab (o → delete job)",
+                "job dependabot-review · due now · skipped, dependabot-weekly runs routine \
+                 dependabot too; delete one on the routines tab (o → delete job)",
+            ]
+        );
+        assert!(repo.queued_ids().is_empty(), "neither job queued anything");
+
+        let (actions, problems) = fire(&repo);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "named once per minute: {actions:?} {problems:?}"
+        );
+    }
+
+    /// A paused job fires nowhere, so it does not take its routine from the
+    /// job that is on.
+    #[test]
+    fn a_paused_job_does_not_clash_with_the_one_that_is_on() {
+        let (repo, _root_guard) = fixture("jobs-clash-paused");
+        settled_now();
+        routine_file(&repo, "nightly/audit.md");
+        write_user_store(
+            &repo,
+            &format!(
+                "{}{}enabled = false\n",
+                job_table("live", "nightly"),
+                job_table("paused", "nightly")
+            ),
+        );
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert!(actions[0].starts_with("job live · fired"), "{actions:?}");
+    }
+
+    /// A job on a task file, on a folder below a routine, or on nothing is
+    /// named with how to mend it, once for the due minute, and never fires.
+    #[test]
+    fn a_job_that_is_not_on_a_whole_routine_is_named_and_never_fires() {
+        let (repo, _root_guard) = fixture("jobs-orphan");
+        settled_now();
+        routine_file(&repo, "dependabot/review-dependabot-prs.md");
+        routine_file(&repo, "nested/inner/audit.md");
+        write_user_store(
+            &repo,
+            &format!(
+                "{}{}{}",
+                job_table("nightly-old", "nightly-old"),
+                job_table("deps-only", "dependabot/review-dependabot-prs.md"),
+                job_table("deep", "nested/inner"),
+            ),
+        );
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            actions,
+            [
+                "job deep · due now · skipped, nested/inner is inside routine nested, not a \
+                 routine itself; point the job at nested, or delete it, on the routines tab (o)",
+                "job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a \
+                 task, not a routine; point the job at dependabot, or delete it, on the \
+                 routines tab (o)",
+                "job nightly-old · due now · skipped, routine nightly-old is not under \
+                 .spoolway/routines/; edit or delete the job on the routines tab (o)",
+            ]
+        );
+        assert!(repo.queued_ids().is_empty(), "no job queued anything");
+
+        let (actions, _) = fire(&repo);
+        assert!(actions.is_empty(), "named once per minute: {actions:?}");
     }
 
     #[test]
