@@ -473,9 +473,10 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
 }
 
 /// Open `path` in the editor the board would pick and wait for it, refusing on
-/// a nonzero exit. Shared by [`config_edit`] and `commands::config_override`.
-/// A caller that writes a file first calls [`editor_line`] before it writes,
-/// then [`run_editor_line`], so a refused editor leaves nothing behind.
+/// a nonzero exit. Only [`config_edit`] calls it. `commands::config_override`
+/// writes a placeholder file first, so it calls [`editor_line`] before the
+/// write and [`run_editor_line`] after it, and a refused editor leaves nothing
+/// behind.
 ///
 /// The choice reads only the environment and `PATH`, never the config, so a
 /// `config.toml` that no longer parses can still be opened to repair it. The
@@ -528,30 +529,10 @@ mod tests {
         assert!(text.contains("spoolway config override"));
     }
 
-    fn editor_inputs(
-        visual: Option<&str>,
-        path: &std::ffi::OsStr,
-    ) -> crate::editor::Inputs<'static> {
-        crate::editor::Inputs {
-            visual: visual.map(String::from),
-            editor: None,
-            path: path.to_os_string(),
-            wsl: false,
-            home: None,
-            wslpath: &|_| anyhow::bail!("wslpath must not run here"),
-        }
-    }
-
     #[test]
     fn the_editor_line_quotes_a_path_with_a_single_quote() {
-        let bin = std::env::var_os("PATH").unwrap_or_default();
-        let inputs = editor_inputs(Some("sh"), &bin);
-        let line = crate::editor::plan(
-            &inputs,
-            Path::new("/home/u/it's/proj/.spoolway/config.toml"),
-        )
-        .unwrap()
-        .line;
+        let _pin = crate::editor::pin_editor("sh");
+        let line = editor_line(Path::new("/home/u/it's/proj/.spoolway/config.toml")).unwrap();
         // The `'` inside the path is escaped, not left to close the quoting.
         assert!(
             line.contains(r"it'\''s") || line.contains("it''s"),

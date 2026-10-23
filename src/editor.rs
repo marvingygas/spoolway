@@ -178,7 +178,9 @@ fn wslpath(path: &Path) -> Result<String> {
     crate::platform::wslpath(path)
 }
 
-/// The inputs open and `spoolway doctor` both read, taken from this process.
+/// The inputs read by open, by `spoolway doctor`, and by `spoolway config edit`
+/// and `config override` through `commands::config::editor_line`, taken from
+/// this process.
 pub(crate) fn live_inputs() -> Inputs<'static> {
     #[cfg(test)]
     let (visual, editor) = pinned::get()
