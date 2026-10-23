@@ -7019,10 +7019,10 @@ fn task_file_moved_away(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
 /// `git ls-remote` per base, not one per task.
 ///
 /// A chain has one base (`src/commands/queue.rs`'s `validate_batch` enforces
-/// it when a batch is sent), so a dependent's `base:` disagreeing with its
-/// dependency's — read from that task's own file, in the queue or the
-/// archive — means one of the two was edited by hand since. That check does
-/// not touch git. A cut task's `starts_from` is not compared with its
+/// it when a batch is sent), so a dependent's `base:` disagreeing with the
+/// `base:` of any dependency still in the queue and not yet `done` means one
+/// of the two was edited by hand since. A `done` dependency, archived or not,
+/// is not compared. That check does not touch git. A cut task's `starts_from` is not compared with its
 /// `base:`: a person may set `starts_from:` to somewhere other than where the
 /// work lands, so the two differing says nothing about an edit since the cut.
 /// A task is told to have been cut by its recorded worktree, never by
@@ -7064,11 +7064,25 @@ pub(crate) fn base_problem_when_unasked(
     let id = task.id();
     let base = task.front.base.as_deref()?;
 
-    if let Some(dep) = task.front.depends_on.first()
-        && let Ok(dep_task) = repo.task(dep)
-        && let Some(dep_base) = dep_task.front.base.as_deref()
-        && dep_base != base
-    {
+    // Every dependency still in the queue is compared, not only the first
+    // listed: a mismatch on the second would otherwise go unreported. A
+    // dependency at `done` is skipped, wherever its file sits: it hands its
+    // dependents a branch (or a base) of its own, so its `base:` string is
+    // no longer part of the chain, and holding a task over it, or refusing
+    // to start the dispatcher, would block work nothing is wrong with.
+    for dep in &task.front.depends_on {
+        let Ok(dep_task) = repo.task(dep) else {
+            continue;
+        };
+        if dep_task.front.stage == crate::pipeline::DONE {
+            continue;
+        }
+        let Some(dep_base) = dep_task.front.base.as_deref() else {
+            continue;
+        };
+        if dep_base == base {
+            continue;
+        }
         return Some((
             format!(
                 "task `{id}` is based on `{base}` but depends on `{dep}`, which is based on \
