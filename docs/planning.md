@@ -359,16 +359,53 @@ project's own routines directory, for a producer writing a routine by hand. A ro
 never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
 Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane,
-titled `routines`, lists one row per routine. Its right pane, titled `tasks`, lists the
-highlighted routine's tasks.
+titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
+pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
+
+```
+┌ routines ────────────────┬ details ──────────────────────────────────────────────────────────────┐
+│ > [ ] dependabot         │                                                                       │
+│   [ ] release-spoolway   │   Schedule:    0 */2 * * *                                            │
+│                          │   Pipeline:    dependabot                                             │
+│                          │   Scope:       project                                                │
+│                          │   Next:        Fri 23 Oct, 18:00                                      │
+│                          │   Last:        Fri 23 Oct, 16:00  ok                                  │
+│                          │   Job:         dependabot-review                                      │
+│                          │                                                                       │
+│                          │   tasks                                                               │
+│                          │     review-dependabot-prs                                             │
+│                          │       Pipeline:    dependabot                                         │
+│                          │       Depends on:  -                                                  │
+│                          │       Description: chore(deps): review and merge open Dependabot pull │
+│                          │                    requests                                           │
+└──────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+ [space] select   [enter] queue   [o] options   [tab] details   [q] quit
+```
+
+The job rows show the same values as the [jobs tab](jobs.md). What the job rows say depends on
+how many jobs point at the routine:
+
+| Jobs on the routine | What the pane shows |
+|---|---|
+| None | One row, `Schedule:    none`. |
+| One | `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and `Job:` rows. |
+| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `paused` on a paused one, and a line saying which to delete. |
+| A job store that will not load | A `Jobs:` row, `will not load:` and the error. The tasks are still drawn. |
+
+Two enabled jobs on one routine fire neither. The `Jobs:` row then reads
+`2 run this routine, so neither fires`. With one enabled and one paused job it reads
+`2 run this routine; only <name> fires`. Resuming the paused job stops both.
+
+The pane reads both job stores again while the list sits idle, so a job saved on the jobs tab or
+by hand shows without a key.
 
 | Key | What it does |
 |---|---|
 | `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
 | `enter` | Queue every task under every ticked routine as one batch. |
 | `o` | Open the options menu of the row the focused pane highlights. |
-| `tab` | Switch focus between the routine list and the tasks pane. |
-| `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
+| `tab` | Switch focus between the routine list and the details pane. |
+| `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |
 
 The options menu follows focus the same way it does on the queue screen, and is titled with the
 highlighted row's name:
@@ -377,7 +414,7 @@ highlighted row's name:
 |---|---|---|
 | `new job` | A routine. | Make a job from the routine. See [Jobs](jobs.md). |
 | `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
-| `open task` | A task in the tasks pane. | Open the task in your editor. |
+| `open task` | A task in the details pane. | Open the task in your editor. |
 
 A task `id:` is unique across all routine folders. When two routine files hold one id, the
 routines tab shows a `Problem:` row beside the task. The row names both files and an id to give
