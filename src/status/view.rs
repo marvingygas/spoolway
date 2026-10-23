@@ -1938,10 +1938,11 @@ fn state_cell_text(row: &Row) -> String {
 /// nothing on any other. Drawn uncoloured, so the word alone carries the
 /// state's colour as it does on every other row.
 ///
-/// A hidden run's time is [`human_secs`]'s, the TIME column's own clock and
-/// the one the restart panel shows a command's run in, so the same run never
-/// reads two different times on one screen. Asked of `Running` alone, so a
-/// row [`super::finish_settled`] has since called finished draws no time.
+/// A hidden run's time is the TIME column's own figure, drawn in the same
+/// [`human_secs`] clock, so the two cells of one row always agree. It is the
+/// clock the restart panel shows a command's run in too. Asked of `Running`
+/// alone, so a row [`super::finish_settled`] has since called finished draws
+/// no time.
 fn state_suffix(row: &Row) -> String {
     match (row.state, row.hidden_run) {
         (State::Silent { secs }, _) => format!(" · {}", state_age(secs)),

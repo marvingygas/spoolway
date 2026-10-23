@@ -5008,6 +5008,17 @@ fn build_rows(
                 .map(|launched| (chrono::Utc::now().timestamp() - launched).max(0)),
             false => None,
         };
+        // Live goes by whether the lane itself is open, not by whether a
+        // transcript could be read from it — a lane that has just launched is
+        // live before it has written a byte, and its clock still runs.
+        // A command run's clock comes off its own pid file rather than
+        // `launched_at`, which is the last *lane*'s launch and would date a
+        // running `gate` to whatever agent step ran before it.
+        let lane_time = match (command_run, live) {
+            (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
+            (None, true) => elapsed,
+            (None, false) => lane_time_at(ledger, task.id(), origin),
+        };
         let held_by_teardown = parked_on_blocked && teardown_hold(task).is_some();
         let row_stage = match held_by_teardown {
             true => crate::pipeline::BLOCKED,
@@ -5054,27 +5065,17 @@ fn build_rows(
                 Some(session) => session.cost,
                 None => cost_at(ledger, task.id(), origin),
             },
-            // Live goes by whether the lane itself is open, not by whether a
-            // transcript could be read from it — a lane that has just
-            // launched is live before it has written a byte, and its clock
-            // still runs.
-            // A command run's clock comes off its own pid file rather than
-            // `launched_at`, which is the last *lane*'s launch and would date
-            // a running `gate` to whatever agent step ran before it.
-            lane_time: match (command_run, live) {
-                (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
-                (None, true) => elapsed,
-                (None, false) => lane_time_at(ledger, task.id(), origin),
-            },
-            // Off the same pid file as the TIME above, and only while the
-            // step hides its command: a shown run has a pane of its own, so
-            // its row stays as it was.
+            lane_time,
+            // The TIME figure itself, not a second read of the pid file: a
+            // read of its own would land on a later instant, and a redraw
+            // across a second boundary would draw STATE and TIME a second
+            // apart. Only while the step hides its command: a shown run has
+            // a pane of its own, so its row stays as it was.
             hidden_run: command_run
                 .filter(|_| {
                     step.is_some_and(|step| step.hides_command(repo.config.dispatch.hide_commands))
                 })
-                .and_then(|key| runs.elapsed(key))
-                .map(|ran| ran.as_secs() as i64),
+                .and(lane_time),
             next,
             resumable,
         });
@@ -8616,6 +8617,9 @@ mod tests {
         assert!(matches!(row("a-hidden").state, State::Running));
         let ran = row("a-hidden").hidden_run.expect("a hidden run answers");
         assert!((3840..=3845).contains(&ran), "{ran}");
+        // One figure for STATE and TIME, so the board never draws the two a
+        // second apart.
+        assert_eq!(Some(ran), row("a-hidden").lane_time);
         for id in ["b-agent", "c-shown"] {
             assert!(matches!(row(id).state, State::Running), "{id}");
             assert_eq!(row(id).hidden_run, None, "{id}");

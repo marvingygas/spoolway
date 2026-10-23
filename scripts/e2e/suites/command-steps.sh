@@ -1141,7 +1141,8 @@ records "and its output is on the record just the same" "hidden-command-marker" 
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
 # A hidden step has no pane, so its row is the only sign it is working, and
 # `queue list` draws how long it has run after the state: `47s`, `9m 12s`,
-# `1h 04m`. Polled, since the row reads `queued` until the run is on disk.
+# `1h 04m`. Polled, as every check on a live row here is: the row is redrawn
+# from disk on each call.
 hidden_row_timed() {
   "$SPOOLWAY" queue list | grep -E 'hiddenc.*● running [0-9]+(s|m [0-9]{2}s|h [0-9]{2}m)'
 }
