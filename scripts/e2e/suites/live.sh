@@ -141,15 +141,16 @@ commit_in_worktree() {
   local cache=${XDG_CACHE_HOME:-$HOME/.cache}
   mkdir -p "$cache"
   WT_ROOT=$(mktemp -d "$cache/spoolway-e2e-live.XXXXXX")
-  # `state` and `project` stand in for `{state_dir}` and `{project_home}`,
-  # the two read grants a lane is given beside the one this case is about.
+  # `state`, `project` and `plans` stand in for `{state_dir}`,
+  # `{project_home}` and `{plans_dir}`, the read grants a lane is given beside
+  # the one this case is about.
   local main="$WT_ROOT/main" lane="$WT_ROOT/lane"
-  local state="$WT_ROOT/state" project="$WT_ROOT/project"
+  local state="$WT_ROOT/state" project="$WT_ROOT/project" plans="$WT_ROOT/plans"
   local home="$WT_ROOT/$kind-home" out="$LIVE/worktree-$kind.txt"
   local real_home=${CODEX_HOME:-$HOME/.codex}
   must "$kind: a main checkout and a linked worktree of it" \
     worktree_fixture "$main" "$lane"
-  mkdir -p "$state" "$project" "$home"
+  mkdir -p "$state" "$project" "$plans" "$home"
 
   # `{git_dir}` exactly as `repo::git_dir` resolves it: the common dir, which
   # holds the objects, the branch ref and `worktrees/<name>` with its index.
@@ -183,6 +184,7 @@ commit_in_worktree() {
       --add-dir "$project" \
       --add-dir "$git_dir" \
       --add-dir "$worktree_git_dir" \
+      --add-dir "$plans" \
       -c check_for_update_on_startup=false \
       --ask-for-approval never \
       exec "Run these three commands in the current directory, in order, and nothing else:

@@ -590,9 +590,9 @@ pub const ADAPTERS: &[Adapter] = &[
             // enterprise policy may forbid `bypassPermissions` outright and a
             // pipeline that only runs where that is allowed is not one to
             // depend on. `{state_dir}` and `{project_home}` rather than
-            // `{repo}` because together they are the whole of what a lane
-            // legitimately reads outside its worktree — the task file and
-            // its prompts.
+            // `{repo}` because together they are what a lane reads outside
+            // its worktree for its task file and its prompts. The plans
+            // folder it also reads is granted below.
             "--add-dir",
             "{state_dir}",
             "--add-dir",
@@ -609,7 +609,7 @@ pub const ADAPTERS: &[Adapter] = &[
             "{git_dir}",
             // A task links the plan page and mockup folders it came from, and
             // those sit in the plans folder, which in home mode is in the
-            // workspace and under neither grant above. Without this one the
+            // workspace and under none of the grants above. Without this one the
             // lane stops on a permission prompt the first time it opens the
             // plan, and nobody is there to answer it. See
             // `crate::repo::Repo::plans_dir`.
