@@ -507,7 +507,7 @@ pub(crate) fn plans_named_by_other_clones_in(
             (home.join(crate::config::PENDING_DIR), true),
             (home.join(crate::config::QUEUE_DIR), false),
         ] {
-            if !dir.exists() {
+            if !folder_exists(&dir)? {
                 continue;
             }
             for path in md_files(&dir)? {
@@ -532,7 +532,7 @@ pub(crate) fn plans_named_by_other_clones_in(
             }
         }
         let archive = home.join(crate::config::ARCHIVE_DIR);
-        if archive.exists() {
+        if folder_exists(&archive)? {
             named.extend(
                 crate::archive_index::read_at(&archive)?
                     .into_iter()
@@ -545,6 +545,15 @@ pub(crate) fn plans_named_by_other_clones_in(
     }
     front_cache.retain(|path, _| seen_paths.contains(path));
     Ok(named)
+}
+
+/// Whether another clone's task folder is there to read. Only a folder that
+/// is not there answers `false`. `Path::exists` would answer `false` too for
+/// a clone home this user cannot search, and that clone's tasks would then
+/// read as none, so any other failure is an error naming the folder.
+fn folder_exists(dir: &Path) -> Result<bool> {
+    dir.try_exists()
+        .with_context(|| format!("reading {}", dir.display()))
 }
 
 /// Every plan page that no pending, queued or archived task names in
@@ -615,8 +624,9 @@ pub(crate) struct Rows {
     /// The pending files no group could be built from, as
     /// [`list_groups_and_skipped`] passed them over.
     pub(crate) unreadable: Vec<PathBuf>,
-    /// Why no plan rows could be listed, when `plans/` would not read. The
-    /// groups are listed all the same.
+    /// Why no plan rows could be listed: `plans/` would not read, or in home
+    /// mode another clone's task folders or the workspace's `project.toml`
+    /// would not. The groups are listed all the same.
     pub(crate) plans_error: Option<String>,
 }
 
@@ -625,10 +635,10 @@ pub(crate) struct Rows {
 /// after the queueable groups, and the pending files no group could be built
 /// from.
 ///
-/// A plans folder that cannot be read costs the plan rows alone, not the
-/// screen: the groups are still listed, the error comes back in
-/// [`Rows::plans_error`] for the screen to name, and the next reload tries
-/// again.
+/// A plan list that cannot be read, whether `plans/` or another clone's
+/// folders, costs the plan rows alone, not the screen: the groups are still
+/// listed, the error comes back in [`Rows::plans_error`] for the screen to
+/// name, and the next reload tries again.
 pub(crate) fn list_rows(repo: &Repo) -> Result<Rows> {
     let (mut groups, unreadable) = list_groups_and_skipped(repo)?;
     let (plans, plans_error) = match plans_without_tasks(repo, &groups) {
@@ -2290,6 +2300,46 @@ mod tests {
         assert!(err.contains(&pending.display().to_string()), "{err}");
         let listed: Vec<&str> = rows.groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(listed, ["cart"]);
+    }
+
+    /// Another clone's home that cannot be searched is an error naming the
+    /// folder under it, not a clone with no tasks. A file in the home's place
+    /// fails the same way a home this user cannot search does.
+    #[test]
+    fn another_clones_unsearchable_home_is_an_error_not_no_tasks() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-home");
+        plan_pages(&shop, &["2026-01-01-search.html"]);
+        std::fs::remove_dir_all(&shop.home).unwrap();
+        std::fs::write(&shop.home, "").unwrap();
+
+        let rows = list_rows(&shop_2).unwrap();
+
+        let err = rows.plans_error.expect("the read error is handed back");
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        assert!(err.contains(&pending.display().to_string()), "{err}");
+        assert!(rows.groups.is_empty());
+    }
+
+    /// A `project.toml` naming a dispatcher that is not one plain name is
+    /// refused, so nothing outside the workspace is read.
+    #[test]
+    fn a_dispatcher_that_is_not_a_plain_name_is_refused() {
+        let (shop, shop_2, _root) =
+            crate::commands::testutil::two_clones("pending-plans-clones-bad");
+        let record = shop
+            .workspace_dir()
+            .unwrap()
+            .join(crate::repo::BINDING_FILE);
+        std::fs::write(
+            &record,
+            "id = \"ws\"\n\n[[clones]]\nroot = \"/x\"\ndispatcher = \"../../elsewhere\"\n",
+        )
+        .unwrap();
+
+        let err = format!("{:#}", shop_2.other_clone_homes().unwrap_err());
+        assert!(err.contains(&record.display().to_string()), "{err}");
+        assert!(err.contains("one plain name"), "{err}");
     }
 
     /// A workspace whose `project.toml` lists nobody but this clone, or is

@@ -750,6 +750,26 @@ mod tests {
         assert!(page.exists());
     }
 
+    /// Another clone's home that cannot be searched removes nothing either:
+    /// it is not read as a clone with no tasks.
+    #[test]
+    fn another_clones_unsearchable_home_removes_no_plan() {
+        let (shop, shop_2, _root) = crate::commands::testutil::two_clones("pdel-plan-clones-home");
+        let page = plan(&shop, "2026-10-21-search.html");
+        std::fs::remove_dir_all(&shop.home).unwrap();
+        // A file in the home's place, which fails the way a home this user
+        // cannot search does.
+        std::fs::write(&shop.home, "").unwrap();
+
+        let outcome = delete_plan(&shop_2, &page);
+        let PlanDeleteOutcome::Failed { error, kind } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(kind, None);
+        assert!(error.contains(&shop.home.display().to_string()), "{error}");
+        assert!(page.exists());
+    }
+
     /// Only an `.html` file directly in `plans/` goes: another kind of file,
     /// or a page anywhere else, is refused before anything is removed. A
     /// folder named like a page passes that check, but fails to remove and

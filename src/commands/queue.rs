@@ -5591,7 +5591,7 @@ pub(crate) struct ScreenState {
 struct NamedFiles {
     dir: std::path::PathBuf,
     files: std::collections::BTreeSet<std::path::PathBuf>,
-    /// Why `plans/` would not read, as last named — see
+    /// Why the plan pages could not be listed, as last named — see
     /// [`announce_plans_error`].
     plans: Option<String>,
 }
@@ -6553,7 +6553,7 @@ struct QueueSnapshot {
     /// The pending files [`super::pending::list_groups_and_skipped`] passed
     /// over, read in the same pass as `groups`.
     unreadable: Vec<std::path::PathBuf>,
-    /// Why `plans/` would not read in that pass — see
+    /// Why the plan pages could not be listed in that pass — see
     /// [`super::pending::Rows::plans_error`].
     plans_error: Option<String>,
 }
@@ -6609,7 +6609,8 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
 ///
 /// A reading that fails is [`Attempt::Failed`] and keeps no stamp, so the
 /// next tick tries again rather than treating the failure as the current
-/// state.
+/// state. A reading whose plan list failed is fresh but keeps no stamp
+/// either, for the same reason.
 #[derive(Default)]
 struct IdleCheck {
     stamp: Option<crate::watch::Stamp>,
@@ -6621,8 +6622,7 @@ impl IdleCheck {
         let head = self.branch.head_path(cwd);
         // The other clones' folders decide which plan pages are listed. A
         // list of them that will not read stamps none: the reading then
-        // names that error, and the workspace's `project.toml`, stamped
-        // below, moves once it is mended.
+        // names that error and keeps no stamp, so the next tick reads again.
         let others = repo.other_clone_homes().unwrap_or_default();
         let deep: Vec<std::path::PathBuf> = [repo.pending_dir(), repo.queue_dir()]
             .into_iter()
@@ -6662,7 +6662,13 @@ impl IdleCheck {
         let Some(snapshot) = build_queue_snapshot(repo, cwd, &mut self.branch) else {
             return Attempt::Failed;
         };
-        self.stamp = Some(stamp);
+        // A plan list that failed keeps no stamp. The usual fix is a chmod,
+        // and a stamp compares inode, length and modified time, none of which
+        // a chmod moves, so a kept stamp would skip every tick after the fix
+        // and leave the plan rows missing.
+        if snapshot.plans_error.is_none() {
+            self.stamp = Some(stamp);
+        }
         Attempt::Fresh(snapshot)
     }
 }
@@ -6755,23 +6761,26 @@ fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: 
     }
 }
 
-/// The notice that names why `plans/` would not read: the plan rows are
-/// missing until it reads again, which the next reading tries.
+/// The notice that names why the plan pages could not be listed: `plans/`,
+/// or in home mode another clone's pending, queue or archive folder or the
+/// workspace's `project.toml`, would not read. The plan rows are missing
+/// until it reads again, which the next reading tries. The remedy covers a
+/// `project.toml` that reads but will not parse, which no permission fixes.
 fn plans_notice(err: &str) -> Mode {
     outcome(
         "plans not listed",
         format!(
             "Plan pages are missing from this list, because {err}.\n\n\
-             Make that path a folder this user can read, and the next read \
-             lists them."
+             Make that path one this user can read, or repair it if it will \
+             not parse, and the next read lists them."
         ),
     )
 }
 
-/// Name why `plans/` would not read, once for each error, by the rules
-/// [`announce_unreadable`] keeps: only over plain browsing, and forgotten
-/// once the folder reads again, so breaking it again is named again. A tab
-/// with no [`NamedFiles`] names nothing.
+/// Name why the plan pages could not be listed, once for each error, by the
+/// rules [`announce_unreadable`] keeps: only over plain browsing, and
+/// forgotten once the plan list reads again, so breaking it again is named
+/// again. A tab with no [`NamedFiles`] names nothing.
 fn announce_plans_error(error: Option<&String>, state: &mut ScreenState) {
     let browsing = matches!(state.mode, Mode::Browsing);
     let Some(named) = state.named.as_mut() else {
@@ -14490,6 +14499,45 @@ mod tests {
         assert_eq!(plan_rows(idle.read(&shop_2, &shop_2.root)), 0);
     }
 
+    /// A reading whose plan list failed keeps no stamp, so the next tick
+    /// reads again even with nothing on disk moved: a chmod that mends the
+    /// folder moves nothing a stamp compares.
+    #[test]
+    fn a_reading_with_a_plan_error_is_read_again_next_tick() {
+        let (shop, shop_2, _root_guard) =
+            crate::commands::testutil::two_clones("queue-idle-plan-error");
+        // A page to list, without which the other clones are never read.
+        std::fs::write(shop.plans_dir().join("2026-10-20-search.html"), "").unwrap();
+        let pending = shop.home.join(crate::config::PENDING_DIR);
+        // A file where the folder should be, which `read_dir` fails on.
+        std::fs::write(&pending, "").unwrap();
+        for path in [
+            shop_2.pending_dir(),
+            shop_2.queue_dir(),
+            shop_2.archive_dir(),
+            shop_2.plans_dir(),
+            shop_2.plans_since_file(),
+            shop_2
+                .workspace_dir()
+                .unwrap()
+                .join(crate::repo::BINDING_FILE),
+            pending,
+        ] {
+            age(&path);
+        }
+        let mut idle = IdleCheck::default();
+        if let Some(head) = idle.branch.head_path(&shop_2.root) {
+            age(&head);
+        }
+
+        for tick in 0..2 {
+            let Attempt::Fresh(snapshot) = idle.read(&shop_2, &shop_2.root) else {
+                panic!("tick {tick} skipped a reading whose plan list failed");
+            };
+            assert!(snapshot.plans_error.is_some(), "tick {tick}");
+        }
+    }
+
     /// A file that breaks while the queue tab stays open is named when the
     /// reader lands it, once — not only on the next visit to the tab. Before,
     /// only the tab's opening message named such files, so a task written
@@ -18122,7 +18170,12 @@ mod tests {
         };
         assert!(notice.text.contains(&err), "{}", notice.text);
         assert!(
-            notice.text.contains("a folder this user can read"),
+            notice.text.contains("one this user can read"),
+            "{}",
+            notice.text
+        );
+        assert!(
+            notice.text.contains("or repair it if it will not parse"),
             "{}",
             notice.text
         );

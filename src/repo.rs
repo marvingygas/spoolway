@@ -683,9 +683,10 @@ impl Repo {
     /// tasks depends on every clone's pending, queue and archive folders, not
     /// only this one's. A `project.toml` that is missing answers no other
     /// clone, since this checkout found its workspace through that file and a
-    /// workspace without it lists nobody. One that will not read or parse is
-    /// an error: answering no clones then would show a page as having no
-    /// tasks while another clone's tasks still link to it.
+    /// workspace without it lists nobody. One that will not read or parse, or
+    /// that names a dispatcher that is not one plain name, is an error:
+    /// answering no clones then would show a page as having no tasks while
+    /// another clone's tasks still link to it.
     pub(crate) fn other_clone_homes(&self) -> Result<Vec<PathBuf>> {
         let Some(workspace) = self.workspace_dir() else {
             return Ok(Vec::new());
@@ -709,6 +710,12 @@ impl Repo {
                 record.display()
             )
         })?;
+        // A dispatcher is joined straight onto the workspace folder, so one
+        // that is not a plain name would have this read, and an archive index
+        // rebuild write, outside the workspace.
+        if let Some(bad) = bad_dispatcher(&toml) {
+            return Err(bad_dispatcher_error(&record, bad));
+        }
         let mut homes: Vec<PathBuf> = toml
             .clones
             .into_iter()
