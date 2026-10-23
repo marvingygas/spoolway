@@ -84,10 +84,16 @@ off an existing one, a job, a routine, or a value made permanent:
 - Every pipeline gets a `description:`, taken from the person's own words
   verbatim, compressed to one sentence when it runs longer.
 - A routine: one folder under `config path`'s `routines`, one finished task
-  per file, `depends_on` only a sibling in the same folder.
+  per file, `depends_on` only a sibling in the same folder. A routine may
+  stand alone, with no job.
 - A job: one `[jobs.<name>]` table, per `spoolway jobs contract`, in the
   store the person picks — `jobs.user` for just this person, `jobs.project`
-  for everyone. Check it with `spoolway jobs list`.
+  for everyone. Its `routine` names one routine folder, never a task
+  file or a subfolder. When that routine does not exist yet, ask what its
+  tasks are and write the routine first, in the same pass. A routine that
+  already has a job gets no second one: offer to change that job instead.
+  Check it with `spoolway jobs list` and `spoolway doctor`, which names a
+  job whose routine is missing, shared, or not a folder.
 - A layered patch already right and ready to keep: `spoolway override
   promote <target>`, not retyped.
 - Check it clean: `spoolway pipeline check`.
