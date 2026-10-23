@@ -1633,14 +1633,30 @@ impl<'a> Dispatcher<'a> {
                 report.actions.push(ceiling.note.clone());
                 report.ceiling = Some(ceiling);
             }
-            None => self.start_lanes(
-                &mut tasks,
-                &owned,
-                &kept_panes,
-                candidates,
-                &mut report,
-                tick,
-            )?,
+            None => {
+                let running: Vec<(&str, &str)> = owned
+                    .iter()
+                    .map(|(step, task, _)| (step.as_str(), task.as_str()))
+                    .collect();
+                let holds = slot_holds(
+                    self.repo,
+                    self.pipelines,
+                    self.unattended,
+                    &graph,
+                    &tasks,
+                    &archived,
+                    &running,
+                );
+                self.start_lanes(
+                    &mut tasks,
+                    &owned,
+                    &kept_panes,
+                    candidates,
+                    holds,
+                    &mut report,
+                    tick,
+                )?
+            }
         }
 
         report.quiet = report.actions.is_empty() && owned.is_empty();
@@ -3050,7 +3066,7 @@ impl<'a> Dispatcher<'a> {
             );
         }
         // Four tiers, in order:
-        //   0. the gate: under `dispatch.priority = "group"`, a candidate
+        //   0. the gate: under `dispatch.priority = "group"` or `"reserve"`, a candidate
         //      whose own group has never run ranks behind one from a group
         //      already able to move — see [`group_gate_holds`]. A tier
         //      rather than the drop this used to be, so an open group that
@@ -4673,6 +4689,12 @@ impl<'a> Dispatcher<'a> {
     /// pane, which is then closed — see [`prepare_boot`]. Past
     /// `dispatch.visible_lanes`, the task's oldest kept panes are closed as
     /// well, and so are those of its shown commands, see [`lanes_over_limit`].
+    ///
+    /// `holds` is [`slot_holds`]'s answer for this pass. A candidate from a
+    /// group that has never run starts only while, on every cap its lane is
+    /// counted on, the running lanes plus the slots held there stay under
+    /// that cap — see [`held_out`]. A candidate that starts spends its own
+    /// group's hold, since its lane now occupies the slot.
     #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
@@ -4680,6 +4702,7 @@ impl<'a> Dispatcher<'a> {
         owned: &[(String, String, &Lane)],
         kept_panes: &HashMap<String, String>,
         candidates: Vec<Candidate>,
+        mut holds: BTreeMap<Cap, Vec<String>>,
         report: &mut Report,
         tick: &mut dyn FnMut(),
     ) -> Result<()> {
@@ -4703,13 +4726,11 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
-            if let Some(agent) = step.agent.clone() {
-                *in_flight.entry(agent).or_insert(0) += 1;
-            }
-            if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                *model_in_flight
-                    .entry(slot_key(&self.repo.config.models, model))
-                    .or_insert(0) += 1;
+            for cap in running_caps(&self.repo.config, step) {
+                match cap {
+                    Cap::Profile(agent) => *in_flight.entry(agent).or_insert(0) += 1,
+                    Cap::Model(key) => *model_in_flight.entry(key).or_insert(0) += 1,
+                }
             }
         }
 
@@ -4914,6 +4935,39 @@ impl<'a> Dispatcher<'a> {
             let model_price = crate::models::resolve(&self.repo.config.models, &model_name).price;
             let slot_key = slot_key(&self.repo.config.models, &model_name);
 
+            // Under `reserve`, a group that has never run may start only
+            // while the lanes running on a cap plus the slots held on it stay
+            // under that cap. A group that is open is never held against, so
+            // it is not asked. A cap already full of running lanes falls
+            // through to the ordinary check below, which says so without
+            // blaming a group — see [`held_out`].
+            if candidate.gated {
+                let running = |cap: &Cap| {
+                    match cap {
+                        Cap::Model(key) => model_in_flight.get(key),
+                        Cap::Profile(name) => in_flight.get(name),
+                    }
+                    .copied()
+                    .unwrap_or(0)
+                };
+                if let Some(HeldOut {
+                    cap,
+                    limit,
+                    running,
+                    holders,
+                }) = held_out(&self.repo.config, &step, running, &holds)
+                {
+                    report.actions.push(format!(
+                        "{}: waiting for a `{cap}` slot held for group `{}` \
+                         ({running} running + {} held of {limit})",
+                        tasks[candidate.task_index].id(),
+                        holders[0],
+                        holders.len()
+                    ));
+                    continue;
+                }
+            }
+
             // A model's `slots` is checked whatever `step.slot` says: it
             // describes what the machine behind the model can hold at once,
             // and a step cannot opt out of physics. `slot: false` is a statement about the *profile's*
@@ -5067,6 +5121,13 @@ impl<'a> Dispatcher<'a> {
                     // as this restructuring finds it rather than chased.
                     *in_flight.entry(agent_name.clone()).or_insert(0) += 1;
                     *model_in_flight.entry(slot_key.clone()).or_insert(0) += 1;
+                    // The lane now occupies its slot, so its group's hold on
+                    // one is spent.
+                    if let Some(group) = task.front.group.as_deref() {
+                        for groups in holds.values_mut() {
+                            groups.retain(|held| held != group);
+                        }
+                    }
                     // The new pane exists, so the old one can go: it was
                     // banked above. A returning step's own old pane has to
                     // free its agent name before the new lane takes it. With
@@ -9018,7 +9079,10 @@ struct Started {
 /// `[models]` row that sets its `slots`, else the literal name. Two spellings of one
 /// row (`qwen3`, `local/qwen3`) must share a count, because the cap describes
 /// the one server behind the row, not the name a step happened to use.
-fn slot_key(config_models: &BTreeMap<String, crate::usage::ModelPrice>, model: &str) -> String {
+pub(crate) fn slot_key(
+    config_models: &BTreeMap<String, crate::usage::ModelPrice>,
+    model: &str,
+) -> String {
     crate::models::row_setting(config_models, model, |row| row.slots != 0)
         .unwrap_or(model)
         .to_string()
@@ -9369,7 +9433,9 @@ fn parked_for_a_person(pipelines: &Pipelines, unattended: bool, task: &Task) -> 
 }
 
 /// Whether the gate ranks `task` behind a still-open group, under
-/// `dispatch.priority = "group"` — its own group has never run.
+/// `dispatch.priority = "group"` or `"reserve"` — its own group has never run.
+/// `reserve` ranks exactly as `group` does; the slot it keeps for a started
+/// group is [`slot_holds`]'s to decide.
 ///
 /// `false` covers every case the gate does not apply: `dispatch.priority` is
 /// `"any"`, `task` carries no `group:` — an ungrouped task has no siblings
@@ -9387,13 +9453,239 @@ pub(crate) fn group_gate_holds(
     graph: &Graph,
     task: &Task,
 ) -> bool {
-    if priority != crate::config::Priority::Group {
+    if priority == crate::config::Priority::Any {
         return false;
     }
     let Some(group) = task.front.group.as_deref() else {
         return false;
     };
     !graph.group_is_open(group)
+}
+
+/// A cap a lane is counted against: a model's `slots` row, or an agent
+/// profile's `concurrency`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Cap {
+    Model(String),
+    Profile(String),
+}
+
+/// Which groups hold a slot on which cap, under `dispatch.priority = "reserve"`.
+///
+/// An open group that has no lane running on its current step keeps one slot,
+/// on the cap of the first agent step its `on_pass` path reaches, so a task of
+/// a group that has never run cannot take it while the group is on a command
+/// step or between two tasks of its chain. A group is one chain, so one slot
+/// is all it ever needs. Empty under any other priority.
+///
+/// Nothing here is saved: it is read off the queue and the lane records every
+/// pass, so a hold ends the moment its group is archived or parks, and cannot
+/// outlive either. A group parked for a person (`paused`, `hook_failed`, an
+/// unstaffed `blocked`) holds nothing, or one task blocked overnight would
+/// take a slot out of the whole unattended run until morning.
+///
+/// `running` is each `(step, task)` pair the multiplexer has a lane for; the
+/// ones [`lane_counts`] counts take the group out of the hold, since that lane
+/// already occupies its slot. `archived` is the tasks this pass archived,
+/// which the queue the caller read still lists.
+///
+/// A step the task walks past (`skip:`, `first:`, `last:`) is not where the
+/// hold sits: the walk follows `on_pass` on to the step the task runs.
+pub(crate) fn slot_holds(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    unattended: bool,
+    graph: &Graph,
+    tasks: &[Task],
+    archived: &[String],
+    running: &[(&str, &str)],
+) -> BTreeMap<Cap, Vec<String>> {
+    let config = &repo.config;
+    let mut holds: BTreeMap<Cap, Vec<String>> = BTreeMap::new();
+    if config.dispatch.priority != crate::config::Priority::Reserve {
+        return holds;
+    }
+    let mut groups: BTreeMap<&str, Vec<&Task>> = BTreeMap::new();
+    for task in tasks.iter().filter(|t| !archived.contains(&t.front.id)) {
+        if let Some(group) = task.front.group.as_deref() {
+            groups.entry(group).or_default().push(task);
+        }
+    }
+    for (group, members) in groups {
+        if !graph.group_is_open(group) {
+            continue;
+        }
+        let idle = members.iter().all(|task| {
+            !parked_for_a_person(pipelines, unattended, task)
+                && !running.iter().any(|(step, id)| {
+                    *id == task.id()
+                        && pipelines
+                            .for_task(task)
+                            .is_ok_and(|p| lane_counts(task, p, step, unattended))
+                })
+        });
+        if !idle {
+            continue;
+        }
+        // The task the chain is at: one already past `queued`, else the next
+        // one waiting. Tasks load in id order, not chain order, so the next
+        // one is the queued task that is ready, or failing that the
+        // shallowest. A task on `done` is finished and only awaits archiving.
+        let current = members
+            .iter()
+            .find(|t| t.stage() != crate::pipeline::QUEUED && t.stage() != crate::pipeline::DONE)
+            .or_else(|| {
+                members
+                    .iter()
+                    .filter(|t| t.stage() == crate::pipeline::QUEUED)
+                    .min_by_key(|t| (!graph.ready(t.id()), graph.depth(t.id())))
+            });
+        let Some(task) = current else {
+            continue;
+        };
+        let Ok(pipeline) = pipelines.for_task(task) else {
+            continue;
+        };
+        // A step the task walks past never runs for it, so the walk follows
+        // `on_pass` on through it, the way a move would, to the step the task
+        // really lands on.
+        let dependents = same_group_dependents(repo, pipelines, tasks, graph, task);
+        let land =
+            |step: &str| land_past_hidden(pipeline, task, step.to_string(), dependents).destination;
+        let mut at = match task.stage() {
+            crate::pipeline::QUEUED => land(pipeline.entry()),
+            stage => land(stage),
+        };
+        // A path that comes back to a step it has been through never reaches
+        // an agent, so the group holds nothing rather than the walk looping.
+        let mut seen: HashSet<String> = HashSet::new();
+        while seen.insert(at.clone()) {
+            let Some(step) = pipeline.step(&at) else {
+                break;
+            };
+            if step.agent.is_some() {
+                if let Some((cap, _)) = step_cap(config, step) {
+                    holds.entry(cap).or_default().push(group.to_string());
+                }
+                break;
+            }
+            let Some(next) = step.on_pass.as_deref() else {
+                break;
+            };
+            at = land(next);
+        }
+    }
+    holds
+}
+
+/// A slot hold that keeps a lane on `step` out: the cap it is on, that cap's
+/// size, the lanes running on it, and the groups holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldOut {
+    pub(crate) cap: Cap,
+    pub(crate) limit: usize,
+    pub(crate) running: usize,
+    pub(crate) holders: Vec<String>,
+}
+
+/// Whether [`slot_holds`]'s `holds` keep a new lane on `step` out, for a task
+/// of a group that has never run. `running` counts the lanes on a cap.
+///
+/// Every cap the lane would be counted on is asked, the profile's included
+/// even when a model row or `slot: false` keeps the ordinary cap check from
+/// applying it: the lane still counts on the profile, and would take the slot
+/// a started group is holding.
+///
+/// Only a hold that keeps the lane out is named. A cap already full of running
+/// lanes answers `None`, so the ordinary cap check says so without blaming a
+/// group that kept nothing out.
+///
+/// Shared by [`Dispatcher::start_lanes`] and the board's NEXT column, so the
+/// board names the group the dispatcher is really holding the slot for.
+pub(crate) fn held_out(
+    config: &crate::config::Config,
+    step: &Step,
+    running: impl Fn(&Cap) -> usize,
+    holds: &BTreeMap<Cap, Vec<String>>,
+) -> Option<HeldOut> {
+    counted_caps(config, step, &resolve_model(step))
+        .into_iter()
+        .find_map(|(cap, limit)| {
+            let running = running(&cap);
+            let holders = holds.get(&cap).filter(|groups| !groups.is_empty())?;
+            (running < limit && running + holders.len() >= limit).then(|| HeldOut {
+                limit,
+                running,
+                holders: holders.clone(),
+                cap,
+            })
+        })
+}
+
+/// The caps a running lane on `step` is counted on: its profile, and the
+/// `[models]` row its model resolves to, or the model's literal name when no
+/// row sets `slots`. Where [`Dispatcher::start_lanes`] counts each running
+/// lane before it starts anything, and where the board counts them to ask
+/// [`held_out`] the same question.
+pub(crate) fn running_caps(config: &crate::config::Config, step: &Step) -> Vec<Cap> {
+    let mut caps = Vec::new();
+    if let Some(agent) = step.agent.as_deref() {
+        caps.push(Cap::Profile(agent.to_string()));
+    }
+    if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
+        caps.push(Cap::Model(slot_key(&config.models, model)));
+    }
+    caps
+}
+
+/// Every cap a lane on `step` would be counted on in `start_lanes`: the
+/// model's `slots` row when it has one, and the profile's `concurrency` too,
+/// whatever the row or `slot: false` say, because the lane lands in the
+/// profile's running count either way.
+fn counted_caps(config: &crate::config::Config, step: &Step, model: &str) -> Vec<(Cap, usize)> {
+    let mut caps = Vec::new();
+    if let Some(price) = crate::models::resolve(&config.models, model)
+        .price
+        .filter(|p| p.slots > 0)
+    {
+        caps.push((
+            Cap::Model(slot_key(&config.models, model)),
+            price.slots as usize,
+        ));
+    }
+    if let Some(agent) = step.agent.as_deref()
+        && let Ok(profile) = config.agent(agent)
+        && profile.concurrency > 0
+    {
+        caps.push((Cap::Profile(agent.to_string()), profile.concurrency));
+    }
+    caps
+}
+
+/// The cap a lane on `step` is counted against, and its size, if it has one:
+/// the model's `slots` row when it has one, otherwise the profile's
+/// `concurrency`, which a `slot: false` step does not count against.
+fn step_cap(config: &crate::config::Config, step: &Step) -> Option<(Cap, usize)> {
+    let agent = step.agent.as_deref()?;
+    let model = resolve_model(step);
+    let price = crate::models::resolve(&config.models, &model).price;
+    if let Some(price) = price.filter(|p| p.slots > 0) {
+        return Some((
+            Cap::Model(slot_key(&config.models, &model)),
+            price.slots as usize,
+        ));
+    }
+    let profile = config.agent(agent).ok()?;
+    (step.slot && profile.concurrency > 0)
+        .then(|| (Cap::Profile(agent.to_string()), profile.concurrency))
+}
+
+impl std::fmt::Display for Cap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cap::Model(name) | Cap::Profile(name) => f.write_str(name),
+        }
+    }
 }
 
 fn lanes_path(repo: &Repo) -> PathBuf {
@@ -23699,6 +23991,647 @@ mod tests {
             ["start billing · implement"],
             "gate-filter must rank behind dispatcher-ui while it can still move"
         );
+    }
+
+    /// `slot_holds` against the queue as it stands, with nothing archived this
+    /// pass and `running` as the lanes the multiplexer lists.
+    fn holds_for(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        running: &[(&str, &str)],
+    ) -> BTreeMap<Cap, Vec<String>> {
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        slot_holds(repo, pipelines, false, &graph, &tasks, &[], running)
+    }
+
+    /// Two command steps and then an agent step. A task on `test` takes no
+    /// agent slot, so its group's hold sits on the agent step the `on_pass`
+    /// path reaches.
+    const COMMAND_THEN_AGENT: &str = "steps:\n  \
+         - id: test\n    run: true\n    on_pass: suite\n  \
+         - id: suite\n    run: true\n    on_pass: shots\n  \
+         - id: shots\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+         on_pass: done\n";
+
+    #[test]
+    fn an_open_group_on_a_command_step_holds_a_slot_on_the_next_agent_steps_profile() {
+        let (mut repo, _root_guard) = fixture("hold-command");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
+    }
+
+    #[test]
+    fn only_reserve_holds_slots() {
+        use crate::config::Priority;
+
+        let (mut repo, _root_guard) = fixture("hold-priority");
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+
+        for priority in [Priority::Group, Priority::Any] {
+            repo.config.dispatch.priority = priority;
+            assert!(holds_for(&repo, &pipelines, &[]).is_empty(), "{priority:?}");
+        }
+    }
+
+    #[test]
+    fn a_group_with_a_lane_running_on_its_current_step_holds_nothing() {
+        let (mut repo, _root_guard) = fixture("hold-running");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", "shots", |f| {
+            f.group = Some("cart".into())
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+
+        let holds = holds_for(&repo, &pipelines, &[("shots", "cart-totals")]);
+
+        assert!(holds.is_empty(), "{holds:?}");
+    }
+
+    #[test]
+    fn a_group_parked_for_a_person_holds_nothing_until_resumed() {
+        let (mut repo, _root_guard) = fixture("hold-parked");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        for parked in [
+            crate::pipeline::PAUSED,
+            crate::pipeline::HOOK_FAILED,
+            crate::pipeline::BLOCKED,
+        ] {
+            let path = add_task_with(&repo, "cart-totals", parked, |f| {
+                f.group = Some("cart".into());
+                f.blocked_from = Some("test".into());
+            });
+            let holds = holds_for(&repo, &pipelines, &[]);
+            assert!(holds.is_empty(), "{parked}: {holds:?}");
+
+            let mut task = reload(&path);
+            task.set_stage("test", None);
+            task.save().unwrap();
+            let holds = holds_for(&repo, &pipelines, &[]);
+            assert_eq!(holds.len(), 1, "resumed from {parked}: {holds:?}");
+        }
+    }
+
+    #[test]
+    fn a_hold_also_keeps_out_a_step_whose_model_row_leaves_the_profile_unchecked() {
+        let (mut repo, _root_guard) = fixture("reserve-model-row-candidate");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "row-model".into(),
+            crate::usage::ModelPrice {
+                slots: 4,
+                ..Default::default()
+            },
+        );
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        for (name, model) in [("solo", "test-model"), ("rowed", "row-model")] {
+            pipelines.pipelines.insert(
+                name.into(),
+                crate::pipeline::Pipeline::parse(
+                    name,
+                    &format!(
+                        "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                         model: {model}\n    on_pass: done\n"
+                    ),
+                )
+                .unwrap(),
+            );
+        }
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        add_task_with(&repo, "bill", "work", |f| {
+            f.group = Some("bill".into());
+            f.pipeline = Some("solo".into());
+        });
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("rowed".into());
+        });
+        let mux = FakeMux::new(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        // `zed`'s lane would count against the profile too, and take the
+        // slot `cart` is waiting to use.
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with("zed:") && a.contains("group `cart`")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    /// One queue, read by a pass and by the board: both name the same cap
+    /// and the same group for the slot that keeps `zed` out, because the
+    /// board asks `slot_holds` and `held_out` rather than working the hold
+    /// out for itself.
+    #[test]
+    fn the_board_names_the_hold_the_pass_keeps_a_task_out_with() {
+        let (mut repo, _root_guard) = fixture("reserve-board-agrees");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 1;
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: test-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("solo".into());
+        });
+
+        let report = run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+
+        let said = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("zed:"))
+            .unwrap_or_else(|| panic!("{:?}", report.actions));
+        assert!(said.contains("`pi` slot held for group `cart`"), "{said}");
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let zed = rows.iter().find(|r| r.id == "zed").unwrap();
+        assert_eq!(zed.next, "pi slot held for group cart");
+    }
+
+    #[test]
+    fn a_cap_full_of_running_lanes_is_not_blamed_on_a_hold() {
+        let (mut repo, _root_guard) = fixture("reserve-full-by-running");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: test-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        for id in ["bill", "ann"] {
+            add_task_with(&repo, id, "work", |f| {
+                f.group = Some(id.into());
+                f.pipeline = Some("solo".into());
+            });
+        }
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("solo".into());
+        });
+        let mux = FakeMux::new(vec![
+            lane(&repo, "bill · work", LaneStatus::Working),
+            lane(&repo, "ann · work", LaneStatus::Working),
+        ]);
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        let said = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("zed:"))
+            .unwrap_or_else(|| panic!("{:?}", report.actions));
+        assert!(!said.contains("held for"), "{said}");
+        assert!(said.contains("(2/2)"), "{said}");
+    }
+
+    #[test]
+    fn the_hold_follows_the_chains_next_task_not_the_first_queued_by_id() {
+        let (mut repo, _root_guard) = fixture("hold-chain-order");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "row-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "rowed".into(),
+            crate::pipeline::Pipeline::parse(
+                "rowed",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: row-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        // An earlier task of the group is archived, so the group is open
+        // with both of these still queued. `api-client` sorts first by id,
+        // but waits on `api-schema`.
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("api-base.md"),
+            "---\nid: api-base\nstage: done\n---\n",
+        )
+        .unwrap();
+        add_task_with(&repo, "api-schema", crate::pipeline::QUEUED, |f| {
+            f.group = Some("api".into());
+            f.depends_on = vec!["api-base".into()];
+        });
+        add_task_with(&repo, "api-client", crate::pipeline::QUEUED, |f| {
+            f.group = Some("api".into());
+            f.depends_on = vec!["api-schema".into()];
+            f.pipeline = Some("rowed".into());
+        });
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["api".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_blocked_task_nobody_staffs_holds_nothing_and_a_staffed_one_holds_its_step() {
+        let (mut repo, _root_guard) = fixture("hold-blocked-staffing");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    prompt: implementer\n    model: test-model\n",
+        );
+        add_task_with(&repo, "cart", crate::pipeline::BLOCKED, |f| {
+            f.group = Some("cart".into());
+            f.blocked_from = Some("work".into());
+        });
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        // Attended, a person answers a block, so the group gives its slot
+        // back; the unblocker's step would otherwise hold a slot overnight.
+        let attended = slot_holds(&repo, &pipelines, false, &graph, &tasks, &[], &[]);
+        assert!(attended.is_empty(), "{attended:?}");
+        // Unattended, the `blocked` step is staffed and the group waits on it.
+        let unattended = slot_holds(&repo, &pipelines, true, &graph, &tasks, &[], &[]);
+        assert_eq!(
+            unattended,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_group_whose_last_task_is_archived_holds_nothing() {
+        let (mut repo, _root_guard) = fixture("hold-archived");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        let holds = slot_holds(
+            &repo,
+            &pipelines,
+            false,
+            &graph,
+            &tasks,
+            &["cart-totals".to_string()],
+            &[],
+        );
+
+        assert!(holds.is_empty(), "{holds:?}");
+    }
+
+    #[test]
+    fn a_queued_next_task_holds_a_slot_on_its_pipelines_first_agent_step() {
+        let (mut repo, _root_guard) = fixture("hold-queued");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        // `cart-totals` is archived; `cart-discounts` is the chain's next task.
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("cart-totals.md"),
+            "---\nid: cart-totals\nstage: done\n---\n",
+        )
+        .unwrap();
+        add_task_with(&repo, "cart-discounts", crate::pipeline::QUEUED, |f| {
+            f.group = Some("cart".into());
+            f.depends_on = vec!["cart-totals".into()];
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_parked_task_keeps_its_groups_other_tasks_from_holding() {
+        let (mut repo, _root_guard) = fixture("hold-parked-sibling");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", crate::pipeline::PAUSED, |f| {
+            f.group = Some("cart".into());
+        });
+        add_task_with(&repo, "cart-discounts", crate::pipeline::QUEUED, |f| {
+            f.group = Some("cart".into());
+            f.depends_on = vec!["cart-totals".into()];
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert!(holds.is_empty(), "{holds:?}");
+    }
+
+    #[test]
+    fn the_hold_sits_on_the_first_step_the_task_runs_not_one_it_walks_past() {
+        let (mut repo, _root_guard) = fixture("hold-walk-past");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "skipped-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into());
+            f.skip = vec!["hidden".into()];
+        });
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: test\n    run: true\n    on_pass: hidden\n  \
+             - id: hidden\n    agent: pi\n    prompt: implementer\n    model: skipped-model\n    \
+             on_pass: shots\n  \
+             - id: shots\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
+    }
+
+    #[test]
+    fn a_path_that_cycles_through_command_steps_holds_nothing() {
+        let (mut repo, _root_guard) = fixture("hold-cycle");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        add_task_with(&repo, "cart-totals", "a", |f| f.group = Some("cart".into()));
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    run: true\n    loop: 3\n    on_pass: b\n  \
+             - id: b\n    run: true\n    on_pass: a\n  \
+             - id: c\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert!(holds.is_empty(), "{holds:?}");
+    }
+
+    #[test]
+    fn a_model_slots_row_takes_the_hold_instead_of_the_profile_and_slot_false_skips_only_the_profile()
+     {
+        let (mut repo, _root_guard) = fixture("hold-model");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "test-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        let pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        assert_eq!(
+            holds_for(&repo, &pipelines, &[]),
+            BTreeMap::from([(Cap::Model("test-model".into()), vec!["cart".to_string()])])
+        );
+
+        repo.config.models.clear();
+        let opted_out =
+            pipelines_of(&COMMAND_THEN_AGENT.replace("agent: pi", "agent: pi\n    slot: false"));
+        assert!(holds_for(&repo, &opted_out, &[]).is_empty());
+    }
+
+    /// A started group keeps its slot from its command step, through the gap
+    /// between its two tasks, until its last task is archived, on one two-slot
+    /// profile.
+    ///
+    /// `cart` is on a command step and keeps a slot, `bill` takes the other,
+    /// and `zed` — a group that never ran — waits though one slot is free.
+    /// Once `cart` reaches its agent step it takes the held slot. Between
+    /// `cart`'s two tasks the next one starts at once and `zed` still waits.
+    /// When `cart`'s last task is archived its slot is free and `zed` starts.
+    #[test]
+    fn a_started_group_keeps_its_slot_through_a_command_step() {
+        let (mut repo, _root_guard) = fixture("reserve-playout");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let mut pipelines = pipelines_of(
+            "steps:\n  \
+             - id: test\n    run: sleep 30\n    on_pass: shots\n  \
+             - id: shots\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  \
+                 - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+                 on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        let totals = add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        // The chain's next task, which starts on an agent step.
+        let discounts = add_task_with(&repo, "cart-discounts", crate::pipeline::QUEUED, |f| {
+            f.group = Some("cart".into());
+            f.depends_on = vec!["cart-totals".into()];
+            f.pipeline = Some("solo".into());
+        });
+        for id in ["bill", "zed"] {
+            add_task_with(&repo, id, crate::pipeline::QUEUED, |f| {
+                f.group = Some(id.into());
+                f.pipeline = Some("solo".into());
+            });
+        }
+        // A pass sees only the lanes its multiplexer reports, so each one is
+        // given the lanes the earlier passes started.
+        let mux_with = |lanes: Vec<Lane>| {
+            FakeMux::new(lanes)
+                .cutting_real_worktrees(repo.worktree_root())
+                .with_unbound_workspace()
+                .removing_real_worktrees(&repo)
+        };
+        let mux = mux_with(vec![]);
+
+        // Step 2: `cart` is on a command, `bill` starts, `zed` is kept out.
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(mux.did("start"), ["start bill · work"], "{:?}", mux.calls());
+        let kept_out = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("zed:"))
+            .unwrap_or_else(|| panic!("{:?}", report.actions));
+        assert!(
+            kept_out.contains("`pi`") && kept_out.contains("group `cart`"),
+            "{kept_out}"
+        );
+
+        // Step 3: the command ends and `cart` takes the slot it held.
+        let mut task = reload(&totals);
+        task.set_stage("shots", None);
+        task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(
+            mux.did("start"),
+            ["start cart-totals · shots"],
+            "{:?}",
+            mux.calls()
+        );
+
+        // Step 4: `cart-totals` is done and archived. Its slot is free, and
+        // `cart` still holds it for `cart-discounts`, so `zed` stays out.
+        let mut task = reload(&totals);
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with("zed:") && a.contains("group `cart`")),
+            "{:?}",
+            report.actions
+        );
+        // Cleanup takes a pass or two more, then `cart-discounts` starts. All
+        // that while `zed` waits.
+        let mut started = Vec::new();
+        for _ in 0..4 {
+            let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+            run_pass_with(&repo, &mux, &pipelines);
+            started = mux.did("start");
+            if !started.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(started, ["start cart-discounts · work"]);
+
+        // Step 5: `cart-discounts` finishes the group. With it archived,
+        // nothing holds a slot and `zed` starts.
+        let mut task = reload(&discounts);
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(mux.did("start"), ["start zed · work"], "{:?}", mux.calls());
+    }
+
+    #[test]
+    fn open_groups_are_never_kept_out_by_each_others_holds() {
+        let (mut repo, _root_guard) = fixture("reserve-open-groups");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: test\n    run: sleep 30\n    on_pass: shots\n  \
+             - id: shots\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        for id in ["a", "b", "c"] {
+            add_task_with(&repo, id, "shots", |f| f.group = Some(id.into()));
+        }
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(
+            mux.did("start"),
+            ["start a · shots", "start b · shots"],
+            "{:?}",
+            mux.calls()
+        );
+    }
+
+    /// `dispatch.priority = "reserve"` answers the gate exactly as `group`
+    /// does, and `any` is the only value that switches it off. A check that
+    /// compared against `Group` alone would treat `reserve` like `any`.
+    #[test]
+    fn group_gate_holds_answers_the_same_under_reserve_as_under_group() {
+        use crate::config::Priority;
+
+        let (repo, _root_guard) = fixture("gate-reserve");
+        add_task_with(&repo, "billing", "implement", |f| {
+            f.group = Some("dispatcher-ui".into());
+        });
+        add_task_with(&repo, "gate-filter", "queued", |f| {
+            f.group = Some("slot-priority".into());
+        });
+        add_task_with(&repo, "loner", "queued", |_| {});
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        for task in &tasks {
+            let id = task.front.id.as_str();
+            let group = group_gate_holds(Priority::Group, &graph, task);
+            assert_eq!(
+                group_gate_holds(Priority::Reserve, &graph, task),
+                group,
+                "{id}"
+            );
+            assert!(!group_gate_holds(Priority::Any, &graph, task), "{id}");
+        }
+        let held = tasks.iter().find(|t| t.front.id == "gate-filter").unwrap();
+        assert!(group_gate_holds(Priority::Reserve, &graph, held));
     }
 
     /// The gate only ranks a candidate behind an open group while that open

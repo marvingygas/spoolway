@@ -1065,13 +1065,17 @@ impl<'de> Deserialize<'de> for VisibleLanes {
 /// already open ahead of one whose group has never run, and stops there: a
 /// slot the open group has no work for goes to the next group in the sort,
 /// never idle. `any` drops that tier, so every ready candidate is weighed on
-/// steps left, `group_open` and `dependents` alone.
+/// steps left, `group_open` and `dependents` alone. `reserve` is for a group
+/// that has started to keep one slot away from groups that have never run until
+/// its last task is archived. The config accepts it, but the dispatcher still
+/// ranks candidates under `reserve` exactly as it does under `group`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Priority {
     #[default]
     Group,
     Any,
+    Reserve,
 }
 
 /// Where a task's lanes are placed in its workspace.
@@ -4241,6 +4245,14 @@ mod tests {
             toml::to_string(&any)
                 .unwrap()
                 .contains("priority = \"any\"")
+        );
+
+        let reserve: Config = toml::from_str("[dispatch]\npriority = \"reserve\"\n").unwrap();
+        assert_eq!(reserve.dispatch.priority, Priority::Reserve);
+        assert!(
+            toml::to_string(&reserve)
+                .unwrap()
+                .contains("priority = \"reserve\"")
         );
 
         let group: Config = toml::from_str("[dispatch]\npriority = \"group\"\n").unwrap();

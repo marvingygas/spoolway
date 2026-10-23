@@ -3843,6 +3843,31 @@ mod tests {
         assert!(refusals(&outcomes).is_empty());
     }
 
+    /// The config a 0.14.0 project scaffolded holds the reference table from
+    /// before `reserve` joined `dispatch.priority`. `sync` rewrites that table
+    /// to this binary's and keeps every value in the file, `retention_days`
+    /// and `priority` included.
+    #[test]
+    fn the_0_14_0_config_gets_the_new_reference_table_and_keeps_its_values() {
+        let (repo, _root_guard) = fixture("config-0-14-0");
+        let path = crate::config::Config::path_in(&repo.root);
+        let shipped_0_14_0 = include_str!("../scripts/e2e/fixtures/0.14.0/.spoolway/config.toml");
+        std::fs::write(&path, shipped_0_14_0).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            after.starts_with(&crate::confkv::reference_table()),
+            "{after}"
+        );
+        assert!(after.contains("group, any, reserve"), "{after}");
+        assert!(after.contains("retention_days = 45"), "{after}");
+        assert!(after.contains("priority = \"group\""), "{after}");
+        assert!(refusals(&outcomes).is_empty());
+    }
+
     /// A table that is none of the shipped ones was written by a newer
     /// spoolway or edited by hand. The file is left byte for byte as it is,
     /// values and unknown keys included, and refused with the remedy.

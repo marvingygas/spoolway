@@ -914,12 +914,24 @@ struct Spend {
 /// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
 /// `pipelines` line under the slots, since the run keeps routing on what it
 /// loaded and an edit waits for a restart. Empty, and no line, otherwise.
+///
+/// `held` is how many slots `dispatch.priority = "reserve"` holds on each cap
+/// for a started group. A figure with a hold on its cap reads
+/// `<live>/<cap> · <n> held`, so a task waiting beside a free slot has its
+/// reason on screen; a cap with none, and every cap under any other priority,
+/// reads as it always has. A model's hold is on its own row's cap, so it
+/// follows the model's figure and never the profile's.
+///
+/// Every argument is a distinct piece of state the reading took once —
+/// bundling them into a struct only to pass one reference would hide that.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
     used: &BTreeMap<&str, usize>,
     model_used: &BTreeMap<&str, usize>,
     agent_model: &BTreeMap<&str, Vec<&str>>,
+    held: &BTreeMap<crate::dispatch::Cap, usize>,
     jobs: &[crate::jobs::ActiveJob],
     changed_pipelines: &[String],
 ) -> Vec<String> {
@@ -940,16 +952,18 @@ pub(super) fn footer(
             // `slots`, one entry per pool — but two names that match the same
             // `[models."<row>"]` entry collapse to the one entry, since they
             // are the same pool being rationed and must draw only one line.
-            // `models::row_setting` names the row `resolve` takes `slots` from,
-            // so comparing that row's *key* is comparing pool identity as
-            // `resolve` sees it, even when a more literal row sets other
-            // values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+            // `dispatch::slot_key` names the row `resolve` takes `slots` from
+            // (through `models::row_setting`, the dispatcher's own key for
+            // the pool), so comparing that row's *key* is comparing pool
+            // identity as `resolve` sees it, even when a more literal row
+            // sets other values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
             // `Ornith-1.5-35B-A3B` both key on `Ornith-1.5-35B-A3B` and
             // collapse to one line, which a raw glob match would miss since
-            // it never takes the suffix fallback.
-            let mut pools: Vec<(&str, u32)> = Vec::new();
-            let mut seen_rows: Vec<&str> = Vec::new();
-            for model in agent_model.get(name.as_str()).into_iter().flatten() {
+            // it never takes the suffix fallback. The line is labelled by
+            // `pool_label`, the rule a queued row's NEXT names the pool by.
+            let spellings: &[&str] = agent_model.get(name.as_str()).map_or(&[], Vec::as_slice);
+            let mut pools: Vec<(&str, u32, String)> = Vec::new();
+            for model in spellings {
                 let Some(slots) = crate::models::resolve(&repo.config.models, model)
                     .price
                     .filter(|p| p.slots > 0)
@@ -957,15 +971,12 @@ pub(super) fn footer(
                 else {
                     continue;
                 };
-                if let Some(row) =
-                    crate::models::row_setting(&repo.config.models, model, |row| row.slots != 0)
-                {
-                    if seen_rows.contains(&row) {
-                        continue;
-                    }
-                    seen_rows.push(row);
+                let key = crate::dispatch::slot_key(&repo.config.models, model);
+                if pools.iter().any(|(_, _, seen)| *seen == key) {
+                    continue;
                 }
-                pools.push((model, slots));
+                let label = pool_label(&repo.config.models, spellings, &key).unwrap_or(model);
+                pools.push((label, slots, key));
             }
             let live = used.get(name.as_str()).copied().unwrap_or(0);
             // Which profiles are worth a line. A cap is: one the profile
@@ -992,6 +1003,7 @@ pub(super) fn footer(
                 0 => format!("{live}/∞"),
                 cap => format!("{live}/{cap}"),
             };
+            let own = own + &held_suffix(held, &crate::dispatch::Cap::Profile(name.clone()));
             // One line per profile, not one per pool: the un-pooled case
             // the mockup in `gh-378` draws (`pi` running one pooled lane and
             // one un-pooled one) needs both figures on the same row, or the
@@ -1000,9 +1012,13 @@ pub(super) fn footer(
             // own figure dropped outright once any pool existed.
             let pools = pools
                 .into_iter()
-                .map(|(model, slots)| {
+                .map(|(model, slots, key)| {
                     let live = model_used.get(model).copied().unwrap_or(0);
-                    (model.to_string(), format!("{live}/{slots}"))
+                    let cap = crate::dispatch::Cap::Model(key);
+                    (
+                        model.to_string(),
+                        format!("{live}/{slots}{}", held_suffix(held, &cap)),
+                    )
                 })
                 .collect();
             Some(Spend {
@@ -1064,6 +1080,36 @@ pub(super) fn footer(
         lines.extend(jobs_ledger(jobs, name_w));
     }
     lines
+}
+
+/// The name a footer line gives the pool behind `[models]` row `key`: the
+/// first of a profile's `spellings` (its `agent_model` entry) whose model
+/// has its own `slots` and resolves to that row. Two spellings of one row,
+/// such as `qwen3` and `local/qwen3`, draw one figure, under whichever the
+/// profile's steps named first.
+///
+/// One rule for the footer and for a queued row's NEXT, so a row kept out by
+/// a hold on that pool names it as the footer does.
+pub(super) fn pool_label<'m>(
+    models: &BTreeMap<String, crate::usage::ModelPrice>,
+    spellings: &[&'m str],
+    key: &str,
+) -> Option<&'m str> {
+    spellings.iter().copied().find(|model| {
+        crate::models::resolve(models, model)
+            .price
+            .is_some_and(|p| p.slots > 0)
+            && crate::dispatch::slot_key(models, model) == key
+    })
+}
+
+/// ` · <n> held` for a cap `reserve` holds `n` slots on, and nothing for one
+/// it holds none on.
+fn held_suffix(held: &BTreeMap<crate::dispatch::Cap, usize>, cap: &crate::dispatch::Cap) -> String {
+    match held.get(cap).copied().unwrap_or(0) {
+        0 => String::new(),
+        n => format!(" · {n} held"),
+    }
 }
 
 /// The job ledger: a `jobs   <n> active` line, then one
@@ -4399,6 +4445,7 @@ mod tests {
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4429,6 +4476,7 @@ mod tests {
                 &repo,
                 &pipelines,
                 &used,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &[],
@@ -4480,6 +4528,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4500,6 +4549,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
@@ -4525,6 +4575,7 @@ mod tests {
             footer(
                 &repo,
                 &pipelines,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
@@ -4594,6 +4645,7 @@ mod tests {
             &used,
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4615,6 +4667,132 @@ mod tests {
         // A profile whose live lanes name no model with its own `slots` is
         // unaffected: its usual `used`/`concurrency` reading stands.
         assert!(line("claude").contains("slots 0/1"), "{lines:#?}");
+    }
+
+    /// Under `reserve`, a cap with a slot held for a started group reads
+    /// `<live>/<cap> · <n> held`, and one with none reads as it always has.
+    #[test]
+    fn a_held_slot_is_counted_beside_its_profiles_figure() {
+        let (mut repo, _root_guard) = fixture("footer-held");
+        repo.config.agents.get_mut("claude").unwrap().concurrency = 2;
+        let pipelines = Pipelines::builtin();
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("claude", 1);
+        let draw = |held: &BTreeMap<crate::dispatch::Cap, usize>| -> Vec<String> {
+            footer(
+                &repo,
+                &pipelines,
+                &used,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                held,
+                &[],
+                &[],
+            )
+            .iter()
+            .map(|l| strip(l))
+            .collect()
+        };
+
+        let held = BTreeMap::from([(crate::dispatch::Cap::Profile("claude".into()), 1)]);
+        let lines = draw(&held);
+        let claude = lines.iter().find(|l| l.starts_with("claude")).unwrap();
+        assert!(claude.ends_with("slots 1/2 · 1 held"), "{lines:#?}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("held")).count(),
+            1,
+            "{lines:#?}"
+        );
+
+        let lines = draw(&BTreeMap::new());
+        assert!(!lines.iter().any(|l| l.contains("held")), "{lines:#?}");
+    }
+
+    /// A hold on a model's own `slots` row follows that model's figure, and
+    /// the profile's own figure does not count it.
+    #[test]
+    fn a_models_held_slot_follows_its_own_figure_not_the_profiles() {
+        let (mut repo, _root_guard) = fixture("footer-held-model");
+        repo.config.models.insert(
+            "small-local".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let used: BTreeMap<&str, usize> = BTreeMap::from([("pi", 1)]);
+        let agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::from([("pi", vec!["small-local"])]);
+        let held = BTreeMap::from([(crate::dispatch::Cap::Model("small-local".into()), 1)]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &agent_model,
+            &held,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let pi = lines.iter().find(|l| l.starts_with("pi")).unwrap();
+        assert!(
+            pi.contains("slots 1/\u{221e}") && !pi.contains("1/\u{221e} · "),
+            "{lines:#?}"
+        );
+        assert!(pi.ends_with("small-local   0/1 · 1 held"), "{lines:#?}");
+    }
+
+    /// The footer is drawn unclipped under a rule of up to 60 columns. With a
+    /// held figure on a profile and on a model's own row, each line still
+    /// fits inside that rule, so it does not run past it or wrap.
+    #[test]
+    fn a_held_footer_line_fits_under_the_rule() {
+        let (mut repo, _root_guard) = fixture("footer-held-narrow");
+        repo.config.agents.get_mut("claude").unwrap().concurrency = 2;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "small-local".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let used: BTreeMap<&str, usize> = BTreeMap::from([("claude", 1), ("pi", 1)]);
+        let agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::from([("pi", vec!["small-local"])]);
+        let held = BTreeMap::from([
+            (crate::dispatch::Cap::Profile("claude".into()), 1),
+            (crate::dispatch::Cap::Profile("pi".into()), 1),
+            (crate::dispatch::Cap::Model("small-local".into()), 1),
+        ]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &agent_model,
+            &held,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("held")).count(),
+            2,
+            "{lines:#?}"
+        );
+        // Under 60, for the one column of margin the board prints before
+        // every footer line.
+        assert!(lines.iter().all(|l| l.chars().count() < 60), "{lines:#?}");
     }
 
     /// A profile running one lane on a step naming a pooled model and one on
@@ -4648,6 +4826,7 @@ mod tests {
             &used,
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4703,6 +4882,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4766,6 +4946,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4821,6 +5002,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4869,6 +5051,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4907,6 +5090,7 @@ mod tests {
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4933,6 +5117,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
@@ -4982,6 +5167,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
