@@ -2052,7 +2052,7 @@ Under `-v`, one `editor` row names the editor the TUI's `open task` runs. A sett
 prints a note with the fix and is never a failure. See [Editor](dispatcher.md#editor).
 
 ```
-  ok    editor — notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths
+  ok    editor — notepad.exe, from $VISUAL — own window, Windows paths
 ```
 
 A note names each `pipeline · step` that runs the deprecated stack command. See [Checking the setup](installation.md#checking-the-setup).

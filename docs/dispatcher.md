@@ -599,7 +599,7 @@ profile, for example `export VISUAL=notepad.exe`.
 
 The same choice serves every item that opens a task file in the terminal screens. These are
 `open task` on the board and on the queue screen's tasks and routines panes, and `open` on the jobs
-routine picker. `spoolway config edit` and `spoolway config override` do not use it yet. They wait
+routine picker. `spoolway config edit` and `spoolway config override` do not use it. They wait
 for the editor to close and then check the file, so they keep their own order: `$VISUAL`, then
 `$EDITOR`, then `vi`.
 
