@@ -267,7 +267,7 @@ dispatcher has started a lane or a command step, the tab covers the board with a
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is
-running. Queued tasks and scheduled jobs do not count as running. When at least one agent lane
+running and no task is on `queued`. Scheduled jobs do not count. When at least one agent lane
 or command step is running, `enter` opens the stop popup instead:
 
 ```
@@ -290,6 +290,26 @@ lane keeps running. `enter` on `interrupt them now` interrupts every live agent 
 every running command step first, parking each of those tasks on `paused` with a mark saying
 the stop parked it, then stops the child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
 nothing: there is nothing left to ask.
+
+When no step is running and at least one task is on `queued`, `enter` opens a different popup. It names
+how many tasks are queued, because stopping the dispatcher leaves them waiting:
+
+```
+╭─ stop dispatching ───────────────────────╮
+│                                          │
+│  1 task is queued and will not start.    │
+│                                          │
+│  > stop dispatching                      │
+│    keep it running                       │
+│                                          │
+│  [enter] confirm   [esc] close           │
+╰──────────────────────────────────────────╯
+```
+
+With several tasks the line reads `3 tasks are queued and will not start.`. The cursor opens on
+`stop dispatching`, and `↑` and `↓` move it. `enter` on `stop dispatching` stops the child the way
+`ctrl-c` does. `enter` on `keep it running` and `esc` close the popup and leave the dispatcher
+running. A task that is paused, blocked or between steps is not counted.
 
 Starting dispatching again, from the tab or with `spoolway dispatch`, resumes every task the
 stop parked, back onto the step it was on, before its first pass.

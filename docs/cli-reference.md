@@ -114,8 +114,8 @@ on this page still reach the board underneath it. It closes once the child's fir
 whatever that pass did, or earlier when the dispatcher starts a lane or a command step. The child
 says so by writing its pid to a `first-pass` file in the project's home. The popup does not open again on
 a later pass. `enter` again, over a running child, stops it at once when no agent lane or
-command step is running.
-Otherwise it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
+command step is running and no task is on `queued`.
+When a step is running, it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
 still up:
 
 ```
@@ -130,7 +130,10 @@ way `ctrl-c` does: nothing is torn down, and every lane keeps running. `enter` o
 now` interrupts every live agent turn and kills every running command step first, parks each of
 those tasks on `paused`, then stops the child. `esc` leaves the dispatcher running, and
 a second `enter` while a stop is already going does nothing. Starting dispatching again resumes
-every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
+every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). With
+no step running and at least one task on `queued`, `enter` opens a popup that reads `1 task is
+queued and will not start.` (`3 tasks are queued and will not start.` for three) over the answers `stop dispatching` and `keep it running`. `stop
+dispatching` stops the child. `keep it running` and `esc` close the popup and leave it running. The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
 finishing` for one, left out once none are). `r` and the `o` options menu work whether or not
