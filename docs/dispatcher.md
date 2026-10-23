@@ -393,7 +393,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark turns while a dispatcher is running, and holds still otherwise.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `update` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -526,7 +526,9 @@ ceiling. A lost lock writes the line shown under
 The key line under the board reads `[enter] start dispatching   [o] options   [q] quit`. It
 reads `stop dispatching` while the dispatcher is running, and `q` shows only inside the dispatch
 tab. `[r] resume` joins it, between the `enter` pair and `[o] options`, only while the `▸`
-cursor sits on a row it can resume.
+cursor sits on a row it can resume. `[u] update config` joins it, between `[o] options` and
+`[q] quit`, while any dispatcher holds the lock. On an empty board it sits between `enter` and
+`q`.
 
 | Key | What it does |
 |---|---|
@@ -534,12 +536,69 @@ cursor sits on a row it can resume.
 | `o` | Open the options menu of the row under the cursor. See [Options menu](#options-menu). |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started resumes at once with no picker. A `hook_failed` row also resumes at once and runs its hook again. See [Resume picker](#resume-picker). |
 | `k` | Open the skip panel for a `hook_failed` row. Does nothing on any other row. See [Skip panel](#skip-panel). |
+| `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while no dispatcher holds the lock, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
 | `ctrl-c` | Stop the run. |
 
 Every menu and panel these keys open lists its answers under its text, with `>` on the
 cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
 with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
 such as `open task` or `pause now`, and on the `(next)` step in the resume picker.
+
+### Updating the config
+
+`u` writes the same reload request as `spoolway dispatch reload` and waits for the dispatcher's
+answer. See [Reloading](#reloading). A popup titled `update config` covers the board while it
+waits. It names no key.
+
+```
+╭─ update config ────────────╮
+│                            │
+│  updating config…          │
+│                            │
+╰────────────────────────────╯
+```
+
+A good reload replaces it with this popup, which closes by itself after one second:
+
+```
+╭─ update config ────────────╮
+│                            │
+│  successfully loaded       │
+│                            │
+╰────────────────────────────╯
+```
+
+A refusal opens a popup that holds the whole refusal and closes on `enter`. It ends each fix
+with `press u again.`
+
+```
+╭─ reload refused ──────────────────────────────────────────────╮
+│                                                               │
+│  Nothing changed. The run is still on what it had.            │
+│                                                               │
+│  fix-login: sitting on `review`, which pipeline `feature`     │
+│  no longer defines                                            │
+│                                                               │
+│  Put `review` back in feature.yml, or wait until fix-login    │
+│  has left it, then press u again.                             │
+│                                                               │
+│  [enter] confirm                                              │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+```mermaid
+flowchart LR
+  U[u] --> W[updating config…]
+  W -->|loaded| L[successfully loaded, closes after 1 s]
+  W -->|refused| R[reload refused, closes on enter]
+  W -->|dispatcher stopped| S[stopped before answering, closes on enter]
+```
+
+When the dispatcher stops before it answers, the popup reads `The dispatcher stopped before
+answering, so nothing was reloaded. A new run loads every file as it is now.` When the dispatch
+tab's own dispatcher stops, that sentence follows the reason it stopped in the exit popup. When
+the answer cannot be read, the popup says the board cannot tell whether the reload loaded, and to
+press `u` again if the footer still shows its `update` line.
 
 ### Options menu
 
@@ -803,8 +862,10 @@ pi   slots 1/∞   small-local   0/1 · 1 held
 
 The count is the number of slots started groups hold on that cap. The NEXT column names the group. Under `group` and `any`, no footer line shows `held`.
 
-A line `pipelines  <files> changed since this run started — restart the dispatcher
-to use it` appears while a pipeline file differs from the copy the dispatcher loaded. See
+A line `update     <names> changed since this run started — press u to update config` appears
+while a pipeline file differs from the copy the dispatcher loaded, or while `config.toml` holds a
+different value than the run is using for `unattended.enabled` or an `unattended.blocked_*` key.
+The line names each pipeline file and each such key. See
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). Then the job ledger lists every enabled job with its next firing:
 
 ```
@@ -821,8 +882,8 @@ shows what one lane is doing.
 The dispatcher reads the pipelines when it starts and when a [reload](#reloading) is requested.
 Configuration is reloaded whenever its files change, with a few exceptions; see the end of this
 section. Right after it takes the project's lock, and after each good reload, it writes a copy of
-what it loaded to `<home>/dispatch-pipelines.json`. A dispatcher that starts later replaces that
-copy.
+what it loaded to `<home>/dispatch-pipelines.json`. The copy also records the run's
+`unattended.blocked_*` values. A dispatcher that starts later replaces that copy.
 
 While a dispatcher is running, these commands route a task on that copy and not on the files:
 
@@ -845,7 +906,8 @@ pipeline files.
 An edit to a pipeline file changes nothing until the dispatcher restarts or reloads. A pipeline
 override follows the same rule: `spoolway pipeline override` writes a patch file, and the running
 dispatcher uses it only after a restart or a reload. The footer and `spoolway pipeline check` name each
-pipeline file or override patch that differs from the loaded copy:
+pipeline file or override patch that differs from the loaded copy. The footer also names the
+config keys that differ, and its `u` key reloads them. `spoolway pipeline check` prints:
 
 ```
 $ spoolway pipeline check
@@ -860,6 +922,7 @@ tells you to restart the dispatcher and try again.
 A reload request makes the running dispatcher load every pipeline file and `config.toml` again
 without stopping any lane. In a terminal, `spoolway dispatch reload` writes the request, waits for
 the answer and prints it; see [`spoolway dispatch reload`](cli-reference.md#spoolway-dispatch-reload).
+On the board, `u` writes the request; see [Updating the config](#updating-the-config).
 A request is a file in `<home>/reload/requests/`. On Linux the
 dispatcher wakes when the file appears. On every system it answers at the top of its next pass. It writes the answer to
 `<home>/reload/answers/<request id>.json`, and the answer names the request it answers.
@@ -867,7 +930,7 @@ dispatcher wakes when the file appears. On every system it answers at the top of
 On a good reload, the dispatcher writes the new pipelines to `dispatch-pipelines.json` before it
 starts any lane on them. From then on `spoolway report`, `spoolway queue route` and the board route
 on the new pipelines, and `spoolway pipeline check` and the footer stop naming the reloaded
-files. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
+files and keys. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
 keys all take effect.
 
 A good reload also sets the run to attended or unattended, as `unattended.enabled` says. This
