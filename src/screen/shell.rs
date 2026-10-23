@@ -2230,9 +2230,10 @@ mod tests {
     }
 
     // When the dispatcher asked is the tab's own child and it dies unasked
-    // under `updating config…`, its exit popup, which goes over the notice
-    // above, says too that the reload went unanswered, and `enter` closes
-    // it. Fails before the change: the exit popup gave the exit status alone.
+    // under `updating config…`, its exit popup, which goes over the `update
+    // config` notice, says too that the reload went unanswered, and `enter`
+    // closes it. Fails before the change: the exit popup gave the exit status
+    // alone.
     #[test]
     fn the_tabs_own_dispatcher_dying_before_answering_says_so() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-child-gone");
