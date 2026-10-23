@@ -65,15 +65,18 @@ pub(crate) fn run(repo: &Repo, dry_run: bool) -> Result<Summary> {
     };
     let own = repo.home().join(crate::config::PLANS_DIR);
     let shared = workspace.join(crate::config::PLANS_DIR);
-    // Columns as `sync` prints its other words: a dry run's are longer.
+    // Columns as the report is drawn: every word padded to the longest of its
+    // set plus one space, so the path starts in the same column on every line
+    // and the lines under an entry line up with it. A dry run's words are
+    // longer.
     let (seeded, moved, rewrote, refused) = match dry_run {
         true => (
-            "would seed   ",
-            "would move   ",
-            "would rewrite",
-            "refused      ",
+            "would seed    ",
+            "would move    ",
+            "would rewrite ",
+            "refused       ",
         ),
-        false => ("seeded   ", "moved    ", "rewrote  ", "refused "),
+        false => ("seeded   ", "moved    ", "rewrote  ", "refused  "),
     };
     let indent = " ".repeat(seeded.len());
 

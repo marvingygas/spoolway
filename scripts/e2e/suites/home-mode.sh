@@ -164,6 +164,8 @@ echo "<html>a page the clone already had</html>" > "$OLD_PAGE"
 printf -- '---\nid: moved\ngroup: moved\ntitle: a task naming the old page\nplan: %s\n---\n\nbody\n' \
   "$OLD_PAGE" > "$WS/dispatchers/proj/pending/moved.md"
 says "a dry-run sync would move the page" "would move" "$SPOOLWAY" sync --dry-run
+says "a dry-run sync keeps a space before the rewritten task" "would rewrite ~/" \
+  "$SPOOLWAY" sync --dry-run
 if [ -e "$OLD_PAGE" ] && [ ! -e "$NEW_PAGE" ]; then ok "a dry-run sync moves nothing"
 else bad "a dry-run sync moves nothing"; fi
 says "sync reports the move and the rewrite" "rewrote" "$SPOOLWAY" sync
