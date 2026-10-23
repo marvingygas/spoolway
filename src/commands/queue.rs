@@ -7054,12 +7054,12 @@ impl Picked<'_> {
             return match item {
                 RowOption::Open => open_highlighted_routine(self.repo, routines, nav),
                 RowOption::DeleteRoutine => begin_routine_delete(self.repo, routines, nav),
-                RowOption::EditJob(job) => match find_job(self.repo, nav, &job) {
+                RowOption::EditJob(job) => match find_job(self.repo, &job) {
                     Ok(found) => Mode::NewJob {
                         nav: nav.clone(),
                         walk: super::jobs::NewJobWalk::edit(&found),
                     },
-                    Err(refused) => refused,
+                    Err(text) => job_not_changed(nav, text),
                 },
                 RowOption::PauseJob(job) => set_job_enabled(self.repo, nav, &job, false),
                 RowOption::ResumeJob(job) => set_job_enabled(self.repo, nav, &job, true),
@@ -7123,40 +7123,34 @@ impl Picked<'_> {
 }
 
 /// The job `job` names, read from both stores again as the item is picked,
-/// so the item acts on the job as it is now. `Err` is the popup over the
-/// routines pane `nav` describes that says why there is nothing to act on:
-/// a store that will not load, or the job gone from its store since the
-/// menu opened.
-fn find_job(
-    repo: &Repo,
-    nav: &RoutineNav,
-    job: &JobRef,
-) -> std::result::Result<crate::jobs::Job, Mode> {
+/// so the item acts on the job as it is now. `Err` is the text of the popup
+/// that says why there is nothing to act on — a store that will not load,
+/// or the job gone from its store since the menu opened — for
+/// [`job_not_changed`] to open.
+fn find_job(repo: &Repo, job: &JobRef) -> std::result::Result<crate::jobs::Job, String> {
     let jobs = crate::jobs::load(repo).map_err(|err| {
-        outcome_over(
-            Some(nav),
-            "job not changed",
-            format!(
-                "{err:#}\n\nthe job {} cannot be read until this store reads. \
-                 `spoolway doctor` names what is wrong.",
-                job.name
-            ),
+        format!(
+            "{err:#}\n\nthe job {} cannot be read until this store reads, so nothing was \
+             changed. `spoolway doctor` names what is wrong.",
+            job.name
         )
     })?;
     jobs.into_iter()
         .find(|found| found.name == job.name && found.scope == job.scope)
         .ok_or_else(|| {
-            outcome_over(
-                Some(nav),
-                "job not changed",
-                format!(
-                    "the job {} is no longer in the {} store, so there is nothing to change. \
-                     Press o on the routine again to see the jobs it has now.",
-                    job.name,
-                    job.scope.label()
-                ),
+            format!(
+                "the job {} is no longer in the {} store, so there is nothing to change. Press \
+                 o on the routine again to see the jobs it has now.",
+                job.name,
+                job.scope.label()
             )
         })
+}
+
+/// The popup over the routines pane `nav` describes that [`find_job`]'s
+/// refusal opens.
+fn job_not_changed(nav: &RoutineNav, text: String) -> Mode {
+    outcome_over(Some(nav), "job not changed", text)
 }
 
 /// Pause job or resume job off a routine's menu: [`find_job`], then
@@ -7165,9 +7159,9 @@ fn find_job(
 /// details show the new state as the stores are read again, or a popup over
 /// it saying why the store was not written.
 fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -> Mode {
-    let found = match find_job(repo, nav, job) {
+    let found = match find_job(repo, job) {
         Ok(found) => found,
-        Err(refused) => return refused,
+        Err(text) => return job_not_changed(nav, text),
     };
     match super::jobs::set_enabled(repo, &found, enabled) {
         Ok(()) => Mode::Routines(nav.clone()),
@@ -21667,11 +21661,13 @@ mod tests {
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
 
-        let held = last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\rynq "))).to_string();
+        let held =
+            last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\rynq "))).to_string();
         assert!(held.contains("─ delete this routine "), "{held}");
         assert!(repo.routines_dir().join("nightly").is_dir());
 
-        let last = last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r\x1b"))).to_string();
+        let last =
+            last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r\x1b"))).to_string();
         assert!(!last.contains("delete this routine"), "{last}");
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(repo.routines_dir().join("nightly").is_dir());
@@ -21690,7 +21686,8 @@ mod tests {
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
-        let last = last_frame(&routines_screen(&repo, &format!("j o{DOWN_TO_LAST}\r\r"))).to_string();
+        let last =
+            last_frame(&routines_screen(&repo, &format!("j o{DOWN_TO_LAST}\r\r"))).to_string();
 
         assert!(!repo.routines_dir().join("nightly").exists());
         assert_eq!(job_names(&repo), vec!["weekly-prune"]);
@@ -21887,6 +21884,270 @@ mod tests {
         assert_eq!(jobs[0].spec.routine, "maintenance");
         assert_eq!(jobs[0].spec.schedule, "0 3 * * *");
         assert!(!repo.user_jobs_file().exists(), "nothing written");
+    }
+
+    /// The routine's job as edit job's test writes it: in the project
+    /// store, on the `default` pipeline, which sorts after `bugfix`, so a
+    /// pipeline popup that opened on the first pipeline would save the
+    /// wrong one.
+    fn write_default_job(repo: &Repo, name: &str, routine: &str) {
+        crate::jobs::write(
+            repo,
+            crate::jobs::Scope::Project,
+            name,
+            &crate::jobs::JobSpec {
+                schedule: "0 3 * * *".to_string(),
+                pipeline: "default".to_string(),
+                routine: routine.to_string(),
+                ..crate::jobs::JobSpec::neutral()
+            },
+        )
+        .unwrap();
+    }
+
+    /// A routine with one job offers edit job, pause job, delete job and
+    /// delete routine, and no new job; a paused job offers resume job in
+    /// place of pause job.
+    #[test]
+    fn a_routine_with_one_job_offers_its_job_items_then_delete_routine() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-options-one-job");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly-audit", "nightly");
+
+        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        assert!(last.contains(&format!("{TOP_LEFT}─ nightly ")), "{last}");
+        let items = [
+            "│  > edit job  ",
+            "│    pause job  ",
+            "│    delete job  ",
+            "│    delete routine  ",
+        ];
+        let at: Vec<usize> = items
+            .iter()
+            .map(|item| last.find(item).unwrap_or_else(|| panic!("{item}: {last}")))
+            .collect();
+        assert!(at.is_sorted(), "in the mockup's order: {last}");
+        assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("resume job"), "{last}");
+
+        let mut spec = crate::jobs::load(&repo).unwrap()[0].spec.clone();
+        spec.enabled = false;
+        crate::jobs::write(&repo, Scope::Project, "nightly-audit", &spec).unwrap();
+        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        assert!(last.contains("│    resume job  "), "{last}");
+        assert!(!last.contains("pause job"), "{last}");
+    }
+
+    /// A routine two jobs run offers to delete either one by name, sorted
+    /// as the details pane lists them, then delete routine — and nothing
+    /// that would edit or resume one of them into the clash.
+    #[test]
+    fn a_routine_with_two_jobs_offers_to_delete_either_by_name() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-options-two-jobs");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "nightly-b", "nightly");
+        write_job(&repo, Scope::Project, "nightly-a", "nightly");
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let mut nav = RoutineNav::new();
+        nav.folder_cursor = 1;
+
+        let jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+        let menu = routine_options(&repo, &Pipelines::builtin(), &routines, &jobs, &nav).unwrap();
+        let labels: Vec<String> = menu.items.iter().map(RowOption::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "delete job nightly-a",
+                "delete job nightly-b",
+                "delete routine"
+            ]
+        );
+
+        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        assert!(last.contains("│  > delete job nightly-a  "), "{last}");
+        assert!(last.contains("│    delete job nightly-b  "), "{last}");
+        assert!(last.contains("│    delete routine  "), "{last}");
+    }
+
+    /// Stores that will not load hide which jobs the routine has, so its
+    /// menu offers delete routine alone, which refuses and says why.
+    #[test]
+    fn a_routine_whose_job_stores_will_not_load_offers_only_delete_routine() {
+        let (repo, _root_guard) = fixture("routine-options-bad-store");
+        seed_two_routines(&repo);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let jobs = Err("job store will not parse".to_string());
+
+        let menu = routine_options(
+            &repo,
+            &Pipelines::builtin(),
+            &routines,
+            &jobs,
+            &RoutineNav::new(),
+        )
+        .unwrap();
+        assert_eq!(menu.items, [RowOption::DeleteRoutine]);
+    }
+
+    /// Pause job writes the job back paused, and resume job enabled, each
+    /// time to the store it came from alone, never copying it into the
+    /// other — and the menu closes back onto the routine list.
+    #[test]
+    fn pause_job_and_resume_job_write_the_job_back_to_its_own_store() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-pause-job");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly-audit", "nightly");
+
+        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\r")).to_string();
+        let jobs = crate::jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(!jobs[0].spec.enabled, "paused");
+        assert_eq!(jobs[0].scope, Scope::Project);
+        assert!(
+            !repo.user_jobs_file().exists(),
+            "never copied to the user store"
+        );
+        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(!last.contains("pause job"), "the menu closed: {last}");
+        assert!(last.contains("paused"), "the details pane says so: {last}");
+
+        routines_screen(&repo, "jo\x1b[B\r");
+        let jobs = crate::jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].spec.enabled, "resumed");
+        assert_eq!(jobs[0].scope, Scope::Project);
+        assert!(
+            !repo.user_jobs_file().exists(),
+            "never copied to the user store"
+        );
+    }
+
+    /// Edit job opens the schedule popup on the job's own schedule and then
+    /// the pipeline popup on its own pipeline, and saves under the job's
+    /// own name to its own store, keeping its routine.
+    #[test]
+    fn edit_job_opens_on_the_jobs_own_values_and_keeps_its_routine() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-edit-job");
+        seed_two_routines(&repo);
+        write_default_job(&repo, "nightly-audit", "nightly");
+
+        let schedule = last_frame(&routines_screen(&repo, "jo\r")).to_string();
+        assert!(
+            schedule.contains("─ when does nightly-audit run "),
+            "{schedule}"
+        );
+        assert!(schedule.contains("  0 3 * * *_"), "{schedule}");
+
+        let pipeline = last_frame(&routines_screen(&repo, "jo\r\r")).to_string();
+        assert!(
+            pipeline.contains("> default"),
+            "on the job's pipeline: {pipeline}"
+        );
+
+        // Nine backspaces clear `0 3 * * *`; `enter` on the pipeline popup
+        // takes the one it opened on.
+        let input = format!("jo\r{}0 4 * * 1\r\r", "\u{8}".repeat(9));
+        let saved = last_frame(&routines_screen(&repo, &input)).to_string();
+        assert!(saved.contains("─ job saved "), "{saved}");
+        let jobs = crate::jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.name, "nightly-audit");
+        assert_eq!(job.scope, Scope::Project);
+        assert_eq!(job.spec.routine, "nightly");
+        assert_eq!(job.spec.schedule, "0 4 * * 1");
+        assert_eq!(job.spec.pipeline, "default");
+        assert!(
+            !repo.user_jobs_file().exists(),
+            "never copied to the user store"
+        );
+    }
+
+    /// Delete job asks first: `esc` keeps the job, and every other key
+    /// leaves the popup open. `enter` deletes the job alone, from its own
+    /// store, leaving the routine and every other job.
+    #[test]
+    fn delete_job_asks_first_and_deletes_only_the_job() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-delete-job");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly-audit", "nightly");
+        write_job(&repo, Scope::User, "weekly-prune", "maintenance");
+
+        let held = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\rynq ")).to_string();
+        assert!(held.contains("─ delete this job "), "{held}");
+        assert!(held.contains("nightly-audit"), "{held}");
+        assert!(held.contains("> delete"), "{held}");
+        assert_eq!(job_names(&repo).len(), 2, "both jobs kept");
+
+        let kept = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\r\x1b")).to_string();
+        assert!(!kept.contains("delete this job"), "{kept}");
+        assert!(kept.contains("─ routines ─"), "{kept}");
+        assert_eq!(job_names(&repo).len(), 2, "both jobs kept");
+
+        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\r\r")).to_string();
+        assert_eq!(job_names(&repo), ["weekly-prune"]);
+        assert!(
+            repo.routines_dir().join("nightly").is_dir(),
+            "the routine stays"
+        );
+        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("Schedule:    none"), "{last}");
+    }
+
+    /// A job gone from its store between `o` and the pick is not written
+    /// back: edit job and pause job both open a popup saying so, and the
+    /// store stays without it.
+    #[test]
+    fn a_job_item_whose_job_is_gone_changes_nothing_and_says_so() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-job-item-gone");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly-audit", "nightly");
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut nav = RoutineNav::new();
+        nav.folder_cursor = 1;
+        let jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+        let menu = routine_options(&repo, &pipelines, &routines, &jobs, &nav).unwrap();
+        crate::jobs::delete_in(&repo, Scope::Project, "nightly-audit").unwrap();
+
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+        let state = ScreenState::new();
+        for item in &menu.items[..2] {
+            let mode = picked.run(&[], &routines, &state, &menu, item.clone());
+            let Mode::Outcome { notice, routines } = mode else {
+                panic!("{item:?}: {mode:?}");
+            };
+            assert_eq!(notice.title, "job not changed");
+            assert!(notice.text.contains("no longer in the project store"), "{notice:?}");
+            assert!(routines.is_some(), "over the routines pane");
+        }
+        assert!(job_names(&repo).is_empty(), "nothing written back");
+    }
+
+    /// On a routine two jobs run, each delete job item deletes the job it
+    /// names and leaves the other.
+    #[test]
+    fn delete_job_by_name_deletes_the_job_it_names() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-delete-named-job");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "nightly-b", "nightly");
+        write_job(&repo, Scope::Project, "nightly-a", "nightly");
+
+        routines_screen(&repo, "jo\x1b[B\r\r");
+        assert_eq!(job_names(&repo), ["nightly-a"]);
+        assert!(repo.routines_dir().join("nightly").is_dir());
     }
 
     /// `esc` over the routine list does nothing: the pane is the routines

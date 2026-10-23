@@ -986,7 +986,11 @@ fn pause_verb(will_be_enabled: bool) -> &'static str {
 /// flipped, so a job paused by another hand since its menu opened is not
 /// resumed by a pick that said pause. `Err` is the popup that says why the
 /// store was not written.
-pub(super) fn set_enabled(repo: &Repo, job: &Job, enabled: bool) -> std::result::Result<(), Notice> {
+pub(super) fn set_enabled(
+    repo: &Repo,
+    job: &Job,
+    enabled: bool,
+) -> std::result::Result<(), Notice> {
     let mut spec = job.spec.clone();
     spec.enabled = enabled;
     let verb = pause_verb(enabled);
