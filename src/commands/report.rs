@@ -2434,7 +2434,7 @@ fn resume_checked(
                 crate::dispatch::land_past_hidden(pipeline, &task, destination, dependents);
             let (destination, walked_past) =
                 land_resume(repo, pipeline, &mut task, &gated, landing);
-            past_the_gate(
+            let task = past_the_gate(
                 task,
                 args,
                 &gated,
@@ -2442,7 +2442,16 @@ fn resume_checked(
                 cleared_block,
                 destination,
                 walked_past,
-            )
+            )?;
+            // The gate road lands the task on a step a settled lane of its
+            // own may already sit on, the same as the other roads out of a
+            // stop, and the dispatcher would wait on that lane forever.
+            // Answered onto `blocked` there is no step to continue and the
+            // stop stands, so nothing is freed.
+            if task.stage() != crate::pipeline::BLOCKED {
+                free_stale_lanes(repo, pipelines, &task);
+            }
+            Ok(())
         }
         road => back_onto_its_step(repo, pipelines, task, args, road),
     }
@@ -3127,9 +3136,9 @@ fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task, step: String) -> R
 /// The settled lane on the step a resume sends this task to, closed, so the
 /// dispatcher does not mistake one left over from before a stop for a lane
 /// still waiting on an answer — the task would wait on it forever and no fresh
-/// lane would ever start. Shared by `back_onto_its_step` and `unpark`, the two
-/// roads that put a task back on a step a lane of its own might already be
-/// sitting settled on.
+/// lane would ever start. Shared by `back_onto_its_step`, `unpark` and the gate
+/// road in `resume_checked`, the roads that put a task back on a step a lane of
+/// its own might already be sitting settled on.
 ///
 /// Only that one lane. The task's other lanes belong to steps it has already
 /// run, and each stays open, idle, until the task is done; closing them here
@@ -3555,6 +3564,9 @@ impl AbandonedSession {
 /// went through [`report`] in full — so nothing here runs, rebuilds or checks
 /// anything. All that is left is the routing decision the pass was not allowed
 /// to take on its own, which [`resume_road`] has already made.
+///
+/// Returns the task as saved, so the caller can free the lane left on the step
+/// it was sent to.
 fn past_the_gate(
     mut task: Task,
     args: &ResumeArgs,
@@ -3563,7 +3575,7 @@ fn past_the_gate(
     cleared_block: bool,
     destination: String,
     walked_past: Option<String>,
-) -> Result<()> {
+) -> Result<Task> {
     // A held unblocker pass kept `blocked_from` for this resume to read — see
     // `route`'s `held_here`. Letting it go is the resume an unheld pass from
     // `blocked` makes there, so it clears the field the same way; left
@@ -3623,7 +3635,7 @@ fn past_the_gate(
         };
         println!("{}: {label} --resume--> {destination}", args.task);
     }
-    Ok(())
+    Ok(task)
 }
 
 /// A task id from the argument, or from the environment every lane is given.
@@ -9579,6 +9591,59 @@ mod tests {
             left,
             [crate::mux::run_key("build", "ship")],
             "the lane on the step the gate sent the task to is closed, the one on another step stays"
+        );
+    }
+
+    /// A gate answered onto `blocked` closes no lane. The stop is still
+    /// standing, and the lane on the gated step is what a person resuming it
+    /// reads to see why it stopped, so freeing it would throw that screen away.
+    #[test]
+    fn resuming_a_gate_onto_blocked_keeps_the_lanes_open() {
+        let (mut repo, _root_guard) = fixture("gate-resume-onto-blocked");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.front.blocked_from = Some("deploy".into());
+        task.front.paused_at = Some("deploy".into());
+        task.front.paused_by = Some(Gate::Step.as_str().to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "deploy".into(),
+            outcome: "block".into(),
+            at: 1,
+            ..crate::task::LastReport::neutral()
+        });
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "held at the gate");
+        task.save().unwrap();
+
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
+        for step in ["deploy", crate::pipeline::BLOCKED] {
+            headless
+                .start_lane(
+                    &crate::mux::LaneSpec {
+                        name: &crate::mux::run_key(step, "ship"),
+                        key: &crate::mux::run_key(step, "ship"),
+                        label: step,
+                        kind: "pi",
+                        pane_id: "p1",
+                        args: &[],
+                        env: &std::collections::BTreeMap::new(),
+                        path_prefix: None,
+                    },
+                    &mut || {},
+                )
+                .unwrap();
+        }
+
+        resume(&repo, &pipelines, &resume_args("ship", None), None).unwrap();
+
+        assert_eq!(queued(&repo, "ship").stage(), crate::pipeline::BLOCKED);
+        assert_eq!(
+            headless.list_lanes().unwrap().len(),
+            2,
+            "answering a gate onto `blocked` must close nothing"
         );
     }
 
