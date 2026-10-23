@@ -7061,6 +7061,15 @@ pub(crate) fn base_problem_when_unasked(
     remote_cache: &mut RemoteCache,
     when_unasked: WhenOriginUnasked,
 ) -> Option<(String, String)> {
+    chain_base_problem(repo, task)
+        .or_else(|| base_existence_problem(repo, task, remote_cache, when_unasked))
+}
+
+/// The chain half of [`base_problem`]: this task's `base:` against that of
+/// every dependency still in the queue. It is its own function because the
+/// start-up check leaves it to the running pass, which holds the one task,
+/// while it keeps refusing over [`base_existence_problem`].
+fn chain_base_problem(repo: &Repo, task: &Task) -> Option<(String, String)> {
     let id = task.id();
     let base = task.front.base.as_deref()?;
 
@@ -7091,6 +7100,19 @@ pub(crate) fn base_problem_when_unasked(
             format!("A chain has one base. Set `base:` in {id} to `{dep_base}`."),
         ));
     }
+    None
+}
+
+/// The existence half of [`base_problem`]: whether a task still waiting to be
+/// cut has a base to start from, locally or on `origin`.
+pub(crate) fn base_existence_problem(
+    repo: &Repo,
+    task: &Task,
+    remote_cache: &mut RemoteCache,
+    when_unasked: WhenOriginUnasked,
+) -> Option<(String, String)> {
+    let id = task.id();
+    let base = task.front.base.as_deref()?;
 
     if task.front.worktree_path.is_some() || is_borrowed(repo, task) {
         // Cut already, or a checkout somebody else has out: its base is never
