@@ -7005,7 +7005,9 @@ fn task_file_moved_away(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
 /// disagrees — and the fix, so a caller can join the two its own way rather
 /// than this saying it differently for each: [`crate::commands::dispatch::check_task_bases`]'s
 /// multi-line refusal before a start, and [`Dispatcher::collect_candidates`]'s
-/// one-line hold on the problem list while a run is already going. `None`
+/// one-line hold on the problem list while a run is already going. The
+/// refusal before a start is built from [`base_existence_problem`] alone; a
+/// chain whose bases disagree is left to the hold. `None`
 /// covers a task with nothing wrong; a task with no `base:` at all is
 /// [`ensure_workspace`]'s own check, not this one's, and reads as `None`
 /// here too, off the leading `?` below — [`Dispatcher::collect_candidates`]
@@ -7019,10 +7021,10 @@ fn task_file_moved_away(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
 /// `git ls-remote` per base, not one per task.
 ///
 /// A chain has one base (`src/commands/queue.rs`'s `validate_batch` enforces
-/// it when a batch is sent), so a dependent's `base:` disagreeing with its
-/// dependency's — read from that task's own file, in the queue or the
-/// archive — means one of the two was edited by hand since. That check does
-/// not touch git. A cut task's `starts_from` is not compared with its
+/// it when a batch is sent), so a dependent's `base:` disagreeing with the
+/// `base:` of any dependency still in the queue and not yet `done` means one
+/// of the two was edited by hand since. A `done` dependency, archived or not,
+/// is not compared. That check does not touch git. A cut task's `starts_from` is not compared with its
 /// `base:`: a person may set `starts_from:` to somewhere other than where the
 /// work lands, so the two differing says nothing about an edit since the cut.
 /// A task is told to have been cut by its recorded worktree, never by
@@ -7035,10 +7037,11 @@ pub(crate) fn base_problem(
     task: &Task,
     remote_cache: &mut RemoteCache,
 ) -> Option<(String, String)> {
-    base_problem_when_unasked(repo, task, remote_cache, WhenOriginUnasked::Hold)
+    chain_base_problem(repo, task)
+        .or_else(|| base_existence_problem(repo, task, remote_cache, WhenOriginUnasked::Hold))
 }
 
-/// What [`base_problem_when_unasked`] makes of a base that exists nowhere
+/// What [`base_existence_problem`] makes of a base that exists nowhere
 /// local when `origin` could not be asked about it: offline, refused, or
 /// given up on at the ask's time bound.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7053,22 +7056,33 @@ pub(crate) enum WhenOriginUnasked {
     Allow,
 }
 
-/// [`base_problem`], with a say in what an `origin` that could not be asked
-/// means.
-pub(crate) fn base_problem_when_unasked(
-    repo: &Repo,
-    task: &Task,
-    remote_cache: &mut RemoteCache,
-    when_unasked: WhenOriginUnasked,
-) -> Option<(String, String)> {
+/// The chain half of [`base_problem`]: this task's `base:` against that of
+/// every dependency still in the queue. It is its own function because the
+/// start-up check leaves it to the running pass, which holds the one task,
+/// while it keeps refusing over [`base_existence_problem`].
+fn chain_base_problem(repo: &Repo, task: &Task) -> Option<(String, String)> {
     let id = task.id();
     let base = task.front.base.as_deref()?;
 
-    if let Some(dep) = task.front.depends_on.first()
-        && let Ok(dep_task) = repo.task(dep)
-        && let Some(dep_base) = dep_task.front.base.as_deref()
-        && dep_base != base
-    {
+    // Every dependency still in the queue is compared, not only the first
+    // listed: a mismatch on the second would otherwise go unreported. A
+    // dependency at `done` is skipped, wherever its file sits: it hands its
+    // dependents a branch (or a base) of its own, so its `base:` string is
+    // no longer part of the chain, and holding a task over it would block
+    // work nothing is wrong with.
+    for dep in &task.front.depends_on {
+        let Ok(dep_task) = repo.task(dep) else {
+            continue;
+        };
+        if dep_task.front.stage == crate::pipeline::DONE {
+            continue;
+        }
+        let Some(dep_base) = dep_task.front.base.as_deref() else {
+            continue;
+        };
+        if dep_base == base {
+            continue;
+        }
         return Some((
             format!(
                 "task `{id}` is based on `{base}` but depends on `{dep}`, which is based on \
@@ -7077,6 +7091,19 @@ pub(crate) fn base_problem_when_unasked(
             format!("A chain has one base. Set `base:` in {id} to `{dep_base}`."),
         ));
     }
+    None
+}
+
+/// The existence half of [`base_problem`]: whether a task still waiting to be
+/// cut has a base to start from, locally or on `origin`.
+pub(crate) fn base_existence_problem(
+    repo: &Repo,
+    task: &Task,
+    remote_cache: &mut RemoteCache,
+    when_unasked: WhenOriginUnasked,
+) -> Option<(String, String)> {
+    let id = task.id();
+    let base = task.front.base.as_deref()?;
 
     if task.front.worktree_path.is_some() || is_borrowed(repo, task) {
         // Cut already, or a checkout somebody else has out: its base is never
@@ -11206,11 +11233,11 @@ mod tests {
             "and does not send a person to edit a task that is right: {fix}"
         );
         assert!(
-            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_none()
+            base_existence_problem(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_none()
         );
         cache.insert("ghost".to_string(), Some(false));
         assert!(
-            base_problem_when_unasked(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_some(),
+            base_existence_problem(&repo, &task, &mut cache, WhenOriginUnasked::Allow).is_some(),
             "an origin that answered `no` still refuses"
         );
     }
@@ -25292,6 +25319,102 @@ mod tests {
             "a cut task whose `starts_from:` differs from `base:` is what a person set, not a \
              base moved since the cut"
         );
+    }
+
+    /// A done dependency is no longer part of the chain the dependent will
+    /// run on, so its `base:` is not compared with the dependent's. That
+    /// holds whether its file has been archived or still sits in the queue.
+    #[test]
+    fn a_task_is_not_held_over_the_base_of_a_dependency_that_is_done() {
+        let (repo, _root_guard) = fixture("base-problem-skips-done-dependency");
+        let mut cache = HashMap::new();
+
+        let archived = add_task_with(&repo, "archived-dep", "done", |f| {
+            f.base = Some("old".into());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("archived-dep.md")).unwrap();
+        add_task_with(&repo, "queued-dep", "done", |f| {
+            f.base = Some("old".into());
+        });
+
+        for dep in ["archived-dep", "queued-dep"] {
+            let task = reload(&add_task_with(&repo, &format!("on-{dep}"), "queued", |f| {
+                f.base = Some("work".into());
+                f.depends_on = vec![dep.into()];
+            }));
+            assert_eq!(
+                base_problem(&repo, &task, &mut cache),
+                None,
+                "a task depending only on done `{dep}` must not be held over its base"
+            );
+        }
+    }
+
+    /// Every dependency still in the queue must share the dependent's base,
+    /// not only the first one listed, and the problem names the one that
+    /// differs.
+    #[test]
+    fn a_task_is_held_over_the_base_of_any_live_dependency_that_differs() {
+        let (repo, _root_guard) = fixture("base-problem-checks-every-live-dependency");
+        let mut cache = HashMap::new();
+
+        add_task_with(&repo, "same", "implement", |f| {
+            f.base = Some("work".into());
+        });
+        add_task_with(&repo, "other", "implement", |f| {
+            f.base = Some("elsewhere".into());
+        });
+        let task = reload(&add_task_with(&repo, "joined", "queued", |f| {
+            f.base = Some("work".into());
+            f.depends_on = vec!["same".into(), "other".into()];
+        }));
+
+        assert_eq!(
+            base_problem(&repo, &task, &mut cache),
+            Some((
+                "task `joined` is based on `work` but depends on `other`, which is based on \
+                 `elsewhere`"
+                    .to_string(),
+                "A chain has one base. Set `base:` in joined to `elsewhere`.".to_string()
+            ))
+        );
+    }
+
+    /// A dependent whose `base:` disagrees with its dependency's is held on
+    /// the pass's problem list with the "A chain has one base" line, and a
+    /// task outside that chain still launches. That list is what reaches the
+    /// problem log, so this is the line a person starting the dispatcher
+    /// reads.
+    #[test]
+    fn a_pass_holds_a_chain_base_mismatch_and_launches_the_other_task() {
+        let (repo, _root_guard) = fixture("pass-holds-chain-mismatch");
+        add_task_with(&repo, "first", "queued", |f| {
+            f.base = Some("work".into());
+        });
+        let held = add_task_with(&repo, "held", "queued", |f| {
+            f.base = Some("elsewhere".into());
+            f.depends_on = vec!["first".into()];
+        });
+        let free = add_task_with(&repo, "free", "queued", |f| {
+            f.base = Some("work".into());
+        });
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(
+            report.problems.contains(
+                &"task `held` is based on `elsewhere` but depends on `first`, which is based on \
+                  `work` — A chain has one base. Set `base:` in held to `work`."
+                    .to_string()
+            ),
+            "{:?}",
+            report.problems
+        );
+        assert_eq!(reload(&held).stage(), "queued");
+        assert!(reload(&held).front.worktree_path.is_none());
+        assert_ne!(reload(&free).stage(), "queued", "{:?}", report.problems);
     }
 
     /// A queued task whose own `starts_from:` exists nowhere is not launched:

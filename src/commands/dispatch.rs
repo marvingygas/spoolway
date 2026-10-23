@@ -151,7 +151,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // cannot resolve one is broken whether or not a lane ever reaches it.
     // Refused here, ahead of the lock, for the same reason as the three
     // checks below: found and fixed by a person reading this line, not
-    // discovered mid-run and left for someone to stop by hand.
+    // discovered mid-run and left for someone to stop by hand. The base check
+    // refuses only over a base that exists nowhere; a chain whose bases
+    // disagree is held task by task by the first pass instead, which prints
+    // the same line.
     check_task_routes(pipelines, &live_tasks)?;
     check_task_bases(repo, &live_tasks)?;
 
@@ -1544,17 +1547,20 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     Ok(())
 }
 
-/// Refuse the whole start over any live task whose `base:` has drifted out
-/// from under it — a dependent that no longer agrees with its dependency's
-/// base — and over a task still waiting to be cut whose base has vanished
-/// from both places a worktree could start from.
+/// Refuse the whole start over a task still waiting to be cut whose base has
+/// vanished from both places a worktree could start from.
+///
+/// A dependent whose `base:` disagrees with its dependency's does not stop the
+/// start: it concerns that one task, so the first pass holds it with the
+/// "A chain has one base" line and every other task goes on. The same goes
+/// for a base `origin` could not be asked about.
 ///
 /// Beside [`check_task_routes`] for the same reason: found and fixed by a
 /// person reading this line before the lock is taken, not discovered mid-run
-/// by whichever lane happens to reach it first. [`crate::dispatch::base_problem`]
-/// is the one place the checks themselves live, shared with the running
-/// dispatcher's own per-pass hold, so the fact and the fix never drift
-/// between the two.
+/// by whichever lane happens to reach it first.
+/// [`crate::dispatch::base_existence_problem`] is where the check itself
+/// lives, shared with the running dispatcher's own per-pass hold, so the fact
+/// and the fix never drift between the two.
 fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
     // Shared across the whole batch, not rebuilt per task — see
     // [`crate::dispatch::base_problem`]'s own doc for why a chain sharing
@@ -1563,7 +1569,7 @@ fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
     for task in tasks {
         // A base `origin` could not be asked about does not stop the start:
         // the running pass holds that one task, and the rest go on.
-        if let Some((reason, fix)) = crate::dispatch::base_problem_when_unasked(
+        if let Some((reason, fix)) = crate::dispatch::base_existence_problem(
             repo,
             task,
             &mut remote_cache,
@@ -1999,34 +2005,33 @@ mod tests {
         assert!(check_task_routes(&pipelines, &[held]).is_ok());
     }
 
-    /// A dependent whose `base:` no longer agrees with its dependency's —
-    /// one of them edited by hand after the batch was sent, since
-    /// `validate_batch` already enforced this once — refuses the whole
-    /// start, naming both tasks and both bases, and the fix.
+    /// One task's chain-base mismatch does not stop the dispatcher from
+    /// starting: the running pass holds that one task with the "A chain has
+    /// one base" line, and every other task goes on.
     #[test]
-    fn check_task_bases_refuses_a_dependent_that_disagrees_with_its_dependency() {
-        let (repo, _root_guard) = fixture("bases-chain-disagrees");
+    fn a_chain_base_mismatch_does_not_stop_the_dispatcher_from_starting() {
+        let (repo, _root_guard) = fixture("bases-chain-mismatch-starts");
+        // Both bases exist, so only the chain disagrees, not a missing branch.
+        repo.git(&["branch", "main"]).unwrap();
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
+        crate::commands::testutil::add(&repo, "cart-receipts", &["cart-discounts"]);
         let mut discounts = repo.task("cart-discounts").unwrap();
         discounts.front.base = Some("main".to_string());
         discounts.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let err = check_task_bases(&repo, &tasks).unwrap_err();
-        let message = format!("{err:#}");
-        assert!(
-            message.contains(
-                "refusing to start: task `cart-discounts` is based on `main` but depends on \
-                 `cart-totals`, which is based on `plan/demo`"
-            ),
-            "{message}"
-        );
-        assert!(
-            message.contains("A chain has one base. Set `base:` in cart-discounts to `plan/demo`."),
-            "{message}"
-        );
-        assert!(message.contains("Nothing was dispatched."), "{message}");
+        let started = check_task_bases(&repo, &tasks);
+        assert!(started.is_ok(), "{:#}", started.unwrap_err());
+
+        let mut remote_cache = crate::dispatch::RemoteCache::new();
+        let held = crate::dispatch::base_problem(
+            &repo,
+            &repo.task("cart-discounts").unwrap(),
+            &mut remote_cache,
+        )
+        .expect("the running pass still holds the mismatched task");
+        assert!(held.1.contains("A chain has one base."), "{}", held.1);
     }
 
     /// A cut task with no dependency whose `starts_from:` differs from its

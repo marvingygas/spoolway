@@ -646,9 +646,8 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with its
-dependency's, or a task not yet cut whose base exists neither locally nor on `origin`, each
-refuses the whole start:
+It checks every live task's `base:` too. A task not yet cut whose base exists neither locally nor
+on `origin` refuses the whole start:
 
 ```
 refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
@@ -662,6 +661,14 @@ Each question to `origin` about a base is given up after 10 seconds. An `origin`
 asked, because it is offline, refuses the connection or does not answer in time, does not refuse the
 start. The running dispatcher holds that one task and asks again on the next pass. An `origin`
 that answers that it has no such branch does refuse the start.
+
+A dependent whose `base:` disagrees with the `base:` of any dependency that is not `done` does not
+refuse the start. The dispatcher starts and runs the other tasks. Every pass holds that one task
+and prints the reason, which is also written to the problem log:
+
+```
+! task `cart-discounts` is based on `main` but depends on `cart-totals`, which is based on `plan/demo` — A chain has one base. Set `base:` in cart-discounts to `plan/demo`.
+```
 
 See [Tasks and the queue](tasks.md#what-only-holds-across-a-set) for the other two shapes and for
 what happens to the same problems once a run is already going.
