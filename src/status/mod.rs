@@ -4673,6 +4673,10 @@ fn cutting_line(ran: Duration) -> String {
 /// The rows themselves, from state already read. Split out so the board can
 /// read the queue and the lane list once per frame and share both.
 ///
+/// Routes, walks the lanes and reads the slot holds for itself, for a caller
+/// with no footer to share them with; [`build`] reads those once and calls
+/// [`rows_on`] instead.
+///
 /// `grace` is [`Board`]'s per-task memory of when a row's stage last changed
 /// — `Some` only from the live `Board::frame`, so a task fresh off a handoff
 /// with no lane up yet reads `Running` rather than `Queued` for one ordinary
