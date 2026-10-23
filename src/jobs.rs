@@ -16,11 +16,11 @@
 //! exception: its store is shared by every clone, so its history is one file
 //! in the workspace, and the clone that holds its copy is named there.
 //!
-//! Reads dominate. The two stores are written only by bare `spoolway`'s jobs
-//! tab and routines tab, through [`write`] and [`delete_in`] — nothing else
-//! stamps a schedule. The routines tab's job items act on the routine's own
-//! job, and its delete routine deletes every job pointing into the routine
-//! it removes.
+//! Reads dominate. The two stores are written by bare `spoolway`'s jobs tab
+//! and routines tab, through [`write`] and [`delete_in`], and by `spoolway
+//! pipeline rename`, which moves a renamed pipeline's jobs onto the new
+//! name. The routines tab's job items act on the routine's own job, and its
+//! delete routine deletes every job pointing into the routine it removes.
 //! A missing store is an empty list, not an error, so a project with no job in
 //! it lists nothing and the dispatcher behaves exactly as it does today.
 //!

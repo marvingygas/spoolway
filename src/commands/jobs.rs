@@ -1,8 +1,9 @@
 //! `spoolway jobs`: `jobs list` for scripts, `jobs contract`
 //! for a producer that has never seen the two store files, and bare
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
-//! are the only thing that write a job — the jobs tab walks the routine, the
-//! cron expression and the pipeline, then saves through
+//! are where a person writes a job; the only other writer is `spoolway
+//! pipeline rename`, which moves jobs onto a renamed pipeline. The jobs tab
+//! walks the routine, the cron expression and the pipeline, then saves through
 //! [`crate::jobs::write`]; the routines tab's new job and edit job skip the
 //! routine and go through the same last two and the same save,
 //! [`NewJobWalk`]. Pause, resume and delete are [`set_enabled`] and
@@ -629,7 +630,7 @@ enum JobMode {
     /// list: see [`routine_panel`].
     PickRoutine { draft: Draft, nav: RoutineNav },
     /// The cron field and then the pipeline picker — the half of the walk
-    /// the routines tab's own `n` shares; see [`NewJobWalk`].
+    /// the routines tab's new job and edit job share; see [`NewJobWalk`].
     Walk(NewJobWalk),
     /// The options menu's delete, waiting on `enter` to delete the named
     /// job from the store `Scope` names or `esc` to keep it.

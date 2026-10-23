@@ -6950,8 +6950,8 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 /// - One job: edit job, then pause job for an enabled job or resume job for
 ///   a paused one, then delete job.
 /// - Two or more: delete job with each job's name, sorted by name as the
-///   details pane lists them. Neither fires, so deleting is the one thing
-///   worth offering; editing or resuming one would leave the clash.
+///   details pane lists them. They clash, so deleting is the one thing
+///   worth offering; editing or resuming one would keep the clash.
 /// - Stores that will not load: nothing but delete routine, since which
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
