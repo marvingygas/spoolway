@@ -660,7 +660,9 @@ thread_local! {
 
 /// Make [`headless_requested`] answer yes on the calling thread, for the
 /// rest of the test. A test runs on its own thread, so this reaches no other
-/// test.
+/// test. It does not reach a thread the test spawns, such as a board reading:
+/// that thread asks the environment, which a test build reads as unset, and so
+/// gets herdr.
 #[cfg(test)]
 pub(crate) fn force_headless_for_test() {
     FORCE_HEADLESS.with(|f| f.set(true));

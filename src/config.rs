@@ -512,10 +512,9 @@ pub struct DispatchConfig {
     pub lane_quiet: Duration,
 
     /// Retired: how a tmux run was laid out in the multiplexer. The tmux
-    /// backend is gone, so there is no
-    /// multiplexer left for this to lay out. Kept only so an existing config
-    /// still parses, whatever it holds; dropped unconditionally on the next
-    /// save.
+    /// backend is gone, so there is no multiplexer left for this to lay out.
+    /// Kept only so an existing config still parses, whatever it holds;
+    /// dropped unconditionally on the next save.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     tmux_mode: Option<toml::Value>,

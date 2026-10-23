@@ -1644,8 +1644,8 @@ fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
 }
 
 /// One row for each note a config load prints to stderr that no other row
-/// here already names: two hard-retired keys, two
-/// retired `dispatch` settings, and an agent profile's retired `env` table.
+/// here already names: two hard-retired keys, two retired `dispatch`
+/// settings, and an agent profile's retired `env` table.
 /// Bare `spoolway` prints none of those notes — see
 /// `overrides::QUIET_NOTES` — so these rows are where it says them, in the
 /// "before dispatching" popup. Read off the raw file, as
