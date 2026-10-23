@@ -685,7 +685,8 @@ impl ConfigWatch {
 /// their new value at once: `unattended.blocked_agent`, `blocked_model`,
 /// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
 /// the pipelines when they load, so only a reload or a restart brings them
-/// in; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
+/// in; `unattended.enabled` is written into the lock, so only a reload or a
+/// restart changes the run's mode; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
 /// environment the dispatcher started with, and only a restart changes it.
 fn reload_config(
     live: &mut Repo,

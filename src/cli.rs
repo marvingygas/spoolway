@@ -1061,7 +1061,9 @@ pub struct DispatchArgs {
     /// Overrides `unattended.enabled` for this run only, which is the shape
     /// the setting wants — the overnight run and the one you sit with are the
     /// same project on the same afternoon. `--attended` is the other direction,
-    /// for a project that leaves the config on.
+    /// for a project that leaves the config on. Both hold until the next
+    /// `spoolway dispatch reload`, which sets the mode back to what
+    /// `unattended.enabled` says.
     ///
     /// With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd`
     /// set this run has no ceiling of any kind: no block can park a task, so
@@ -1071,7 +1073,7 @@ pub struct DispatchArgs {
     pub unattended: bool,
 
     /// Park blocked tasks in front of a person for this run, whatever
-    /// `unattended.enabled` says.
+    /// `unattended.enabled` says, until the next `spoolway dispatch reload`.
     #[arg(long, overrides_with = "unattended")]
     pub attended: bool,
 

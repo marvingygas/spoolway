@@ -257,15 +257,16 @@ pub(crate) struct Served {
 ///
 /// All of it is built and checked before anything is touched. A refusal, or a
 /// snapshot that cannot be written, leaves `pipelines`, `live.config`, the lock
-/// and the snapshot as they were.
+/// and the snapshot as they were. See [`apply`] for the one way it cannot.
 pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served> {
     let ids = pending(live);
     let first = ids.first()?.clone();
+    let mut problems = Vec::new();
     let outcome = match try_reload(live) {
-        Ok((config, loaded)) => apply(live, pipelines, config, loaded),
+        Ok((config, loaded)) => apply(live, pipelines, config, loaded, &mut problems),
         Err(reasons) => Outcome::Refused(reasons),
     };
-    let problems = settle(live, &ids, &outcome);
+    problems.extend(settle(live, &ids, &outcome));
     Some(Served {
         answer: Answer {
             request: first,
@@ -276,22 +277,28 @@ pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served
 }
 
 /// Put a checked reload in force: the run's mode, then the snapshot, then the
-/// swap.
+/// swap, then the record of the last good config.
 ///
-/// The mode comes first because the snapshot records the lock's text, and a
-/// snapshot written under the old mode line would no longer match the lock, so
-/// every reader would fall back to the files. Both are done before the caller
-/// builds the pass, so no lane launches on a lock and snapshot that disagree.
-/// A snapshot that cannot be written puts the lock back, so a refusal still
-/// changes nothing.
+/// The mode comes first because the snapshot and the record both hold the
+/// lock's text, and either written under the old mode line would no longer
+/// match the lock, so every reader would fall back to the files. The snapshot
+/// is done before the caller builds the pass, so no lane launches on a lock and
+/// snapshot that disagree. A snapshot that cannot be written puts the lock
+/// back, so a refusal still changes nothing; if the lock cannot be put back
+/// either, the refusal says which mode the run is now in.
+///
+/// The record comes last and cannot refuse. It only serves a command that runs
+/// while `config.toml` is broken, and the reload is already in force by then,
+/// so a failure to write it is a problem for the log instead.
 fn apply(
     live: &mut Repo,
     pipelines: &mut Pipelines,
     config: crate::config::Config,
     loaded: Pipelines,
+    problems: &mut Vec<String>,
 ) -> Outcome {
-    let switch = match crate::lock::Lock::switch_mode(&live.lock_file(), config.unattended.enabled)
-    {
+    let enabled = config.unattended.enabled;
+    let switch = match crate::lock::Lock::switch_mode(&live.lock_file(), enabled) {
         Ok(switch) => switch,
         Err(err) => {
             return Outcome::Refused(vec![Reason {
@@ -300,22 +307,33 @@ fn apply(
             }]);
         }
     };
-    match crate::pipeline_snapshot::write(live, &loaded) {
-        Ok(()) => {
-            live.config = config;
-            *pipelines = loaded;
-            Outcome::Loaded
-        }
-        Err(err) => {
-            if let Some(switch) = switch {
-                switch.undo();
-            }
-            Outcome::Refused(vec![Reason {
-                what: format!("the new pipelines could not be recorded: {err:#}"),
+    if let Err(err) = crate::pipeline_snapshot::write(live, &loaded) {
+        let mut reasons = vec![Reason {
+            what: format!("the new pipelines could not be recorded: {err:#}"),
+            fix: "Make the project home writable, then reload again.".to_string(),
+        }];
+        if let Some(Err(undo)) = switch.map(crate::lock::ModeSwitch::undo) {
+            let mode = if enabled { "unattended" } else { "attended" };
+            reasons.push(Reason {
+                what: format!(
+                    "the lock could not be put back: {undo:#}. The run is now {mode}, and its \
+                     snapshot no longer matches the lock"
+                ),
                 fix: "Make the project home writable, then reload again.".to_string(),
-            }])
+            });
         }
+        return Outcome::Refused(reasons);
     }
+    live.config = config;
+    *pipelines = loaded;
+    if let Err(err) = crate::pipeline_snapshot::record_config(live, &live.config) {
+        problems.push(format!(
+            "the last good config could not be recorded under the run's new mode: {err:#}. A \
+             lane that reports while config.toml is broken fails until it is; reload again once \
+             the project home is writable"
+        ));
+    }
+    Outcome::Loaded
 }
 
 /// The config and pipelines as the files now stand, when nothing in the queue
@@ -327,6 +345,19 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
             fix: "Fix config.toml, then reload again.".to_string(),
         }]
     })?;
+    // The state a dispatch start refuses, refused here too: a reload that
+    // turned unattended on over a blank model would leave the next block on a
+    // staffed `blocked` step that no lane can launch on, with nobody there.
+    if config.unattended.enabled && config.unattended.blocked_model.trim().is_empty() {
+        return Err(vec![Reason {
+            what: "unattended.enabled is on and unattended.blocked_model is blank — an \
+                   unattended run has nobody to clear a block, so `blocked` has to be staffed"
+                .to_string(),
+            fix: "Set unattended.blocked_model, or turn unattended.enabled off, then reload \
+                  again."
+                .to_string(),
+        }]);
+    }
     let loaded = Pipelines::load(&live.root, &config).map_err(|err| {
         vec![Reason {
             what: format!("the pipelines do not load: {err:#}"),
@@ -656,7 +687,72 @@ mod tests {
         assert_eq!(served.answer.outcome, Outcome::Loaded);
         assert_eq!(crate::lock::Lock::unattended(&lock_file), Some(true));
         assert!(crate::pipeline_snapshot::LoadedPipelines::live(&repo).is_some());
+        assert!(
+            crate::pipeline_snapshot::recorded_config(&repo)
+                .unwrap()
+                .is_some()
+        );
         assert!(repo.unattended());
+    }
+
+    /// A snapshot that cannot be written refuses the reload and puts the lock
+    /// back: its text, its modified time and the mode it answers.
+    #[test]
+    fn a_snapshot_that_cannot_be_written_puts_the_lock_back() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-mode-rollback", "build");
+        let lock_file = repo.lock_file();
+        let text = std::fs::read_to_string(&lock_file).unwrap();
+        let stamp = std::fs::metadata(&lock_file).unwrap().modified().unwrap();
+        // A directory where the snapshot belongs, so the rename onto it fails.
+        std::fs::create_dir_all(crate::pipeline_snapshot::path(&repo)).unwrap();
+        let mut edited = repo.config.clone();
+        edited.unattended.enabled = true;
+        edited.unattended.blocked_model = "claude-sonnet-5-5".to_string();
+        edited.save(&repo.root).unwrap();
+        request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        let Outcome::Refused(reasons) = served.answer.outcome else {
+            panic!("reload was not refused");
+        };
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert_eq!(std::fs::read_to_string(&lock_file).unwrap(), text);
+        assert_eq!(
+            std::fs::metadata(&lock_file).unwrap().modified().unwrap(),
+            stamp
+        );
+        assert_eq!(crate::lock::Lock::unattended(&lock_file), Some(false));
+        assert!(!repo.config.unattended.enabled);
+    }
+
+    /// Unattended on over a blank `unattended.blocked_model` is the state a
+    /// start refuses, so a reload refuses it too and leaves the mode alone.
+    #[test]
+    fn a_reload_to_unattended_with_no_blocked_model_is_refused() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-blank-model", "build");
+        let mut edited = repo.config.clone();
+        edited.unattended.enabled = true;
+        edited.unattended.blocked_model = " ".to_string();
+        edited.save(&repo.root).unwrap();
+        request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        let Outcome::Refused(reasons) = served.answer.outcome else {
+            panic!("reload was not refused");
+        };
+        assert!(
+            reasons[0]
+                .what
+                .contains("unattended.blocked_model is blank")
+                && reasons[0].fix.contains("turn unattended.enabled off"),
+            "{reasons:?}"
+        );
+        assert_eq!(
+            crate::lock::Lock::unattended(&repo.lock_file()),
+            Some(false)
+        );
     }
 
     /// A queue file that does not parse cannot be checked, so it refuses the

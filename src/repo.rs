@@ -450,12 +450,15 @@ impl Repo {
             || message.starts_with("this checkout is in no workspace spoolway can read, and ")
     }
 
-    /// Whether work here stops for a person: what the run in progress was
-    /// started as, and the project's own setting when there is no run.
+    /// Whether work here stops for a person: the mode the run in progress is in
+    /// now — what it started as, until a reload switches it to
+    /// `unattended.enabled` — and the project's own setting when there is no
+    /// run.
     ///
     /// The run wins because `spoolway dispatch --unattended` is a decision about
     /// *tonight*, taken after config.toml was last written, and every lane it
-    /// starts has to take the same one — a lane that parked itself on `blocked`
+    /// starts has to take the same one. Only a reload, which reads config.toml
+    /// afresh, hands that decision back to the file — a lane that parked itself on `blocked`
     /// inside a run whose dispatcher never stops for anybody is a task nothing
     /// will ever come back to.
     pub fn unattended(&self) -> bool {

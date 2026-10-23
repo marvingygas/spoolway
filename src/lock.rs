@@ -74,14 +74,16 @@ pub(crate) struct ModeSwitch {
 impl ModeSwitch {
     /// Put the old text back, and the old modified time with it. The time is
     /// restored because it starts the run's spend window: a switch that was
-    /// undone must not have moved it. Best effort, since the caller is already
-    /// reporting the failure that made it undo.
-    pub(crate) fn undo(self) {
-        if crate::task::write_atomic(&self.path, self.previous).is_ok()
-            && let Ok(file) = std::fs::File::options().write(true).open(&self.path)
-        {
-            let _ = file.set_modified(self.modified);
-        }
+    /// undone must not have moved it. Fails when either cannot be restored, so
+    /// the caller can say the lock stayed switched.
+    pub(crate) fn undo(self) -> Result<()> {
+        crate::task::write_atomic(&self.path, self.previous)?;
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&self.path)
+            .with_context(|| format!("reopening {}", self.path.display()))?;
+        file.set_modified(self.modified)
+            .with_context(|| format!("restoring the modified time of {}", self.path.display()))
     }
 }
 
@@ -1066,7 +1068,7 @@ mod tests {
         assert_eq!(Lock::unattended(&path), Some(true));
         assert!(lock.still_held());
 
-        switch.undo();
+        switch.undo().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
         drop(dir);
