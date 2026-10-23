@@ -197,8 +197,8 @@ running group has ready work. With `dispatch.priority = "any"` only the three ru
 `dispatch.priority = "reserve"` ranks tasks the same way as `group`, and also keeps a slot. A
 group that has started holds one slot until its last task is archived. A task from a group that
 has never run starts only while the lanes running on a cap plus the slots held on it stay below
-the cap. A started group is never kept out by another group's hold, so turning `reserve` on
-with more started groups than slots cannot stall them.
+the cap. A started group is never kept out by another group's hold. A task with no `group:` is
+never kept out by a hold.
 
 A started group holds its slot while no lane is running on its current step. That covers a
 command step and the pause between two tasks of its chain. Once a lane for its current step is

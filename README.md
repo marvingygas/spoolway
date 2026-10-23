@@ -272,7 +272,7 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 backend = "herdr"            # where lanes run
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
-priority = "group"           # fill a free slot from a group already running first; "any" weighs every ready task; "reserve" fills as "group"
+priority = "group"           # fill a free slot from a group already running first; "any" weighs every ready task; "reserve" also holds a slot for each started group
 lane_child_ceiling = "1h"    # how long a lane's running child process excuses it from reminders
 visible_lanes = 3            # a task's most recent lanes kept open, or "all"
 hide_commands = false        # true runs command steps without a pane
