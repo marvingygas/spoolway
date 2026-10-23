@@ -952,16 +952,18 @@ pub(super) fn footer(
             // `slots`, one entry per pool — but two names that match the same
             // `[models."<row>"]` entry collapse to the one entry, since they
             // are the same pool being rationed and must draw only one line.
-            // `models::row_setting` names the row `resolve` takes `slots` from,
-            // so comparing that row's *key* is comparing pool identity as
-            // `resolve` sees it, even when a more literal row sets other
-            // values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+            // `dispatch::slot_key` names the row `resolve` takes `slots` from
+            // (through `models::row_setting`, the dispatcher's own key for
+            // the pool), so comparing that row's *key* is comparing pool
+            // identity as `resolve` sees it, even when a more literal row
+            // sets other values: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
             // `Ornith-1.5-35B-A3B` both key on `Ornith-1.5-35B-A3B` and
             // collapse to one line, which a raw glob match would miss since
-            // it never takes the suffix fallback.
-            let mut pools: Vec<(&str, u32)> = Vec::new();
-            let mut seen_rows: Vec<&str> = Vec::new();
-            for model in agent_model.get(name.as_str()).into_iter().flatten() {
+            // it never takes the suffix fallback. The line is labelled by
+            // `pool_label`, the rule a queued row's NEXT names the pool by.
+            let spellings: &[&str] = agent_model.get(name.as_str()).map_or(&[], Vec::as_slice);
+            let mut pools: Vec<(&str, u32, String)> = Vec::new();
+            for model in spellings {
                 let Some(slots) = crate::models::resolve(&repo.config.models, model)
                     .price
                     .filter(|p| p.slots > 0)
@@ -969,15 +971,12 @@ pub(super) fn footer(
                 else {
                     continue;
                 };
-                if let Some(row) =
-                    crate::models::row_setting(&repo.config.models, model, |row| row.slots != 0)
-                {
-                    if seen_rows.contains(&row) {
-                        continue;
-                    }
-                    seen_rows.push(row);
+                let key = crate::dispatch::slot_key(&repo.config.models, model);
+                if pools.iter().any(|(_, _, seen)| *seen == key) {
+                    continue;
                 }
-                pools.push((model, slots));
+                let label = pool_label(&repo.config.models, spellings, &key).unwrap_or(model);
+                pools.push((label, slots, key));
             }
             let live = used.get(name.as_str()).copied().unwrap_or(0);
             // Which profiles are worth a line. A cap is: one the profile
@@ -1013,12 +1012,9 @@ pub(super) fn footer(
             // own figure dropped outright once any pool existed.
             let pools = pools
                 .into_iter()
-                .map(|(model, slots)| {
+                .map(|(model, slots, key)| {
                     let live = model_used.get(model).copied().unwrap_or(0);
-                    let cap = crate::dispatch::Cap::Model(crate::dispatch::slot_key(
-                        &repo.config.models,
-                        model,
-                    ));
+                    let cap = crate::dispatch::Cap::Model(key);
                     (
                         model.to_string(),
                         format!("{live}/{slots}{}", held_suffix(held, &cap)),
@@ -1084,6 +1080,27 @@ pub(super) fn footer(
         lines.extend(jobs_ledger(jobs, name_w));
     }
     lines
+}
+
+/// The name a footer line gives the pool behind `[models]` row `key`: the
+/// first of a profile's `spellings` (its `agent_model` entry) whose model
+/// has its own `slots` and resolves to that row. Two spellings of one row,
+/// such as `qwen3` and `local/qwen3`, draw one figure, under whichever the
+/// profile's steps named first.
+///
+/// One rule for the footer and for a queued row's NEXT, so a row kept out by
+/// a hold on that pool names it as the footer does.
+pub(super) fn pool_label<'m>(
+    models: &BTreeMap<String, crate::usage::ModelPrice>,
+    spellings: &[&'m str],
+    key: &str,
+) -> Option<&'m str> {
+    spellings.iter().copied().find(|model| {
+        crate::models::resolve(models, model)
+            .price
+            .is_some_and(|p| p.slots > 0)
+            && crate::dispatch::slot_key(models, model) == key
+    })
 }
 
 /// ` · <n> held` for a cap `reserve` holds `n` slots on, and nothing for one

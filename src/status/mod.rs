@@ -3179,7 +3179,7 @@ struct Snapshot {
     model_used: BTreeMap<String, usize>,
     agent_model: BTreeMap<String, Vec<String>>,
     /// How many slots `reserve` holds on each cap, for the footer's
-    /// `· <n> held` — see [`reserved`].
+    /// `· <n> held` — see [`held_slots`].
     held: BTreeMap<crate::dispatch::Cap, usize>,
     active_jobs: Vec<crate::jobs::ActiveJob>,
     /// Every pipeline file edited since the running dispatcher loaded them —
@@ -3333,14 +3333,22 @@ fn build(
     // footer wants it for the spend, and it is the largest file the board
     // opens.
     let ledger = crate::usage::totals(repo);
-    let mut active_rows = build_rows(
+    // One routing, one lane walk and one reading of the slot holds for the
+    // whole frame: the rows' NEXT and the footer below both draw from them,
+    // so the two cannot disagree about who holds a slot.
+    let routing = route(repo, &tasks, pipelines);
+    let slots = slots_used(repo, &tasks, &routing.pipelines, &lanes);
+    let holds = held_slots(repo, &routing.pipelines, &tasks, &graph, &slots);
+    let mut active_rows = rows_on(
         repo,
         &tasks,
-        pipelines,
+        &routing,
         &graph,
         &lanes,
         &ledger,
         Some(&memory.arrived),
+        &slots,
+        &holds,
     )?;
     active_rows.extend(opening_rows(repo, &tasks));
     // How many steps are still working with no dispatcher up to move them on
@@ -3379,7 +3387,8 @@ fn build(
         agents,
         models,
         agent_model,
-    } = slots_used(repo, &tasks, pipelines, &lanes);
+        ..
+    } = slots;
     let used = agents
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -3393,10 +3402,9 @@ fn build(
         .map(|(k, v)| (k.to_string(), v.into_iter().map(str::to_string).collect()))
         .collect();
 
-    // The footer's count of each hold, read the way the queued rows' NEXT
-    // reads them in `build_rows`, so the two cannot disagree.
-    let held = reserved(repo, pipelines, &tasks, &graph, &lanes)
-        .held
+    // The footer's count of each hold, off the very holds the rows' NEXT
+    // was read from above.
+    let held = holds
         .into_iter()
         .map(|(cap, groups)| (cap, groups.len()))
         .collect();
@@ -4117,13 +4125,15 @@ fn git_first_name(repo: &Repo) -> Option<String> {
 ///   same rule through [`crate::dispatch::lane_counts`], and so does this walk
 ///   for the parked check above.
 ///
-/// `agent_model`, on its own, is wider than the other two: after the live
-/// walk above it is widened again over every task's whole pipeline, so a
-/// profile whose model carries its own `slots` gets a footer line as soon as
-/// some task's pipeline names it, not only once a lane is actually open on
-/// it. `agents` and `models` stay live-only — the footer's `used` and
-/// `model_used` must keep agreeing with the dispatcher about what is
-/// actually running.
+/// `agent_model`, on its own, is wider than the counts: after the live walk
+/// above it is widened again over every task's whole pipeline, so a profile
+/// whose model carries its own `slots` gets a footer line as soon as some
+/// task's pipeline names it, not only once a lane is actually open on it.
+/// `agents`, `models` and `caps` stay live-only — the footer's `used` and
+/// `model_used`, and the board's reading of a slot hold, must keep agreeing
+/// with the dispatcher about what is actually running. `lane_steps` keeps
+/// every lane of ours the walk parsed, before the last two tests, because
+/// `slot_holds` applies those itself.
 ///
 /// A profile's entry holds every distinct model name its steps — live or
 /// queued — name, in the order first seen, rather than only the first: a
@@ -4146,6 +4156,8 @@ fn slots_used<'a>(
         let Some((step_id, task)) = crate::mux::parse_lane(&lane.name, &step_ids, tasks) else {
             continue;
         };
+        out.lane_steps
+            .push((step_id.to_string(), task.id().to_string()));
         let Ok(pipeline) = pipelines.for_task(task) else {
             continue;
         };
@@ -4155,6 +4167,9 @@ fn slots_used<'a>(
         let Some(step) = pipeline.step(step_id) else {
             continue;
         };
+        for cap in crate::dispatch::running_caps(&repo.config, step) {
+            *out.caps.entry(cap).or_default() += 1;
+        }
         if let Some(agent) = step.agent.as_deref() {
             *out.agents.entry(agent).or_default() += 1;
             // A model's own cap is counted separately from its profile's: a
@@ -4203,67 +4218,32 @@ fn slots_used<'a>(
     out
 }
 
-/// What `dispatch.priority = "reserve"` holds this frame: the groups holding
-/// a slot on each cap, and the lanes running on each cap. Both empty under
-/// any other priority.
-#[derive(Debug, Default)]
-struct Reserved {
-    /// [`crate::dispatch::slot_holds`]'s own answer, read off this frame's
-    /// queue and lanes.
-    held: BTreeMap<crate::dispatch::Cap, Vec<String>>,
-    /// Live lanes per cap, counted on every cap
-    /// [`crate::dispatch::running_caps`] names, as the pass counts them.
-    running: BTreeMap<crate::dispatch::Cap, usize>,
-}
-
-/// Which slots are held for a started group, and which lanes run on each
-/// cap, from the very functions the dispatcher's pass calls. A board that
-/// worked the holds out for itself could name a group the dispatcher is not
-/// holding a slot for.
+/// Which groups hold a slot on which cap under `dispatch.priority =
+/// "reserve"`, from [`crate::dispatch::slot_holds`], the very function the
+/// dispatcher's pass calls. A board that worked the holds out for itself could
+/// name a group the dispatcher is not holding a slot for. Empty under any
+/// other priority.
 ///
-/// Routed on the running dispatcher's copy of the pipelines when there is
-/// one, as [`build_rows`] routes NEXT, since that copy is what the pass holds
-/// slots by. The lanes are this project's own, as [`slots_used`] counts them.
-fn reserved(
+/// `pipelines` is the frame's routed copy, see [`route`], since that is what
+/// the pass holds slots by. `used` is this frame's [`slots_used`] walk over
+/// the same pipelines, whose `lane_steps` are the lanes the pass would hand
+/// `slot_holds`.
+fn held_slots(
     repo: &Repo,
     pipelines: &Pipelines,
     tasks: &[crate::task::Task],
     graph: &Graph,
-    lanes: &[crate::mux::Lane],
-) -> Reserved {
+    used: &SlotsUsed,
+) -> BTreeMap<crate::dispatch::Cap, Vec<String>> {
     if repo.config.dispatch.priority != crate::config::Priority::Reserve {
-        return Reserved::default();
+        return BTreeMap::new();
     }
-    let routed = crate::pipeline_snapshot::for_tasks(repo, tasks).map(|r| r.pipelines);
-    let pipelines = routed.as_ref().unwrap_or(pipelines);
-    let step_ids = pipelines.all_step_ids();
-    let mine = crate::dispatch::our_checkouts(repo, tasks);
-    let mut lane_steps: Vec<(&str, &str)> = Vec::new();
-    let mut running: BTreeMap<crate::dispatch::Cap, usize> = BTreeMap::new();
-    for lane in lanes {
-        if !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
-            continue;
-        }
-        let Some((step_id, task)) = crate::mux::parse_lane(&lane.name, &step_ids, tasks) else {
-            continue;
-        };
-        // Every lane of ours goes to `slot_holds`, which asks `lane_counts`
-        // itself; only the running count below needs the test here.
-        lane_steps.push((step_id, task.id()));
-        let Ok(pipeline) = pipelines.for_task(task) else {
-            continue;
-        };
-        if !crate::dispatch::lane_counts(task, pipeline, step_id, repo.unattended()) {
-            continue;
-        }
-        let Some(step) = pipeline.step(step_id) else {
-            continue;
-        };
-        for cap in crate::dispatch::running_caps(&repo.config, step) {
-            *running.entry(cap).or_default() += 1;
-        }
-    }
-    let held = crate::dispatch::slot_holds(
+    let lane_steps: Vec<(&str, &str)> = used
+        .lane_steps
+        .iter()
+        .map(|(step, task)| (step.as_str(), task.as_str()))
+        .collect();
+    crate::dispatch::slot_holds(
         repo,
         pipelines,
         repo.unattended(),
@@ -4271,8 +4251,7 @@ fn reserved(
         tasks,
         &[],
         &lane_steps,
-    );
-    Reserved { held, running }
+    )
 }
 
 /// The NEXT-column line for a queued task a slot hold keeps out:
@@ -4281,17 +4260,20 @@ fn reserved(
 /// waits for a worker slot whatever is held.
 ///
 /// Asks [`crate::dispatch::held_out`], the dispatcher's own check, of the step
-/// the task would start on. A model's cap is named by the model the step
-/// names, and a profile's by the profile, as the footer names them.
+/// the task would start on, against `held` and the running lanes `used`
+/// counted. A profile's cap is named by the profile, and a model's by
+/// [`view::pool_label`] over the same spellings the footer labels that pool
+/// with, so the row and the footer name one pool alike.
 fn held_note(
     repo: &Repo,
     pipeline: &crate::pipeline::Pipeline,
     graph: &Graph,
     task: &crate::task::Task,
     dependents: usize,
-    reserved: &Reserved,
+    used: &SlotsUsed,
+    held: &BTreeMap<crate::dispatch::Cap, Vec<String>>,
 ) -> Option<String> {
-    if reserved.held.is_empty()
+    if held.is_empty()
         || !crate::dispatch::group_gate_holds(repo.config.dispatch.priority, graph, task)
     {
         return None;
@@ -4302,19 +4284,29 @@ fn held_note(
     let step = pipeline
         .step(&start)
         .filter(|step| step.kind() == crate::pipeline::StepKind::Agent)?;
-    let running = |cap: &crate::dispatch::Cap| reserved.running.get(cap).copied().unwrap_or(0);
-    let held = crate::dispatch::held_out(&repo.config, step, running, &reserved.held)?;
-    let cap = match &held.cap {
+    let running = |cap: &crate::dispatch::Cap| used.caps.get(cap).copied().unwrap_or(0);
+    let kept_out = crate::dispatch::held_out(&repo.config, step, running, held)?;
+    let cap = match &kept_out.cap {
         crate::dispatch::Cap::Profile(name) => name.as_str(),
-        crate::dispatch::Cap::Model(_) => step.model.as_deref().unwrap_or_default(),
+        // The step's own spelling is in `agent_model` whenever the pool has
+        // a footer line, since that map is widened over every task's
+        // pipeline; it stands in only if the map somehow lacks it.
+        crate::dispatch::Cap::Model(key) => step
+            .agent
+            .as_deref()
+            .and_then(|agent| used.agent_model.get(agent))
+            .and_then(|spellings| view::pool_label(&repo.config.models, spellings, key))
+            .or(step.model.as_deref())
+            .unwrap_or_default(),
     };
-    Some(format!("{cap} slot held for group {}", held.holders[0]))
+    Some(format!("{cap} slot held for group {}", kept_out.holders[0]))
 }
 
-/// What the run's live lanes are consuming, counted two ways.
+/// What the run's live lanes are consuming, counted per profile, per model,
+/// and per cap as the dispatcher keys its own counts.
 ///
 /// A lane maps to a profile, and to a model, through the step that started it.
-/// Both counts come off the same walk because they must agree about which
+/// Every count comes off the same walk because they must agree about which
 /// lanes are ours and which are parked — counting them apart is how the board
 /// ends up saying a profile is full while the dispatcher starts another lane.
 #[derive(Debug, Default)]
@@ -4328,6 +4320,14 @@ struct SlotsUsed<'a> {
     /// further model named by some task's own pipeline for that profile's
     /// step. See [`slots_used`].
     agent_model: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Live lanes per cap, on every cap [`crate::dispatch::running_caps`]
+    /// names, the way the pass counts them before it starts anything. What
+    /// [`held_note`] asks `held_out` with.
+    caps: BTreeMap<crate::dispatch::Cap, usize>,
+    /// The `(step, task)` of every lane of ours, counted or not, as the pass
+    /// hands its own lanes to [`crate::dispatch::slot_holds`], which asks
+    /// `lane_counts` of each itself.
+    lane_steps: Vec<(String, String)>,
 }
 
 /// Whether the busy board's spool turns this frame.
@@ -4691,25 +4691,64 @@ fn build_rows(
     ledger: &crate::usage::LedgerTotals,
     grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
-    // Asked once a frame, not once a row: every queued row a hold might keep
-    // out reads the same holds. Routes for itself, the same way as below.
-    let reserved = reserved(repo, pipelines, tasks, graph, lanes);
-    // Every row's NEXT names the step a resume takes, and while a dispatcher
-    // runs `spoolway resume` takes it on the dispatcher's copy of the
-    // pipelines. So both readers of these rows — the board and `queue list`
-    // — route here, on each reading, rather than on whatever files their
-    // caller loaded: a dispatcher can start or stop while a board is open.
-    // A task naming a pipeline that dispatcher never loaded is drawn as an
-    // unroutable row in the loop below, so one such task does not stop the
-    // board redrawing every other.
-    let (routed, refused) = match crate::pipeline_snapshot::for_tasks(repo, tasks) {
-        Some(snapshot) => (
-            std::borrow::Cow::Owned(snapshot.pipelines),
-            snapshot.refused,
-        ),
-        None => (std::borrow::Cow::Borrowed(pipelines), BTreeMap::new()),
-    };
-    let pipelines = &*routed;
+    let routing = route(repo, tasks, pipelines);
+    let used = slots_used(repo, tasks, &routing.pipelines, lanes);
+    let held = held_slots(repo, &routing.pipelines, tasks, graph, &used);
+    rows_on(
+        repo, tasks, &routing, graph, lanes, ledger, grace, &used, &held,
+    )
+}
+
+/// The pipelines a frame reads its rows and its slots by, and every task
+/// those pipelines cannot route.
+struct Routing<'p> {
+    pipelines: std::borrow::Cow<'p, Pipelines>,
+    /// Each task the running dispatcher's copy cannot route, by id, with
+    /// the reason in a sentence a row can print.
+    refused: BTreeMap<String, String>,
+}
+
+/// Every row's NEXT names the step a resume takes, and while a dispatcher
+/// runs `spoolway resume` takes it on the dispatcher's copy of the
+/// pipelines. So both readers of these rows — the board and `queue list` —
+/// route here, on each reading, rather than on whatever files their caller
+/// loaded: a dispatcher can start or stop while a board is open. A task
+/// naming a pipeline that dispatcher never loaded is drawn as an unroutable
+/// row, so one such task does not stop the board redrawing every other.
+///
+/// Read once a frame: the rows, the slots the footer counts and the slots
+/// `reserve` holds all route on the one answer, so the footer and NEXT
+/// cannot read a dispatcher that started or stopped between two reads.
+fn route<'p>(repo: &Repo, tasks: &[crate::task::Task], pipelines: &'p Pipelines) -> Routing<'p> {
+    match crate::pipeline_snapshot::for_tasks(repo, tasks) {
+        Some(snapshot) => Routing {
+            pipelines: std::borrow::Cow::Owned(snapshot.pipelines),
+            refused: snapshot.refused,
+        },
+        None => Routing {
+            pipelines: std::borrow::Cow::Borrowed(pipelines),
+            refused: BTreeMap::new(),
+        },
+    }
+}
+
+/// [`build_rows`] over a frame's [`route`], its [`slots_used`] walk and its
+/// [`held_slots`], all three read once by the caller, so [`build`] can hand
+/// the same reading to the footer.
+#[allow(clippy::too_many_arguments)]
+fn rows_on(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    routing: &Routing,
+    graph: &Graph,
+    lanes: &[crate::mux::Lane],
+    ledger: &crate::usage::LedgerTotals,
+    grace: Option<&BTreeMap<String, Instant>>,
+    used: &SlotsUsed,
+    held: &BTreeMap<crate::dispatch::Cap, Vec<String>>,
+) -> Result<Vec<Row>> {
+    let pipelines = &*routing.pipelines;
+    let refused = &routing.refused;
     // The dispatcher's own record of what it has started outside a lane. Built
     // once: it is a handle on a directory, and every task below asks it the
     // same question.
@@ -4910,7 +4949,7 @@ fn build_rows(
                     // opens against is not the dependency's branch.
                     (None, None, None, None) => (
                         State::Queued,
-                        held_note(repo, pipeline, graph, task, dependents, &reserved)
+                        held_note(repo, pipeline, graph, task, dependents, used, held)
                             .or_else(|| closed_dependency_note(repo, task))
                             .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
                         false,
@@ -7290,18 +7329,18 @@ mod tests {
         );
     }
 
-    /// The footer's held count comes off the same reading: one slot on
-    /// `pi` under `reserve`, and none under `group`.
+    /// `held_slots` names the group holding each cap under `reserve`, and
+    /// nothing under `group`.
     #[test]
-    fn the_footer_counts_the_holds_the_rows_name() {
-        let (mut repo, _root_guard) = cart_on_a_command_step("held-footer-count", 1);
+    fn held_slots_reads_holds_only_under_reserve() {
+        let (mut repo, _root_guard) = cart_on_a_command_step("held-slots-priority", 1);
         let pipelines = reserve_pipelines();
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
+        let used = slots_used(&repo, &tasks, &pipelines, &[]);
 
-        let held = reserved(&repo, &pipelines, &tasks, &graph, &[]).held;
         assert_eq!(
-            held,
+            held_slots(&repo, &pipelines, &tasks, &graph, &used),
             BTreeMap::from([(
                 crate::dispatch::Cap::Profile("pi".into()),
                 vec!["cart".to_string()]
@@ -7309,11 +7348,92 @@ mod tests {
         );
 
         repo.config.dispatch.priority = crate::config::Priority::Group;
+        assert!(held_slots(&repo, &pipelines, &tasks, &graph, &used).is_empty());
+    }
+
+    /// A reading over `pipelines` painted as the board draws it, stripped.
+    fn painted(repo: &Repo, pipelines: &Pipelines) -> (Snapshot, String) {
+        let snapshot = build(repo, pipelines, None, &mut Memory::new()).unwrap();
+        let frame = strip(&paint_at(
+            repo,
+            pipelines,
+            false,
+            &snapshot,
+            None,
+            &VecDeque::new(),
+            None,
+            Some(60),
+        ));
+        (snapshot, frame)
+    }
+
+    /// The whole road from a reading to the painted footer: `build` fills
+    /// `Snapshot::held` and `paint_at` hands it to `footer`. Fails if either
+    /// passes an empty map instead, which no `footer` test alone can see.
+    #[test]
+    fn a_reading_under_reserve_paints_the_held_slot_in_the_footer() {
+        let (repo, _root_guard) = cart_on_a_command_step("held-painted", 1);
+
+        let (snapshot, frame) = painted(&repo, &reserve_pipelines());
+
+        let zed = snapshot.rows.iter().find(|r| r.id == "zed").unwrap();
+        assert_eq!(zed.next, "pi slot held for group cart");
         assert!(
-            reserved(&repo, &pipelines, &tasks, &graph, &[])
-                .held
-                .is_empty()
+            frame
+                .lines()
+                .any(|l| l.trim_end().ends_with("slots 0/1 · 1 held")),
+            "{frame}"
         );
+    }
+
+    /// Two spellings of one `[models]` row draw one footer figure, under the
+    /// spelling the profile's steps named first. A row a hold on that pool
+    /// keeps out names it by the same spelling, not its own step's. Fails
+    /// with the step's own `local/qwen3` in NEXT while the footer reads
+    /// `qwen3`.
+    #[test]
+    fn a_held_pool_is_named_alike_in_next_and_the_footer() {
+        let (mut repo, _root_guard) = cart_on_a_command_step("held-pool-spelling", 2);
+        repo.config.models.insert(
+            "qwen3".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse(
+                "default",
+                &AGENT_COMMAND_AGENT.replace("model: test-model", "model: qwen3"),
+            )
+            .unwrap(),
+        );
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: local/qwen3\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        let mut zed = repo.task("zed").unwrap();
+        zed.front.pipeline = Some("solo".into());
+        zed.save().unwrap();
+
+        let (snapshot, frame) = painted(&repo, &pipelines);
+
+        let zed = snapshot.rows.iter().find(|r| r.id == "zed").unwrap();
+        assert_eq!(zed.next, "qwen3 slot held for group cart");
+        assert!(
+            frame
+                .lines()
+                .any(|l| l.trim_end().ends_with("qwen3   0/1 · 1 held")),
+            "{frame}"
+        );
+        assert!(!frame.contains("local/qwen3"), "{frame}");
     }
 
     /// `Row::arrivals` reads [`crate::task::Frontmatter::arrivals`]'s own
