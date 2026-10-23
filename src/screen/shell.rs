@@ -645,38 +645,32 @@ impl DispatchTab {
         let pid = child.pid();
         if let Some(ended) = child.ended(&repo.lock_file()) {
             self.child = None;
-            // The request this child was asked can no longer be answered,
-            // so it is settled here, whichever way the child went.
-            let asked = self.asked.take_if(|asked| asked.holder == pid);
-            let answer = asked
-                .as_ref()
-                .map(|asked| crate::reload::answer(repo, &asked.id));
             match ended {
                 // The child is the dispatcher `u` asked whenever it holds
                 // the lock, since no second dispatcher starts while it does.
                 // Its exit popup then covers whatever `u` had up, so it says
-                // the reload went unanswered too, unless the answer landed
+                // the reload went unanswered too, unless an answer landed
                 // before it went.
                 Some(ended) => {
-                    let unanswered = answer.is_some_and(|answer| !matches!(answer, Ok(Some(_))));
+                    let unanswered =
+                        self.asked
+                            .take_if(|asked| asked.holder == pid)
+                            .is_some_and(|asked| {
+                                matches!(crate::reload::answer(repo, &asked.id), Ok(None))
+                            });
                     self.popup = Some(Popup::Ended(match unanswered {
                         true => ended.panel_with(UNANSWERED),
                         false => ended.panel(),
                     }));
                 }
                 // Stopped by `enter` or the stop popup. Before its first
-                // pass, nothing is starting any more; while a reload waited
-                // on it, what came of that is said instead.
+                // pass, nothing is starting any more. A reload it was asked
+                // and never answered is said so now, not a tick later.
                 None => {
                     if matches!(self.popup, Some(Popup::Starting { .. })) {
                         self.popup = None;
                     }
-                    self.popup = match answer {
-                        Some(Ok(Some(answer))) => Some(Came::Answer(answer).popup()),
-                        Some(Ok(None)) => Some(Came::Unanswered.popup()),
-                        Some(Err(err)) => Some(Came::Unreadable(err).popup()),
-                        None => self.popup.take(),
-                    };
+                    self.settle(repo);
                 }
             }
             return;
@@ -700,8 +694,9 @@ impl DispatchTab {
     /// child lets go of the lock unanswered. `Lock`'s drop deletes the lock
     /// file before the process exits, so the child may still be running,
     /// about to print why it stopped; the reap that sees it exit says both
-    /// in one popup. It is the last thing the child does, so `Updating` is
-    /// up only that moment longer.
+    /// in one popup, or the unanswered notice alone for a child that was
+    /// asked to stop. Exiting is the last thing the child does, so
+    /// `Updating` is up only that moment longer.
     fn settle(&mut self, repo: &Repo) {
         let Some(asked) = &self.asked else {
             return;
