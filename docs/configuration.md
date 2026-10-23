@@ -13,7 +13,7 @@ uses is written in the pipeline file. See [Pipelines](pipelines.md).
 
 ```
 spoolway config contract       # every setting, its values and its default
-spoolway config edit           # open the file in $VISUAL, $EDITOR or vi, checked on save
+spoolway config edit           # open the file in $VISUAL, $EDITOR or vim, checked on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`
 spoolway config path           # every place the setup lives, and every workspace on the machine

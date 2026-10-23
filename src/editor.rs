@@ -2,9 +2,9 @@
 //!
 //! Every open in the TUI — the board's, the pending screen's and the
 //! routines pane's — goes through [`open`], so the three can never resolve
-//! different editors. `spoolway config edit` does not: it waits for
-//! the editor and validates afterwards, so it keeps its own `$VISUAL`,
-//! `$EDITOR`, `vi` order in `commands::config`.
+//! different editors. `spoolway config edit` and `config override` wait for
+//! the editor and validate afterwards, so they build their line with
+//! [`plan`] and run it themselves, but they pick the editor here too.
 //!
 //! spoolway keeps no editor setting of its own. The editor is the one
 //! `$VISUAL` names, then `$EDITOR`, then `vim`, so the board and `git commit`

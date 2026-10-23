@@ -472,41 +472,28 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
     }
 }
 
-/// Resolve the user's editor the way every `spoolway *edit`-shaped command
-/// does: `$VISUAL`, then `$EDITOR`, then `vi`.
-pub(super) fn editor_from_env() -> String {
-    std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string())
+/// Open `path` in the editor the board would pick and wait for it, refusing on
+/// a nonzero exit. Shared by [`config_edit`] and `commands::config_override`.
+///
+/// The choice reads only the environment and `PATH`, never the config, so a
+/// `config.toml` that no longer parses can still be opened to repair it. The
+/// path is quoted through the platform's own escaper, which escapes an
+/// embedded `'`: a plain `format!("… '{}'")` would break on a checkout path
+/// that contains one, and the editor would exit on a syntax error (finding 71).
+pub(super) fn open_in_editor(path: &Path) -> Result<()> {
+    run_editor_line(&crate::editor::plan(&crate::editor::live_inputs(), path)?.line)
 }
 
-/// Open `path` in the resolved editor and wait for it, refusing on a
-/// nonzero exit. Shared by [`config_edit`] and `commands::config_override`,
-/// so the quoting fix in [`editor_command`] (finding 71) only has to be
-/// right once.
-pub(super) fn open_in_editor(path: &Path) -> Result<()> {
-    let editor = editor_from_env();
-    let status = crate::platform::shell_command(&editor_command(&editor, path))
+/// Run `line` in a shell and wait, so the file is checked only once the
+/// editor has exited, even for a Windows `.exe` that draws its own window.
+fn run_editor_line(line: &str) -> Result<()> {
+    let status = crate::platform::shell_command(line)
         .status()
-        .with_context(|| format!("could not start `{editor}`"))?;
+        .with_context(|| format!("could not start `{line}`"))?;
     if !status.success() {
-        bail!("`{editor}` exited with {status}");
+        bail!("`{line}` exited with {status}");
     }
     Ok(())
-}
-
-/// The shell line that opens `path` in `editor`.
-///
-/// `$VISUAL`/`$EDITOR` is interpolated unquoted on purpose, so `code --wait`
-/// still splits into a program and a flag. The path is quoted through the
-/// platform's own escaper, which escapes an embedded `'` — a plain
-/// `format!("… '{}'")` would break the quoting on a checkout path that
-/// contains one, and the editor would exit on a syntax error (finding 71).
-fn editor_command(editor: &str, path: &Path) -> String {
-    format!(
-        "{editor} {}",
-        crate::platform::quote(&path.display().to_string())
-    )
 }
 
 #[cfg(test)]
@@ -533,16 +520,74 @@ mod tests {
         assert!(text.contains("spoolway config override"));
     }
 
+    fn editor_inputs(
+        visual: Option<&str>,
+        path: &std::ffi::OsStr,
+    ) -> crate::editor::Inputs<'static> {
+        crate::editor::Inputs {
+            visual: visual.map(String::from),
+            editor: None,
+            path: path.to_os_string(),
+            wsl: false,
+            home: None,
+            wslpath: &|_| anyhow::bail!("wslpath must not run here"),
+        }
+    }
+
     #[test]
-    fn editor_command_quotes_a_path_with_a_single_quote() {
-        let line = editor_command("vi", Path::new("/home/u/it's/proj/.spoolway/config.toml"));
+    fn the_editor_line_quotes_a_path_with_a_single_quote() {
+        let bin = std::env::var_os("PATH").unwrap_or_default();
+        let inputs = editor_inputs(Some("sh"), &bin);
+        let line = crate::editor::plan(
+            &inputs,
+            Path::new("/home/u/it's/proj/.spoolway/config.toml"),
+        )
+        .unwrap()
+        .line;
         // The `'` inside the path is escaped, not left to close the quoting.
         assert!(
             line.contains(r"it'\''s") || line.contains("it''s"),
             "unescaped quote in {line:?}"
         );
         // The editor is still its own unquoted token.
-        assert!(line.starts_with("vi "));
+        assert!(line.starts_with("sh "));
+    }
+
+    /// `config edit` repairs a broken `config.toml`, so choosing the editor
+    /// must not read it, and the check after the editor exits must still run
+    /// and report the file as unparsable.
+    #[test]
+    fn config_edit_opens_an_unparsable_config_and_then_reports_it() {
+        let (_repo, checkout, _dir) = worktree_fixture("edit-broken");
+        let path = Config::path_in(&checkout);
+        std::fs::write(&path, "this is = = not toml\n").unwrap();
+        // `true` exits at once, so the broken file is still broken afterwards.
+        let _pin = crate::editor::pin_editor("true");
+        let err = format!("{:#}", config_edit(&checkout).unwrap_err());
+        assert!(err.contains("no longer parses"), "{err}");
+    }
+
+    /// A program that is not on `PATH` is refused with the board's remedy
+    /// before anything starts, and the file is left as it was.
+    #[test]
+    fn a_missing_editor_is_refused_with_the_remedy_and_leaves_the_file() {
+        let (_repo, checkout, _dir) = worktree_fixture("edit-missing");
+        let path = Config::path_in(&checkout);
+        let before = std::fs::read_to_string(&path).unwrap();
+        let _pin = crate::editor::pin_editor("no-such-editor-for-spoolway");
+        let err = format!("{:#}", config_edit(&checkout).unwrap_err());
+        assert!(err.contains("$VISUAL") && err.contains("$EDITOR"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// The CLI waits for the editor: the line must have finished running when
+    /// `run_editor_line` returns.
+    #[test]
+    fn the_editor_line_is_waited_on() {
+        let (_repo, checkout, _dir) = worktree_fixture("edit-wait");
+        let marker = checkout.join("waited");
+        run_editor_line(&format!("sleep 0.3; touch '{}'", marker.display())).unwrap();
+        assert!(marker.exists());
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
