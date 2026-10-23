@@ -207,7 +207,7 @@ first agent step the group's `on_pass` path reaches. That is the model's `slots`
 model has one. Otherwise it is the profile's `concurrency`, which a step with `slot: false` does
 not count against. A group whose task is `paused`, `hook_failed` or `blocked` with no unblocker
 lane holds nothing until it is resumed. A task kept out by a hold logs a line naming the cap and
-the group that holds it.
+the group that holds it. The board shows the same hold in its [footer](#footer) and in the NEXT column.
 
 A task that reaches a command step whose id some pipeline marks `serial: true` waits there
 unstarted while another task's run of that step id, on any pipeline, is going. The task's own
@@ -388,7 +388,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -753,7 +753,18 @@ When the dispatcher's copy of the pipelines refuses the task, the panel opens wi
 
 A board with at least one task ends with a footer. One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
 its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
-running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line `pipelines  <files> changed since this run started — restart the dispatcher
+running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`.
+
+Under `dispatch.priority = "reserve"`, a cap that has a held slot ends its figure with `· <n> held`. A model's own figure carries its own count, and the profile's figure does not count it:
+
+```
+claude   slots 0/1 · 1 held
+pi   slots 1/∞   small-local   0/1 · 1 held
+```
+
+The count is the number of slots started groups hold on that cap. The NEXT column names the group. Under `group` and `any`, no footer line shows `held`.
+
+A line `pipelines  <files> changed since this run started — restart the dispatcher
 to use it` appears while a pipeline file differs from the copy the dispatcher loaded. See
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). Then the job ledger lists every enabled job with its next firing:
 
