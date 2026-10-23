@@ -58,6 +58,14 @@ The dispatcher names each such skip once per matching minute, with the step the 
 job nightly · due now · skipped, audit is still in the queue, at step queued
 ```
 
+The dispatcher names a job that cannot fire in the same way, once per matching minute:
+
+```
+job dependabot-weekly · due now · skipped, dependabot-review runs routine dependabot too; delete one on the routines tab (o → delete job)
+job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; pick a routine folder, or delete it, on the routines tab (o)
+job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit or delete the job on the routines tab (o)
+```
+
 A firing that fails is recorded for its minute and is not tried again on every pass. This covers
 a failing `open` hook, one that is stopped after 60 seconds, and a routine that cannot be queued, such as one with a `gate_at:` that
 names no step. The dispatcher names the failure once for that minute. Only an `origin` that
@@ -202,8 +210,8 @@ a `base` already in the file.
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
 gives the job `nightly`. This is the same whether the walk started on the jobs tab or the
 routines tab. A save is refused, with a notice naming the job, when the routine already has a
-job in either store. A job in the project store is
-written by hand once; the screen then edits it in place.
+job in either store. A job in the project store is written by hand once; the screen then edits it
+in place.
 
 ## The cron grammar
 
@@ -305,7 +313,7 @@ not parse.
 | job `<name>` has no unknown keys | The job's table holds a key no job reads. |
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
-| job `<name>` routine is a whole routine folder | The routine path is a task file, or a folder inside a routine. |
+| job `<name>` routine is a whole routine folder | The routine path is a task file, a folder inside a routine, or the routines directory itself. |
 | job `<name>` is the only job on its routine | Another enabled job runs the same routine. The check names that job and its store. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
 | job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step, a `*.md` file that does not parse, or a folder with no task. |

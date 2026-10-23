@@ -230,7 +230,7 @@ A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`:
 [jobs.nightly-audit]
 schedule = "0 3 * * 1-5"   # weekdays at 03:00, local time
 pipeline = "impl_fast"
-routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
+routine  = "nightly"       # a top-level folder under .spoolway/routines/
 ```
 
 <img src="docs/screenshots/jobs.png" alt="the jobs tab" width="100%">
