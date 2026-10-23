@@ -534,6 +534,13 @@ impl LaneRecord {
         })
     }
 
+    /// Whether this lane is over and only its pane is left open: the board
+    /// reads it so a task that came back to the step reads `queued` until a
+    /// new lane for it starts, rather than `running` on an idle pane.
+    pub(crate) fn is_kept(&self) -> bool {
+        self.kept
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and

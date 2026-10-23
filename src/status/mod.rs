@@ -4671,7 +4671,17 @@ fn build_rows(
         let key = crate::mux::run_key(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
         // checkout path is no test of ownership here the way it is in a pass.
-        let live_lane = lanes.iter().find(|l| l.name == lane);
+        //
+        // A lane whose record says `kept` is not the step's live lane: it is
+        // an idle pane left open from an earlier visit, and the dispatcher
+        // leaves it out of every count of what is running. Reading it as
+        // live made a task the dispatcher was holding show `running` for as
+        // long as the hold lasted. A fresh lane's record is written with
+        // `kept: false`, so the row turns to running when one starts.
+        let live_lane = lanes
+            .iter()
+            .find(|l| l.name == lane)
+            .filter(|_| !lane_records.get(&lane).is_some_and(|r| r.is_kept()));
         let live = live_lane.is_some();
         // One read of the transcript, for the three figures that come off it.
         let session = live
