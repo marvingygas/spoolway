@@ -636,3 +636,42 @@ fn the_reload_command_with_no_dispatcher_says_so_and_writes_no_request() {
         .count();
     assert_eq!(requests, 0, "a request was left with nobody to read it");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_reload_command_reaches_the_dispatcher_over_a_config_that_does_not_parse() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    let before = project.snapshot();
+
+    fs::write(project.root.join(".spoolway/config.toml"), "[agents\n").expect("break config");
+
+    let output = project.reload_command();
+    assert!(!output.status.success(), "a refusal exited 0: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("reload refused — nothing changed")
+            && stderr.contains("config.toml does not load")
+            && stderr.contains("Fix config.toml, then reload again."),
+        "the dispatcher's own refusal did not reach the terminal:\n{stderr}"
+    );
+    assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_reload_command_with_no_dispatcher_and_a_broken_config_still_says_so() {
+    let project = Project::new();
+    project.run(&["init", "--yes"]);
+    fs::write(project.root.join(".spoolway/config.toml"), "[agents\n").expect("break config");
+
+    let output = project.reload_command();
+    assert!(!output.status.success(), "it exited 0: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .starts_with("no dispatcher is running, so there is nothing to reload."),
+        "{output:?}"
+    );
+}

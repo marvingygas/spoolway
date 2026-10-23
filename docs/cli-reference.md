@@ -807,7 +807,7 @@ reload refused — nothing changed, the run is still on what it had:
   Put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
 ```
 
-With no dispatcher running it prints this, so it works even when a pipeline file is broken:
+With no dispatcher running it prints this, so it works even when a pipeline file or `config.toml` is broken:
 
 ```
 no dispatcher is running, so there is nothing to reload.

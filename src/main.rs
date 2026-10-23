@@ -327,17 +327,31 @@ fn run() -> Result<()> {
             // leaving it to look like nothing was wrong. `override drop`
             // exists to remove an `overrides/config.toml` that does not
             // parse, and `Repo::discover` would stop on that file first.
+            //
+            // `dispatch reload` reads leniently too. A person reloads after
+            // an edit, and the edit may be the one `config.toml` fails to
+            // parse on. The running dispatcher then gives its own refusal,
+            // and with no dispatcher the command prints its two lines, where
+            // `Repo::discover` would end both with a raw parse error. It
+            // needs only the project home and its lock file.
             // Every other command reaching this arm, bar `report` and
             // `stack` below, still dies on a config it cannot read.
-            let repo = if matches!(
+            let lenient = matches!(
                 command,
-                Command::Sync(_) | Command::Override(OverrideCommand::Drop(_))
-            ) {
+                Command::Sync(_)
+                    | Command::Override(OverrideCommand::Drop(_))
+                    | Command::Dispatch(cli::DispatchArgs {
+                        command: Some(cli::DispatchCommand::Reload),
+                        ..
+                    })
+            );
+            let repo = if lenient {
                 let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
                 // The lenient read is for a config, not a home: a copied
                 // checkout (two carry one id) is refused by every other
                 // command, and `sync` writes into the home it would
-                // otherwise wrongly share with the original.
+                // otherwise wrongly share with the original. `dispatch
+                // reload` would write its request into that shared home.
                 if let Some(err) = home_error {
                     return Err(err);
                 }
@@ -359,7 +373,8 @@ fn run() -> Result<()> {
             // whose config or layout is in question, and a sweep run ahead
             // of them would be one more thing to rule out.
             //
-            // Skipped for the same reason under `sync` and `override drop`:
+            // Skipped for the same reason under `sync`, `override drop` and
+            // `dispatch reload`:
             // `repo.config` came from `discover_lenient` above, which is
             // `Config::default()` — a made-up `retention_days` — whenever the
             // merged load fails, and those commands exist to work on exactly
@@ -367,10 +382,7 @@ fn run() -> Result<()> {
             // person's own project is even readable is the thing this comment
             // already rules out for every command above; reaching this arm
             // at all must not put it back.
-            if !matches!(
-                command,
-                Command::Sync(_) | Command::Override(OverrideCommand::Drop(_))
-            ) {
+            if !lenient {
                 retain::sweep_once(&repo);
             }
 
@@ -626,11 +638,10 @@ fn run() -> Result<()> {
                     unreachable!("`jobs run` is refused by its argument parser")
                 }
 
-                // Not built yet. Each of these is a slice of work in its own
-                // right; the surface is declared so the shape is visible.
                 // Before `routing`: a reload is what a person reaches for after
                 // an edit, and the edit may be the one the files' pipelines
-                // fail to load on. The dispatcher it asks does the loading.
+                // fail to load on, or `config.toml` itself (see `lenient`
+                // above). The dispatcher it asks does the loading.
                 Command::Dispatch(cli::DispatchArgs {
                     command: Some(cli::DispatchCommand::Reload),
                     ..
