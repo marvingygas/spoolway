@@ -294,49 +294,53 @@ impl Job {
         let rel = self.relative_target(repo)?;
         let depth = rel.split('/').filter(|part| !part.is_empty()).count();
         let top = rel.split('/').next().unwrap_or_default();
-        let missing = || RoutineFault {
-            missing: true,
-            clause: format!(
-                "routine {} is not under .spoolway/routines/; edit or delete the job on the \
-                 routines tab (o)",
-                self.spec.routine
-            ),
+        let fault = |missing: bool, reason: String, fix: &str| RoutineFault {
+            missing,
+            clause: format!("{reason}; {fix}"),
+            reason,
         };
         // `.`, `./` and an empty `routine` resolve to the routines directory
         // itself, which exists but is no routine; it is not reported as
         // missing, since `doctor`'s existence check passes for it.
         if depth == 0 {
-            return Some(RoutineFault {
-                missing: false,
-                clause: format!(
-                    "routine `{}` is the routines directory itself, not a routine; pick a \
-                     routine folder, or delete the job, on the routines tab (o)",
+            return Some(fault(
+                false,
+                format!(
+                    "routine `{}` is the routines directory itself, not a routine",
                     self.spec.routine
                 ),
-            });
+                "pick a routine folder, or delete the job, on the routines tab (o)",
+            ));
         }
         if !target.exists() {
-            return Some(missing());
+            return Some(fault(
+                true,
+                format!(
+                    "routine {} is not under .spoolway/routines/",
+                    self.spec.routine
+                ),
+                "edit or delete the job on the routines tab (o)",
+            ));
         }
         let advice = if depth == 1 {
             "pick a routine folder".to_string()
         } else {
             format!("point the job at {top}")
         };
+        let fix = format!("{advice}, or delete it, on the routines tab (o)");
         if target.is_file() {
-            return Some(RoutineFault {
-                missing: false,
-                clause: format!(
-                    "{rel} is a task, not a routine; {advice}, or delete it, on the routines tab (o)"
-                ),
-            });
+            return Some(fault(
+                false,
+                format!("{rel} is a task, not a routine"),
+                &fix,
+            ));
         }
-        (depth > 1).then(|| RoutineFault {
-            missing: false,
-            clause: format!(
-                "{rel} is inside routine {top}, not a routine itself; {advice}, or delete it, on \
-                 the routines tab (o)"
-            ),
+        (depth > 1).then(|| {
+            fault(
+                false,
+                format!("{rel} is inside routine {top}, not a routine itself"),
+                &fix,
+            )
         })
     }
 
@@ -365,6 +369,9 @@ pub struct RoutineFault {
     pub missing: bool,
     /// The reason and the fix, to follow `skipped, ` in the dispatcher's line.
     pub clause: String,
+    /// The reason alone, the part of `clause` before its fix — for the
+    /// routines tab's details, which give their own fix under it.
+    pub reason: String,
 }
 
 /// Both stores merged into one list: the user store first, then the project

@@ -4745,6 +4745,22 @@ enum Mode {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
     },
+    /// Edit job on a job whose routine is not a listed one: the routine
+    /// picker over the routines pane `nav` describes, one answer per
+    /// routine folder and nothing else, so a job is never pointed at a task
+    /// file or a subfolder again. `enter` opens the schedule and pipeline
+    /// popups of [`Mode::NewJob`] with `job` moved onto the folder under
+    /// `cursor`; `esc` goes back to the pane having written nothing.
+    ///
+    /// `folders` is the routines as they were when edit job was picked, by
+    /// name and path, held for the same reason [`Mode::DeletePending`] holds
+    /// its set: the popup is drawn with no routines list to read.
+    PickRoutine {
+        nav: RoutineNav,
+        job: JobRef,
+        folders: Vec<(String, std::path::PathBuf)>,
+        cursor: usize,
+    },
     /// What new job or edit job saved, over the routines pane —
     /// [`super::jobs::saved_notice`].
     /// Apart from [`Mode::Outcome`] only in its key line, which names the one
@@ -4775,7 +4791,7 @@ enum Mode {
 ///
 /// `row` is that row's own key — a task's [`TaskKey`] or a group's
 /// [`GroupKey`] on the pending screen, a routine's or a routine task's
-/// path on the routines pane. The queue reader can re-read the groups while
+/// path on the routines pane, or a job's name and store for its row there. The queue reader can re-read the groups while
 /// the menu is open, and [`adopt_groups`] keeps the cursor on a group by its
 /// key but not on a task, so `enter` checks the highlighted row is still
 /// this one before acting, rather than run gate on whichever task slid
@@ -4818,6 +4834,9 @@ enum RowOption {
     NewJob,
     /// The routine's job, through the schedule and pipeline popups.
     EditJob(JobRef),
+    /// Edit job on a job whose routine is not listed: the routine picker
+    /// first, then the same popups as [`RowOption::EditJob`].
+    PickRoutine(JobRef),
     PauseJob(JobRef),
     ResumeJob(JobRef),
     /// `named` when the routine has more than one job, so the item has to
@@ -4846,7 +4865,7 @@ impl RowOption {
             RowOption::Trial => "trial".to_string(),
             RowOption::SaveRoutine => "save as routine".to_string(),
             RowOption::NewJob => "new job".to_string(),
-            RowOption::EditJob(_) => "edit job".to_string(),
+            RowOption::EditJob(_) | RowOption::PickRoutine(_) => "edit job".to_string(),
             RowOption::PauseJob(_) => "pause job".to_string(),
             RowOption::ResumeJob(_) => "resume job".to_string(),
             RowOption::DeleteJob { job, named: true } => format!("delete job {}", job.name),
@@ -6045,7 +6064,7 @@ fn run_screen_from(
         // from whatever the reader last landed rather than a read of its
         // own.
         refresh_from_reader(&reader, &mut known_reading, &mut groups, &mut state);
-        reload_jobs(repo, &mut state);
+        reload_jobs(repo, &routines, &mut state);
         let panes = Panes {
             repo,
             routines: &routines,
@@ -6254,7 +6273,13 @@ fn run_screen_from(
                 // `enter` over a ticked folder — ignored with nothing ticked,
                 // the same way `Mode::Browsing`'s own `enter` does nothing
                 // over an empty `state.selected`.
-                Key::Enter if nav.focus == Focus::Groups && !nav.selected.is_empty() => {
+                // Not over a job row, which queues nothing: `enter` there
+                // with routines ticked above it would queue them unseen.
+                Key::Enter
+                    if nav.focus == Focus::Groups
+                        && !nav.selected.is_empty()
+                        && highlighted_routine_folder(&routines, nav).is_some() =>
+                {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     state.mode = begin_routine_queue(
@@ -6297,8 +6322,44 @@ fn run_screen_from(
                 }
                 _ => {
                     let mut nav = nav.clone();
-                    handle_routine_key(&routines, &mut nav, key);
+                    let orphans = orphan_jobs(repo, &routines, &state.jobs).len();
+                    handle_routine_key(&routines, orphans, &mut nav, key);
                     state.mode = Mode::Routines(nav);
+                }
+            },
+            Mode::PickRoutine {
+                nav,
+                job,
+                folders,
+                cursor,
+            } => match key {
+                Key::Esc => state.mode = Mode::Routines(nav.clone()),
+                Key::Enter => {
+                    let picked = folders.get(*cursor).map(|(_, folder)| folder.clone());
+                    if let Some(folder) = picked {
+                        let (nav, job) = (nav.clone(), job.clone());
+                        state.mode = match find_job(repo, &job) {
+                            Ok(found) => {
+                                match super::jobs::NewJobWalk::repoint(
+                                    &found,
+                                    &folder,
+                                    &routines_dir,
+                                ) {
+                                    Some(walk) => Mode::NewJob { nav, walk },
+                                    None => Mode::Routines(nav),
+                                }
+                            }
+                            Err(text) => job_not_changed(&nav, text),
+                        };
+                    }
+                    // No routine to pick: the popup says so and stays open
+                    // until `esc`.
+                }
+                _ => {
+                    let cursor = crate::screen::move_cursor(*cursor, folders.len(), key);
+                    if let Mode::PickRoutine { cursor: at, .. } = &mut state.mode {
+                        *at = cursor;
+                    }
                 }
             },
             Mode::NewJob { nav, walk } => {
@@ -6483,7 +6544,7 @@ struct Held {
 
 impl Held {
     fn new(groups: &[Group], panes: &Panes, state: &ScreenState) -> Held {
-        let footer = footer(state);
+        let footer = screen_footer(panes, state);
         Held {
             frame: beneath(groups, panes, state, &footer),
             footer,
@@ -6564,19 +6625,28 @@ fn wait_for_key(
             return read_key(input);
         }
         refresh_from_reader(reader, known, groups, state);
-        reload_jobs(panes.repo, state);
+        reload_jobs(panes.repo, panes.routines, state);
         draw(groups, panes, state, writer, out);
     }
 }
 
 /// Re-read both job stores into `state` while the routines pane is drawn,
-/// the way the jobs tab re-reads them while its list sits idle, so a job
-/// edited on that tab or by hand shows here without a key. A popup over the
-/// pane reads them too: the pane under `job saved` must show the job just
-/// written. Nothing is read on the queue tab, which draws no job.
-fn reload_jobs(repo: &Repo, state: &mut ScreenState) {
-    if routines_beneath(&state.mode).is_some() {
-        state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+/// so a job edited by hand or by `spoolway pipeline rename` shows here
+/// without a key. A popup over the pane reads them too: the pane under `job
+/// saved` must show the job just written. Nothing is read on the queue tab,
+/// which draws no job.
+///
+/// The list's cursor is then kept on a row: a job row goes when its job is
+/// deleted or moved onto a routine, and the cursor that sat on the last one
+/// moves up rather than off the end of the list.
+fn reload_jobs(repo: &Repo, routines: &[RoutineFolder], state: &mut ScreenState) {
+    if routines_beneath(&state.mode).is_none() {
+        return;
+    }
+    state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+    let rows = routines.len() + orphan_jobs(repo, routines, &state.jobs).len();
+    if let Mode::Routines(nav) = &mut state.mode {
+        nav.folder_cursor = nav.folder_cursor.min(rows.saturating_sub(1));
     }
 }
 
@@ -6956,8 +7026,11 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
 ///
+/// A job's row under the routines, an [`Orphan`], offers edit job, through
+/// the routine picker, and delete job, titled with the row's name.
+///
 /// A routine's task offers open task, and never open plan. `None`, and no
-/// menu, with no routine or no task under the focused pane's cursor.
+/// menu, with no row or no task under the focused pane's cursor.
 fn routine_options(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -6967,6 +7040,20 @@ fn routine_options(
 ) -> Option<OptionsMenu> {
     let (title, row, items) = match nav.focus {
         Focus::Groups => {
+            let orphans = orphan_jobs(repo, routines, jobs);
+            if let Some(orphan) = highlighted_orphan(routines, &orphans, nav) {
+                let job = JobRef::of(orphan.job);
+                return Some(OptionsMenu {
+                    title: orphan.name().to_string(),
+                    row: format!("{} in {}", orphan.job.name, orphan.job.source.display()),
+                    items: vec![
+                        RowOption::PickRoutine(job.clone()),
+                        RowOption::DeleteJob { job, named: false },
+                    ],
+                    cursor: 0,
+                    routines: Some(nav.clone()),
+                });
+            }
             let folder = highlighted_routine_folder(routines, nav)?;
             let mut items = match jobs {
                 Ok(jobs) => routine_job_options(repo, pipelines, folder, jobs),
@@ -7061,6 +7148,15 @@ impl Picked<'_> {
                     },
                     Err(text) => job_not_changed(nav, text),
                 },
+                RowOption::PickRoutine(job) => Mode::PickRoutine {
+                    nav: nav.clone(),
+                    job,
+                    folders: routines
+                        .iter()
+                        .map(|folder| (folder.name.clone(), folder.path.clone()))
+                        .collect(),
+                    cursor: 0,
+                },
                 RowOption::PauseJob(job) => set_job_enabled(self.repo, nav, &job, false),
                 RowOption::ResumeJob(job) => set_job_enabled(self.repo, nav, &job, true),
                 RowOption::DeleteJob { job, .. } => Mode::DeleteJob {
@@ -7114,6 +7210,7 @@ impl Picked<'_> {
             // screen's menu.
             RowOption::NewJob
             | RowOption::EditJob(_)
+            | RowOption::PickRoutine(_)
             | RowOption::PauseJob(_)
             | RowOption::ResumeJob(_)
             | RowOption::DeleteJob { .. }
@@ -7280,23 +7377,26 @@ pub(super) fn highlighted_routine_task<'a>(
 /// this for the rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
 ///
+/// The list's cursor runs over the routines and then over `orphans` job
+/// rows under them — see [`Orphan`]. A job row has no tick and no tasks, so
+/// `space` and `tab` do nothing on it.
+///
 /// `tab` is the only key that moves between the two panes. `←` and `→`
-/// read nothing here: they belong to the tab strip, which the routines tab
-/// and the jobs picker both sit under. `esc` is not read here either, since
-/// it means "back to the list" over the routines tab's details pane and
-/// "cancel" in the jobs picker, so each caller reads it itself.
-pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
+/// read nothing here: they belong to the tab strip the routines tab sits
+/// under. `esc` is not read here either: it means "back to the list" over
+/// the details pane, which `run_screen` reads itself.
+fn handle_routine_key(routines: &[RoutineFolder], orphans: usize, nav: &mut RoutineNav, key: Key) {
+    let last = (routines.len() + orphans).saturating_sub(1);
     match key {
         Key::Up | Key::Char('k') => match nav.focus {
             Focus::Groups => {
-                nav.folder_cursor = nav.folder_cursor.saturating_sub(1);
+                nav.folder_cursor = nav.folder_cursor.min(last).saturating_sub(1);
                 nav.task_cursor = 0;
             }
             Focus::Tasks => nav.task_cursor = nav.task_cursor.saturating_sub(1),
         },
         Key::Down | Key::Char('j') => match nav.focus {
             Focus::Groups => {
-                let last = routines.len().saturating_sub(1);
                 nav.folder_cursor = (nav.folder_cursor + 1).min(last);
                 nav.task_cursor = 0;
             }
@@ -7310,7 +7410,9 @@ pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNa
         // Only the focus moves, as `tab` on the pending screen does: the
         // list's cursor stays on the routine whose tasks are shown, and
         // coming back to the tasks pane finds its cursor where it was left.
-        Key::Tab => {
+        // Not on a job row, whose details hold no task to land on; with no
+        // rows at all it moves as it always has.
+        Key::Tab if nav.folder_cursor < routines.len() || orphans == 0 => {
             nav.focus = match nav.focus {
                 Focus::Groups => Focus::Tasks,
                 Focus::Tasks => Focus::Groups,
@@ -8289,36 +8391,56 @@ pub(crate) fn tasks_pane_lines(
 /// read wrong — see [`Repo::routines_dir`] on why nothing creates that
 /// directory for this to find.
 ///
-/// Comes back with the line each folder starts on as well — see [`Items`].
-/// A folder is one line, so that is every line; it is noted in the loop
-/// all the same, where it cannot drift from the rows it points at.
+/// Under them, after a blank line, one row per [`Orphan`], `width` wide:
+/// no checkbox, since it cannot be ticked, its name, and its mark at the
+/// right edge. A name too long for the row is cut, never the mark.
+///
+/// Comes back with the line each row starts on as well — see [`Items`]. A
+/// row is one line, but the blank line puts the job rows one further down,
+/// so each is noted in the loop that draws it.
 fn routine_folder_lines(
     routines_dir: &std::path::Path,
     routines: &[RoutineFolder],
+    orphans: &[Orphan],
     nav: &RoutineNav,
+    width: usize,
 ) -> (Vec<String>, Vec<usize>) {
+    let marker = |i: usize| match i == nav.folder_cursor && nav.focus == Focus::Groups {
+        true => ">",
+        false => " ",
+    };
+    let mut lines = Vec::with_capacity(routines.len() + orphans.len() + 1);
+    let mut starts = Vec::with_capacity(routines.len() + orphans.len());
     if routines.is_empty() {
-        return (
-            vec![format!("  nothing under {}", routines_dir.display())],
-            Vec::new(),
-        );
+        lines.push(format!("  nothing under {}", routines_dir.display()));
     }
-
-    let mut lines = Vec::with_capacity(routines.len());
-    let mut starts = Vec::with_capacity(routines.len());
     for (i, folder) in routines.iter().enumerate() {
-        let marker = if i == nav.folder_cursor && nav.focus == Focus::Groups {
-            ">"
-        } else {
-            " "
-        };
         let box_ = if nav.selected.contains(&folder.path) {
             "[x]"
         } else {
             "[ ]"
         };
         starts.push(lines.len());
-        lines.push(format!("{marker} {box_} {}", folder.name));
+        lines.push(format!("{} {box_} {}", marker(i), folder.name));
+    }
+    if !orphans.is_empty() {
+        lines.push(String::new());
+    }
+    for (i, orphan) in orphans.iter().enumerate() {
+        let mark = orphan.mark();
+        // Two columns for the marker, and at least two between the name
+        // and the mark.
+        let room = width.saturating_sub(2 + 2 + mark.chars().count()).max(1);
+        let name = clip(orphan.name().to_string(), room);
+        let gap = width
+            .saturating_sub(2 + name.chars().count() + mark.chars().count())
+            .max(2);
+        starts.push(lines.len());
+        lines.push(format!(
+            "{} {name}{}{mark}",
+            marker(routines.len() + i),
+            " ".repeat(gap)
+        ));
     }
     (lines, starts)
 }
@@ -8457,6 +8579,108 @@ fn jobs_on<'a>(
         .collect()
 }
 
+/// A job whose `routine` is not one of the routines the tab lists: missing,
+/// a task file, a folder inside a routine, or nothing a routine can be. It
+/// fires nowhere, and with no routine row to hang it on it gets a row of
+/// its own under the routines, where its menu can point it at a routine or
+/// delete it. Without that row it could be removed only by editing a store
+/// by hand.
+struct Orphan<'a> {
+    job: &'a crate::jobs::Job,
+    /// Whether the `routine` names nothing on disk, rather than something
+    /// that is not a routine — [`crate::jobs::RoutineFault::missing`].
+    missing: bool,
+    /// Why the job runs no routine, as a sentence for the details pane.
+    reason: String,
+}
+
+impl Orphan<'_> {
+    /// The row's name: the job's `routine` value as written, which is what
+    /// a person would search the store for. An empty one is drawn as `.`,
+    /// the routines directory it resolves to, so the row is never blank.
+    fn name(&self) -> &str {
+        match self.job.spec.routine.trim() {
+            "" => ".",
+            routine => routine,
+        }
+    }
+
+    /// The word at the row's right edge.
+    fn mark(&self) -> &'static str {
+        match self.missing {
+            true => "missing",
+            false => "not a routine",
+        }
+    }
+}
+
+/// Every job in `jobs` that runs none of `routines`, in store order — the
+/// rows drawn under the routines. A job runs a routine when
+/// [`crate::jobs::Job::target`] is that folder's own path, the same test
+/// [`jobs_on`] makes, so a job is either on one routine's details or on a
+/// row of its own, never both and never neither. Empty when the stores will
+/// not load: the routines' details already say so.
+fn orphan_jobs<'a>(
+    repo: &Repo,
+    routines: &[RoutineFolder],
+    jobs: &'a LoadedJobs,
+) -> Vec<Orphan<'a>> {
+    let Ok(jobs) = jobs else {
+        return Vec::new();
+    };
+    jobs.iter()
+        .filter(|job| {
+            let target = job.target(repo).ok();
+            !routines
+                .iter()
+                .any(|folder| target.as_ref() == Some(&folder.path))
+        })
+        .map(|job| {
+            let fault = job.routine_fault(repo);
+            let missing = fault.as_ref().is_some_and(|fault| fault.missing);
+            let reason = match fault {
+                Some(fault) if fault.missing => {
+                    format!("No routine {} under .spoolway/routines/.", job.spec.routine)
+                }
+                Some(fault) => format!("{}.", capitalized(&fault.reason)),
+                // `routine_fault` has nothing to say about a `routine` that
+                // escapes the routines directory, which `target` refuses.
+                None if job.target(repo).is_err() => format!(
+                    "{} is outside .spoolway/routines/, where every routine is.",
+                    job.spec.routine
+                ),
+                // A top-level folder that appeared after the list was read.
+                None => format!("{} is not a listed routine.", job.spec.routine),
+            };
+            Orphan {
+                job,
+                missing,
+                reason,
+            }
+        })
+        .collect()
+}
+
+/// `text` with its first letter in capitals, to open a sentence with a
+/// clause written to follow `skipped, `.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The job row the list's cursor sits on: the rows run through `routines`
+/// first and `orphans` after them, on one cursor.
+fn highlighted_orphan<'a, 'b>(
+    routines: &[RoutineFolder],
+    orphans: &'b [Orphan<'a>],
+    nav: &RoutineNav,
+) -> Option<&'b Orphan<'a>> {
+    orphans.get(nav.folder_cursor.checked_sub(routines.len())?)
+}
+
 /// The `Jobs:` block for a routine two or more jobs run: a headline saying
 /// which of them fires, one row per job sorted by name with its scope and,
 /// when paused, `paused`, and the fix under them.
@@ -8576,7 +8800,11 @@ fn routine_details_lines(
     width: usize,
 ) -> (Vec<String>, Vec<usize>, (usize, usize)) {
     let Some(folder) = panes.routines.get(nav.folder_cursor) else {
-        return (Vec::new(), Vec::new(), (0, 0));
+        let orphans = orphan_jobs(panes.repo, panes.routines, jobs);
+        let lines = highlighted_orphan(panes.routines, &orphans, nav)
+            .map(|orphan| orphan_details_lines(panes.repo, orphan, width))
+            .unwrap_or_default();
+        return (lines, Vec::new(), (0, 0));
     };
     // The tasks sit one indent in under the `tasks` line, so they wrap that
     // many columns short of the pane.
@@ -8596,6 +8824,37 @@ fn routine_details_lines(
     (lines, starts, (focus.0 + above, focus.1 + above))
 }
 
+/// The details of a job row, an [`Orphan`]: the job's own config rows, the
+/// ones [`routine_job_lines`] draws for a routine's one job, with `Next:`
+/// saying it never fires, then why and what to do about it. There are no
+/// tasks under it, since it runs no routine.
+fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<String> {
+    let job = orphan.job;
+    let next = match orphan.missing {
+        true => "never, its routine is missing",
+        false => "never, it runs no routine",
+    };
+    let mut lines = vec![String::new()];
+    lines.extend(config_row("Schedule:", &job.spec.schedule, width));
+    lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
+    lines.extend(config_row("Scope:", job.scope.label(), width));
+    lines.extend(config_row("Next:", next, width));
+    lines.extend(config_row(
+        "Last:",
+        &super::jobs::detail_last(repo, &job.name),
+        width,
+    ));
+    lines.extend(config_row("Job:", &job.name, width));
+    lines.push(String::new());
+    lines.extend(wrapped(CONFIG_INDENT, &orphan.reason, width));
+    lines.extend(wrapped(
+        CONFIG_INDENT,
+        "Press o to point this job at a routine, or delete it.",
+        width,
+    ));
+    lines
+}
+
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, routines on the left
 /// and the highlighted one's [`routine_details_lines`] on the right, both
@@ -8608,10 +8867,16 @@ fn render_routines(
 ) -> Vec<String> {
     let routines = panes.routines;
     let layout = layout(footer);
-    let (left, left_starts) = routine_folder_lines(panes.routines_dir, routines, nav);
+    let orphans = orphan_jobs(panes.repo, routines, jobs);
+    let (left, left_starts) =
+        routine_folder_lines(panes.routines_dir, routines, &orphans, nav, layout.left);
     let (right, right_starts, focus) = routine_details_lines(panes, jobs, nav, layout.right);
 
-    let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
+    let folder_line = left_starts
+        .get(nav.folder_cursor)
+        .or(left_starts.last())
+        .copied()
+        .unwrap_or(0);
     two_pane_frame(
         &window(
             &left,
@@ -8737,7 +9002,7 @@ pub(super) fn two_pane_frame(
 /// focus — so this draws the filter's own line instead, naming exactly the
 /// one key [`handle_filter_key`] does not simply append to the query:
 /// `enter`, which leaves it.
-fn footer(state: &ScreenState) -> String {
+fn footer(state: &ScreenState, on_orphan: bool) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
         // The save panel reads a name the same way the filter box reads a
@@ -8747,6 +9012,7 @@ fn footer(state: &ScreenState) -> String {
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
         Mode::DeleteRoutine { .. }
         | Mode::DeleteJob { .. }
+        | Mode::PickRoutine { .. }
         | Mode::DeletePending { .. }
         | Mode::DeletePlan { .. }
         | Mode::Gate { .. } => hint(&crate::screen::answer_keys()),
@@ -8770,6 +9036,15 @@ fn footer(state: &ScreenState) -> String {
         // details pane it goes back to the list, which `tab` already names.
         // The same line under a notice or the options menu drawn over the
         // pane.
+        // A job row under the routines can be neither ticked, queued nor
+        // tabbed into, so its line is `o` and `q` alone.
+        _ if on_orphan && routines_beneath(&state.mode).is_some() => key_hint(
+            &[
+                [("o", "options")].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
                 Focus::Groups => &[("o", "options"), ("tab", "details")],
@@ -8805,6 +9080,17 @@ fn footer(state: &ScreenState) -> String {
             key_hint(&keys)
         }
     }
+}
+
+/// [`footer`] for the frame `panes` and `state` draw: whether the routines
+/// pane's cursor is on a job row needs the routines and the jobs, which the
+/// key line alone is not handed.
+fn screen_footer(panes: &Panes, state: &ScreenState) -> String {
+    let on_orphan = routines_beneath(&state.mode).is_some_and(|nav| {
+        let orphans = orphan_jobs(panes.repo, panes.routines, &state.jobs);
+        highlighted_orphan(panes.routines, &orphans, nav).is_some()
+    });
+    footer(state, on_orphan)
 }
 
 /// Everything a frame would put on the terminal, as plain lines — the whole
@@ -8891,6 +9177,7 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
         })
         | Mode::DeleteRoutine { nav, .. }
         | Mode::DeleteJob { nav, .. }
+        | Mode::PickRoutine { nav, .. }
         | Mode::NewJob { nav, .. }
         | Mode::JobSaved { nav, .. } => Some(nav),
         _ => None,
@@ -8900,7 +9187,7 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
 /// A frame: the pending screen, or the routines pane, with whatever popup
 /// the mode has open laid over it and the key line under it.
 fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
-    let footer = footer(state);
+    let footer = screen_footer(panes, state);
     let frame = beneath(groups, panes, state, &footer);
     let popup = popup(groups, panes.pipelines, state, layout(&footer));
     compose(frame, popup.as_deref(), footer)
@@ -8975,6 +9262,12 @@ fn popup(
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
         Mode::DeleteJob { job, .. } => Some(super::jobs::delete_panel(&job.name)),
+        Mode::PickRoutine {
+            job,
+            folders,
+            cursor,
+            ..
+        } => Some(pick_routine_panel(&job.name, folders, *cursor)),
         Mode::DeletePending { title, set, .. } => Some(delete_pending_panel(
             title,
             set,
@@ -10427,6 +10720,33 @@ fn begin_routine_delete(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNa
         nav: nav.clone(),
         target,
     }
+}
+
+/// How wide the routine picker's lines may run, kept under the narrowest
+/// frame the way the job popups' own limit is.
+const PICK_ROUTINE_WIDTH: usize = 50;
+
+/// [`Mode::PickRoutine`]'s popup: which job it is for, then one answer per
+/// routine folder, by name. With no routine at all it says so, and offers
+/// nothing for `enter` to confirm.
+fn pick_routine_panel(
+    job: &str,
+    folders: &[(String, std::path::PathBuf)],
+    cursor: usize,
+) -> Vec<String> {
+    let mut body = vec![
+        String::new(),
+        clip(format!("  for the job {job}"), PICK_ROUTINE_WIDTH),
+    ];
+    if folders.is_empty() {
+        body.push(String::new());
+        body.push("  no routine to point it at".to_string());
+    }
+    let answers: Vec<String> = folders
+        .iter()
+        .map(|(name, _)| clip(name.clone(), PICK_ROUTINE_WIDTH))
+        .collect();
+    crate::screen::ask("which routine", &body, &answers, cursor)
 }
 
 /// Delete's popup: the routine, what deleting it means, and the jobs that go
@@ -15135,10 +15455,10 @@ mod tests {
 
         // `key_hint` opens every key line on one column of indent.
         let mut state = ScreenState::new();
-        let line = crate::status::strip_ansi(&footer(&state));
+        let line = crate::status::strip_ansi(&footer(&state, false));
         assert_eq!(line, format!(" {groups_line}"));
         state.focus = Focus::Tasks;
-        let line = crate::status::strip_ansi(&footer(&state));
+        let line = crate::status::strip_ansi(&footer(&state, false));
         assert_eq!(line, format!(" {tasks_line}"));
 
         let drawn = screen(&repo, listed(&repo), "\t");
@@ -15163,7 +15483,7 @@ mod tests {
             let mut state = ScreenState::new();
             state.focus = focus;
             state.hide_scope = hide_scope;
-            crate::status::strip_ansi(&footer(&state))
+            crate::status::strip_ansi(&footer(&state, false))
         };
 
         let groups = line(Focus::Groups, HideScope::Pending);
@@ -16597,7 +16917,7 @@ mod tests {
     fn a_hosted_layout_fills_the_drawing_area_and_not_the_terminal() {
         let _terminal = crate::screen::test_terminal((100, 24));
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Queue);
-        let footer = footer(&ScreenState::new());
+        let footer = footer(&ScreenState::new(), false);
         let layout = layout(&footer);
         assert_eq!(layout.left + layout.right + PANE_CHROME_COLUMNS, 98);
         assert_eq!(crate::screen::key_rows(&footer).len(), 2);
@@ -21304,22 +21624,22 @@ mod tests {
 
         let mut nav = RoutineNav::new();
         for key in [Key::Right, Key::Left, Key::Right] {
-            handle_routine_key(&routines, &mut nav, key);
+            handle_routine_key(&routines, 0, &mut nav, key);
         }
         assert_eq!(nav.focus, Focus::Groups, "the arrows move no focus");
         assert_eq!(nav.folder_cursor, 0, "nor the cursor");
 
-        handle_routine_key(&routines, &mut nav, Key::Tab);
+        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
         assert_eq!(nav.focus, Focus::Tasks);
-        handle_routine_key(&routines, &mut nav, Key::Down);
+        handle_routine_key(&routines, 0, &mut nav, Key::Down);
         assert_eq!(nav.task_cursor, 1);
-        handle_routine_key(&routines, &mut nav, Key::Left);
+        handle_routine_key(&routines, 0, &mut nav, Key::Left);
         assert_eq!(nav.focus, Focus::Tasks, "`←` does not go back either");
 
-        handle_routine_key(&routines, &mut nav, Key::Tab);
+        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
         assert_eq!(nav.focus, Focus::Groups);
         assert_eq!(nav.folder_cursor, 0, "still on `nightly`");
-        handle_routine_key(&routines, &mut nav, Key::Tab);
+        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
         assert_eq!(nav.task_cursor, 1, "the tasks pane's cursor kept");
     }
 
@@ -21847,7 +22167,7 @@ mod tests {
         );
         assert!(saved.contains("Next: "), "{saved}");
         assert!(
-            saved.contains("Edit, pause or delete it on the jobs tab."),
+            saved.contains("Edit, pause or delete it with o on its routine."),
             "{saved}"
         );
         // The key line under the frame is the popup's own `[enter]
@@ -22590,11 +22910,11 @@ mod tests {
             "dependabot",
         );
 
-        reload_jobs(&repo, &mut state);
+        reload_jobs(&repo, &[], &mut state);
         assert_eq!(state.jobs.as_ref().map(Vec::len), Ok(0), "queue tab");
 
         state.mode = Mode::Routines(RoutineNav::new());
-        reload_jobs(&repo, &mut state);
+        reload_jobs(&repo, &[], &mut state);
         assert_eq!(state.jobs.as_ref().map(Vec::len), Ok(1), "routines list");
     }
 
@@ -22634,11 +22954,13 @@ mod tests {
     fn the_empty_routines_pane_names_its_own_path() {
         let (repo, _root_guard) = fixture("routines-empty");
 
-        // Checked against `routine_folder_lines` directly, which cuts no
-        // row: the frame cuts it to the left pane's own 25 columns, which
-        // would truncate a scratch test repo's own long path well before
-        // this could tell "named the path" apart from "named nothing at all".
-        let (lines, _) = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new());
+        // Checked against `routine_folder_lines` directly, which cuts only
+        // a job row to its width: the frame cuts this line to the left
+        // pane's own 25 columns, which would truncate a scratch test repo's
+        // own long path well before this could tell "named the path" apart
+        // from "named nothing at all".
+        let (lines, _) =
+            routine_folder_lines(&repo.routines_dir(), &[], &[], &RoutineNav::new(), 25);
         assert_eq!(
             lines,
             vec![format!("  nothing under {}", repo.routines_dir().display())]
