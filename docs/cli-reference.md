@@ -646,8 +646,8 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with its
-dependency's, or a task not yet cut whose base exists neither locally nor on `origin`, each
+It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with the
+`base:` of any dependency that is not `done`, or a task not yet cut whose base exists neither locally nor on `origin`, each
 refuses the whole start:
 
 ```
