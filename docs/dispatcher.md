@@ -25,8 +25,9 @@ spoolway: Open herdr and start spoolway there:
   spoolway
 ```
 
-An internal headless backend exists for automated tests only. It is not a supported runtime
-or an alternative to installing herdr. See [Testing](testing.md).
+An internal headless backend exists for automated tests only. The test harness picks it by
+exporting `SPOOLWAY_TEST_BACKEND=headless`. It is not a supported runtime or an alternative to
+installing herdr. See [Testing](testing.md).
 
 One `spoolway` serves the whole project at a time: a dispatcher started with `spoolway
 dispatch`, or a screen opened with bare `spoolway`. Every pass re-reads the queue, so a task
@@ -867,9 +868,9 @@ A lane's `spoolway report` runs on this record when `config.toml` or
 used only while the dispatcher that wrote it is running. The dispatcher writes it on the first
 pass whose load succeeds. If it cannot write the record, it prints that once, and lanes then stop on a broken config.
 
-Three groups of keys are fixed when the dispatcher starts. `spoolway config get` shows a new
+Two groups of keys are fixed when the dispatcher starts. `spoolway config get` shows a new
 value for them at once, but the running dispatcher keeps the old one until you restart it.
-They are `unattended.enabled`, the `unattended.blocked_*` keys and `dispatch.backend`.
+They are `unattended.enabled` and the `unattended.blocked_*` keys.
 
 ## Gates: when the pipeline waits for you
 
