@@ -599,9 +599,10 @@ profile, for example `export VISUAL=notepad.exe`.
 
 The same choice serves every item that opens a task file in the terminal screens. These are
 `open task` on the board and on the queue screen's tasks and routines panes, and `open` on the jobs
-routine picker. `spoolway config edit` and `spoolway config override` do not use it. They wait
-for the editor to close and then check the file, so they keep their own order: `$VISUAL`, then
-`$EDITOR`, then `vi`.
+routine picker. `spoolway config edit` and `spoolway config override` use it too. They run the
+editor in the terminal, wait for it to close, and then check the file. They wait for an `.exe`
+editor as well. They read only the environment and `PATH`, so they open a `config.toml` that does
+not parse.
 
 The variable may hold flags, such as `code --wait`. The task path is added at the end.
 
@@ -635,6 +636,9 @@ warnings screen shown before a run does not include it.
 | `wslpath` is not on `PATH`, for an `.exe` editor on WSL | The error says to install it, or to set `$VISUAL` or `$EDITOR` to a wrapper script without the `.exe` suffix. |
 | The Windows path conversion fails | The error names the task path and says why the conversion failed. |
 | A terminal editor is chosen on the headless backend | The error says the backend has no pane to open a command in. |
+
+`spoolway config edit` and `spoolway config override` refuse in the first four cases with the same
+error. They print it, exit non-zero and leave the file as it was.
 
 A refusal shows in a popup titled `open task`. The popup holds the whole error, including its fix,
 and closes with `enter` alone. It appears on the board and on the queue screen's tasks and routines
