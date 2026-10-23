@@ -488,12 +488,13 @@ pub(crate) fn plans_named_by_other_clones(
 /// clone's screen at the same moment, whichever clone the task is in.
 ///
 /// Pending and queue files go through [`list_front_in`], so a file whose
-/// bytes did not change is not parsed again, and the archive is read from
-/// its index alone. A file that will not read is passed over, as this
-/// clone's own listing passes one over. A folder that is missing has no
-/// tasks; one that exists and will not list is an error naming it, since
-/// a page could otherwise read as having no tasks while that folder's tasks
-/// still link to it.
+/// bytes did not change is not parsed again, and the archive is read
+/// through its index, as [`archive_tasks`] reads this clone's, so no archived
+/// task file is opened while the index is current. A file that will not read
+/// is passed over, as this clone's own listing passes one over. A folder that
+/// is missing has no tasks; one that exists and will not list is an error
+/// naming it, since a page could otherwise read as having no tasks while that
+/// folder's tasks still link to it.
 pub(crate) fn plans_named_by_other_clones_in(
     repo: &Repo,
     front_cache: &mut ListFrontCache,
