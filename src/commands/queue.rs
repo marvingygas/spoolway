@@ -8292,8 +8292,8 @@ fn routine_job_lines(
     lines
 }
 
-/// How far the job config rows sit in from the pane's edge: two columns,
-/// where a task's own rows sit four in and the task block itself two more.
+/// How far the job config rows and the `tasks` line sit in from the pane's
+/// edge. The task block under that line is moved in by the same amount.
 const CONFIG_INDENT: &str = "  ";
 
 /// One job config row: [`labeled_row`]'s layout, label column and narrow
