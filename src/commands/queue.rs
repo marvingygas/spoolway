@@ -5584,7 +5584,8 @@ pub(crate) struct ScreenState {
     named: Option<NamedFiles>,
     /// Both job stores as the routines pane last read them, for the job
     /// config drawn above a routine's tasks. Re-read by [`reload_jobs`]
-    /// while that pane is up, so a job edited elsewhere shows without a key.
+    /// while that pane is drawn, popups over it included, so a job edited
+    /// elsewhere or just saved shows without a key.
     jobs: LoadedJobs,
 }
 
@@ -6185,7 +6186,7 @@ fn run_screen_from(
                 _ => {}
             },
             Mode::Routines(nav) => match key {
-                // `esc` over the tasks pane goes back to the list, the way
+                // `esc` over the details pane goes back to the list, the way
                 // it does on the pending screen, keeping the list's cursor
                 // on the routine whose tasks were shown.
                 Key::Esc if nav.focus == Focus::Tasks => {
@@ -6212,7 +6213,7 @@ fn run_screen_from(
                         &mut |_| {},
                     );
                 }
-                // `space` over the tasks pane queues that one task alone
+                // `space` over a task in the details pane queues it alone
                 // — over the folders pane it is `handle_routine_key`'s own
                 // business instead, ticking the highlighted folder.
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
@@ -6496,13 +6497,13 @@ fn wait_for_key(
     }
 }
 
-/// Re-read both job stores into `state` while the routines list is up, the
-/// way the jobs tab re-reads them while its list sits idle, so a job edited
-/// on that tab or by hand shows here without a key. Nothing is read on the
-/// queue tab, which draws no job, or under a popup over the routines pane,
-/// which is drawn from the last reading.
+/// Re-read both job stores into `state` while the routines pane is drawn,
+/// the way the jobs tab re-reads them while its list sits idle, so a job
+/// edited on that tab or by hand shows here without a key. A popup over the
+/// pane reads them too: the pane under `job saved` must show the job just
+/// written. Nothing is read on the queue tab, which draws no job.
 fn reload_jobs(repo: &Repo, state: &mut ScreenState) {
-    if matches!(state.mode, Mode::Routines(_)) {
+    if routines_beneath(&state.mode).is_some() {
         state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
     }
 }
@@ -7096,7 +7097,7 @@ pub(super) fn highlighted_routine_task<'a>(
 /// `tab` is the only key that moves between the two panes. `←` and `→`
 /// read nothing here: they belong to the tab strip, which the routines tab
 /// and the jobs picker both sit under. `esc` is not read here either, since
-/// it means "back to the list" over the routines tab's tasks pane and
+/// it means "back to the list" over the routines tab's details pane and
 /// "cancel" in the jobs picker, so each caller reads it itself.
 pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
     match key {
@@ -7271,7 +7272,7 @@ fn open_highlighted_plan(groups: &[Group], state: &ScreenState) -> Mode {
     }
 }
 
-/// Open task over the routines pane's own tasks pane: open the highlighted
+/// Open task over a task in the routines pane's details: open the highlighted
 /// task in the picked editor — the same shape [`open_highlighted`] gives
 /// the pending screen, including the same [`Mode::Outcome`] a refused open is
 /// surfaced through — drawn over this pane, and
@@ -8215,14 +8216,12 @@ fn routine_task_lines(
 /// - No job on the routine: `Schedule:` reads `none`.
 /// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
 ///   `Job:` rows, the jobs tab's own values for each.
-/// - Two or more enabled jobs on it: [`crate::jobs::Job::clashing_jobs`],
-///   the rule the dispatcher skips both by, lists them under a `Jobs:` row.
+/// - Two or more jobs on it, paused or not: every one of them, listed by
+///   [`routine_jobs_lines`].
 /// - Stores that will not load: one `Jobs:` row naming the error.
 ///
 /// A job is on the routine when [`crate::jobs::Job::target`] is the folder's
-/// own path, so `nightly` and `nightly/` both count. A paused job never
-/// clashes, so a routine holding one paused and one enabled job draws the
-/// enabled one, and one holding only paused jobs draws the first.
+/// own path, so `nightly` and `nightly/` both count.
 fn routine_job_lines(
     repo: &Repo,
     folder: &RoutineFolder,
@@ -8242,53 +8241,96 @@ fn routine_job_lines(
         .iter()
         .filter(|job| job.target(repo).is_ok_and(|target| target == folder.path))
         .collect();
-    let Some(job) = on.iter().find(|job| job.spec.enabled).or(on.first()) else {
-        lines.extend(config_row("Schedule:", "none", width));
-        lines.push(String::new());
-        return lines;
-    };
-
-    let others = job.clashing_jobs(repo, jobs);
-    if others.is_empty() {
-        lines.extend(config_row("Schedule:", &job.spec.schedule, width));
-        lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
-        lines.extend(config_row("Scope:", job.scope.label(), width));
-        lines.extend(config_row("Next:", &super::jobs::detail_next(job), width));
-        lines.extend(config_row(
-            "Last:",
-            &super::jobs::detail_last(repo, &job.name),
-            width,
-        ));
-        lines.extend(config_row("Job:", &job.name, width));
-    } else {
-        let mut clash: Vec<&crate::jobs::Job> = others;
-        clash.push(job);
-        clash.sort_by(|a, b| a.name.cmp(&b.name));
-        let (none, fix) = if clash.len() == 2 {
-            ("neither", "Delete one with o to fire the other.")
-        } else {
-            ("none", "Delete all but one with o to fire it.")
-        };
-        let headline = format!("{} run this routine, so {none} fires", clash.len());
-        lines.extend(config_row("Jobs:", &headline, width));
-        // The names line up under the headline's text, two columns in, and
-        // the scopes line up three columns past the longest name.
-        let name_width = clash
-            .iter()
-            .map(|job| job.name.chars().count())
-            .max()
-            .unwrap_or(0);
-        let under = " ".repeat(CONFIG_INDENT.len() + LABEL_FIELD);
-        for job in &clash {
-            lines.push(format!(
-                "{under}  {:<name_width$}   {}",
-                job.name,
-                job.scope.label()
+    match on.as_slice() {
+        [] => lines.extend(config_row("Schedule:", "none", width)),
+        [job] => {
+            lines.extend(config_row("Schedule:", &job.spec.schedule, width));
+            lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
+            lines.extend(config_row("Scope:", job.scope.label(), width));
+            lines.extend(config_row("Next:", &super::jobs::detail_next(job), width));
+            lines.extend(config_row(
+                "Last:",
+                &super::jobs::detail_last(repo, &job.name),
+                width,
             ));
+            lines.extend(config_row("Job:", &job.name, width));
         }
-        lines.extend(wrapped(&under, fix, width));
+        several => lines.extend(routine_jobs_lines(several, width)),
     }
     lines.push(String::new());
+    lines
+}
+
+/// The `Jobs:` block for a routine two or more jobs run: a headline saying
+/// which of them fires, one row per job sorted by name with its scope and,
+/// when paused, `paused`, and the fix under them.
+///
+/// Every job is listed, paused ones too. Two enabled jobs fire neither, by
+/// [`crate::jobs::Job::clashing_jobs`], the rule the dispatcher skips them
+/// by. A paused one fires nowhere, but resuming it beside an enabled one
+/// stops both, so it is a job to delete as much as a clashing one is.
+fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
+    let mut on = on.to_vec();
+    on.sort_by(|a, b| a.name.cmp(&b.name));
+    let live: Vec<&&crate::jobs::Job> = on.iter().filter(|job| job.spec.enabled).collect();
+    let two = on.len() == 2;
+    let (headline, fix) = match live.as_slice() {
+        [] => (
+            format!("{} run this routine, all paused", on.len()),
+            if two {
+                "Delete one with o before resuming the other."
+            } else {
+                "Delete all but one with o before resuming it."
+            },
+        ),
+        [job] => (
+            format!("{} run this routine; only {} fires", on.len(), job.name),
+            if two {
+                "Delete the paused one with o, or resuming it stops both."
+            } else {
+                "Delete the paused ones with o, or resuming one stops both."
+            },
+        ),
+        _ => (
+            format!(
+                "{} run this routine, so {} fires",
+                on.len(),
+                if two { "neither" } else { "none" }
+            ),
+            if two {
+                "Delete one with o to fire the other."
+            } else {
+                "Delete all but one with o to fire it."
+            },
+        ),
+    };
+
+    let mut lines = config_row("Jobs:", &headline, width);
+    // The names sit two columns in under the headline's text, and the
+    // scopes line up three columns past the longest name. A row too wide
+    // for the pane puts its scope on a line of its own, further in, rather
+    // than letting the frame cut off which job and store it names.
+    let under = format!("{}  ", config_value_indent(width));
+    let name_width = on
+        .iter()
+        .map(|job| job.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for job in &on {
+        let scope = if job.spec.enabled {
+            job.scope.label().to_string()
+        } else {
+            format!("{}, paused", job.scope.label())
+        };
+        let row = format!("{under}{:<name_width$}   {scope}", job.name);
+        if row.chars().count() <= width {
+            lines.push(row);
+        } else {
+            lines.push(format!("{under}{}", job.name));
+            lines.push(format!("{under}  {scope}"));
+        }
+    }
+    lines.extend(wrapped(&config_value_indent(width), fix, width));
     lines
 }
 
@@ -8296,12 +8338,23 @@ fn routine_job_lines(
 /// edge. The task block under that line is moved in by the same amount.
 const CONFIG_INDENT: &str = "  ";
 
+/// Where a job config row's value starts: past the label column on a wide
+/// pane, two columns in from the label on a narrow one, where
+/// [`config_row`] puts the label on a line of its own.
+fn config_value_indent(width: usize) -> String {
+    if width < NARROW_RIGHT_PANE {
+        format!("{CONFIG_INDENT}  ")
+    } else {
+        " ".repeat(CONFIG_INDENT.len() + LABEL_FIELD)
+    }
+}
+
 /// One job config row: [`labeled_row`]'s layout, label column and narrow
 /// fallback included, at [`CONFIG_INDENT`] rather than a task row's indent.
 fn config_row(label: &str, value: &str, width: usize) -> Vec<String> {
     if width < NARROW_RIGHT_PANE {
         let mut lines = vec![format!("{CONFIG_INDENT}{label}")];
-        lines.extend(wrapped(&format!("{CONFIG_INDENT}  "), value, width));
+        lines.extend(wrapped(&config_value_indent(width), value, width));
         lines
     } else {
         wrapped(
@@ -11264,7 +11317,7 @@ fn still_queued_panel(live: &[LiveCopy], nav: &RoutineNav) -> Mode {
     }
 }
 
-/// `space` over the routines pane's own tasks pane: queue the highlighted
+/// `space` over a task in the routines pane's details: queue the highlighted
 /// task alone, under a minted id, with its `depends_on` emptied before
 /// [`validate_batch_undescribed`] ever sees it. Emptied here rather than left for
 /// [`check_dependencies_set`] to refuse: a solo pick names no sibling in
@@ -15898,7 +15951,7 @@ mod tests {
     }
 
     /// On the routines tab, `o` over the list offers new job then delete,
-    /// titled with the routine; over the tasks pane it offers open task,
+    /// titled with the routine; over the details pane it offers open task,
     /// titled with the task, and never open plan, even for a task with a
     /// `plan:`.
     #[test]
@@ -20993,7 +21046,7 @@ mod tests {
 
     /// A subfolder inside a routine is never a row of its own: the list is
     /// one row per folder directly under `.spoolway/routines/`, and the
-    /// nested task shows in its routine's tasks pane instead.
+    /// nested task shows in its routine's details pane instead.
     #[test]
     fn a_subfolder_is_no_row_and_its_tasks_show_under_its_routine() {
         let (repo, _root_guard) = fixture("routines-flat-list");
@@ -21499,7 +21552,20 @@ mod tests {
         assert!(job_names(&repo).is_empty());
     }
 
-    /// New job is offered only over the routine list: the tasks pane's menu
+    /// The details pane under `job saved` shows the job just written, not
+    /// the stores as they were read before the save.
+    #[test]
+    fn the_details_pane_under_job_saved_shows_the_new_job() {
+        let (repo, _root_guard) = fixture("routine-new-job-details");
+        seed_two_routines(&repo);
+
+        let saved = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r")).to_string();
+        assert!(saved.contains("─ job saved "), "{saved}");
+        assert!(saved.contains("Schedule:    0 3 * * 1-5"), "{saved}");
+        assert!(!saved.contains("Schedule:    none"), "{saved}");
+    }
+
+    /// New job is offered only over the routine list: the details pane's menu
     /// does not list it, and `down` then `enter` there still picks open task,
     /// its one item, rather than a schedule popup. Headless, so open task
     /// surfaces its refusal instead of opening an editor pane in a real
@@ -21750,10 +21816,12 @@ mod tests {
         .unwrap();
     }
 
-    /// The details pane for the first routine, 69 columns wide: the right
-    /// pane the routines tab's mockups draw inside their 100-column frame,
-    /// so a row wraps where the mockup wraps it.
-    fn details_at_mockup_width(repo: &Repo) -> Vec<String> {
+    /// The right pane the routines tab's mockups draw inside their
+    /// 100-column frame, so a row wraps where the mockup wraps it.
+    const MOCKUP_DETAILS_WIDTH: usize = 69;
+
+    /// The details pane for the first routine, `width` columns wide.
+    fn details_at(repo: &Repo, width: usize) -> Vec<String> {
         let routines = super::super::routines::list_routines(repo).unwrap();
         let routines_dir = repo.routines_dir();
         let pipelines = Pipelines::builtin();
@@ -21764,7 +21832,7 @@ mod tests {
             pipelines: &pipelines,
         };
         let jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
-        let (lines, _, _) = routine_details_lines(&panes, &jobs, &RoutineNav::new(), 69);
+        let (lines, _, _) = routine_details_lines(&panes, &jobs, &RoutineNav::new(), width);
         lines
             .into_iter()
             .map(|line| line.trim_end().to_string())
@@ -21803,8 +21871,15 @@ mod tests {
         );
         let job = &crate::jobs::load(&repo).unwrap()[0];
 
-        let pane = details_at_mockup_width(&repo);
-        let next = format!("  Next:        {}", super::super::jobs::detail_next(job));
+        // `Next:` is read off the clock, which can cross a firing between
+        // drawing the pane and working out the value here, so either side of
+        // the draw is accepted, and the row is then compared as the earlier.
+        let next = |when: String| format!("  Next:        {when}");
+        let before = next(super::super::jobs::detail_next(job));
+        let mut pane = details_at(&repo, MOCKUP_DETAILS_WIDTH);
+        let after = next(super::super::jobs::detail_next(job));
+        assert!(pane[4] == before || pane[4] == after, "{pane:#?}");
+        pane[4] = before.clone();
         assert_eq!(
             pane,
             [
@@ -21812,7 +21887,7 @@ mod tests {
                 "  Schedule:    0 */2 * * *",
                 "  Pipeline:    dependabot",
                 "  Scope:       project",
-                &next,
+                &before,
                 "  Last:        never",
                 "  Job:         dependabot-review",
                 "",
@@ -21866,7 +21941,7 @@ mod tests {
             "dependabot",
         );
 
-        let pane = details_at_mockup_width(&repo);
+        let pane = details_at(&repo, MOCKUP_DETAILS_WIDTH);
         assert_eq!(
             pane[..8],
             [
@@ -21883,10 +21958,10 @@ mod tests {
         );
     }
 
-    /// A paused job never fires, so it does not clash with the enabled job on
-    /// the same routine, whose config is drawn.
+    /// A paused job beside an enabled one on the same routine is listed with
+    /// it, marked paused: it fires nowhere, but resuming it stops both.
     #[test]
-    fn the_details_pane_draws_the_enabled_job_beside_a_paused_one() {
+    fn the_details_pane_lists_a_paused_job_beside_the_enabled_one() {
         let (repo, _root_guard) = fixture("routines-details-paused");
         write_dependabot_routine(&repo);
         crate::jobs::write(
@@ -21902,12 +21977,104 @@ mod tests {
         .unwrap();
         write_dependabot_job(&repo, crate::jobs::Scope::Project, "b-live", "dependabot");
 
-        let pane = details_pane(&repo);
-        assert!(
-            pane.contains(&"  Job:         b-live".to_string()),
+        let pane = details_at(&repo, MOCKUP_DETAILS_WIDTH);
+        assert_eq!(
+            pane[..7],
+            [
+                "",
+                "  Jobs:        2 run this routine; only b-live fires",
+                "                 a-paused   user, paused",
+                "                 b-live     project",
+                "               Delete the paused one with o, or resuming it stops",
+                "               both.",
+                "",
+            ],
             "{pane:#?}"
         );
-        assert!(!pane.iter().any(|row| row.contains("Jobs:")), "{pane:#?}");
+    }
+
+    /// On a narrow pane the clash block follows the job config's narrow
+    /// layout: the label on a line of its own and every job row inside the
+    /// pane, so the frame cuts neither a name nor its store.
+    #[test]
+    fn the_details_pane_keeps_a_clash_inside_a_narrow_pane() {
+        let (repo, _root_guard) = fixture("routines-details-clash-narrow");
+        write_dependabot_routine(&repo);
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::User,
+            "dependabot-weekly",
+            "dependabot",
+        );
+        write_dependabot_job(
+            &repo,
+            crate::jobs::Scope::Project,
+            "dependabot-review",
+            "dependabot",
+        );
+
+        let pane = details_at(&repo, 35);
+        assert_eq!(
+            pane[..9],
+            [
+                "",
+                "  Jobs:",
+                "    2 run this routine, so neither",
+                "    fires",
+                "      dependabot-review   project",
+                "      dependabot-weekly   user",
+                "    Delete one with o to fire the",
+                "    other.",
+                "",
+            ],
+            "{pane:#?}"
+        );
+        assert!(
+            pane.iter().all(|row| row.chars().count() <= 35),
+            "{pane:#?}"
+        );
+    }
+
+    /// A job row too wide for the pane even in the narrow layout puts its
+    /// scope on a line of its own rather than lose it off the pane's edge.
+    #[test]
+    fn a_job_row_too_wide_for_the_pane_puts_its_scope_under_its_name() {
+        let (repo, _root_guard) = fixture("routines-details-paused-narrow");
+        write_dependabot_routine(&repo);
+        for (scope, name) in [
+            (crate::jobs::Scope::User, "dependabot-weekly"),
+            (crate::jobs::Scope::Project, "dependabot-review"),
+        ] {
+            crate::jobs::write(
+                &repo,
+                scope,
+                name,
+                &crate::jobs::JobSpec {
+                    routine: "dependabot".to_string(),
+                    enabled: false,
+                    ..crate::jobs::JobSpec::neutral()
+                },
+            )
+            .unwrap();
+        }
+
+        let pane = details_at(&repo, 35);
+        assert_eq!(
+            pane[..10],
+            [
+                "",
+                "  Jobs:",
+                "    2 run this routine, all paused",
+                "      dependabot-review",
+                "        project, paused",
+                "      dependabot-weekly",
+                "        user, paused",
+                "    Delete one with o before",
+                "    resuming the other.",
+                "",
+            ],
+            "{pane:#?}"
+        );
     }
 
     /// Job stores that will not load still open the tab: one row names the
@@ -25279,7 +25446,7 @@ group_description: audit
                 assert!(hook_calls(&repo).is_empty());
             }
 
-            /// `space` on the routines tab's tasks pane — one task queued
+            /// `space` on the routines tab's details pane — one task queued
             /// alone — asks with the same checklist, and its group left
             /// unticked opens its ticket.
             #[test]
