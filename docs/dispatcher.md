@@ -650,7 +650,8 @@ An `enter` the resume refuses leaves the picker open and prints the reason above
 
 When the board cannot route the task for an `r`, the picker lists no steps and shows the reason. Its key line offers only `esc`, which closes it.
 
-Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
+Pausing an agent turn sends Escape to the pane. A resume picks the session back up on a step that
+declares `session: true`, and opens a fresh conversation on any other step. Pausing
 a command step kills the run, and the command runs again in full on resume. On a command step
 the panel says so in two lines above the answers: `Pausing terminates the command's process.`
 and `Resuming restarts the command.`

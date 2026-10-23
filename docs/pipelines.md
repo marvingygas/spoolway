@@ -243,7 +243,7 @@ flowchart LR
   D -->|pause| F[paused, for a person]
 ```
 
-The unblocker lane opens its own session on the `unblocker` prompt. The lane that stopped is continued only when the task goes back to its step, and then with everything it had read. A `gate:` on an
+The unblocker lane opens its own session on the `unblocker` prompt. The lane that stopped is continued only when the task goes back to its step and that step declares `session: true`, and then with everything it had read. A `gate:` on an
 agent step still waits for a person. A lane that keeps dying at launch is retried with a doubling
 delay, up to an hour.
 
