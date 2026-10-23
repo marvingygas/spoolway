@@ -101,8 +101,10 @@ writes a task into the pending directory works too.
 <img src="screenshots/plan.png" alt="a plan page written by /spoolway-plan">
 
 The plan page is one self-contained HTML file. A person reads it once to approve the shape.
-The binary never reads it. It lives outside the checkout, at
-`~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`.
+The binary never reads it. It lives outside the checkout, in the `plans:` folder that
+`spoolway config path` prints. In repo mode that is
+`~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`. In home mode it is the workspace's own
+`plans/`, shared by every clone of the workspace.
 
 Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
 the one sentence a person can approve or reject, then two or three sentences on what is true
@@ -159,8 +161,8 @@ no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-ta
 
 `space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
 name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
-instead. Only pages written after the time kept in `~/.spoolway/<label>-<id>/plans-since` are
-shown. Older pages stay off the screen.
+instead. Only pages written after the time kept in the `plans-since` file beside `plans/` are shown.
+In home mode that file is the workspace's, so every clone uses the same cutoff. Older pages stay off the screen.
 
 When the `plans/` folder cannot be read, the screen lists the groups without plan rows and
 shows a notice titled `plans not listed`. The notice names the read error. It appears once per

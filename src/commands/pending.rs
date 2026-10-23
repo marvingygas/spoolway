@@ -371,9 +371,9 @@ pub(crate) fn list_groups_and_skipped(repo: &Repo) -> Result<(Vec<Group>, Vec<Pa
     list_groups_in(repo, &mut guard, &mut parsed)
 }
 
-/// The file in [`Repo::home`] that holds when plan listing began, in
-/// nanoseconds since the epoch.
-pub(crate) const PLANS_SINCE: &str = "plans-since";
+/// The file beside the plans folder that holds when plan listing began, in
+/// nanoseconds since the epoch; see [`Repo::plans_since_file`].
+pub(crate) const PLANS_SINCE: &str = crate::config::PLANS_SINCE;
 
 /// One plan page that no task names, as the queue screen draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,21 +419,43 @@ fn nanos(at: std::time::SystemTime) -> u128 {
 /// clock tick. A stamp that does not read as a number is treated as missing.
 /// If it cannot be written the value is still used, and the next call tries
 /// again.
+///
+/// In home mode the stamp is the workspace's, shared by every clone. A new
+/// one is seeded from the oldest stamp any clone's dispatcher folder holds,
+/// because the clones listed plans from those folders before the workspace
+/// had a stamp of its own. Stamping the current time instead would hide every
+/// page already in the workspace's `plans/`, which are the pages people have
+/// been missing. Only a workspace whose clones hold no stamp uses the rule
+/// above.
 fn plans_since(repo: &Repo, any_page: bool) -> u128 {
-    let file = repo.home().join(PLANS_SINCE);
-    if let Some(since) = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-    {
+    let file = repo.plans_since_file();
+    if let Some(since) = read_stamp(&file) {
         return since;
     }
-    let since = if any_page {
-        nanos(std::time::SystemTime::now())
-    } else {
-        0
-    };
+    let since = oldest_clone_stamp(repo).unwrap_or_else(|| {
+        if any_page {
+            nanos(std::time::SystemTime::now())
+        } else {
+            0
+        }
+    });
     let _ = crate::task::write_atomic(&file, since.to_string());
     since
+}
+
+/// A stamp file's number, or `None` when it is missing or not a number.
+fn read_stamp(file: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(file).ok()?.trim().parse().ok()
+}
+
+/// The oldest `plans-since` among the dispatcher folders of `repo`'s
+/// workspace, or `None` in repo mode and when no folder holds a readable one.
+fn oldest_clone_stamp(repo: &Repo) -> Option<u128> {
+    let workspace = repo.workspace_dir()?;
+    std::fs::read_dir(workspace.join("dispatchers"))
+        .ok()?
+        .filter_map(|entry| read_stamp(&entry.ok()?.path().join(PLANS_SINCE)))
+        .min()
 }
 
 /// Every plan page that no pending, queued or archived task in `groups`
@@ -1990,7 +2012,7 @@ mod tests {
     /// The stamp is set to the earliest instant so only the behaviour under
     /// test decides what is listed.
     fn open_stamp(repo: &Repo) {
-        std::fs::write(repo.home().join(PLANS_SINCE), "1").unwrap();
+        std::fs::write(repo.plans_since_file(), "1").unwrap();
     }
 
     /// A page named by a pending, a queued or an archived task is not listed,
@@ -2030,6 +2052,69 @@ mod tests {
         assert_eq!(names(&repo), [".draft", "undated", "new", "old"]);
     }
 
+    /// A clone of a home-mode workspace: `home` is the dispatcher folder, so
+    /// `plans/` and `plans-since` resolve to the workspace root.
+    fn workspace_clone_repo(
+        name: &str,
+        dispatcher: &str,
+    ) -> (Repo, std::path::PathBuf, crate::scratch::ScratchRoot) {
+        let (mut repo, root) = crate::commands::testutil::fixture(name);
+        let workspace = root.join("ws");
+        repo.home = workspace.join("dispatchers").join(dispatcher);
+        std::fs::create_dir_all(&repo.home).unwrap();
+        (repo, workspace, root)
+    }
+
+    /// In home mode the pages and the cutoff are the workspace's, not the
+    /// clone's: a page in the workspace's `plans/` is listed, and the
+    /// dispatcher folder's own `plans/` is not read.
+    #[test]
+    fn a_home_mode_clone_lists_the_workspace_plans_folder() {
+        let (repo, workspace, _root) = workspace_clone_repo("pending-plans-ws", "a");
+        assert_eq!(repo.plans_dir(), workspace.join("plans"));
+        assert_eq!(repo.plans_since_file(), workspace.join("plans-since"));
+        open_stamp(&repo);
+        plan_pages(&repo, &["2026-01-01-shared.html"]);
+        let other = Repo {
+            home: workspace.join("dispatchers").join("b"),
+            ..repo.clone()
+        };
+
+        assert_eq!(names(&repo), ["shared"]);
+        assert_eq!(names(&other), ["shared"]);
+    }
+
+    /// A workspace with no stamp of its own takes the oldest one a clone
+    /// holds, so a page already in the workspace root is listed rather than
+    /// hidden by a stamp written now.
+    #[test]
+    fn a_new_workspace_stamp_is_seeded_from_the_oldest_clone_stamp() {
+        let (repo, workspace, _root) = workspace_clone_repo("pending-plans-seed", "a");
+        std::fs::write(repo.home.join(PLANS_SINCE), "50").unwrap();
+        let younger = workspace.join("dispatchers").join("b");
+        std::fs::create_dir_all(&younger).unwrap();
+        std::fs::write(younger.join(PLANS_SINCE), "0").unwrap();
+        std::fs::write(workspace.join("dispatchers/c-unreadable"), "").unwrap();
+        plan_pages(&repo, &["2026-01-01-waiting.html"]);
+
+        assert_eq!(names(&repo), ["waiting"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.plans_since_file()).unwrap(),
+            "0"
+        );
+    }
+
+    /// With no clone stamp at all, a workspace that already has pages stamps
+    /// the current time, the same as repo mode.
+    #[test]
+    fn a_workspace_with_no_clone_stamp_stamps_the_current_time() {
+        let (repo, _workspace, _root) = workspace_clone_repo("pending-plans-noseed", "a");
+        plan_pages(&repo, &["2026-01-01-before.html"]);
+
+        assert!(names(&repo).is_empty());
+        assert!(read_stamp(&repo.plans_since_file()).unwrap() > 1);
+    }
+
     /// Only an exact path counts: a task naming another folder's page of the
     /// same file name does not hide this one.
     #[test]
@@ -2052,7 +2137,7 @@ mod tests {
         let (repo, _root) = crate::commands::testutil::fixture("pending-plans-stamp");
         plan_pages(&repo, &["2026-01-01-before.html"]);
         let stamp = nanos(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
-        std::fs::write(repo.home().join(PLANS_SINCE), stamp.to_string()).unwrap();
+        std::fs::write(repo.plans_since_file(), stamp.to_string()).unwrap();
 
         assert!(names(&repo).is_empty());
         open_stamp(&repo);
@@ -2065,11 +2150,11 @@ mod tests {
     fn the_first_listing_stamps_after_the_pages_already_there() {
         let (repo, _root) = crate::commands::testutil::fixture("pending-plans-first");
         plan_pages(&repo, &["2026-01-01-before.html"]);
-        assert!(!repo.home().join(PLANS_SINCE).exists());
+        assert!(!repo.plans_since_file().exists());
 
         assert!(names(&repo).is_empty());
 
-        assert!(repo.home().join(PLANS_SINCE).exists());
+        assert!(repo.plans_since_file().exists());
         std::thread::sleep(std::time::Duration::from_millis(15));
         plan_pages(&repo, &["2026-01-02-after.html"]);
         assert_eq!(names(&repo), ["after"]);

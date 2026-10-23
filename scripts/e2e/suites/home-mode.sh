@@ -80,6 +80,11 @@ works "config path lists the workspace this checkout joined, its config/ and its
   'any(.workspaces[]; .name == $name and .config == $config and .clones == 1 and (has("error") | not))' \
   "$CONFIG_PATH"
 
+# The plans folder is the workspace's own, whichever clone asks, so the
+# planning skills can read it from here instead of building a path.
+says "config path names the workspace's plans folder" "plans:     $WS/plans" \
+  "$SPOOLWAY" config path
+
 # ------------------------------------------------------- one real pass
 BODY="$LIVE/body.md"
 task_body "$BODY"

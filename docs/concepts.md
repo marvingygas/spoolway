@@ -87,6 +87,12 @@ Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place
 `~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the
 checkout's own `.git`.
 
+Plan pages are the exception. They belong to the workspace, so every clone lists the pages in
+the workspace's own `plans/` folder, beside `config/` and `dispatchers/`. One `plans-since`
+file sits beside it. When the workspace has none yet, it is written from the oldest
+`plans-since` any clone's dispatcher folder holds, so pages people were already waiting on
+stay listed. `spoolway config path` prints the folder on its `plans:` line.
+
 The workspace's project jobs fire once for all its clones. Their firing record is the
 workspace's own `jobs.state.json`. See [Jobs](jobs.md#a-project-job-in-a-home-mode-workspace).
 

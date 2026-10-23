@@ -6622,7 +6622,7 @@ impl IdleCheck {
             &[
                 repo.archive_dir(),
                 repo.plans_dir(),
-                repo.home().join(super::pending::PLANS_SINCE),
+                repo.plans_since_file(),
             ]
             .into_iter()
             .chain(head)
@@ -14345,7 +14345,7 @@ mod tests {
         let mut idle = IdleCheck::default();
         let git_runs = || crate::repo::runs_here_under(&repo.root);
         let file_reads = || super::pending::pending_reads_here_under(&repo.pending_dir());
-        let since = repo.home().join(super::pending::PLANS_SINCE);
+        let since = repo.plans_since_file();
         std::fs::write(&since, "0").unwrap();
         for dir in [
             repo.pending_dir(),
@@ -17768,7 +17768,7 @@ mod tests {
     /// the last so creation times order the pages. The `plans-since` stamp
     /// is set to the earliest instant, so the page's time never hides it.
     fn plan_page(repo: &Repo, file: &str) -> String {
-        std::fs::write(repo.home().join("plans-since"), "1").unwrap();
+        std::fs::write(repo.plans_since_file(), "1").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
         let path = repo.plans_dir().join(file);
         std::fs::write(&path, "<html></html>").unwrap();

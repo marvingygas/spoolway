@@ -47,6 +47,9 @@ pub const JOBS_STORE: &str = "jobs.toml";
 pub const QUEUE_DIR: &str = "queue";
 pub const ARCHIVE_DIR: &str = "archive";
 pub const PLANS_DIR: &str = "plans";
+/// The file beside `plans/` holding when plan listing began; see
+/// [`crate::repo::Repo::plans_since_file`].
+pub const PLANS_SINCE: &str = "plans-since";
 pub const PENDING_DIR: &str = "pending";
 
 /// Directory under the project's home holding one scratch worktree per task,
