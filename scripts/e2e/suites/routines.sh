@@ -11,8 +11,9 @@
 # bodies untouched, that save as routine copies a pending group's documents back
 # into the checkout, that delete removes a routine with the jobs that point
 # into it, that new job saves a job for a routine to the user store, that
-# the details pane draws a routine's job above its tasks, and that the
-# routine's options menu pauses, resumes, edits and deletes that job. No
+# the details pane draws a routine's job above its tasks, that the
+# routine's options menu pauses, resumes, edits and deletes that job, and
+# that a job whose routine is gone gets a row of its own to delete it from. No
 # `new_forge`/`install_agents` needed for the same reason `trials.sh` needs
 # none.
 #
@@ -349,6 +350,49 @@ on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\r' /dev/null
 lacks "delete job then enter deletes the job" "[jobs.release]" "$USER_STORE"
 works "and leaves the routine" test -d .spoolway/routines/release
 has "and every other job" "[jobs.weekly-prune]" "$USER_STORE"
+
+# A job whose routine is gone gets a row of its own under the routines, after
+# a blank line: `nightly` was deleted above, so a job still naming it is
+# missing. The folders sort `archived-reuse`, `maintenance`, `release`, so
+# `jjj` puts the cursor on the job's row, whose details say why it never
+# fires and whose key line is `o` and `q` alone.
+cat >>"$USER_STORE" <<'EOF'
+
+[jobs.nightly-old]
+schedule = "0 3 * * 1-5"
+pipeline = "bugfix"
+routine = "nightly"
+EOF
+ORPHAN="$LIVE/routine-orphan.txt"
+on_screen '\x1b[Cjjj' "$ORPHAN"
+sed 's/\x1b\[[0-9;]*m//g' "$ORPHAN" >"$ORPHAN.plain"
+has "a job without a routine gets a row named after its routine" "> nightly    " "$ORPHAN.plain"
+has "marked missing at the row's edge" "missing" "$ORPHAN.plain"
+has "its details say it never fires" "never, its routine is missing" "$ORPHAN.plain"
+has "and why" "No routine nightly under .spoolway/routines/." "$ORPHAN.plain"
+has "and what to do" "Press o to point this job at a routine, or delete it." "$ORPHAN.plain"
+has "its key line is options and quit" "[o] options   [q] quit" "$ORPHAN.plain"
+
+# The row takes no tick and queues nothing: `space` ticks `archived-reuse`,
+# `jjj` moves onto the job's row, and `space` and `enter` there do nothing,
+# so the ticked routine is not queued unseen.
+QUEUED_BEFORE=$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)
+on_screen '\x1b[C jjj \r' /dev/null
+works "space and enter on the job's row queue nothing" \
+  test "$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)" -eq "$QUEUED_BEFORE"
+
+# Its menu offers edit job and delete job, and nothing a routine offers.
+MENU="$LIVE/routine-orphan-menu.txt"
+on_screen '\x1b[Cjjjo' "$MENU"
+sed 's/\x1b\[[0-9;]*m//g' "$MENU" >"$MENU.plain"
+has "the job's row offers edit job" "> edit job" "$MENU.plain"
+has "and delete job" "delete job" "$MENU.plain"
+lacks "and never delete routine" "delete routine" "$MENU.plain"
+
+# Delete job (`o`, down, `enter`) asks, and `enter` deletes the job alone.
+on_screen '\x1b[Cjjjo\x1b[B\r\r' /dev/null
+lacks "delete job on the job's row deletes it" "[jobs.nightly-old]" "$USER_STORE"
+has "and leaves every other job" "[jobs.weekly-prune]" "$USER_STORE"
 
 # A routine folder holding a file that will not parse is refused whole, and
 # the refusal names the file: queueing it any other way would leave the

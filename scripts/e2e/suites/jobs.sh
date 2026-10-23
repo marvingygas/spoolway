@@ -313,7 +313,7 @@ else
 fi
 tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/stopped-board.out"
 # With no dispatcher up nothing will fire, so the stopped board lists no job;
-# the jobs tab still lists every job and its next firing.
+# the routines tab still shows each routine's job and its next firing.
 lacks "the stopped empty board leaves the job ledger off" "2 active" \
   "$LIVE/stopped-board.out"
 
