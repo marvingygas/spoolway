@@ -402,6 +402,10 @@ has "naming the step that still runs it, pipeline first" \
   "Still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
+lacks "sync dropped the retired backend line the 0.6.0 fixture carried" \
+  "backend = " .spoolway/config.toml
+lacks "and its row in the reference header" \
+  "dispatch.backend" .spoolway/config.toml
 
 has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml

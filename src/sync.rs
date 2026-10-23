@@ -3849,7 +3849,10 @@ mod tests {
         config(&repo, &args(), &mut outcomes).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
-        assert!(after.contains("backend = \"headless\""));
+        assert!(
+            !after.contains("backend"),
+            "the retired key is dropped: {after}"
+        );
         assert!(after.contains("lane_quiet = \"45m\""));
         assert!(after.contains("auto_commit"));
         // The explanation is not a comment standing above the key any more —
@@ -4219,7 +4222,7 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(!after.contains("interval"), "{after}");
-        assert!(after.contains("backend = \"headless\""), "{after}");
+        assert!(!after.contains("backend"), "{after}");
         assert!(
             crate::config::Config::load(&repo.root).is_ok(),
             "the rewritten file must load cleanly now that the key is gone"

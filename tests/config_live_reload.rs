@@ -91,7 +91,7 @@ impl Project {
             .current_dir(&self.root)
             .env("HOME", self.base().join("home"))
             .env("PATH", path)
-            .env("SPOOLWAY_TEST_BACKEND", "1")
+            .env("SPOOLWAY_TEST_BACKEND", "headless")
             .env("STAND_IN_LOG", self.log())
             .env("STAND_IN_STOP", self.base().join("stop"))
             .env("SPOOLWAY_UNDER_TEST", env!("CARGO_BIN_EXE_spoolway"));
@@ -175,7 +175,6 @@ impl Project {
 
     fn set_up(&self) {
         self.run(&["init", "--yes"]);
-        self.run(&["config", "set", "dispatch.backend", "headless"]);
         self.run(&["config", "set", "agents.claude.concurrency", "1"]);
         let pipelines = self.root.join(".spoolway/pipelines");
         for entry in fs::read_dir(&pipelines).expect("read pipelines") {

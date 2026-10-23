@@ -636,21 +636,51 @@ pub trait Mux: Sync {
     }
 }
 
+/// Whether this process runs lanes on the headless backend.
+///
+/// Only the end-to-end harness asks for it, by exporting
+/// `SPOOLWAY_TEST_BACKEND=headless`. Any other value, or none, means herdr.
+/// There is no config key for it: a person can only ever run herdr, and a
+/// setting that chose headless would be one more way to start a run that
+/// nothing draws anywhere they can see. The unit tests cannot export a
+/// variable without racing every other test in the process, so they ask for
+/// it through [`force_headless_for_test`] instead.
+pub(crate) fn headless_requested() -> bool {
+    #[cfg(test)]
+    if FORCE_HEADLESS.with(std::cell::Cell::get) {
+        return true;
+    }
+    crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).as_deref() == Ok("headless")
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_HEADLESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make [`headless_requested`] answer yes on the calling thread, for the
+/// rest of the test. A test runs on its own thread, so this reaches no other
+/// test.
+#[cfg(test)]
+pub(crate) fn force_headless_for_test() {
+    FORCE_HEADLESS.with(|f| f.set(true));
+}
+
 /// The backend this project dispatches through.
 ///
 /// The one place a concrete backend is named. Everything downstream — the
 /// dispatcher, `doctor` — works through [`Mux`], which is what
-/// makes `backend = "headless"` a config edit rather than a code path.
+/// keeps the headless backend a harness switch rather than a code path.
 pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
     let root = &repo.root;
-    let config = &repo.config;
-    Ok(match config.dispatch.backend {
-        crate::config::Backend::Herdr => Box::new(Herdr::new(root, &repo.checkout, &repo.home)),
-        crate::config::Backend::Headless => Box::new(crate::headless::Headless::new(
+    Ok(if headless_requested() {
+        Box::new(crate::headless::Headless::new(
             root,
             &repo.home,
             repo.headless_dir(),
-        )),
+        ))
+    } else {
+        Box::new(Herdr::new(root, &repo.checkout, &repo.home))
     })
 }
 
@@ -3616,6 +3646,21 @@ fn resolve_lane_name(wire: &str, alias_lane: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::platform::PathExt;
+
+    /// Only the value `headless` picks the headless backend. The harness's
+    /// other marker value, and an unset variable, both run herdr. Before the
+    /// choice moved to the variable, a config key decided it and `1` was
+    /// enough to arm the test gates, so a harness still exporting `1` would
+    /// have been read as asking for headless if this compared presence alone.
+    #[test]
+    fn only_the_value_headless_picks_the_headless_backend() {
+        use crate::platform::test_env::with_env;
+        let var = crate::headless::TEST_BACKEND_ENV;
+        assert!(with_env(var, "headless", headless_requested));
+        for other in ["1", "herdr", "", "HEADLESS"] {
+            assert!(!with_env(var, other, headless_requested), "{other:?}");
+        }
+    }
 
     /// Captured from `herdr pane layout --pane w5S:p19` against herdr as it
     /// ships: the rects live under `layout.panes[].rect`, and a reader that

@@ -682,7 +682,7 @@ lane_on_record() {
 E2E_DISPATCH_MAX_ROUNDS=${E2E_DISPATCH_MAX_ROUNDS:-60}
 
 # What the dispatcher holds from when it started. Pipelines, and the few
-# config keys it fixes at start (`dispatch.backend`, `unattended.enabled`,
+# config keys it fixes at start (`unattended.enabled`,
 # `unattended.blocked_*`), are read once; the rest of config.toml is read again
 # every pass, so a restart over it costs time and changes nothing.
 #

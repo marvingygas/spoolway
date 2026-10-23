@@ -62,16 +62,15 @@ pub(crate) fn logs_dir_in(lane_dir: &Path) -> PathBuf {
     lane_dir.join(LOGS_DIR)
 }
 
-/// The environment variable that has to be set for `spoolway dispatch` to
-/// run this backend at all — see `commands::dispatch::check_dispatcher_visible`.
+/// The environment variable that picks this backend: `headless` runs lanes on
+/// it, and any other value, or none, runs herdr — see `crate::mux::backend`.
 ///
 /// This backend runs no multiplexer, so nothing draws the board anywhere a
 /// person could see it; every end-to-end suite needs exactly that, since CI
-/// has no multiplexer to run herdr against, but a project config edited onto
-/// `headless` by mistake would otherwise start a run just as invisible as
-/// one begun outside a herdr pane. `fixture.sh` and `scaffold.sh` export
-/// this beside `dispatch.backend = "headless"`, which is the harness saying
-/// it means it.
+/// has no multiplexer to run herdr against. There is no config key for it, so
+/// a project cannot be edited onto an invisible run by mistake. `fixture.sh`
+/// and `scaffold.sh` export `headless` here, which is the harness saying it
+/// means it. A few suites export another value for a stretch to run herdr.
 pub(crate) const TEST_BACKEND_ENV: &str = "SPOOLWAY_TEST_BACKEND";
 
 /// Marks a workspace that owns the checkout under it, and may therefore have it
@@ -472,11 +471,10 @@ pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u3
 
 /// Why this backend refuses to start anywhere but Unix, and what to do
 /// instead — the same shape [`crate::mux::Herdr::unavailable`] already
-/// answers with: what is missing, and the `dispatch.backend` that works in
-/// its place.
+/// answers with: what is missing, and what works in its place.
 const NOT_UNIX: &str = "headless lanes need `libc::setsid()` to detach a turn, and this \
-     platform has no such syscall. Dispatch through a multiplexer instead: set \
-     `dispatch.backend = \"herdr\"`.";
+     platform has no such syscall. Dispatch through a multiplexer instead: leave \
+     `SPOOLWAY_TEST_BACKEND` unset or set to anything but `headless`.";
 
 /// Spawn `sh -c script` detached in `cwd`: `libc::setsid()`, called in the
 /// child between fork and exec — see [`crate::command_step`]'s own copy of
@@ -884,7 +882,7 @@ impl Mux for Headless {
             bail!(
                 "`{}` cannot run headless: spoolway does not know how to hand it a prompt and \
                  reopen its session. Run this project under a multiplexer \
-                 (`dispatch.backend = \"herdr\"`), or use one of the kinds that \
+                 (leave `SPOOLWAY_TEST_BACKEND` unset), or use one of the kinds that \
                  can: {}",
                 spec.kind,
                 headless_kinds()
@@ -1798,7 +1796,7 @@ mod tests {
         let message = refused.unwrap_err().to_string();
         assert!(message.contains("cannot run headless"), "{message}");
         // And it says what to do instead, both ways.
-        assert!(message.contains("herdr"), "{message}");
+        assert!(message.contains("SPOOLWAY_TEST_BACKEND"), "{message}");
         assert!(message.contains("pi"), "{message}");
     }
 

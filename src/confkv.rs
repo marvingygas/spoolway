@@ -49,13 +49,6 @@ const TIER_RATE_KEY: &str = "models.<glob>.above_<N>k_tokens.<rate>";
 /// them.
 pub const REFERENCE: &[Reference] = &[
     Reference {
-        key: "dispatch.backend",
-        values: "herdr, headless",
-        default: "herdr",
-        sentence: "Where lanes run: a real pane you can watch. `headless` is spoolway's own \
-                    test backend, refused unless SPOOLWAY_TEST_BACKEND is set.",
-    },
-    Reference {
         key: "dispatch.lane_quiet",
         values: "<duration>",
         default: "15m",
@@ -897,15 +890,9 @@ impl ValueProblem {
 /// allowed — for `spoolway config set` only.
 ///
 /// Not part of [`set`], which the override layer also loads through: that
-/// layer has to keep accepting what the loader accepts, such as a
-/// `dispatch.backend = "tmux"` that has always loaded as herdr. Typed text is
-/// the one place a value saved as a different one than typed can be stopped.
+/// layer has to keep accepting what the loader accepts. Typed text is the one
+/// place a value saved as a different one than typed can be stopped.
 pub fn check_typed(key: &str, input: &str) -> Result<()> {
-    // Deserialising accepts the retired `tmux` and would save `herdr`, a
-    // different value from the one typed.
-    if key == "dispatch.backend" {
-        crate::config::Backend::parse_typed(input).with_context(|| key.to_string())?;
-    }
     // Zero is how the struct spells "unset", so the range cannot be held there:
     // a typed `0` would be saved as a key left out, a different statement from
     // the one made.
@@ -1472,6 +1459,18 @@ mod tests {
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 
+    /// `dispatch.backend` retired the way `tmux_mode` did: the field stays on
+    /// `DispatchConfig` so an old file parses, but it left `REFERENCE`, so
+    /// `get` and `set` refuse it as an unknown key.
+    #[test]
+    fn backend_is_refused_rather_than_resolved() {
+        let config = Config::default();
+        let err = get(&config, "dispatch.backend").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
+        let err = set(&config, "dispatch.backend", "headless").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
+    }
+
     /// `visible_lanes` is a count or `all`, written even while it is 3, and
     /// `0` is refused with the wording a person is told to act on.
     #[test]
@@ -1936,26 +1935,6 @@ mod tests {
         // Durations are validated by the real deserialiser, not by this module.
         assert!(set(&config, "dispatch.lane_quiet", "every so often").is_err());
         assert!(set(&config, "dispatch.lane_quiet", "5m").is_ok());
-    }
-
-    #[test]
-    fn a_backend_that_cannot_be_saved_as_typed_is_refused_naming_the_allowed_ones() {
-        let config = Config::default();
-
-        for typed in ["tmux", "zellij"] {
-            let err = format!("{:#}", check_typed("dispatch.backend", typed).unwrap_err());
-            assert!(
-                err.contains("not a backend — use herdr or headless"),
-                "{err}"
-            );
-        }
-        check_typed("dispatch.backend", "headless").unwrap();
-        // `set` itself still accepts what the loader does, so the override
-        // layer's `tmux` keeps loading, as herdr.
-        let updated = set(&config, "dispatch.backend", "tmux").unwrap();
-        assert_eq!(get(&updated, "dispatch.backend").unwrap(), "herdr");
-        let updated = set(&config, "dispatch.backend", "headless").unwrap();
-        assert_eq!(get(&updated, "dispatch.backend").unwrap(), "headless");
     }
 
     #[test]

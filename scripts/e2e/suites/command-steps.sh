@@ -860,7 +860,9 @@ export HERDR_STUB_STATE="$HSTATE"
 PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
-must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+# Any value but `headless` runs herdr, here the double above; `1` also keeps
+# the test-only gates open, as the harness's own export does.
+export SPOOLWAY_TEST_BACKEND=1
 # Commands are shown by default, which opens a pane; the cases below are about
 # that pane, so they read the default and set nothing.
 
@@ -1357,7 +1359,7 @@ must "the failing-pane task is taken back out before its pipeline goes" \
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
-must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
+export SPOOLWAY_TEST_BACKEND=headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
   .spoolway/pipelines/paneoverride.yml .spoolway/pipelines/paneflaky.yml
 
@@ -1386,7 +1388,9 @@ export HERDR_STUB_STATE="$HSTATE"
 PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
-must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+# Any value but `headless` runs herdr, here the double above; `1` also keeps
+# the test-only gates open, as the harness's own export does.
+export SPOOLWAY_TEST_BACKEND=1
 
 # A real project home is `~/.spoolway/<label>-<id>/`, a good deal longer than
 # the short paths this suite lives under, and every path in a paned step's
@@ -1540,7 +1544,7 @@ unset SPOOLWAY_E2E_PANE_ENV_MARKER SPOOLWAY_E2E_PANE_BULK
 export HOME="$REAL_HOME"
 export SPOOLWAY_PROJECT_HOME="$REAL_PROJECT_HOME"
 rm -f .spoolway/pipelines/herdrpane.yml
-must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
+export SPOOLWAY_TEST_BACKEND=headless
 # Every pane of the double is a real shell with a real process holding its
 # fifo open. A suite that walked away would leave both behind. All of this
 # teardown runs *before* `dispatcher_restart` below: that call starts the

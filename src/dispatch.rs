@@ -6354,7 +6354,7 @@ impl<'a> Dispatcher<'a> {
     ///
     /// Falls back to the old detached run whenever the backend has none to
     /// offer: [`crate::mux::Mux::run_in_pane`] answers `None` for headless,
-    /// which is what makes `backend = "headless"` silently keep working —
+    /// which is what makes the headless backend silently keep working —
     /// nothing here treats a declined pane as a problem to report.
     ///
     /// `run_in_pane` is handed the dispatcher's own environment as an
@@ -10173,7 +10173,7 @@ mod tests {
             self
         }
         /// A backend whose lanes do not survive between turns — what
-        /// `backend = "headless"` is.
+        /// the headless backend is.
         fn detached(mut self) -> FakeMux {
             self.resident = false;
             self
@@ -27395,8 +27395,8 @@ mod tests {
     /// `done`, and the task waiting on it is no longer held back.
     #[test]
     fn a_task_closed_as_done_by_hand_is_archived_and_frees_its_dependent() {
-        let (mut repo, _root_guard) = fixture("close-as-done");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-as-done");
+        crate::mux::force_headless_for_test();
         let path = add_task_with(&repo, "parent", crate::pipeline::BLOCKED, |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/parent".into());

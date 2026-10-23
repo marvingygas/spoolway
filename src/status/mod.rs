@@ -11665,9 +11665,9 @@ mod tests {
     /// the only thing a done row with no `plan:` offers.
     #[test]
     fn the_cursor_reaches_a_done_row_and_its_menu_opens_its_task() {
-        let (mut repo, _root_guard) = fixture("cursor-reaches-done-row");
+        let (repo, _root_guard) = fixture("cursor-reaches-done-row");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
@@ -12866,8 +12866,8 @@ mod tests {
     /// back onto its step to continue its session, and spends the mark.
     #[test]
     fn a_stop_interrupt_ends_a_live_agent_turn_and_the_next_start_resumes_it() {
-        let (mut repo, _root_guard) = fixture("stop-interrupt-live-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("stop-interrupt-live-lane");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -13695,8 +13695,8 @@ mod tests {
     /// still exactly what it was when the panel opened.
     #[test]
     fn picking_pause_on_a_live_agent_lane_names_the_turn_and_lists_its_answers() {
-        let (mut repo, _root_guard) = fixture("pause-cursor-agent-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("pause-cursor-agent-lane");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -13761,8 +13761,8 @@ mod tests {
     /// rather than trusting whatever `status::Reader` already had on hand.
     #[test]
     fn picking_pause_opens_the_pause_panel_for_a_lane_that_started_after_the_last_reading() {
-        let (mut repo, _root_guard) = fixture("pause-panel-after-stale-reading");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("pause-panel-after-stale-reading");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -13791,8 +13791,8 @@ mod tests {
     /// `s`, the letter that used to schedule it, does nothing.
     #[test]
     fn pausing_when_the_step_finishes_schedules_a_gate_and_leaves_the_lane_running() {
-        let (mut repo, _root_guard) = fixture("schedule-pause-cursor");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("schedule-pause-cursor");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -13927,8 +13927,8 @@ mod tests {
     #[test]
     fn every_row_popup_titles_a_routine_copy_by_its_routine() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("routine-popup-titles");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("routine-popup-titles");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         let queue_copy = |id: &str, stage: Option<&str>, routine: &str| {
             add_to(&repo, id, &[], stage, Some(id));
@@ -13984,8 +13984,8 @@ mod tests {
     /// running, and the panel names the step and the lane it would end.
     #[test]
     fn picking_restart_opens_the_restart_panel() {
-        let (mut repo, _root_guard) = fixture("restart-panel-opens");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-opens");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
@@ -14038,8 +14038,8 @@ mod tests {
     #[test]
     fn esc_on_the_restart_panel_changes_nothing() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-esc");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-esc");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
@@ -14061,8 +14061,8 @@ mod tests {
     #[test]
     fn confirming_the_restart_panel_restarts_the_step() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-confirm");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-confirm");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
@@ -14083,8 +14083,8 @@ mod tests {
     #[test]
     fn a_task_moved_to_another_step_is_not_restarted_from_a_stale_panel() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-moved");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-moved");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
@@ -14118,8 +14118,8 @@ mod tests {
     #[test]
     fn a_refused_restart_keeps_the_panel_open_with_the_error() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-refused");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-refused");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = live_headless_lane(&repo);
@@ -14157,8 +14157,8 @@ mod tests {
     #[test]
     fn confirming_the_restart_panel_on_a_command_step_stops_its_run() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-command");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-command");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -14195,8 +14195,8 @@ mod tests {
     #[test]
     fn a_command_step_moved_on_is_not_restarted_from_a_stale_panel() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-command-moved");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-command-moved");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -14234,8 +14234,8 @@ mod tests {
     #[test]
     fn the_restart_panel_names_what_the_running_dispatchers_copy_restarts() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-command-routed");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-command-routed");
+        crate::mux::force_headless_for_test();
         let loaded = Pipelines::builtin();
         let mut edited = loaded.clone();
         edited
@@ -14274,8 +14274,8 @@ mod tests {
     #[test]
     fn a_restart_the_running_dispatchers_copy_refuses_says_so_in_its_panel() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("restart-panel-routed-refused");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("restart-panel-routed-refused");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         let mut loaded = pipelines.clone();
         let default = loaded.pipelines.remove("default").unwrap();
@@ -14350,8 +14350,8 @@ mod tests {
     #[test]
     fn answering_a_scheduled_pause_again_cancels_it() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("schedule-pause-toggle");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("schedule-pause-toggle");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (_mux, _name) = live_headless_lane(&repo);
@@ -14397,8 +14397,8 @@ mod tests {
     #[test]
     fn cancelling_a_pause_already_gone_leaves_it_gone() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("schedule-pause-gone");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("schedule-pause-gone");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -14796,9 +14796,9 @@ mod tests {
     /// the task file is left exactly as it was.
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
-        let (mut repo, _root_guard) = fixture("open-key-headless");
+        let (repo, _root_guard) = fixture("open-key-headless");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let before = std::fs::read_to_string(repo.task("login").unwrap().path).unwrap();
@@ -14890,8 +14890,8 @@ mod tests {
     /// column carries no loop counter across it.
     #[test]
     fn picking_pause_then_r_round_trips_a_task_without_banking_a_lap() {
-        let (mut repo, _root_guard) = fixture("park-round-trip");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("park-round-trip");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -15081,8 +15081,8 @@ mod tests {
     #[test]
     fn picking_pause_on_a_blocked_row_with_a_live_unblocker_interrupts_it_and_resumes_onto_blocked()
     {
-        let (mut repo, _root_guard) = fixture("pause-blocked-live-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("pause-blocked-live-lane");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
         let mut task = repo.task("stuck").unwrap();
@@ -15486,8 +15486,8 @@ mod tests {
     #[test]
     fn the_removed_row_keys_do_nothing_on_the_board() {
         use crate::screen::Key;
-        let (mut repo, _root_guard) = fixture("removed-row-keys");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("removed-row-keys");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add_to(&repo, "month-instant", &[], None, Some("month-instant"));
         add(&repo, "login", &[], Some("implement"));
@@ -16041,8 +16041,8 @@ mod tests {
     /// `done`. Moving down onto it and pressing `enter` closes the task.
     #[test]
     fn a_blocked_tasks_picker_ends_with_a_done_row_that_closes_it() {
-        let (mut repo, _root_guard) = fixture("picker-close");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("picker-close");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "b-noop", &[], None);
         let mut task = repo.task("b-noop").unwrap();
@@ -16194,8 +16194,8 @@ mod tests {
     /// counts for nothing because the task is no longer on its step.
     #[test]
     fn a_reroute_off_a_park_keeps_the_parked_steps_lane() {
-        let (mut repo, _root_guard) = fixture("picker-reroute-park");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("picker-reroute-park");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let (mux, name) = settled_headless_lane(&repo);

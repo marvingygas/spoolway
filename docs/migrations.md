@@ -61,6 +61,12 @@ Run `spoolway sync` in each project and commit what it writes. It renames `headl
 drops `housekeeping.price_max_age_days` and takes the new planning and calibrate skills. Then read
 the notes `spoolway doctor` prints, work through the list, and restart the dispatcher.
 
+- `dispatch.backend` is retired. Every run uses herdr, and only the end-to-end harness picks the
+  headless backend, by exporting `SPOOLWAY_TEST_BACKEND=headless`. A config that still holds
+  `backend = "herdr"` or `backend = "headless"` loads without a note, and `spoolway sync` drops the
+  line and its row in the reference header. `spoolway config get` and `config set` refuse the key,
+  as they do `dispatch.tmux_mode`. A script that ran `spoolway config set dispatch.backend headless`
+  must export `SPOOLWAY_TEST_BACKEND=headless` instead.
 - A step's `headless:` key is now `hide:`. The new release refuses `headless:` with any value,
   naming the step. `spoolway sync` renames `headless: true` to `hide: true` in the checkout's
   pipeline files, the private patches and the private pipelines. It deletes `headless: false`

@@ -435,10 +435,6 @@ spoolway config set unattended.blocked_prompt unblocker
 spoolway config set unattended.blocked_model "$MODEL"
 spoolway config set unattended.blocked_session true
 
-if [ "$HEADLESS" = 1 ]; then
-  spoolway config set dispatch.backend headless
-fi
-
 # What the plan itself asks for. Every `config: <key> <value>` line in the plan
 # file is applied here, which is how one plan runs with a session share of 5%
 # and another with a different concurrency without either of them needing a
@@ -466,15 +462,15 @@ say "checking what was installed"
 spoolway pipeline check
 spoolway doctor || true
 
-# `spoolway dispatch` refuses `backend = headless` outright unless this is
-# set — the backend draws nowhere a person can see, so only a harness with no
+# `SPOOLWAY_TEST_BACKEND=headless` is the only way to pick the headless
+# backend, which draws nowhere a person can see, so only a harness with no
 # multiplexer to run herdr against may run it. `--headless` is exactly that
 # case here, so step 3 below exports it alongside `SPOOLWAY_GH`; an ordinary
 # herdr scaffold needs no such export and gets none.
 EXPORTS="export SPOOLWAY_GH=\"$FORGE/bin/gh\"  (so \`handover\`'s \`spoolway stack\` finds the local forge)"
 if [ "$HEADLESS" = 1 ]; then
   EXPORTS="$EXPORTS
-     export SPOOLWAY_TEST_BACKEND=1"
+     export SPOOLWAY_TEST_BACKEND=headless"
 fi
 
 cat <<EOF

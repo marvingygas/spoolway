@@ -339,10 +339,6 @@ base = "main"
 TOML
 mkdir -p "$WS2/config/routines/shared"
 task_doc "$WS2/config/routines/shared/shared-audit.md" shared-audit "$BODY" "group: shared"
-for clone in "$FRESH" "$SECOND"; do
-  (cd "$clone" && must "the headless backend, for the clone's dispatcher" \
-    "$SPOOLWAY" config set dispatch.backend headless)
-done
 # Dispatch refuses to start without a git identity, and this suite's HOME is
 # its own, so the identity is set there and not in either clone.
 must "a git identity for the dispatchers" git config --global user.name "spoolway tests"

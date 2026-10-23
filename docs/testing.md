@@ -87,9 +87,11 @@ of those tools support none of them. The job installs them with Homebrew and put
 unprefixed names on `PATH` ahead of the system ones. There is no stand-in for `script`: only
 the suites that drive a screen over a pty call it, and `command-steps` does not.
 
-`spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
-environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
-that runs on that backend.
+`SPOOLWAY_TEST_BACKEND=headless` in the environment makes `spoolway dispatch` run lanes on the
+headless backend. Any other value, or none, runs herdr. There is no config key for the choice.
+`fixture.sh` and `scaffold.sh` export `headless` for every suite and scaffolded project that runs
+on that backend. A suite that needs the herdr double exports another value, such as `1`, for that
+stretch and exports `headless` again afterwards.
 
 ### Killing the dispatcher at a named point
 
@@ -149,7 +151,7 @@ with a `// covers:` line.
 | Suite | Covers |
 |---|---|
 | `flow` | A task's whole life: queued, agent steps, command steps, archived; copying a pipeline and a prompt into the private layer from a real linked worktree, then promoting the pipeline from the worktree into its own `.spoolway/` and from the main checkout into the checkout |
-| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, `config set` refusing an unknown backend and a hook that is not a bare filename and warning on a missing agent or hook script, the overrides layer through a linked worktree, housekeeping's retention sweep, a behind checkout staying silent over a real pty, `spoolway sync`'s confirm panel over a real pty with esc after its title, checking the panel reaches the terminal, no alternate screen, and the cancel message |
+| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, `config set` refusing the retired `dispatch.backend` key and a hook that is not a bare filename and warning on a missing agent or hook script, the overrides layer through a linked worktree, housekeeping's retention sweep, a behind checkout staying silent over a real pty, `spoolway sync`'s confirm panel over a real pty with esc after its title, checking the panel reaches the terminal, no alternate screen, and the cancel message |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, hidden and paned steps, a step's `hide:` overriding `dispatch.hide_commands` both ways, the environment a step is handed, nothing over 512 bytes typed into a pane, an unattended unblocker that answers `--stage` parking the task after three laps |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `started`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double and `jira.sh` against the `acli` double, both opening a ticket titled with its commit prefix stripped and a body built from the task's own `## Context` and `## Acceptance criteria`, never `## Intend`, `jira.sh`'s body read back as real ADF, a failing `queued`, `started` or `done` hook landing the task on `hook_failed` with no hook event fired for it and `queue list --json` naming that state, `spoolway resume --skip-hook` archiving a task whose `done` hook failed with no second hook run, `github.sh`'s `done` on a branch with no pull request closing the ticket as completed with no review label, `jira.sh`'s `done` on a branch with no pull request moving the Sub-task to `Done` with a comment, and the Story too only when no other Sub-task is open, a failing hook's own trace landing in `## Hook error`, a hook saved with CRLF line endings failing with exit 127 and one with mode 644 failing with exit 126, each failed by `doctor` and passed once fixed, `key_in_names`, `labels:` reaching the hook as `SPOOLWAY_LABELS`, `queue add` refusing a label with a space, `queue add` running no `open` hook for a `tracking: off` task, a `queue add` stopped while its `open` hook runs, whose hook the next `queue add` of the same id adopts and starts once, and `queue add --from` queueing with `tracking: off` and opening no ticket when the `acli` double answers `jira auth status` as unauthorized |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |

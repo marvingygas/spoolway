@@ -1931,8 +1931,8 @@ mod tests {
     // place; one stopped by `enter` just takes the popup away.
     #[test]
     fn a_child_ending_first_replaces_the_starting_popup() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-starting-ended");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-ended");
+        crate::mux::force_headless_for_test();
         let mut tab = DispatchTab::default();
         tab.started(
             Ok(stand_in("echo refused >&2; exit 1")),
@@ -1987,8 +1987,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_over_a_running_dispatcher_asks_and_esc_leaves_it_running() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
+        crate::mux::force_headless_for_test();
         crate::status::testutil::add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("handover", "login");
@@ -2026,8 +2026,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_with_no_step_running_stops_at_once_and_opens_no_popup() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-idle");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-idle");
+        crate::mux::force_headless_for_test();
         crate::status::testutil::add(&repo, "login", &[], Some(crate::pipeline::PAUSED));
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
@@ -2045,8 +2045,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_with_a_task_queued_asks_and_esc_leaves_it_running() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-esc");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-esc");
+        crate::mux::force_headless_for_test();
         crate::status::testutil::add(&repo, "login", &[], None);
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
@@ -2085,8 +2085,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_queued_stop_popup_stops_on_its_first_answer_and_keeps_on_its_second() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-answer");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-queued-answer");
+        crate::mux::force_headless_for_test();
         crate::status::testutil::add(&repo, "login", &[], None);
         crate::status::testutil::add(&repo, "logout", &["login"], None);
         let pipelines = Pipelines::builtin();
@@ -2123,8 +2123,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_asks_when_what_is_running_cannot_be_read() {
-        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-stop-unread");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-unread");
+        crate::mux::force_headless_for_test();
         // A file where the queue directory belongs makes reading it fail.
         let queue = repo.queue_dir();
         std::fs::remove_dir_all(&queue).unwrap();

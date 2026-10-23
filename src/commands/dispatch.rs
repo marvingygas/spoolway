@@ -179,10 +179,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
     // There is one way to start a run and it is visible: refused here, in the
     // same early group as the three checks above, so a run begun in a
-    // backgrounded shell or a `backend = headless` config edit outside the
-    // harness is stopped before it takes the lock or writes anywhere, not
-    // found and killed by hand once it is already spending. No exemption —
-    // not an environment override, not a per-platform carve-out.
+    // backgrounded shell is stopped before it takes the lock or writes
+    // anywhere, not found and killed by hand once it is already spending. The
+    // headless backend, which nothing draws, can only be picked by the
+    // harness's own `SPOOLWAY_TEST_BACKEND=headless`.
     check_dispatcher_visible(mux.as_ref())?;
     // The test-only kill hook is armed for this process alone, and a bad
     // `SPOOLWAY_TEST_KILL_AT` name is refused here, before anything is spent.
@@ -581,8 +581,9 @@ impl ConfigWatch {
 /// their new value at once: `unattended.blocked_agent`, `blocked_model`,
 /// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
 /// the pipelines when they load; `unattended.enabled` is settled once into
-/// the lock; `dispatch.backend` picks the multiplexer once. A change to any
-/// of them needs a restart.
+/// the lock; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
+/// environment the dispatcher started with. A change to any of them needs a
+/// restart.
 fn reload_config(
     live: &mut Repo,
     reported: &mut Option<String>,
@@ -1461,8 +1462,8 @@ pub(crate) fn check_backend_checkout(
                     "{} has no main checkout herdr can resolve a workspace onto",
                     repo.root.display()
                 ),
-                fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
-                      dispatch.backend headless"
+                fix: "a bare repository, say. Run spoolway from a clone that has a \
+                      working tree."
                     .to_string(),
             }));
         }
@@ -1500,43 +1501,24 @@ pub(crate) fn check_backend_checkout(
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
 
-/// Refuse a start nobody can see: a herdr run outside any pane, or a
-/// `backend = headless` run started without the end-to-end harness's own
-/// marker.
+/// Refuse a start nobody can see: a herdr run outside any pane.
 ///
-/// Not a third [`Refusal`]: neither half of this reads as a `doctor` row —
-/// there is no dispatcher yet for `doctor` to ask whether it is visible —
-/// and the herdr half's own message is the multi-line shape the task's
-/// mockup draws, not the single line [`refuse`] joins a reason and a fix
-/// into.
+/// Not a third [`Refusal`]: it does not read as a `doctor` row — there is no
+/// dispatcher yet for `doctor` to ask whether it is visible — and its message
+/// is the multi-line shape the task's mockup draws, not the single line
+/// [`refuse`] joins a reason and a fix into.
 ///
-/// `headless` is checked by name rather than by a trait method the way the
-/// herdr half is: the marker gates the backend itself, not any property a
-/// `Mux` could answer for — a fake pane to ask about would be one more thing
-/// for a test double to get right for no reason a real backend needs.
+/// `headless` is checked by name rather than by a trait method: it is only
+/// ever chosen by the harness's own `SPOOLWAY_TEST_BACKEND=headless` — see
+/// [`crate::mux::backend`] — which is the marker that nothing needs to draw
+/// it, and a fake pane to ask about would be one more thing for a test double
+/// to get right for no reason a real backend needs.
 fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
     if mux.name() == "headless" {
-        return check_headless_marker();
+        return Ok(());
     }
     if !mux.in_own_pane() {
         bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
-    }
-    Ok(())
-}
-
-/// Refuse `backend = headless` unless the end-to-end harness's marker is
-/// exported. Split out of [`check_dispatcher_visible`] so `doctor`'s "lanes
-/// can be started" row gives the very reason a start gives, rather than
-/// passing a backend `dispatch` then refuses.
-pub(crate) fn check_headless_marker() -> Result<()> {
-    if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
-        bail!(
-            "backend = headless is spoolway's own test backend — nothing draws it \
-             anywhere a person can see, so only the end-to-end harness runs it, with \
-             {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
-             herdr",
-            crate::headless::TEST_BACKEND_ENV
-        );
     }
     Ok(())
 }
@@ -2642,7 +2624,7 @@ mod tests {
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
         assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
         assert!(
-            !bare.contains("dispatch.backend"),
+            !bare.contains("working tree"),
             "a doctor row must carry the short reason alone, not the fix: {bare}"
         );
 
@@ -2650,7 +2632,7 @@ mod tests {
             "{:#}",
             refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
         );
-        assert!(refused.contains("dispatch.backend"), "{refused}");
+        assert!(refused.contains("working tree"), "{refused}");
     }
 
     /// herdr against a dispatcher started inside a linked worktree of its
@@ -2691,8 +2673,8 @@ mod tests {
             "the fix names the checkout to run from instead: {refused}"
         );
         assert!(
-            !refused.contains("dispatch.backend"),
-            "no backend switch is offered — herdr is refused this checkout, not this project: \
+            !refused.contains("working tree"),
+            "no clone is suggested — herdr is refused this checkout, not this project: \
              {refused}"
         );
 
@@ -2728,42 +2710,17 @@ mod tests {
         assert!(check_dispatcher_visible(&mux).is_ok());
     }
 
-    /// `backend = headless` with no harness marker is refused, naming it as
-    /// the test backend and offering the way back to herdr.
-    ///
-    /// Read through [`crate::platform::env_var`] rather than `std::env::var`
-    /// so the marker can be set per-thread below without touching the real
-    /// process environment every other test shares.
+    /// The headless backend, which only the harness can pick, passes with no
+    /// pane at all — `in_own_pane: false` proves the pane check meant for
+    /// herdr is not what it answers to.
     #[test]
-    fn dispatcher_visible_refuses_headless_with_no_marker() {
+    fn dispatcher_visible_passes_headless_without_a_pane() {
         let mux = StubMux {
             name: "headless",
             available: true,
             in_own_pane: false,
         };
-        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
-        assert!(err.contains("test backend"), "{err}");
-        assert!(
-            err.contains("spoolway config set dispatch.backend herdr"),
-            "{err}"
-        );
-    }
-
-    /// The same run passes once the end-to-end harness's own marker is set —
-    /// `in_own_pane: false` alongside it, to prove the marker is what gates
-    /// this backend rather than the pane check meant for herdr.
-    #[test]
-    fn dispatcher_visible_passes_headless_with_the_marker_set() {
-        let mux = StubMux {
-            name: "headless",
-            available: true,
-            in_own_pane: false,
-        };
-        let result =
-            crate::platform::test_env::with_env(crate::headless::TEST_BACKEND_ENV, "1", || {
-                check_dispatcher_visible(&mux)
-            });
-        assert!(result.is_ok());
+        assert!(check_dispatcher_visible(&mux).is_ok());
     }
 
     /// A project with no layer at all is nothing to ask about — the gate

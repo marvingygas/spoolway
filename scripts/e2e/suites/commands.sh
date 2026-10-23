@@ -1576,11 +1576,10 @@ rm -f "$STALE_QUEUED" "$LOST_QUEUED"
 # `config set` runs the file-based checks `doctor` runs. A value that can
 # never be right is refused, and one naming something not set up yet is saved
 # with a warning, so a script can set keys in the order it likes.
-BEFORE_BACKEND=$("$SPOOLWAY" config get dispatch.backend)
-refuses "config set refuses a backend that does not exist, naming the allowed ones" \
-  "not a backend — use herdr or headless" "$SPOOLWAY" config set dispatch.backend tmux
-works "and the backend is still what it was" \
-  test "$("$SPOOLWAY" config get dispatch.backend)" = "$BEFORE_BACKEND"
+refuses "config set refuses the retired backend key, as it does tmux_mode" \
+  "no config key" "$SPOOLWAY" config set dispatch.backend headless
+refuses "and config get refuses it too" \
+  "no config key" "$SPOOLWAY" config get dispatch.backend
 
 BEFORE_AGENT=$("$SPOOLWAY" config get unattended.blocked_agent)
 says "config set saves an agent not in [agents] yet, with a warning" \

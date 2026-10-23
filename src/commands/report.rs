@@ -9494,8 +9494,8 @@ mod tests {
     /// answer, and no fresh one would ever start.
     #[test]
     fn unparking_frees_the_stale_lane_it_left_behind() {
-        let (mut repo, _root_guard) = fixture("unpark-stale-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("unpark-stale-lane");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -9548,8 +9548,8 @@ mod tests {
     /// still waiting on an answer and never start a fresh one.
     #[test]
     fn resuming_past_a_gate_frees_the_stale_lane_on_the_step_it_goes_to() {
-        let (mut repo, _root_guard) = fixture("gate-resume-stale-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("gate-resume-stale-lane");
+        crate::mux::force_headless_for_test();
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
 
@@ -9603,8 +9603,8 @@ mod tests {
     /// stopped.
     #[test]
     fn resuming_a_gate_onto_blocked_frees_only_the_blocked_lane() {
-        let (mut repo, _root_guard) = fixture("gate-resume-onto-blocked");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("gate-resume-onto-blocked");
+        crate::mux::force_headless_for_test();
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
 
@@ -9663,8 +9663,8 @@ mod tests {
     /// with every resume would throw that away.
     #[test]
     fn resuming_closes_only_the_lane_on_the_step_it_resumes() {
-        let (mut repo, _root_guard) = fixture("unpark-only-resumed-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("unpark-only-resumed-lane");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -9761,8 +9761,8 @@ mod tests {
     /// person's `-m` as its Note.
     #[test]
     fn resuming_a_blocked_task_at_done_closes_it_and_logs_what_it_skipped() {
-        let (mut repo, _root_guard) = fixture("close-blocked");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-blocked");
+        crate::mux::force_headless_for_test();
         add(&repo, "b-noop", &[]);
         let mut task = queued(&repo, "b-noop");
         task.set_stage("handover", None);
@@ -9803,8 +9803,8 @@ mod tests {
     /// it. With no `-m` the line carries no Note.
     #[test]
     fn closing_a_caught_fail_names_every_step_its_resume_would_run() {
-        let (mut repo, _root_guard) = fixture("close-caught-fail");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-caught-fail");
+        crate::mux::force_headless_for_test();
         add(&repo, "g1", &[]);
         let mut task = queued(&repo, "g1");
         task.set_stage("review", None);
@@ -9887,8 +9887,8 @@ mod tests {
     /// the unblocker's lane.
     #[test]
     fn closing_a_blocked_task_with_a_live_unblocker_stops_its_lane() {
-        let (mut repo, _root_guard) = fixture("close-blocked-live");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-blocked-live");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
         task.front.blocked_from = Some("implement".into());
@@ -9924,8 +9924,8 @@ mod tests {
     /// lane to stop, and the lane would boot on a `done` task.
     #[test]
     fn closing_a_blocked_task_the_dispatcher_has_claimed_is_refused() {
-        let (mut repo, _root_guard) = fixture("close-blocked-claimed");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-blocked-claimed");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
         task.front.blocked_from = Some("implement".into());
@@ -9996,7 +9996,7 @@ mod tests {
     #[test]
     fn closing_a_hook_failed_task_forgets_the_failed_hook() {
         let (mut repo, _root_guard) = fixture("close-hook-failed");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "hooked", &[]);
         repo.config.issue_tracking.hook = "fail.sh".into();
@@ -10075,8 +10075,8 @@ mod tests {
     /// would wedge the task forever.
     #[test]
     fn resuming_frees_the_stale_lane_that_blocked() {
-        let (mut repo, _root_guard) = fixture("unblock-stale-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("unblock-stale-lane");
+        crate::mux::force_headless_for_test();
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -10475,8 +10475,8 @@ mod tests {
     /// naming `queue pause`, and its file is unchanged.
     #[test]
     fn resuming_a_blocked_task_with_a_live_unblocker_is_refused() {
-        let (mut repo, _root_guard) = fixture("resume-blocked-live");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("resume-blocked-live");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
         task.front.blocked_from = Some("implement".into());
@@ -10509,8 +10509,8 @@ mod tests {
     /// boot the unblocker on a task that is no longer blocked.
     #[test]
     fn resuming_a_blocked_task_the_dispatcher_has_claimed_is_refused() {
-        let (mut repo, _root_guard) = fixture("resume-blocked-claimed");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("resume-blocked-claimed");
+        crate::mux::force_headless_for_test();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
         task.front.blocked_from = Some("implement".into());
