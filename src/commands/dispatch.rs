@@ -409,10 +409,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
             stop(&live, pipelines, mux.as_ref())?;
-            // A run the screen started leaves this line to the screen, which
-            // knows who asked and is the only one that sees a kill.
-            if !args.screen {
-                crate::problem_log::append(repo, &stop_line("stopped on ctrl-c", ""));
+            if let Some(line) = ctrl_c_line(args.screen) {
+                crate::problem_log::append(repo, &line);
             }
             println!("  stopped.");
             return Ok(0);
@@ -501,6 +499,13 @@ fn stop_line(why: &str, detail: &str) -> String {
         true => format!("dispatcher {pid} {why}"),
         false => format!("dispatcher {pid} {why}: {detail}"),
     }
+}
+
+/// The problem-log line for a stop on `ctrl-c`, or none for a run the
+/// screen started: the screen writes that one, since it knows who asked and
+/// is the only one that sees a kill. One exit, one line.
+fn ctrl_c_line(screen: bool) -> Option<String> {
+    (!screen).then(|| stop_line("stopped on ctrl-c", ""))
 }
 
 /// Whether the files [`reload_config`] reads have moved since it last ran, so
@@ -1908,6 +1913,20 @@ mod tests {
             stop_line("stopped on a spend ceiling", "max reached"),
             format!("dispatcher {pid} stopped on a spend ceiling: max reached")
         );
+    }
+
+    /// A terminal dispatcher logs its own `ctrl-c` stop; one the screen
+    /// started leaves it to the screen, so the exit is not logged twice.
+    #[test]
+    fn only_a_terminal_dispatcher_logs_its_own_ctrl_c() {
+        assert_eq!(
+            ctrl_c_line(false),
+            Some(format!(
+                "dispatcher {} stopped on ctrl-c",
+                std::process::id()
+            ))
+        );
+        assert_eq!(ctrl_c_line(true), None);
     }
 
     /// An empty queue with no job still keeps the dispatcher up while an

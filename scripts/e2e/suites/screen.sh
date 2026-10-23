@@ -161,6 +161,10 @@ else bad "the child is gone once the screen has ended"; fi
 PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 has "the problem log names the stop enter asked for" \
   "stopped: asked by the board (enter on the dispatch tab); it exited with" "$PROBLEM_LOG"
+# The child was started with `--from-screen`, so it leaves its own stop to the
+# board: one exit, one line.
+lacks "the board's dispatcher does not log its own stop as well" \
+  "stopped on ctrl-c" "$PROBLEM_LOG"
 
 # With a task queued and no step running, `enter` asks before it stops: a
 # stop then is silent, and the task just waits. `held-after` waits on

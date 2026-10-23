@@ -221,29 +221,10 @@ impl Dispatcher {
         }
         let status = self.process.try_wait().ok()??;
         self.ran |= status.success();
-        let text = self
-            .reason
-            .take()
-            .and_then(|reader| reader.join().ok())
-            .unwrap_or_default();
-        let kept = last_lines(&text);
-        if let Some(by) = self.asked {
-            if by == Asked::Enter {
-                let tail = match kept.is_empty() {
-                    true => String::new(),
-                    false => format!(": {kept}"),
-                };
-                self.log_line(&format!(
-                    "dispatcher {pid} stopped: {}; it exited with {status}{tail}",
-                    by.said()
-                ));
-            }
+        let text = self.log_exit(status);
+        if self.asked.is_some() {
             return Some(None);
         }
-        self.log_line(&match kept.is_empty() {
-            true => format!("dispatcher {pid} exited with {status} and said nothing"),
-            false => format!("dispatcher {pid} exited with {status}, last said: {kept}"),
-        });
         // `main` puts the binary's name in front of every error. Inside the
         // screen that name is noise: the popup's title already says who
         // spoke.
@@ -260,6 +241,38 @@ impl Dispatcher {
 }
 
 impl Dispatcher {
+    /// Write the problem-log line for a child that has exited with
+    /// `status`, and give back everything it said on stderr. The line names
+    /// the stop `enter` asked for when there was one, and otherwise the
+    /// status and the last of what it said.
+    fn log_exit(&mut self, status: std::process::ExitStatus) -> String {
+        let pid = self.process.id();
+        let text = self
+            .reason
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
+        let kept = last_lines(&text);
+        let line = match self.asked {
+            Some(by) => {
+                let tail = match kept.is_empty() {
+                    true => String::new(),
+                    false => format!(": {kept}"),
+                };
+                format!(
+                    "dispatcher {pid} stopped: {}; it exited with {status}{tail}",
+                    by.said()
+                )
+            }
+            None if kept.is_empty() => {
+                format!("dispatcher {pid} exited with {status} and said nothing")
+            }
+            None => format!("dispatcher {pid} exited with {status}, last said: {kept}"),
+        };
+        self.log_line(&line);
+        text
+    }
+
     /// Write `line` to the problem log, once for this child: a second
     /// exit line for the same child would say the same thing twice.
     fn log_line(&mut self, line: &str) {
@@ -275,18 +288,28 @@ impl Drop for Dispatcher {
     /// what it holds and exits on its own, and the screen does not keep
     /// the person waiting on a pass that is still finishing.
     fn drop(&mut self) {
-        if matches!(self.process.try_wait(), Ok(None)) {
-            self.stop(Asked::Quit);
-            // The exit is never seen, so the line is written now, naming
-            // whoever asked first: a stop `enter` asked for a moment ago
-            // is still the reason, and its exit has not been reaped.
-            if let Some(by) = self.asked {
-                self.log_line(&format!(
-                    "dispatcher {} stopped: {}; the board left before it exited",
-                    self.process.id(),
-                    by.said()
-                ));
+        match self.process.try_wait() {
+            // A child that already exited unseen, with the dispatch tab
+            // closed, is logged here with its status, as `ended` would have.
+            Ok(Some(status)) => {
+                if !self.logged {
+                    self.log_exit(status);
+                }
             }
+            Ok(None) => {
+                self.stop(Asked::Quit);
+                // The exit is never seen, so the line is written now, naming
+                // whoever asked first: a stop `enter` asked for a moment ago
+                // is still the reason, and its exit has not been reaped.
+                if let Some(by) = self.asked {
+                    self.log_line(&format!(
+                        "dispatcher {} stopped: {}; the board left before it exited",
+                        self.process.id(),
+                        by.said()
+                    ));
+                }
+            }
+            Err(_) => {}
         }
     }
 }
@@ -708,5 +731,45 @@ mod tests {
             text.contains("(enter on the dispatch tab); the board left"),
             "{text}"
         );
+    }
+
+    /// A child that dies unseen, while the dispatch tab is closed, still
+    /// gets its line when the board quits: with its status, not as a stop
+    /// the board asked for.
+    #[cfg(unix)]
+    #[test]
+    fn an_exit_never_reaped_is_logged_when_the_board_quits() {
+        let log = log_in("dispatcher-log-unreaped");
+        let mut child = Dispatcher::stand_in_logging("echo gone >&2; exit 7", log.clone());
+        let pid = child.pid();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while matches!(child.process.try_wait(), Ok(None)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(child);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dispatcher {pid} exited with exit status: 7, last said: gone"
+            )),
+            "{text}"
+        );
+    }
+
+    /// An exit the tab already reaped and logged is not logged again when
+    /// the board quits.
+    #[test]
+    fn a_reaped_exit_is_not_logged_again_on_quit() {
+        let log = log_in("dispatcher-log-reaped-then-quit");
+        let mut child = Dispatcher::stand_in_logging("exit 3", log.clone());
+        wait_ended(&mut child);
+        drop(child);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
     }
 }
