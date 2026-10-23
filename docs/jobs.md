@@ -161,12 +161,11 @@ With no job enabled and both stores parsing, an empty queue stops the run as usu
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
-Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edited, paused or
-deleted. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
+Bare `spoolway`'s jobs tab opens this screen. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
 `details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
-The routines tab writes a job too, with `new job` in a routine's options menu. See
-[Routines](planning.md#routines).
+The routines tab writes a job too. A routine's options menu offers `new job`, `edit job`,
+`pause job` or `resume job`, and `delete job`. See [Routines](planning.md#routines).
 
 | Key | What it does |
 |---|---|
@@ -199,7 +198,8 @@ item under it, and `esc` closes the menu.
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
 The routines tab's `new job` starts on the schedule panel, for the routine its options menu was
-opened on, then walks the same pipeline panel and save.
+opened on, then walks the same pipeline panel and save. Its `edit job` does the same, with the
+job's own schedule and pipeline filled in. The job keeps its name, routine and store.
 
 ### What the screen decides for you
 
@@ -277,7 +277,7 @@ spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 ```
 
-Bare `spoolway`'s jobs tab is where a job is written, edited, paused or deleted.
+Bare `spoolway`'s jobs tab and routines tab are where a job is written, edited, paused or deleted.
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST

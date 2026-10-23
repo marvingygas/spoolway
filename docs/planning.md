@@ -412,9 +412,16 @@ highlighted row's name:
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `new job` | A routine. | Make a job from the routine. See [Jobs](jobs.md). |
-| `delete` | A routine. | Delete the routine and every job that points into it, after a popup. |
+| `new job` | A routine with no job. | Make a job from the routine. See [Jobs](jobs.md). |
+| `edit job` | A routine with one job. | Change the job's schedule and pipeline. |
+| `pause job` | A routine with one enabled job. | Pause the job. |
+| `resume job` | A routine with one paused job. | Resume the job. |
+| `delete job` | A routine with one job. | Delete the job after a popup. The routine stays. |
+| `delete job <name>` | A routine with two or more jobs. One item per job, sorted by name. | Delete that job after a popup. The routine stays. |
+| `delete routine` | A routine. | Delete the routine and every job that points into it, after a popup. |
 | `open task` | A task in the details pane. | Open the task in your editor. |
+
+A routine with a job store that will not load offers only `delete routine`.
 
 A task `id:` is unique across all routine folders. When two routine files hold one id, the
 routines tab shows a `Problem:` row beside the task. The row names both files and an id to give
@@ -471,7 +478,7 @@ Pick `save as routine` from a pending group's options menu to save it as a routi
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
 run are removed on the way. A folder that already holds tasks is refused.
 
-Pick `delete` from a routine's options menu to delete it. The popup names the routine, its task count, and every
+Pick `delete routine` from a routine's options menu to delete it. The popup names the routine, its task count, and every
 job whose routine path is that folder or a task inside it. Each job is listed beside its
 store, `user` or `project`. Its one answer is `delete`: `enter` deletes those jobs first, then
 the folder. `esc` keeps everything. The folder leaves disk without touching git, so only git can bring it back. A job
@@ -480,7 +487,13 @@ store that will not read refuses the delete before anything is removed, naming t
 
 A job queues a routine on a cron schedule. Pick `new job` from a routine's options menu to make
 one: it opens the jobs tab's own schedule and pipeline panels for that routine, and `enter` on
-the pipeline panel saves it. `esc` on either panel cancels and writes nothing. See [Jobs](jobs.md).
+the pipeline panel saves it. `edit job` opens the same two panels filled with the job's own
+values and saves the job back to the store it came from. `esc` on either panel cancels and writes
+nothing. See [Jobs](jobs.md).
+
+`pause job` and `resume job` write the job back to its own store with the schedule unchanged.
+`delete job` opens a popup titled `delete this job` whose one answer is `delete`. `enter` deletes
+the job and `esc` keeps it.
 
 ## Closing a plan out
 
