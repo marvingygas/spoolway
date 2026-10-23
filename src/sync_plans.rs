@@ -10,10 +10,10 @@
 //! rewritten first, and the page moves second. A crash between the two leaves
 //! tasks naming the workspace path while the page is still in the clone's
 //! folder, and the next sync moves it. A crash part-way through a page's
-//! several tasks leaves the page in place too, so that run finishes the rest
-//! the same way. A task that names the clone's path for a page that is already in the
-//! workspace, because it came to name it after the page moved, is rewritten as
-//! well.
+//! several tasks leaves the page in place too, so the next run finishes the
+//! rest the same way. A task that names the clone's path for a page that is
+//! already in the workspace, because it came to name it after the page moved,
+//! is rewritten as well.
 //!
 //! A lane does not do any of this. The pages and tasks are outside git, so a
 //! lane's rewrite of them cannot be reviewed or undone, and it only reports
@@ -238,10 +238,11 @@ fn plan(repo: &Repo, own: &Path, shared: &Path) -> Result<(Vec<Page>, Vec<Clash>
         let taken = std::fs::symlink_metadata(&to).is_ok();
         // A link is not a page: only a regular file moves, as in `html_files`.
         if std::fs::symlink_metadata(&from).is_ok_and(|meta| meta.is_file()) {
-            // A page that is the very same file as the one in the workspace is
-            // what a crash between linking and unlinking leaves. Nothing is
-            // lost by finishing that move.
-            if taken && !same_file(&from, &to) {
+            // A page that is already in the workspace, as the same file or as
+            // a copy with the same bytes, is what a crash between putting it
+            // there and removing the old name leaves. Nothing is lost by
+            // finishing that move.
+            if taken && !already_there(&from, &to) {
                 clashes.push(Clash { from, to, tasks });
             } else {
                 pages.push(Page {
@@ -270,6 +271,14 @@ fn same_folder(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
+}
+
+/// Whether `to` already holds the page `from` is: the same file, or a copy
+/// with exactly the same bytes, which a crash in the copy fallback of
+/// [`move_page`] leaves behind. Removing `from` then loses nothing.
+fn already_there(from: &Path, to: &Path) -> bool {
+    same_file(from, to)
+        || matches!((std::fs::read(from), std::fs::read(to)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Whether two paths are one file. Only Unix can tell; elsewhere a clash is
@@ -309,9 +318,10 @@ fn move_page(from: &Path, to: &Path) -> Result<()> {
     };
     match std::fs::hard_link(from, to) {
         Ok(()) => {}
-        // Plan-time checks keep the two names in different folders, so one
-        // inode under both is what a crash between linking and removing leaves.
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && same_file(from, to) => {}
+        // Plan-time checks keep the two names in different folders, so the page
+        // already being there is what a crash between putting it there and
+        // removing the old name leaves.
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && already_there(from, to) => {}
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken(to)),
         Err(_) => match copy_no_clobber(from, to) {
             Ok(()) => {}
@@ -663,5 +673,20 @@ mod tests {
         let err = copy_no_clobber(&from, &to).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "OLD");
+    }
+
+    /// Fails before the change: a separately written copy left by a crash in
+    /// the copy fallback was refused as a clash, with no task under it.
+    #[test]
+    fn an_identical_copy_in_the_workspace_finishes_the_move() {
+        let (shop, _shop_2, _root) = two_clones("sync-plans-twin");
+        let old = page(&own_plans(&shop), "m.html", "SAME");
+        let new = page(&shared_plans(&shop), "m.html", "SAME");
+
+        let summary = run(&shop, false).unwrap();
+
+        assert!(!summary.refused);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "SAME");
     }
 }

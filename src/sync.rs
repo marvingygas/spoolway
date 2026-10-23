@@ -45,11 +45,11 @@
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
 //!
-//! The private override layer is the one file in the project home this command
-//! writes, and the plan pages below are its other writes outside the checkout.
-//! A lane leaves the layer alone: a retired key stays there and the
-//! report says so, because the layer is the person's and sits in no git
-//! branch to revert from.
+//! The private override layer and, in a home-mode clone, the plan pages,
+//! `plans-since` and the `plan:` lines of pending and queued tasks are this
+//! command's writes outside the checkout. A lane leaves the layer alone: a
+//! retired key stays there and the report says so, because the layer is the
+//! person's and sits in no git branch to revert from.
 //!
 //! In a home-mode clone, sync also moves the clone's plan pages into the
 //! workspace and relinks the tasks that name them. That is
