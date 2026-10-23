@@ -191,7 +191,8 @@ else bad "esc closes it"; fi
 screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "and leaves the dispatcher running" "dispatcher running · pid " "$LAST"
 screen_press $'\r'
-poll_until 10 now_says "> stop dispatching"
+if poll_until 10 now_says "> stop dispatching"; then ok "enter asks again once it was kept running"
+else bad "enter asks again once it was kept running"; fi
 screen_press $'\r'
 if poll_until 10 now_says "[enter] start dispatching"
 then ok "enter on stop dispatching stops it"
