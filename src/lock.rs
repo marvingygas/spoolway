@@ -71,19 +71,31 @@ pub(crate) struct ModeSwitch {
     modified: std::time::SystemTime,
 }
 
+/// What [`ModeSwitch::undo`] could not put back. The two differ in what the
+/// run is left with, so the caller has to be able to tell them apart.
+#[derive(Debug)]
+pub(crate) enum UndoError {
+    /// The old text is not back: the lock still has the new mode line.
+    Text(anyhow::Error),
+    /// The old text is back, and so is the mode, but the modified time is
+    /// still the switch's.
+    Time(anyhow::Error),
+}
+
 impl ModeSwitch {
     /// Put the old text back, and the old modified time with it. The time is
     /// restored because it starts the run's spend window: a switch that was
-    /// undone must not have moved it. Fails when either cannot be restored, so
-    /// the caller can say the lock stayed switched.
-    pub(crate) fn undo(self) -> Result<()> {
-        crate::task::write_atomic(&self.path, self.previous)?;
+    /// undone must not have moved it.
+    pub(crate) fn undo(self) -> std::result::Result<(), UndoError> {
+        crate::task::write_atomic(&self.path, self.previous).map_err(UndoError::Text)?;
         let file = std::fs::File::options()
             .write(true)
             .open(&self.path)
-            .with_context(|| format!("reopening {}", self.path.display()))?;
+            .with_context(|| format!("reopening {}", self.path.display()))
+            .map_err(UndoError::Time)?;
         file.set_modified(self.modified)
             .with_context(|| format!("restoring the modified time of {}", self.path.display()))
+            .map_err(UndoError::Time)
     }
 }
 

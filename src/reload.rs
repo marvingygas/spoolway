@@ -312,15 +312,27 @@ fn apply(
             what: format!("the new pipelines could not be recorded: {err:#}"),
             fix: "Make the project home writable, then reload again.".to_string(),
         }];
-        if let Some(Err(undo)) = switch.map(crate::lock::ModeSwitch::undo) {
-            let mode = if enabled { "unattended" } else { "attended" };
-            reasons.push(Reason {
+        let fix = "Make the project home writable, then reload again.".to_string();
+        match switch.map(crate::lock::ModeSwitch::undo) {
+            Some(Err(crate::lock::UndoError::Text(undo))) => {
+                let mode = if enabled { "unattended" } else { "attended" };
+                reasons.push(Reason {
+                    what: format!(
+                        "the lock could not be put back: {undo:#}. The run is now {mode}, and \
+                         its snapshot no longer matches the lock"
+                    ),
+                    fix,
+                });
+            }
+            Some(Err(crate::lock::UndoError::Time(undo))) => reasons.push(Reason {
                 what: format!(
-                    "the lock could not be put back: {undo:#}. The run is now {mode}, and its \
-                     snapshot no longer matches the lock"
+                    "the lock's modified time could not be put back: {undo:#}. The run is \
+                     still in its old mode and the snapshot still matches, but the spend \
+                     ceilings now count from this reload"
                 ),
-                fix: "Make the project home writable, then reload again.".to_string(),
-            });
+                fix,
+            }),
+            _ => {}
         }
         return Outcome::Refused(reasons);
     }
