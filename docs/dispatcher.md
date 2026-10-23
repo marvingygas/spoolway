@@ -871,8 +871,9 @@ messages to receive, the pass types the next one instead. Otherwise:
 4. A lane that has answered three reminders and still has not reported is escalated in place of
    a fourth, with the last of what the pane said in the task's `## Blocker`. An attended run
    parks the task on `paused`. An unattended run sends it to `blocked`. `spoolway resume`
-   restarts the step on the same session, unless its last reply is past `prompt_cache_ttl`, in
-   which case it opens fresh.
+   restarts the step on the same session if the step declares `session: true`, unless its last
+   reply is past `prompt_cache_ttl`, in which case it opens fresh. A step without
+   `session: true` opens fresh.
 
 A lane that still holds a process it started, such as a long build, is excused from reminders
 until `dispatch.lane_child_ceiling` (one hour by default), then escalated the same way.
@@ -910,7 +911,9 @@ The step carries the session on if two bounds hold:
 
 Otherwise the step opens a fresh session. The lookup goes by prompt,
 so two steps running the same prompt share one conversation. A task carrying `restart: <step>`
-opens a fresh session on that step whatever `session:` says. A blocked task's resume
+opens a fresh session on that step whatever `session:` says. A resume onto a step
+without `session: true` opens fresh too, and the lane is told the worktree already holds
+earlier work. On a `session: true` step, a blocked task's resume
 passes the same age check but not the size bound. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
 
 ## Restarts, laps and escalation

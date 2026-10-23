@@ -1004,7 +1004,9 @@ pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, _step: &Step) ->
 /// A step without `skills:` gets exactly one message, the briefing.
 ///
 /// `restarting` is a launch that begins a new conversation on a step that has
-/// already run, so its worktree is not clean. The briefing then gains one
+/// already run, so its worktree is not clean. A restart is one such launch.
+/// A resume onto a step with no `session: true` is the other, and the caller
+/// passes `true` for it too. The briefing then gains one
 /// paragraph saying so. It joins the briefing message rather than arriving as
 /// one of its own, because a message of its own would be a second turn, and
 /// the skill messages ahead of the briefing are untouched. The briefing is

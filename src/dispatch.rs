@@ -8633,7 +8633,9 @@ fn prepare_boot(
     // a task back to where it stopped, and the step's own standing
     // `session:` — its prompt already holds one on this task, still under
     // the declared size. Only for a kind whose resume flag was established
-    // against the real binary, either way.
+    // against the real binary, either way. The one-shot flag is honoured
+    // only on a step that declares `session: true`; any other step opens
+    // fresh on a resume, as it does on every visit.
     let adapter = crate::agent::adapter(&profile.kind);
     let resuming = task.front.resume.as_deref() == Some(step.id.as_str());
     // A restart is the one road that ends the step's conversation instead of
@@ -8662,7 +8664,13 @@ fn prepare_boot(
     // carries what the old lane knew; a park leaves its Handoff and commits.
     let resolved = crate::models::resolve(&repo.config.models, &model);
     let (price, lifetime) = (resolved.price, resolved.lifetime);
-    let one_shot = (resuming && !restarting)
+    //
+    // Only a step that declares `session: true` has a conversation worth
+    // walking back into. Any other step opens fresh on a resume, as it does
+    // on every visit, so the one-shot flag is still spent but finds nothing
+    // to continue. The unattended `blocked` step takes its `session:` from
+    // `dispatch.blocked_session`, so it is covered by the same test.
+    let one_shot = (resuming && !restarting && step.session)
         .then(|| lane_session_in(repo, ledger, &name, &key))
         .flatten()
         .filter(|(kind, session)| !session_is_cold(lifetime, kind, session));
@@ -8898,7 +8906,12 @@ fn prepare_boot(
                 repo.unattended(),
             )]
         }
-        (false, _, _) => crate::compose::opening_messages(task, pipeline, step, restarting),
+        // A resume that opens fresh comes back to a worktree that already
+        // holds the earlier lane's work, which the new lane has no memory of.
+        // It gets the same notice a restart does.
+        (false, _, _) => {
+            crate::compose::opening_messages(task, pipeline, step, restarting || resuming)
+        }
     };
 
     Ok(Boot {
@@ -22268,6 +22281,106 @@ mod tests {
             );
             assert_eq!(reload(&path).front.resume, None, "spent either way");
         }
+    }
+
+    /// A resume onto a step with no `session:` key opens a new conversation,
+    /// on the block road: the session the lane stopped on is in the ledger
+    /// and is not continued. The lane is briefed with the opening prompt plus
+    /// the notice that the worktree already holds earlier work, and the
+    /// one-shot `resume:` is spent so the next launch is an ordinary visit.
+    #[test]
+    fn a_resume_onto_a_step_without_session_opens_fresh_and_says_the_worktree_is_not_clean() {
+        let (repo, _root_guard) = fixture("resume-fresh-block");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.blocked_from = Some("implement".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · implement", "the-session-that-blocked", &kind);
+        crate::commands::resume(
+            &repo,
+            &session_pipelines(),
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+                skip_hook: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(reload(&path).front.resume.as_deref(), Some("implement"));
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let session = load_lane_records(&repo)["demo · implement"].session.clone();
+        assert!(!session.is_empty());
+        assert_ne!(
+            session, "the-session-that-blocked",
+            "a step that does not declare `session: true` has no conversation \
+             to walk back into"
+        );
+        let sent = mux.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(sent.contains("its changes are still here"), "{sent}");
+        assert!(!sent.contains("a person has cleared it"), "{sent}");
+        let task = reload(&path);
+        assert_eq!(task.front.resume, None, "spent by the launch");
+    }
+
+    /// The park road onto the same kind of step: a fresh conversation with
+    /// the opening prompt rather than `park_prompt`, and both one-shot keys
+    /// spent.
+    #[test]
+    fn resuming_a_park_onto_a_step_without_session_opens_fresh() {
+        let (repo, _root_guard) = fixture("resume-fresh-park");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.parked_from = Some("implement".into());
+            f.resume = Some("implement".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · implement", "parked-session", &kind);
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let session = load_lane_records(&repo)["demo · implement"].session.clone();
+        assert_ne!(session, "parked-session");
+        let sent = mux.read("demo · implement", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(sent.contains("its changes are still here"), "{sent}");
+        assert!(
+            !sent.contains("A person stopped this lane's turn"),
+            "a fresh lane is not told it was parked: {sent}"
+        );
+        let task = reload(&path);
+        assert_eq!(task.front.parked_from, None);
+        assert_eq!(task.front.resume, None);
+    }
+
+    /// The counterpart on a `session: true` step: the one-shot resume still
+    /// continues the session the lane stopped on.
+    #[test]
+    fn a_resume_onto_a_session_step_still_continues_its_session() {
+        let (repo, _root_guard) = fixture("resume-session-step");
+        add_task_with(&repo, "demo", "fix", |f| {
+            f.resume = Some("fix".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · fix", "the-session-that-blocked", &kind);
+
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(
+            load_lane_records(&repo)["demo · fix"].session,
+            "the-session-that-blocked"
+        );
     }
 
     /// A restart opens a new conversation on a `session: true` step whose
