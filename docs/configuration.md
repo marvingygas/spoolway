@@ -341,8 +341,8 @@ on a detached HEAD refuse, as `config set` does.
 
 The same rule holds for the tracked `.spoolway/config.toml`. `spoolway config get` shows a new
 value at once. The running dispatcher keeps the old value of
-`unattended.enabled` and the `unattended.blocked_*` keys until you restart it. See [Editing a
-pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+`unattended.enabled` and the `unattended.blocked_*` keys until you run `spoolway dispatch reload`
+or restart it. See [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
@@ -413,7 +413,7 @@ These keys apply only when nobody is watching. See [Unattended runs](pipelines.m
 
 | Key | Default | What it controls |
 |---|---|---|
-| `enabled` | `false` | `true` staffs `blocked` with the unblocker lane instead of parking the task for a person. `gate:` still pauses the task for a person. `spoolway dispatch --unattended` or `--attended` overrides this for one run. |
+| `enabled` | `false` | `true` staffs `blocked` with the unblocker lane instead of parking the task for a person. `gate:` still pauses the task for a person. `spoolway dispatch --unattended` or `--attended` overrides this until the first `spoolway dispatch reload`, which sets the run to this value. |
 | `max_output_tokens` | `0` | Output tokens one unattended run may spend before the dispatcher stops starting lanes. `0` is no limit. Live lanes finish. |
 | `max_cost_usd` | `0.0` | Dollars one unattended run may spend before the dispatcher stops starting lanes. `0.0` is no limit. Whichever limit is hit first stops the run. See [Cost accounting](cost.md). |
 | `blocked_agent` | `claude` | The `[agents.*]` profile that runs the `blocked` step. A pipeline may override these five keys in its own `blocked` step. `spoolway init`, run again with no `--provider`, reads this key as the project's own provider; pointing it at a profile `init` did not create falls back to the menu's default, `claude`. |

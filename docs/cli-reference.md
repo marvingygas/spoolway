@@ -619,8 +619,8 @@ see [`spoolway`](#spoolway).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
-| `--attended` | | Park blocked tasks for a person, whatever the config says |
+| `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. Holds until the first `spoolway dispatch reload`. See [Unattended runs](pipelines.md#unattended-runs) |
+| `--attended` | | Park blocked tasks for a person, whatever the config says. Holds until the first `spoolway dispatch reload`. |
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
 See [The dispatcher](dispatcher.md#running-it).
@@ -786,6 +786,10 @@ is found or opened. A failure to find or open it is shown instead, on its own no
 Ask the running dispatcher to load every pipeline file and `config.toml` again, without stopping
 any lane. It writes a request, waits for the answer to that request and prints it. It does not
 start a run, and it takes no flags. `--json` is refused.
+
+A good reload also sets the run to attended or unattended, as `unattended.enabled` says, even when
+the run started with `--unattended` or `--attended`. A reload refuses a config that turns
+`unattended.enabled` on with a blank `unattended.blocked_model`.
 
 ```
 $ spoolway dispatch reload

@@ -868,7 +868,17 @@ On a good reload, the dispatcher writes the new pipelines to `dispatch-pipelines
 starts any lane on them. From then on `spoolway report`, `spoolway queue route` and the board route
 on the new pipelines, and `spoolway pipeline check` and the footer stop naming the reloaded
 files. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
-keys all take effect. The run keeps its mode, and `unattended.enabled` keeps its value.
+keys all take effect.
+
+A good reload also sets the run to attended or unattended, as `unattended.enabled` says. This
+replaces the mode that `--unattended` or `--attended` chose at the start. The dispatcher acts on
+the new mode from its next pass. A lane already running on `blocked` finishes its turn when the
+run goes attended, and the dispatcher starts no further lane on `blocked`.
+
+The mode is the third line of the lock file `dispatch.pid`. A reload that leaves the mode as it is
+does not touch that file. A reload that changes the mode rewrites that line and moves the file's
+modified time. The ceilings `unattended.max_output_tokens` and `unattended.max_cost_usd` add up the
+spend since that time, so a reload that turns unattended on starts their count at zero.
 
 The dispatcher refuses a reload and changes nothing when one of these is true:
 
@@ -879,9 +889,10 @@ The dispatcher refuses a reload and changes nothing when one of these is true:
 | A task sits on a step the new pipelines lack, or is held at one | The task and the missing step, and to put the step back or wait until the task has left it. |
 | A task names a pipeline the new pipelines lack | The task and the pipeline, and to put its file back or wait until the task is done. |
 | A queue file does not parse, or the queue cannot be read | The file and the error, and to fix or remove it. |
+| `unattended.enabled` is on and `unattended.blocked_model` is blank | Both keys, and to set the model or turn `unattended.enabled` off. |
 | The project home cannot be written | That the new pipelines could not be recorded. |
 
-A refusal leaves the pipelines, the config and `dispatch-pipelines.json` as they were. It prints
+A refusal leaves the pipelines, the config, the run's mode and `dispatch-pipelines.json` as they were. It prints
 the answer and adds one line to the [problem log](#the-problem-log). A good reload prints the
 answer and adds nothing to the log.
 
@@ -906,10 +917,9 @@ A lane's `spoolway report` runs on this record when `config.toml` or
 used only while the dispatcher that wrote it is running. The dispatcher writes it on the first
 pass whose load succeeds. If it cannot write the record, it prints that once, and lanes then stop on a broken config.
 
-Two groups of keys are fixed when the dispatcher starts. `spoolway config get` shows a new
-value for them at once. The running dispatcher keeps the old value of `unattended.enabled` until
-you restart it. It keeps the old value of the `unattended.blocked_*` keys until you restart it or
-it reloads on a request.
+The pass-by-pass check does not apply two groups of keys. `spoolway config get` shows a new
+value for them at once. The running dispatcher keeps the old value of `unattended.enabled` and of
+the `unattended.blocked_*` keys until you restart it or it reloads on a request.
 
 ## Gates: when the pipeline waits for you
 
