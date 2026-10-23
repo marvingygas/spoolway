@@ -8642,7 +8642,7 @@ fn orphan_jobs<'a>(
                 Some(fault) if fault.missing => {
                     format!("No routine {} under .spoolway/routines/.", job.spec.routine)
                 }
-                Some(fault) => format!("{}.", capitalized(&fault.reason)),
+                Some(fault) => format!("{}.", fault.reason),
                 // `routine_fault` has nothing to say about a `routine` that
                 // escapes the routines directory, which `target` refuses.
                 None if job.target(repo).is_err() => format!(
@@ -8659,16 +8659,6 @@ fn orphan_jobs<'a>(
             }
         })
         .collect()
-}
-
-/// `text` with its first letter in capitals, to open a sentence with a
-/// clause written to follow `skipped, `.
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
 }
 
 /// The job row the list's cursor sits on: the rows run through `routines`
@@ -22652,6 +22642,254 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    /// Two jobs that run no listed routine, beside `maintenance` and
+    /// `nightly`: `nightly-old` in the user store, whose routine is gone, and
+    /// `deps-only` in the project store, on one of `nightly`'s task files.
+    fn seed_orphans(repo: &Repo) {
+        use crate::jobs::Scope;
+        seed_two_routines(repo);
+        crate::jobs::write(
+            repo,
+            Scope::User,
+            "nightly-old",
+            &crate::jobs::JobSpec {
+                schedule: "0 3 * * 1-5".to_string(),
+                pipeline: "impl_fast".to_string(),
+                routine: "nightly-old".to_string(),
+                ..crate::jobs::JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        write_job(repo, Scope::Project, "deps-only", "nightly/audit-deps.md");
+    }
+
+    /// The list for `seed_orphans`, cursor on `cursor`, at the left pane's
+    /// width in the routines tab's mockups.
+    fn orphan_list(repo: &Repo, cursor: usize) -> (Vec<String>, Vec<usize>) {
+        let routines = super::super::routines::list_routines(repo).unwrap();
+        let jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+        let orphans = orphan_jobs(repo, &routines, &jobs);
+        let mut nav = RoutineNav::new();
+        nav.folder_cursor = cursor;
+        routine_folder_lines(&repo.routines_dir(), &routines, &orphans, &nav, 24)
+    }
+
+    /// Each job that runs no listed routine gets a row under a blank line,
+    /// in store order, named after its `routine` and marked at the right
+    /// edge. A name too long for the row is cut, and the mark is kept.
+    #[test]
+    fn a_job_without_a_listed_routine_gets_a_row_under_a_blank_line() {
+        let (repo, _root_guard) = fixture("routines-orphan-rows");
+        seed_orphans(&repo);
+
+        let (lines, starts) = orphan_list(&repo, 2);
+        assert_eq!(
+            lines,
+            [
+                "  [ ] maintenance",
+                "  [ ] nightly",
+                "",
+                "> nightly-old    missing",
+                "  nightl…  not a routine",
+            ]
+        );
+        assert_eq!(starts, [0, 1, 3, 4]);
+        assert!(lines.iter().all(|line| line.chars().count() <= 24));
+    }
+
+    /// A job on a routine the tab lists gets no row of its own, and with no
+    /// such job there is no blank line under the routines either.
+    #[test]
+    fn a_job_on_a_listed_routine_gets_no_row_of_its_own() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routines-orphan-none");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly-audit", "nightly/");
+
+        let (lines, starts) = orphan_list(&repo, 0);
+        assert_eq!(lines, ["> [ ] maintenance", "  [ ] nightly"]);
+        assert_eq!(starts, [0, 1]);
+    }
+
+    /// A job row's details are the job's config, `Next:` saying it never
+    /// fires, then why and what to do, with no tasks — as the mockup draws a
+    /// job whose routine is missing. A job on a task file says that instead.
+    #[test]
+    fn a_job_rows_details_say_why_it_never_fires() {
+        let (repo, _root_guard) = fixture("routines-orphan-details");
+        seed_orphans(&repo);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let routines_dir = repo.routines_dir();
+        let pipelines = Pipelines::builtin();
+        let panes = Panes {
+            repo: &repo,
+            routines: &routines,
+            routines_dir: &routines_dir,
+            pipelines: &pipelines,
+        };
+        let jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+        let details = |cursor: usize| {
+            let mut nav = RoutineNav::new();
+            nav.folder_cursor = cursor;
+            let (lines, starts, _) =
+                routine_details_lines(&panes, &jobs, &nav, MOCKUP_DETAILS_WIDTH);
+            assert!(starts.is_empty(), "no task to stop on: {lines:#?}");
+            lines
+        };
+
+        assert_eq!(
+            details(2),
+            [
+                "",
+                "  Schedule:    0 3 * * 1-5",
+                "  Pipeline:    impl_fast",
+                "  Scope:       user",
+                "  Next:        never, its routine is missing",
+                "  Last:        never",
+                "  Job:         nightly-old",
+                "",
+                "  No routine nightly-old under .spoolway/routines/.",
+                "  Press o to point this job at a routine, or delete it.",
+            ]
+        );
+        let task_file = details(3);
+        assert_eq!(task_file[4], "  Next:        never, it runs no routine");
+        assert_eq!(task_file[6], "  Job:         deps-only");
+        assert_eq!(
+            task_file[8],
+            "  nightly/audit-deps.md is a task, not a routine."
+        );
+    }
+
+    /// On a job row the key line is `o` and `q` alone, since the row can be
+    /// neither ticked, queued nor tabbed into; on a routine it is the
+    /// routine's own line.
+    #[test]
+    fn hosted_a_job_rows_key_line_is_options_and_quit() {
+        use crate::screen::shell::{Hosting, Tab};
+        let (repo, _root_guard) = fixture("routines-orphan-footer");
+        seed_orphans(&repo);
+        let _hosting = Hosting::open(Tab::Routines);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let routines_dir = repo.routines_dir();
+        let pipelines = Pipelines::builtin();
+        let panes = Panes {
+            repo: &repo,
+            routines: &routines,
+            routines_dir: &routines_dir,
+            pipelines: &pipelines,
+        };
+        let line = |cursor: usize| {
+            let mut state = ScreenState::new();
+            state.jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+            let mut nav = RoutineNav::new();
+            nav.folder_cursor = cursor;
+            state.mode = Mode::Routines(nav);
+            crate::status::strip_ansi(&screen_footer(&panes, &state))
+        };
+
+        assert_eq!(line(2), " [o] options   [q] quit");
+        assert_eq!(line(3), " [o] options   [q] quit");
+        assert_eq!(
+            line(1),
+            " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
+        );
+    }
+
+    /// `space`, `enter` and `tab` do nothing on a job row: it takes no
+    /// tick, and `enter` there does not queue the routine ticked above it.
+    #[test]
+    fn space_enter_and_tab_do_nothing_on_a_job_row() {
+        let (repo, _root_guard) = fixture("routines-orphan-keys");
+        seed_orphans(&repo);
+
+        let last = last_frame(&routines_screen(&repo, " jj \r\t")).to_string();
+        assert!(!last.contains("queued"), "{last}");
+        assert!(repo.task("prune").is_err(), "nothing was queued");
+        assert!(last.contains("[x] maintenance"), "{last}");
+        assert!(
+            last.contains("> nightly-old"),
+            "the list kept focus: {last}"
+        );
+        assert!(!last.contains("[x] nightly-old"), "{last}");
+    }
+
+    /// `o` on a job row offers edit job and delete job, titled with the
+    /// row's name.
+    #[test]
+    fn o_on_a_job_row_offers_edit_job_and_delete_job() {
+        let (repo, _root_guard) = fixture("routines-orphan-menu");
+        seed_orphans(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "jjo")).to_string();
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ nightly-old ")),
+            "{last}"
+        );
+        let edit = last.find("│  > edit job  ").expect(&last);
+        let delete = last.find("│    delete job  ").expect(&last);
+        assert!(edit < delete, "{last}");
+        assert!(!last.contains("pause job"), "{last}");
+        assert!(!last.contains("delete routine"), "{last}");
+    }
+
+    /// Edit job on a job row opens the routine picker, which lists the
+    /// routine folders and none of their tasks. `enter` moves on to the
+    /// schedule and pipeline popups, and the save points the job at the
+    /// picked folder, under its own name in its own store. `esc` on the
+    /// picker writes nothing.
+    #[test]
+    fn edit_job_on_a_job_row_picks_a_routine_folder_then_the_schedule() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routines-orphan-edit");
+        seed_orphans(&repo);
+
+        let picker = last_frame(&routines_screen(&repo, "jjo\r")).to_string();
+        assert!(picker.contains("─ which routine "), "{picker}");
+        assert!(picker.contains("> maintenance"), "{picker}");
+        assert!(picker.contains("  nightly  "), "{picker}");
+        assert!(!picker.contains("audit-deps"), "folders only: {picker}");
+        assert!(!picker.contains("prune"), "folders only: {picker}");
+
+        routines_screen(&repo, "jjo\r\x1b");
+        let job = |name: &str| {
+            crate::jobs::load(&repo)
+                .unwrap()
+                .into_iter()
+                .find(|job| job.name == name)
+                .unwrap()
+        };
+        assert_eq!(job("nightly-old").spec.routine, "nightly-old");
+
+        let schedule = last_frame(&routines_screen(&repo, "jjo\r\r")).to_string();
+        assert!(
+            schedule.contains("─ when does nightly-old run "),
+            "{schedule}"
+        );
+
+        // `↓` picks `nightly`, the second folder; `enter` keeps the schedule
+        // and then the pipeline the job already has.
+        let saved = last_frame(&routines_screen(&repo, "jjo\r\x1b[B\r\r\r")).to_string();
+        assert!(saved.contains("─ job saved "), "{saved}");
+        let moved = job("nightly-old");
+        assert_eq!(moved.spec.routine, "nightly");
+        assert_eq!(moved.spec.schedule, "0 3 * * 1-5");
+        assert_eq!(moved.scope, Scope::User);
+    }
+
+    /// Delete job on a job row asks first, then deletes the job, and its row
+    /// goes with it: the cursor moves up onto the row above.
+    #[test]
+    fn delete_job_on_a_job_row_removes_the_job_and_its_row() {
+        let (repo, _root_guard) = fixture("routines-orphan-delete");
+        seed_orphans(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "jjjo\x1b[B\r\r")).to_string();
+        assert_eq!(job_names(&repo), ["nightly-old"]);
+        assert!(!last.contains("nightl…"), "{last}");
+        assert!(last.contains("> nightly-old"), "{last}");
     }
 
     /// A routine with one job draws that job's config, the jobs tab's own
