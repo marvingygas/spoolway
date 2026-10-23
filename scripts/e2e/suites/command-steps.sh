@@ -1139,6 +1139,18 @@ must "a task through a hide: true command step" \
 # this log.
 records "and its output is on the record just the same" "hidden-command-marker" \
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
+# A hidden step has no pane, so its row is the only sign it is working, and
+# `queue list` draws how long it has run after the state: `47s`, `9m 12s`,
+# `1h 04m`. Polled, since the row reads `queued` until the run is on disk.
+hidden_row_timed() {
+  "$SPOOLWAY" queue list | grep -E 'hiddenc.*● running [0-9]+(s|m [0-9]{2}s|h [0-9]{2}m)'
+}
+if poll_until 30 hidden_row_timed; then
+  ok "queue list shows how long a running hidden step has run"
+else
+  bad "queue list shows how long a running hidden step has run"
+  "$SPOOLWAY" queue list 2>&1 | sed 's/^/        /'
+fi
 
 touch "$HIDDEN_RELEASE"
 if drive hiddenc gone 180; then ok "a hide: true command step still routes on its exit code"
@@ -1268,6 +1280,18 @@ if [ -n "$OVERRIDE_RECORDED" ]; then
   ok "hide: false runs in a pane of its own while the project hides commands"
 else
   bad "hide: false runs in a pane of its own while the project hides commands"
+fi
+# A step in a pane keeps the bare `● running`: the pane is where to look.
+shown_row_untimed() {
+  local line
+  line=$("$SPOOLWAY" queue list | grep 'override.*● running') || return 1
+  ! grep -qE '● running [0-9]' <<<"$line"
+}
+if poll_until 30 shown_row_untimed; then
+  ok "and its queue list row shows no running time"
+else
+  bad "and its queue list row shows no running time"
+  "$SPOOLWAY" queue list 2>&1 | sed 's/^/        /'
 fi
 # The pane file is written only after the pane exists, so a pane the next step
 # wrongly opened would show in the stub's own list first. Count it before and after.
