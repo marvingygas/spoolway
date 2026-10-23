@@ -19,7 +19,7 @@ Create YAML pipelines that mix agents and commands, cloud and local models. Plan
 however you like, then cut spoolway tasks and assign each to a suitable pipeline.
 Measurable, comparable, repeatable.
 
-<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
+<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines tab" width="100%">
 
 Supported providers:
 
@@ -233,7 +233,8 @@ pipeline = "impl_fast"
 routine  = "nightly"       # a top-level folder under .spoolway/routines/
 ```
 
-<img src="docs/screenshots/jobs.png" alt="the jobs tab" width="100%">
+The routines tab shows a routine's job above its tasks. Press `o` on the routine to edit,
+pause or delete it.
 
 ## Trials
 

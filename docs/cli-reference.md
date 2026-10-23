@@ -785,24 +785,10 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
-Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writes a cron job.
-The left pane is titled `jobs` and the right pane `details`. While a new job is being written,
-the right pane is titled `new job`.
-
-<img src="screenshots/jobs.png" alt="the jobs screen">
-
-| Key | What it does |
-|---|---|
-| `n` | Write a new job: pick the routine, type the schedule, pick the pipeline |
-| `o` | Open the options menu of the highlighted job, titled with its name |
-
-The options menu offers these items for the highlighted job, in this order:
-
-| Item | What it does |
-|---|---|
-| `edit` | Edit the job through the same three panels |
-| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it |
-| `delete` | Delete the job, after a popup whose one answer is `delete` |
+Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
+menu offers `new job`, `edit job`, `pause job` or `resume job`, and `delete job`. A job whose
+routine is not a listed one gets a row of its own under the routines, whose menu offers
+`edit job` and `delete job`.
 
 See [Jobs](jobs.md).
 
