@@ -161,8 +161,9 @@ no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-ta
 
 `space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
 name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
-instead. Only pages written after the time kept in the `plans-since` file beside `plans/` are shown.
-In home mode that file is the workspace's, so every clone uses the same cutoff. Older pages stay off the screen.
+instead. Only pages written after the time kept in the `plans-since` file beside `plans/` are
+shown. In home mode that file is the workspace's, so every clone uses the same cutoff. Older
+pages stay off the screen.
 
 When the `plans/` folder cannot be read, the screen lists the groups without plan rows and
 shows a notice titled `plans not listed`. The notice names the read error. It appears once per

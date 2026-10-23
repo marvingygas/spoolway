@@ -2576,10 +2576,11 @@ pub fn project_label(root: &Path) -> String {
 /// of one clone, so all four resolve here identically, and never shared
 /// between two clones of the same repository.
 ///
-/// The one directory a project's queue, archive, plans, lane bookkeeping and
+/// The one directory a project's queue, archive, lane bookkeeping and
 /// dispatched worktrees all sit under — see [`crate::repo::Repo::home`] for
-/// the rest of it. Every backend is handed that home rather than asking for
-/// it again.
+/// the rest of it. Plan pages sit there too in repo mode; in home mode they
+/// sit in the workspace, see [`crate::repo::Repo::plans_dir`]. Every backend
+/// is handed that home rather than asking for it again.
 ///
 /// `<label>` is the checkout's basename at the moment it was first stamped,
 /// frozen into the checkout's own `.git` alongside the id — never recomputed

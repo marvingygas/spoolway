@@ -10381,8 +10381,9 @@ fn highlighted_plan_page<'a>(groups: &'a [Group], state: &ScreenState) -> Option
 }
 
 /// A plan page as its popups name it: `plans/` and the file's name, which
-/// is all that tells two plans apart, since every page sits in that one
-/// folder of the project home.
+/// is all that tells two plans apart, since every page sits in the one
+/// folder [`Repo::plans_dir`] names: the project home's in repo mode, the
+/// workspace's in home mode.
 fn plan_file(page: &Path) -> String {
     let name = page.file_name().map_or_else(
         || page.display().to_string(),
@@ -18007,7 +18008,7 @@ mod tests {
     fn a_plans_folder_that_will_not_read_is_named_once() {
         let (repo, _root_guard) = fixture("screen-plan-unreadable");
         write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
-        let plans = repo.home().join(crate::config::PLANS_DIR);
+        let plans = repo.plans_dir();
         std::fs::create_dir_all(repo.home()).unwrap();
         let _ = std::fs::remove_dir_all(&plans);
         // A file where the folder should be: `read_dir` fails on it the same
