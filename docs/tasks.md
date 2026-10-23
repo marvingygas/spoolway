@@ -181,16 +181,16 @@ and its dependent must share the same `base`. They must also share the same `gro
 dependent is its own group's first task naming the other group's own last task. See [Stacking
 one group on another](#stacking-one-group-on-another).
 
-`spoolway dispatch` checks the same base rule again before it starts, since a task file can be
-edited by hand, or a base branch deleted, after the batch was sent. A dependent whose `base:` no
-longer agrees with its dependency's refuses the whole start. A task still waiting to be cut whose
-base exists neither locally nor on `origin` refuses it too, checked locally first; a task already
-cut is not asked. Each question to `origin` is given up after 10 seconds. An `origin` that cannot
-be asked does not refuse the start. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
-While a dispatcher is already running, the same two problems hold only the task they are found on,
-the way a task with no `base:` at all is held. A task whose base is not a local branch and whose
-`origin` cannot be asked is held too, with a reason that says `origin` could not be asked. Its
-hold lifts on the first pass `origin` answers.
+`spoolway dispatch` checks the same base rule again, since a task file can be edited by hand, or a
+base branch deleted, after the batch was sent. A dependent whose `base:` no longer agrees with its
+dependency's is held on every pass, starting with the first. Only that task is held, the way a task
+with no `base:` at all is held, and the other tasks run. A task still waiting to be cut whose base
+exists neither locally nor on `origin` refuses the whole start, checked locally first; a task
+already cut is not asked. Each question to `origin` is given up after 10 seconds. An `origin` that
+cannot be asked does not refuse the start. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
+While a dispatcher is already running, a base that exists nowhere holds only the task it is found
+on. A task whose base is not a local branch and whose `origin` cannot be asked is held too, with a
+reason that says `origin` could not be asked. Its hold lifts on the first pass `origin` answers.
 
 When `depends_on` names more than one id, the first must be the one whose branch already
 contains the others. `queue add` reorders the list to put it first. A list with no such id is
