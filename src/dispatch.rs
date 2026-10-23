@@ -727,9 +727,10 @@ pub struct Dispatcher<'a> {
     /// see [`PassMemory`]. A dispatcher built for one pass alone starts with
     /// none, so it asks everything.
     memory: PassMemory,
-    /// Whether this run stops for a person. Settled once when the run takes its
-    /// lock and carried here rather than re-read per decision, so that one pass
-    /// cannot make half its choices in each mode.
+    /// Whether this run stops for a person. Read off the lock when the pass is
+    /// built and carried here rather than re-read per decision, so that one
+    /// pass cannot make half its choices in each mode. A reload rewrites the
+    /// lock between passes, never during one.
     unattended: bool,
     /// What each session in the usage ledger has already banked, by session
     /// id — folded once per pass out of [`Dispatcher::ledger`], rather than

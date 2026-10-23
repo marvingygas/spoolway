@@ -19,6 +19,10 @@
 //! `spoolway dispatch reload` writes that request itself and prints the
 //! answer: `successfully loaded` and exit 0, or the whole refusal and a
 //! non-zero exit. With no dispatcher running it writes nothing.
+//!
+//! A reload also sets the run's mode to `unattended.enabled`. Switching on
+//! starts the spend ceilings' window at the reload, so what was spent before it
+//! is not counted. Switching off lifts the ceilings from the next pass.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -241,6 +245,30 @@ impl Project {
             .args(["dispatch", "reload"])
             .output()
             .expect("run spoolway dispatch reload")
+    }
+
+    /// The third line of the dispatcher's lock file: `attended` or
+    /// `unattended`.
+    fn lock_mode(&self) -> String {
+        fs::read_to_string(self.project_home().join("dispatch.pid"))
+            .expect("read lock")
+            .lines()
+            .nth(2)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Banks `output` tokens against a task, stamped now, the way a finished
+    /// lane would.
+    fn spend(&self, output: u64) {
+        let line = format!(
+            "{{\"ts\":\"{}\",\"task\":\"spent\",\"tokens\":{{\"output\":{output}}}}}\n",
+            chrono::Utc::now().to_rfc3339()
+        );
+        let ledger = self.project_home().join("usage.jsonl");
+        let mut text = fs::read_to_string(&ledger).unwrap_or_default();
+        text.push_str(&line);
+        fs::write(ledger, text).expect("write ledger");
     }
 
     fn pipeline_file(&self) -> PathBuf {
@@ -673,5 +701,81 @@ fn the_reload_command_with_no_dispatcher_and_a_broken_config_still_says_so() {
         String::from_utf8_lossy(&output.stderr)
             .starts_with("no dispatcher is running, so there is nothing to reload."),
         "{output:?}"
+    );
+}
+
+/// A reload that turns unattended on counts the ceiling from the reload, not
+/// from the start of the run. The 5000 tokens banked before it are left out,
+/// so the ceiling reports only the 5000 banked after it.
+#[cfg(unix)]
+#[test]
+fn a_reload_that_turns_unattended_on_counts_spend_from_the_reload() {
+    let mut project = Project::new();
+    project.set_up();
+    project.run(&["config", "set", "unattended.max_output_tokens", "1000"]);
+    project.run(&[
+        "config",
+        "set",
+        "unattended.blocked_model",
+        "claude-sonnet-5-5",
+    ]);
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    assert_eq!(project.lock_mode(), "attended");
+    project.spend(5000);
+    std::thread::sleep(Duration::from_millis(200));
+
+    project.run(&["config", "set", "unattended.enabled", "true"]);
+    let answer = project.reload("2-1");
+    assert!(answer.contains("Loaded"), "reload was not taken:\n{answer}");
+    assert_eq!(project.lock_mode(), "unattended");
+    std::thread::sleep(Duration::from_millis(200));
+    project.spend(5000);
+
+    // The lane reports on the snapshot the switch rewrote, then the pass that
+    // would start the next one meets the ceiling instead.
+    let (status, stderr) = project.report_from_lane("ta");
+    assert_eq!(status.trim(), "0", "report failed:\n{stderr}");
+    project.wait_for("the ceiling to stop the run", |p| {
+        p.dispatch_text()
+            .contains("spent 5000 output tokens against a max_output_tokens of 1000")
+    });
+    assert_eq!(project.started().len(), 1, "a second lane started");
+}
+
+/// A reload that turns unattended off lifts the ceiling from the next pass:
+/// spend that would have stopped an unattended run starts the next lane.
+#[cfg(unix)]
+#[test]
+fn a_reload_that_turns_unattended_off_lifts_the_ceiling() {
+    let mut project = Project::new();
+    project.set_up();
+    project.run(&["config", "set", "unattended.max_output_tokens", "1000"]);
+    project.run(&[
+        "config",
+        "set",
+        "unattended.blocked_model",
+        "claude-sonnet-5-5",
+    ]);
+    project.run(&["config", "set", "unattended.enabled", "true"]);
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    assert_eq!(project.lock_mode(), "unattended");
+
+    project.run(&["config", "set", "unattended.enabled", "false"]);
+    let answer = project.reload("3-1");
+    assert!(answer.contains("Loaded"), "reload was not taken:\n{answer}");
+    assert_eq!(project.lock_mode(), "attended");
+    project.spend(5000);
+
+    let (status, stderr) = project.report_from_lane("ta");
+    assert_eq!(status.trim(), "0", "report failed:\n{stderr}");
+    project.wait_for("the next lane to start", |p| p.started().len() == 2);
+    assert!(
+        !project
+            .dispatch_text()
+            .contains("max_output_tokens reached"),
+        "the ceiling still applied:\n{}",
+        project.dispatch_text()
     );
 }

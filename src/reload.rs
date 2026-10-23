@@ -20,6 +20,10 @@
 //! one file under `reload/answers/`, and [`answer`] reads that answer back by
 //! id.
 //!
+//! A reload also sets the run's mode to `unattended.enabled`, whatever flag the
+//! run started with, because the mode is the one setting the lock records. See
+//! [`crate::lock::Lock::switch_mode`].
+//!
 //! A reload is refused, and changes nothing, when the new pipelines do not
 //! load, or when a task in the queue is recorded on a step, or names a
 //! pipeline, the new pipelines lack. A running lane whose step is gone is no
@@ -246,28 +250,19 @@ pub(crate) struct Served {
 ///
 /// Returns `None` when there were none. Otherwise it loads the pipelines from
 /// `live`'s root with the config as it now stands, checks them, and on a good
-/// load rewrites the snapshot and then replaces `pipelines` and `live.config`.
-/// The snapshot is written before the swap and before anything else runs, so
-/// no lane launches on a graph its own `report` would not route on.
+/// load switches the run's mode to `unattended.enabled`, rewrites the snapshot
+/// and then replaces `pipelines` and `live.config`. The snapshot is written
+/// before the swap and before anything else runs, so no lane launches on a
+/// graph its own `report` would not route on.
 ///
 /// All of it is built and checked before anything is touched. A refusal, or a
-/// snapshot that cannot be written, leaves `pipelines`, `live.config` and the
-/// snapshot as they were.
+/// snapshot that cannot be written, leaves `pipelines`, `live.config`, the lock
+/// and the snapshot as they were.
 pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served> {
     let ids = pending(live);
     let first = ids.first()?.clone();
     let outcome = match try_reload(live) {
-        Ok((config, loaded)) => match crate::pipeline_snapshot::write(live, &loaded) {
-            Ok(()) => {
-                live.config = config;
-                *pipelines = loaded;
-                Outcome::Loaded
-            }
-            Err(err) => Outcome::Refused(vec![Reason {
-                what: format!("the new pipelines could not be recorded: {err:#}"),
-                fix: "Make the project home writable, then reload again.".to_string(),
-            }]),
-        },
+        Ok((config, loaded)) => apply(live, pipelines, config, loaded),
         Err(reasons) => Outcome::Refused(reasons),
     };
     let problems = settle(live, &ids, &outcome);
@@ -278,6 +273,49 @@ pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served
         },
         problems,
     })
+}
+
+/// Put a checked reload in force: the run's mode, then the snapshot, then the
+/// swap.
+///
+/// The mode comes first because the snapshot records the lock's text, and a
+/// snapshot written under the old mode line would no longer match the lock, so
+/// every reader would fall back to the files. Both are done before the caller
+/// builds the pass, so no lane launches on a lock and snapshot that disagree.
+/// A snapshot that cannot be written puts the lock back, so a refusal still
+/// changes nothing.
+fn apply(
+    live: &mut Repo,
+    pipelines: &mut Pipelines,
+    config: crate::config::Config,
+    loaded: Pipelines,
+) -> Outcome {
+    let switch = match crate::lock::Lock::switch_mode(&live.lock_file(), config.unattended.enabled)
+    {
+        Ok(switch) => switch,
+        Err(err) => {
+            return Outcome::Refused(vec![Reason {
+                what: format!("the run's mode could not be changed: {err:#}"),
+                fix: "Make the project home writable, then reload again.".to_string(),
+            }]);
+        }
+    };
+    match crate::pipeline_snapshot::write(live, &loaded) {
+        Ok(()) => {
+            live.config = config;
+            *pipelines = loaded;
+            Outcome::Loaded
+        }
+        Err(err) => {
+            if let Some(switch) = switch {
+                switch.undo();
+            }
+            Outcome::Refused(vec![Reason {
+                what: format!("the new pipelines could not be recorded: {err:#}"),
+                fix: "Make the project home writable, then reload again.".to_string(),
+            }])
+        }
+    }
 }
 
 /// The config and pipelines as the files now stand, when nothing in the queue
@@ -590,6 +628,35 @@ mod tests {
                 .is_some()
         );
         assert!(pending(&repo).is_empty());
+    }
+
+    /// A reload that changes `unattended.enabled` rewrites the lock's mode line
+    /// and the snapshot together, so the snapshot still matches the lock. One
+    /// that leaves the mode alone does not touch the lock, whose modified time
+    /// starts the spend window.
+    #[test]
+    fn a_reload_follows_the_configs_mode_and_leaves_the_lock_alone_otherwise() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-mode", "build");
+        let lock_file = repo.lock_file();
+        let stamp = std::fs::metadata(&lock_file).unwrap().modified().unwrap();
+        request(&repo).unwrap();
+        serve(&mut repo, &mut held).unwrap();
+        assert_eq!(
+            std::fs::metadata(&lock_file).unwrap().modified().unwrap(),
+            stamp
+        );
+        assert_eq!(crate::lock::Lock::unattended(&lock_file), Some(false));
+
+        let mut edited = repo.config.clone();
+        edited.unattended.enabled = true;
+        edited.save(&repo.root).unwrap();
+        request(&repo).unwrap();
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        assert_eq!(served.answer.outcome, Outcome::Loaded);
+        assert_eq!(crate::lock::Lock::unattended(&lock_file), Some(true));
+        assert!(crate::pipeline_snapshot::LoadedPipelines::live(&repo).is_some());
+        assert!(repo.unattended());
     }
 
     /// A queue file that does not parse cannot be checked, so it refuses the

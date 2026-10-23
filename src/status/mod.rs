@@ -6645,7 +6645,8 @@ fn published_newer(
 }
 
 /// When this run began: the moment the dispatcher wrote its lock, as an
-/// RFC 3339 timestamp comparable with the ledger's own.
+/// RFC 3339 timestamp comparable with the ledger's own. A reload that switches
+/// the run's mode rewrites the lock, and so begins the window again.
 ///
 /// Shared with the dispatcher's own `max_output_tokens` and `max_cost_usd`
 /// checks, so that what the footer reports the run has spent and what either

@@ -115,10 +115,10 @@ pub fn dispatch_reload(repo: &Repo) -> Result<i32> {
 /// still `Err` — see `crate::main` for where each of these becomes a
 /// process exit code.
 pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<i32> {
-    // The mode is settled here, once, and written into the lock — every lane's
+    // The mode is settled here, and written into the lock — every lane's
     // own `spoolway report` reads it back from there, so a `--unattended` typed
     // on this command line reaches the processes that actually decide what a
-    // block does.
+    // block does. A reload switches it to `unattended.enabled` later.
     let unattended = args.unattended(&repo.config);
 
     // An unattended run staffs `blocked` instead of parking a task for a
@@ -685,8 +685,7 @@ impl ConfigWatch {
 /// their new value at once: `unattended.blocked_agent`, `blocked_model`,
 /// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
 /// the pipelines when they load, so only a reload or a restart brings them
-/// in; `unattended.enabled` is settled once into the lock, and only a restart
-/// changes it; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
+/// in; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
 /// environment the dispatcher started with, and only a restart changes it.
 fn reload_config(
     live: &mut Repo,
