@@ -25294,6 +25294,66 @@ mod tests {
         );
     }
 
+    /// A done dependency is no longer part of the chain the dependent will
+    /// run on, so its `base:` is not compared with the dependent's. That
+    /// holds whether its file has been archived or still sits in the queue.
+    #[test]
+    fn a_task_is_not_held_over_the_base_of_a_dependency_that_is_done() {
+        let (repo, _root_guard) = fixture("base-problem-skips-done-dependency");
+        let mut cache = HashMap::new();
+
+        let archived = add_task_with(&repo, "archived-dep", "done", |f| {
+            f.base = Some("old".into());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("archived-dep.md")).unwrap();
+        add_task_with(&repo, "queued-dep", "done", |f| {
+            f.base = Some("old".into());
+        });
+
+        for dep in ["archived-dep", "queued-dep"] {
+            let task = reload(&add_task_with(&repo, &format!("on-{dep}"), "queued", |f| {
+                f.base = Some("work".into());
+                f.depends_on = vec![dep.into()];
+            }));
+            assert_eq!(
+                base_problem(&repo, &task, &mut cache),
+                None,
+                "a task depending only on done `{dep}` must not be held over its base"
+            );
+        }
+    }
+
+    /// Every dependency still in the queue must share the dependent's base,
+    /// not only the first one listed, and the problem names the one that
+    /// differs.
+    #[test]
+    fn a_task_is_held_over_the_base_of_any_live_dependency_that_differs() {
+        let (repo, _root_guard) = fixture("base-problem-checks-every-live-dependency");
+        let mut cache = HashMap::new();
+
+        add_task_with(&repo, "same", "implement", |f| {
+            f.base = Some("work".into());
+        });
+        add_task_with(&repo, "other", "implement", |f| {
+            f.base = Some("elsewhere".into());
+        });
+        let task = reload(&add_task_with(&repo, "joined", "queued", |f| {
+            f.base = Some("work".into());
+            f.depends_on = vec!["same".into(), "other".into()];
+        }));
+
+        assert_eq!(
+            base_problem(&repo, &task, &mut cache),
+            Some((
+                "task `joined` is based on `work` but depends on `other`, which is based on \
+                 `elsewhere`"
+                    .to_string(),
+                "A chain has one base. Set `base:` in joined to `elsewhere`.".to_string()
+            ))
+        );
+    }
+
     /// A queued task whose own `starts_from:` exists nowhere is not launched:
     /// it pauses with the branch recorded, no worktree cut, and exactly one
     /// line on the dispatch output.
