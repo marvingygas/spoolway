@@ -307,7 +307,7 @@ fn apply(
             }]);
         }
     };
-    if let Err(err) = crate::pipeline_snapshot::write(live, &loaded) {
+    if let Err(err) = crate::pipeline_snapshot::write(live, &loaded, &config.unattended) {
         let mut reasons = vec![Reason {
             what: format!("the new pipelines could not be recorded: {err:#}"),
             fix: "Make the project home writable, then reload again.".to_string(),

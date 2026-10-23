@@ -302,7 +302,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // graph this dispatcher does rather than on files edited since. See
     // `crate::pipeline_snapshot`. Before any lane exists, so no lane of
     // this run can report ahead of it.
-    crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
+    crate::pipeline_snapshot::write(repo, pipelines, &repo.config.unattended)
+        .context("refusing to start")?;
     // A request a dead dispatcher left is answered here, as loaded: this start
     // has just loaded every file, and serving it as well would load twice.
     for problem in crate::reload::settle_left_behind(repo) {

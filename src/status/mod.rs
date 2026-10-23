@@ -3205,11 +3205,13 @@ struct Snapshot {
     /// `· <n> held` — see [`held_slots`].
     held: BTreeMap<crate::dispatch::Cap, usize>,
     active_jobs: Vec<crate::jobs::ActiveJob>,
-    /// Every pipeline file edited since the running dispatcher loaded them —
-    /// see [`crate::pipeline_snapshot::changed_since_start`]. Read here, off
-    /// the key thread, rather than in the footer, since it reads every
-    /// pipeline file.
-    changed_pipelines: Vec<String>,
+    /// Every pipeline file edited since the running dispatcher loaded them,
+    /// then every config key whose edit waits for a reload — see
+    /// [`crate::pipeline_snapshot::changed_since_start`] and
+    /// [`crate::pipeline_snapshot::config_changed_since_start`]. Read here,
+    /// off the key thread, rather than in the footer, since it reads every
+    /// pipeline file and `config.toml`.
+    waiting: Vec<String>,
     recent: VecDeque<RecentEvent>,
 }
 
@@ -3229,7 +3231,7 @@ impl Snapshot {
             agent_model: BTreeMap::new(),
             held: BTreeMap::new(),
             active_jobs: Vec::new(),
-            changed_pipelines: Vec::new(),
+            waiting: Vec::new(),
             recent: VecDeque::new(),
         }
     }
@@ -3436,7 +3438,8 @@ fn build(
     // — memoised, so a reading over an unchanged calendar does not re-scan
     // it for every enabled job.
     let active_jobs = crate::jobs::active_jobs_cached(repo, &mut memory.jobs_next);
-    let changed_pipelines = crate::pipeline_snapshot::changed_since_start(repo);
+    let mut waiting = crate::pipeline_snapshot::changed_since_start(repo);
+    waiting.extend(crate::pipeline_snapshot::config_changed_since_start(repo));
 
     // Taken before the clear below, which must not erase the very news this
     // reading is handing back — see `Memory::adopted`.
@@ -3457,7 +3460,7 @@ fn build(
         agent_model,
         held,
         active_jobs,
-        changed_pipelines,
+        waiting,
         recent,
     })
 }
@@ -3917,7 +3920,7 @@ fn paint_at(
         &agent_model,
         &snapshot.held,
         &snapshot.active_jobs,
-        &snapshot.changed_pipelines,
+        &snapshot.waiting,
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
@@ -3937,7 +3940,9 @@ fn paint_at(
     //
     // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
     // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
-    // the one place it starts or stops dispatching.
+    // the one place it starts or stops dispatching. `[u] update config` sits
+    // between `[o] options` and `q` while a dispatcher holds the lock — see
+    // [`update_hint`].
     let resumable = cursor
         .and_then(|id| snapshot.rows.iter().find(|row| row.id == id))
         .is_some_and(|row| row.resumable);
@@ -3949,6 +3954,7 @@ fn paint_at(
         &[enter_hint(phase)][..],
         resume,
         &[("o", "options")],
+        update_hint(phase),
         crate::screen::shell::quit_hint(),
     ]
     .concat();
@@ -4028,6 +4034,19 @@ fn hosted_keys(keys: String, height: Option<usize>) -> (String, Option<usize>) {
     )
 }
 
+/// The key line's `u` pair, drawn while any dispatcher holds the lock: the
+/// tab's own child, or one started in a terminal, since the request `u`
+/// writes is read by whichever holds it. Empty with none, as there is no run
+/// to update — see `crate::screen::shell`, where the key is read.
+fn update_hint(phase: Phase) -> &'static [(&'static str, &'static str)] {
+    match phase {
+        Phase::Watching {
+            holder: Some(_), ..
+        } => &[("u", "update config")],
+        Phase::Watching { holder: None, .. } => &[],
+    }
+}
+
 /// The key line's `enter` pair: what pressing it would do to the tab's own
 /// dispatcher, given whether it has one up.
 fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
@@ -4043,13 +4062,14 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 
 /// [`paint`]'s frame for a board with no rows: the header alone in the
 /// top-right corner, then [`view::greeting_screen`] centred down the rest of
-/// the pane, and a key line of `enter` and, inside the dispatch tab, `q`.
+/// the pane, and a key line of `enter`, `u` while a dispatcher holds the
+/// lock and, inside the dispatch tab, `q`.
 /// Under the greeting, `jobs` is drawn as the busy board's own job ledger —
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
 ///
 /// Everything else the busy board draws is left off, so an idle board reads
-/// as idle at a glance: the rule, the slots lines, the `pipelines`
+/// as idle at a glance: the rule, the slots lines, the `update`
 /// notice and the parse warning. Each comes back
 /// once the board has a row again. A queue file that fails to parse makes no
 /// row, so a broken file on an otherwise empty queue is not named on the
@@ -4073,7 +4093,12 @@ fn paint_empty(
     let hosted = crate::screen::shell::hosted().is_some();
     let (keys, height) = hosted_keys(
         crate::screen::key_hint(
-            &[&[enter_hint(phase)][..], crate::screen::shell::quit_hint()].concat(),
+            &[
+                &[enter_hint(phase)][..],
+                update_hint(phase),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
         ),
         pane_height(),
     );
@@ -7713,7 +7738,7 @@ mod tests {
                 error: "no frontmatter".to_string(),
                 duplicate: false,
             }],
-            changed_pipelines: vec!["default".to_string()],
+            waiting: vec!["default".to_string()],
             ..Snapshot::empty()
         };
         let frame = strip(&paint(
@@ -8026,6 +8051,55 @@ mod tests {
         assert!(
             held.contains("[r] → "),
             "the NEXT column keeps its own `[r]`: {held}"
+        );
+    }
+
+    /// `[u] update config` is offered while a dispatcher holds the lock,
+    /// after `[o] options` and before `[q] quit`, on a board with rows and on
+    /// an empty one alike, and goes once nothing holds it. Fails before the
+    /// change: no key line named `u`.
+    #[test]
+    fn the_key_hint_offers_update_config_while_a_dispatcher_holds_the_lock() {
+        let (repo, _root_guard) = fixture("key-hint-update");
+        let pipelines = Pipelines::builtin();
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let mut board = Board::for_test();
+        // Hosted, the key line sits under the box, the frame's last row.
+        let keys = |board: &mut Board, holder: Option<u32>| {
+            let frame = strip(
+                &board
+                    .frame(
+                        &repo,
+                        &pipelines,
+                        Phase::Watching {
+                            holder,
+                            dispatching: false,
+                        },
+                    )
+                    .unwrap(),
+            );
+            frame
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+
+        assert_eq!(
+            keys(&mut board, Some(4242)),
+            "[enter] start dispatching   [u] update config   [q] quit"
+        );
+        add_to(&repo, "login", &[], Some("implement"), Some("login"));
+        board.cursor = Some("login".to_string());
+        assert_eq!(
+            keys(&mut board, Some(4242)),
+            "[enter] start dispatching   [o] options   [u] update config   [q] quit"
+        );
+        assert_eq!(
+            keys(&mut board, None),
+            "[enter] start dispatching   [o] options   [q] quit"
         );
     }
 
@@ -13174,7 +13248,7 @@ mod tests {
         loaded.pipelines.insert("renamed".into(), default);
         hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
 
         let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('k')]);
 
@@ -13209,7 +13283,7 @@ mod tests {
         hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
         let before = std::fs::read_to_string(&repo.task("retry-flag").unwrap().path).unwrap();
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &renamed).unwrap();
+        crate::pipeline_snapshot::write(&repo, &renamed, &repo.config.unattended).unwrap();
 
         let board = board_after(&repo, &renamed, &[Key::Down, Key::Char('k')]);
 
@@ -13280,7 +13354,8 @@ mod tests {
         );
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin(), &repo.config.unattended)
+            .unwrap();
         assert_eq!(
             routed_for(&repo, &board, "t1").unwrap().names(),
             vec!["default"]
@@ -13328,7 +13403,7 @@ mod tests {
         assert_eq!(repo.task("unwatched").unwrap().stage(), "document");
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
         gate("running");
         resume_task(&repo, &edited, "running").unwrap();
         assert_eq!(repo.task("running").unwrap().stage(), loaded_next);
@@ -13369,7 +13444,7 @@ mod tests {
         task.save().unwrap();
 
         let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(repo, &loaded, &repo.config.unattended).unwrap();
         (edited, loaded_next, lock)
     }
 
@@ -14255,7 +14330,7 @@ mod tests {
             .start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
 
         let mut board = board_picking(&repo, &edited, RowAction::Restart, &[]);
         let frame = watching_frame(&mut board, &repo, &edited);
@@ -14287,7 +14362,7 @@ mod tests {
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
 
         let mut board = board_picking(&repo, &pipelines, RowAction::Restart, &[]);
         let refused = "is not one the running dispatcher";
@@ -14340,7 +14415,7 @@ mod tests {
         assert!(menu_items(&mut board, &repo, &edited).contains(&RowAction::Restart));
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
         assert!(!menu_items(&mut board, &repo, &edited).contains(&RowAction::Restart));
     }
 

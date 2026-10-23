@@ -910,10 +910,11 @@ struct Spend {
 /// at all, only the same ledger under its greeting while a dispatcher holds
 /// the lock — see [`jobs_ledger`] and `paint_empty` in the parent module.
 ///
-/// `changed_pipelines` is every pipeline file edited since the running
-/// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
-/// `pipelines` line under the slots, since the run keeps routing on what it
-/// loaded and an edit waits for a restart. Empty, and no line, otherwise.
+/// `waiting` is every pipeline file edited since the running dispatcher
+/// started, then every config key whose new value it has not taken up — see
+/// [`crate::pipeline_snapshot`]. Named on an `update` line under the slots,
+/// since the run keeps routing on what it loaded and an edit waits for `u`.
+/// Empty, and no line, otherwise.
 ///
 /// `held` is how many slots `dispatch.priority = "reserve"` holds on each cap
 /// for a started group. A figure with a hold on its cap reads
@@ -933,7 +934,7 @@ pub(super) fn footer(
     agent_model: &BTreeMap<&str, Vec<&str>>,
     held: &BTreeMap<crate::dispatch::Cap, usize>,
     jobs: &[crate::jobs::ActiveJob],
-    changed_pipelines: &[String],
+    waiting: &[String],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
     // ships a profile per agent kind spoolway can drive, so a project that
@@ -1063,11 +1064,12 @@ pub(super) fn footer(
         .collect();
 
     // A person who edited a pipeline mid-run would otherwise watch the run
-    // ignore the edit with nothing saying why. Two spaces after the label,
-    // not `GUTTER`: this line shares no column with the slots lines above
-    // it, so the wider gutter would have nothing to line up with.
-    if let Some(notice) = crate::pipeline_snapshot::restart_notice(changed_pipelines, "this run") {
-        lines.push(format!("{BOLD}pipelines{RESET}  {notice}"));
+    // ignore the edit with nothing saying why. Not `GUTTER` after the label:
+    // this line shares no column with the slots lines above it. The label is
+    // padded to the width `pipelines` had when it labelled this line, so the
+    // notice starts in the column a person already looks in.
+    if let Some(notice) = update_notice(waiting) {
+        lines.push(format!("{BOLD}update{RESET}     {notice}"));
     }
 
     // The job ledger, below the whole slots block: every enabled job, ordered
@@ -1080,6 +1082,18 @@ pub(super) fn footer(
         lines.extend(jobs_ledger(jobs, name_w));
     }
     lines
+}
+
+/// The footer's `update` line about `waiting`, or `None` when nothing waits:
+/// what changed, and the key on this board that brings it in.
+fn update_notice(waiting: &[String]) -> Option<String> {
+    if waiting.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} changed since this run started — press u to update config",
+        waiting.join(", ")
+    ))
 }
 
 /// The name a footer line gives the pool behind `[models]` row `key`: the
@@ -4463,10 +4477,11 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with("codex")), "{lines:#?}");
     }
 
-    /// A pipeline edited mid-run is named under the slots, with the restart
-    /// that applies it — and no line at all while nothing is waiting.
+    /// A pipeline edited mid-run is named under the slots, on an `update`
+    /// line with the key that applies it, and a config key waiting beside it
+    /// is named after it — and no line at all while nothing is waiting.
     #[test]
-    fn a_pipeline_edited_mid_run_is_named_with_the_restart_it_waits_on() {
+    fn a_pipeline_edited_mid_run_is_named_with_the_key_that_updates_it() {
         let (repo, _root_guard) = fixture("footer-changed-pipelines");
         let pipelines = Pipelines::builtin();
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
@@ -4488,7 +4503,7 @@ mod tests {
         };
 
         assert!(
-            !draw(&[]).iter().any(|l| l.starts_with("pipelines")),
+            !draw(&[]).iter().any(|l| l.starts_with("update")),
             "{:#?}",
             draw(&[])
         );
@@ -4496,10 +4511,18 @@ mod tests {
         let lines = draw(&["t.yml".to_string()]);
         assert_eq!(
             lines.last().unwrap(),
-            "pipelines  t.yml changed since this run started — restart the dispatcher to use it",
+            "update     t.yml changed since this run started — press u to update config",
             "{lines:#?}"
         );
         assert!(lines[0].starts_with("claude"), "{lines:#?}");
+
+        let lines = draw(&["t.yml".to_string(), "unattended.enabled".to_string()]);
+        assert_eq!(
+            lines.last().unwrap(),
+            "update     t.yml, unattended.enabled changed since this run started — press u to \
+             update config",
+            "{lines:#?}"
+        );
     }
 
     /// A capped profile no step names is off the board, and a live lane puts

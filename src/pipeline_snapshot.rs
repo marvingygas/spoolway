@@ -69,21 +69,75 @@ struct Written {
     clashes: BTreeMap<String, crate::pipeline::Clash>,
     /// Every pipeline source file the load could have read, label to text.
     sources: BTreeMap<String, String>,
+    /// The `unattended.blocked_*` values the `blocked` steps above were filled
+    /// in from. A snapshot from before this existed has none, which names no
+    /// key as changed.
+    #[serde(default)]
+    blocked: Option<BlockedKeys>,
+}
+
+/// The five `unattended.blocked_*` keys, as the dispatcher loaded them.
+///
+/// Recorded because nothing else keeps them: they are baked into each
+/// pipeline's `blocked` step when the pipelines load, while
+/// `dispatch-config.toml` follows `config.toml` on every pass. Without this
+/// copy the board could not tell an edit to one of them, which waits for a
+/// reload, from one the run already uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BlockedKeys {
+    agent: String,
+    model: String,
+    effort: String,
+    session: bool,
+    prompt: String,
+}
+
+impl BlockedKeys {
+    fn of(unattended: &crate::config::UnattendedConfig) -> BlockedKeys {
+        BlockedKeys {
+            agent: unattended.blocked_agent.clone(),
+            model: unattended.blocked_model.clone(),
+            effort: unattended.blocked_effort.clone(),
+            session: unattended.blocked_session,
+            prompt: unattended.blocked_prompt.clone(),
+        }
+    }
+
+    /// The full name of every key whose value differs between `self` and
+    /// `now`, in the order `config.toml` lists them.
+    fn changed(&self, now: &BlockedKeys) -> Vec<String> {
+        [
+            ("unattended.blocked_agent", self.agent != now.agent),
+            ("unattended.blocked_model", self.model != now.model),
+            ("unattended.blocked_effort", self.effort != now.effort),
+            ("unattended.blocked_session", self.session != now.session),
+            ("unattended.blocked_prompt", self.prompt != now.prompt),
+        ]
+        .into_iter()
+        .filter(|(_, differs)| *differs)
+        .map(|(key, _)| key.to_string())
+        .collect()
+    }
 }
 
 /// Write the snapshot for the dispatcher that holds `repo`'s lock: just after
 /// it took the lock, and again each time a reload swaps its pipelines.
 ///
-/// `pipelines` is what that dispatcher loaded. The sources are read here,
-/// a moment after the load, so an edit landing in between is recorded as
-/// already applied and is never named as waiting on a restart or a reload.
-/// That window is the dispatcher's own start-up checks, or on a reload the
-/// queue read and the check of it, and anything wider would mean threading the
-/// file text through [`Pipelines::load`] for every caller.
+/// `pipelines` is what that dispatcher loaded, and `unattended` the section
+/// of the config their `blocked` steps were filled in from. The sources are
+/// read here, a moment after the load, so an edit landing in between is
+/// recorded as already applied and is never named as waiting on a restart or
+/// a reload. That window is the dispatcher's own start-up checks, or on a
+/// reload the queue read and the check of it, and anything wider would mean
+/// threading the file text through [`Pipelines::load`] for every caller.
 ///
 /// Replaces whatever is there, whoever wrote it: only one dispatcher holds
 /// the lock, so an older snapshot belongs to a run that has ended.
-pub fn write(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+pub fn write(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    unattended: &crate::config::UnattendedConfig,
+) -> Result<()> {
     let lock_file = repo.lock_file();
     let lock = std::fs::read_to_string(&lock_file)
         .with_context(|| format!("reading {}", lock_file.display()))?;
@@ -98,6 +152,7 @@ pub fn write(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         pipelines: encoded,
         clashes: pipelines.clashes.clone(),
         sources: sources(&repo.root),
+        blocked: Some(BlockedKeys::of(unattended)),
     };
     let path = path(repo);
     crate::task::write_atomic(&path, serde_json::to_string(&written)?)
@@ -389,8 +444,36 @@ pub fn changed_since_start(repo: &Repo) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The line the board footer and `pipeline check` print about `changed`, or
-/// `None` when nothing changed. `since` is what the reader calls the run.
+/// The config keys whose value in `config.toml` differs from the one the
+/// running dispatcher is using, and which wait for a reload or a restart:
+/// `unattended.enabled` against the mode in the lock, and each
+/// `unattended.blocked_*` key against what the snapshot recorded. Every other
+/// key reaches the run on its next pass, so it never waits to be named.
+///
+/// Nothing when no dispatcher is running, as for [`changed_since_start`].
+/// Nothing either while `config.toml` does not load: there is no value to
+/// compare, and a reload would be refused until the file is fixed.
+pub fn config_changed_since_start(repo: &Repo) -> Vec<String> {
+    let Some(loaded) = LoadedPipelines::live(repo) else {
+        return Vec::new();
+    };
+    let Ok(config) = crate::config::Config::load_present(&repo.root) else {
+        return Vec::new();
+    };
+    let mut changed = Vec::new();
+    if crate::lock::Lock::unattended(&repo.lock_file())
+        .is_some_and(|run| run != config.unattended.enabled)
+    {
+        changed.push("unattended.enabled".to_string());
+    }
+    if let Some(run) = &loaded.written.blocked {
+        changed.extend(run.changed(&BlockedKeys::of(&config.unattended)));
+    }
+    changed
+}
+
+/// The line `pipeline check` prints about `changed`, or `None` when nothing
+/// changed. `since` is what the reader calls the run.
 pub fn restart_notice(changed: &[String], since: &str) -> Option<String> {
     let pronoun = match changed.len() {
         0 => return None,
@@ -505,7 +588,7 @@ mod tests {
             let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
             // Held, but nothing written under it yet: the files still rule.
             assert!(LoadedPipelines::live(&repo).is_none());
-            write(&repo, &pipelines).unwrap();
+            write(&repo, &pipelines, &repo.config.unattended).unwrap();
             let loaded = LoadedPipelines::live(&repo).expect("written under the live lock");
             assert_eq!(loaded.names(), vec!["t"]);
         }
@@ -579,7 +662,7 @@ mod tests {
             },
         );
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        write(&repo, &pipelines).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
 
         let task = crate::task::Task::parse(
             PathBuf::from("q.md"),
@@ -595,11 +678,47 @@ mod tests {
         );
     }
 
+    /// `unattended.enabled` is named once `config.toml` disagrees with the
+    /// mode in the lock, and an `unattended.blocked_*` key once it disagrees
+    /// with what the snapshot recorded; a key the run takes up on its own
+    /// next pass is never named, and nothing is with no dispatcher running.
+    /// Fails before the change: nothing compared the config with the run.
+    #[test]
+    fn config_keys_that_wait_for_a_reload_are_named_once_they_differ() {
+        let (repo, _root, pipelines) = project("snapshot-config-keys");
+        let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let mut config = repo.config.clone();
+        config.unattended.enabled = false;
+        config.save(&repo.root).unwrap();
+        write(&repo, &pipelines, &config.unattended).unwrap();
+        assert!(config_changed_since_start(&repo).is_empty());
+
+        config.dispatch.lane_quiet = std::time::Duration::from_secs(45 * 60);
+        config.save(&repo.root).unwrap();
+        assert!(config_changed_since_start(&repo).is_empty());
+
+        config.unattended.enabled = true;
+        config.unattended.blocked_model = "another-model".into();
+        config.unattended.blocked_session = !config.unattended.blocked_session;
+        config.save(&repo.root).unwrap();
+        assert_eq!(
+            config_changed_since_start(&repo),
+            [
+                "unattended.enabled",
+                "unattended.blocked_model",
+                "unattended.blocked_session"
+            ]
+        );
+
+        drop(lock);
+        assert!(config_changed_since_start(&repo).is_empty());
+    }
+
     #[test]
     fn a_snapshot_routes_on_what_was_loaded_not_what_is_on_disk() {
         let (repo, _root, pipelines) = project("snapshot-routes");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        write(&repo, &pipelines).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
 
         // The file is broken mid-run. The snapshot does not care.
         std::fs::write(Pipelines::file_in(&repo.root, "t"), "steps: [").unwrap();
@@ -621,7 +740,7 @@ mod tests {
     fn a_pipeline_the_dispatcher_never_loaded_is_refused_naming_the_restart() {
         let (repo, _root, pipelines) = project("snapshot-unknown");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        write(&repo, &pipelines).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
 
         let err = LoadedPipelines::live(&repo)
             .unwrap()
@@ -639,7 +758,7 @@ mod tests {
         let dir = Pipelines::dir_in(&repo.root);
         std::fs::write(dir.join("gone.yml"), "steps: []\n").unwrap();
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        write(&repo, &pipelines).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
         assert!(changed_since_start(&repo).is_empty());
 
         std::fs::write(dir.join("t.yml"), "# edited\n").unwrap();
@@ -658,7 +777,7 @@ mod tests {
         let (repo, _root, pipelines) = project("snapshot-no-run");
         {
             let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-            write(&repo, &pipelines).unwrap();
+            write(&repo, &pipelines, &repo.config.unattended).unwrap();
         }
         std::fs::write(Pipelines::file_in(&repo.root, "t"), "# edited\n").unwrap();
         assert!(changed_since_start(&repo).is_empty());

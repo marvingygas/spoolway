@@ -11944,7 +11944,8 @@ mod tests {
     fn queue_add_on_a_running_dispatcher_refuses_a_pipeline_it_never_loaded() {
         let (repo, _root) = fixture("queue-add-on-snapshot");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin(), &repo.config.unattended)
+            .unwrap();
         let loaded = crate::pipeline_snapshot::LoadedPipelines::live(&repo).unwrap();
 
         let submit = |id: &str, pipeline: &str| {

@@ -815,7 +815,7 @@ mod tests {
         assert!(err.to_string().contains("t.yml does not parse"), "{err:#}");
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        pipeline_snapshot::write(&repo, &Pipelines::builtin(), &repo.config.unattended).unwrap();
         let routed = routing_for_task(&repo, &broken, Some("t1")).unwrap();
         assert_eq!(routed.names(), vec!["default"]);
 
@@ -844,7 +844,7 @@ mod tests {
         );
         let broken: Result<Pipelines> = Err(anyhow::anyhow!("t.yml does not parse"));
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        pipeline_snapshot::write(&repo, &held).unwrap();
+        pipeline_snapshot::write(&repo, &held, &repo.config.unattended).unwrap();
 
         let routed = routing_for_rows(&repo, &broken).unwrap();
 
