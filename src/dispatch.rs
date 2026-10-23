@@ -1632,7 +1632,7 @@ impl<'a> Dispatcher<'a> {
                     .map(|(step, task, _)| (step.as_str(), task.as_str()))
                     .collect();
                 let holds = slot_holds(
-                    &self.repo.config,
+                    self.repo,
                     self.pipelines,
                     self.unattended,
                     &graph,
@@ -9420,8 +9420,11 @@ pub(crate) enum Cap {
 /// ones [`lane_counts`] counts take the group out of the hold, since that lane
 /// already occupies its slot. `archived` is the tasks this pass archived,
 /// which the queue the caller read still lists.
+///
+/// A step the task walks past (`skip:`, `first:`, `last:`) is not where the
+/// hold sits: the walk follows `on_pass` on to the step the task runs.
 pub(crate) fn slot_holds(
-    config: &crate::config::Config,
+    repo: &Repo,
     pipelines: &Pipelines,
     unattended: bool,
     graph: &Graph,
@@ -9429,6 +9432,7 @@ pub(crate) fn slot_holds(
     archived: &[String],
     running: &[(&str, &str)],
 ) -> BTreeMap<Cap, Vec<String>> {
+    let config = &repo.config;
     let mut holds: BTreeMap<Cap, Vec<String>> = BTreeMap::new();
     if config.dispatch.priority != crate::config::Priority::Reserve {
         return holds;
@@ -9471,9 +9475,15 @@ pub(crate) fn slot_holds(
         let Ok(pipeline) = pipelines.for_task(task) else {
             continue;
         };
+        // A step the task walks past never runs for it, so the walk follows
+        // `on_pass` on through it, the way a move would, to the step the task
+        // really lands on.
+        let dependents = same_group_dependents(repo, pipelines, tasks, graph, task);
+        let land =
+            |step: &str| land_past_hidden(pipeline, task, step.to_string(), dependents).destination;
         let mut at = match task.stage() {
-            crate::pipeline::QUEUED => pipeline.entry().to_string(),
-            stage => stage.to_string(),
+            crate::pipeline::QUEUED => land(pipeline.entry()),
+            stage => land(stage),
         };
         // A path that comes back to a step it has been through never reaches
         // an agent, so the group holds nothing rather than the walk looping.
@@ -9488,10 +9498,10 @@ pub(crate) fn slot_holds(
                 }
                 break;
             }
-            let Some(next) = step.on_pass.clone() else {
+            let Some(next) = step.on_pass.as_deref() else {
                 break;
             };
-            at = next;
+            at = land(next);
         }
     }
     holds
@@ -23680,7 +23690,7 @@ mod tests {
     ) -> BTreeMap<Cap, Vec<String>> {
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        slot_holds(&repo.config, pipelines, false, &graph, &tasks, &[], running)
+        slot_holds(repo, pipelines, false, &graph, &tasks, &[], running)
     }
 
     const COMMAND_THEN_AGENT: &str = "steps:\n  \
@@ -23778,7 +23788,7 @@ mod tests {
         let graph = Graph::build(&tasks, &repo.archive_dir());
 
         let holds = slot_holds(
-            &repo.config,
+            &repo,
             &pipelines,
             false,
             &graph,
@@ -23836,6 +23846,39 @@ mod tests {
     }
 
     #[test]
+    fn the_hold_sits_on_the_first_step_the_task_runs_not_one_it_walks_past() {
+        let (mut repo, _root_guard) = fixture("hold-walk-past");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "skipped-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into());
+            f.skip = vec!["hidden".into()];
+        });
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: test\n    run: true\n    on_pass: hidden\n  \
+             - id: hidden\n    agent: pi\n    prompt: implementer\n    model: skipped-model\n    \
+             on_pass: shots\n  \
+             - id: shots\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+
+        let holds = holds_for(&repo, &pipelines, &[]);
+
+        assert_eq!(
+            holds,
+            BTreeMap::from([(Cap::Profile("pi".into()), vec!["cart".to_string()])])
+        );
+    }
+
+    #[test]
     fn a_path_that_cycles_through_command_steps_holds_nothing() {
         let (mut repo, _root_guard) = fixture("hold-cycle");
         repo.config.dispatch.priority = crate::config::Priority::Reserve;
@@ -23882,11 +23925,13 @@ mod tests {
         assert!(holds_for(&repo, &opted_out, &[]).is_empty());
     }
 
-    /// The plan's mockup, steps 2 to 5, on one two-slot profile: `cart` is on
-    /// a command step and keeps a slot, `bill` takes the other, and `zed` —
-    /// a group that never ran — waits even though one slot is free. Once
-    /// `cart` reaches its agent step it takes the held slot, and `zed` waits
-    /// for a lane to finish.
+    /// The plan's mockup, steps 2 to 5, on one two-slot profile.
+    ///
+    /// `cart` is on a command step and keeps a slot, `bill` takes the other,
+    /// and `zed` — a group that never ran — waits though one slot is free.
+    /// Once `cart` reaches its agent step it takes the held slot. Between
+    /// `cart`'s two tasks the next one starts at once and `zed` still waits.
+    /// When `cart`'s last task is archived its slot is free and `zed` starts.
     #[test]
     fn a_started_group_keeps_its_slot_through_a_command_step() {
         let (mut repo, _root_guard) = fixture("reserve-playout");
@@ -23908,15 +23953,32 @@ mod tests {
             )
             .unwrap(),
         );
-        let cart = add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        let totals = add_task_with(&repo, "cart-totals", "test", |f| {
+            f.group = Some("cart".into())
+        });
+        // The chain's next task, which starts on an agent step.
+        let discounts = add_task_with(&repo, "cart-discounts", crate::pipeline::QUEUED, |f| {
+            f.group = Some("cart".into());
+            f.depends_on = vec!["cart-totals".into()];
+            f.pipeline = Some("solo".into());
+        });
         for id in ["bill", "zed"] {
             add_task_with(&repo, id, crate::pipeline::QUEUED, |f| {
                 f.group = Some(id.into());
                 f.pipeline = Some("solo".into());
             });
         }
-        let mux = FakeMux::new(vec![]);
+        // A pass sees only the lanes its multiplexer reports, so each one is
+        // given the lanes the earlier passes started.
+        let mux_with = |lanes: Vec<Lane>| {
+            FakeMux::new(lanes)
+                .cutting_real_worktrees(repo.worktree_root())
+                .with_unbound_workspace()
+                .removing_real_worktrees(&repo)
+        };
+        let mux = mux_with(vec![]);
 
+        // Step 2: `cart` is on a command, `bill` starts, `zed` is kept out.
         let report = run_pass_with(&repo, &mux, &pipelines);
 
         assert_eq!(mux.did("start"), ["start bill · work"], "{:?}", mux.calls());
@@ -23930,18 +23992,60 @@ mod tests {
             "{kept_out}"
         );
 
-        // The command ends and `cart` moves to its agent step.
-        let mut task = reload(&cart);
+        // Step 3: the command ends and `cart` takes the slot it held.
+        let mut task = reload(&totals);
         task.set_stage("shots", None);
         task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
         run_pass_with(&repo, &mux, &pipelines);
 
         assert_eq!(
             mux.did("start"),
-            ["start bill · work", "start cart · shots"],
+            ["start cart-totals · shots"],
             "{:?}",
             mux.calls()
         );
+
+        // Step 4: `cart-totals` is done and archived. Its slot is free, and
+        // `cart` still holds it for `cart-discounts`, so `zed` stays out.
+        let mut task = reload(&totals);
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with("zed:") && a.contains("group `cart`")),
+            "{:?}",
+            report.actions
+        );
+        // Cleanup takes a pass or two more, then `cart-discounts` starts. All
+        // that while `zed` waits.
+        let mut started = Vec::new();
+        for _ in 0..4 {
+            let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+            run_pass_with(&repo, &mux, &pipelines);
+            started = mux.did("start");
+            if !started.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(started, ["start cart-discounts · work"]);
+
+        // Step 5: `cart-discounts` finishes the group. With it archived,
+        // nothing holds a slot and `zed` starts.
+        let mut task = reload(&discounts);
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        let mux = mux_with(vec![lane(&repo, "bill · work", LaneStatus::Working)]);
+        run_pass_with(&repo, &mux, &pipelines);
+
+        assert_eq!(mux.did("start"), ["start zed · work"], "{:?}", mux.calls());
     }
 
     #[test]
