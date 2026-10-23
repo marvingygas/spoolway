@@ -21,6 +21,25 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.14.1
+
+### Highlights
+- The `Starting dispatcher` popup closes once the dispatcher's first pass is over, whatever that pass did. In 0.14.0 a first pass that started only a command step, or found nothing to claim, left the popup over the board. The dispatcher now writes its pid to a `first-pass` file in the project's home when that pass returns, failed or not, and a file left by an earlier run does not close a new popup. (#1161)
+- A command step reads `◌ starting` on the board, with the step it is starting in STEP, from the moment the dispatcher decides to start it. In 0.14.0 it read `○ queued` and "waiting for a worker slot to free up" while its worktree was cut and its run began, because only an agent lane was marked as starting. That mark now also closes the `Starting dispatcher` popup, as an agent lane's does. (#1162)
+- Leaving the Eval tab while its table is still loading gives that memory back to the system. In 0.14.0 the table was freed after both trims had run, so a tab left mid-load kept the whole table resident. (#1163)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- The nightly memory-budget suite leaves Eval only once a whole frame shows the load is over, where it counted three new frames that another tab's redraw could supply and failed at random on a slow runner. (#1163)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.14.1`, or run it without installing via `npx spoolway@0.14.1`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64; the GitHub release carries one archive per platform and `SHA256SUMS`.
+- No project changes are needed from 0.14.0. Restart the dispatcher to take the fixes.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.14.1
+
 ## 0.14.0
 
 ### Highlights
