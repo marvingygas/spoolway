@@ -367,7 +367,9 @@ ORPHAN="$LIVE/routine-orphan.txt"
 on_screen '\x1b[Cjjj' "$ORPHAN"
 sed 's/\x1b\[[0-9;]*m//g' "$ORPHAN" >"$ORPHAN.plain"
 has "a job without a routine gets a row named after its routine" "> nightly    " "$ORPHAN.plain"
-has "marked missing at the row's edge" "missing" "$ORPHAN.plain"
+# On the row itself: the details' `Next:` line says "missing" too, so the
+# bare word would pass with no mark drawn.
+works "marked missing at the row's edge" grep -qE '> nightly +missing' "$ORPHAN.plain"
 has "its details say it never fires" "never, its routine is missing" "$ORPHAN.plain"
 # The two sentences under them wrap on a narrow pane, so only their
 # openings are matched.

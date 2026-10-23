@@ -1,7 +1,9 @@
-//! The scrolling window the queue screen cuts a tall pane down to.
+//! The scrolling window the queue screen and the dispatch board cut a tall
+//! pane down to.
 //!
-//! The queue screen and its routines view each draw a pane that can be taller than the terminal, and the dispatch board's task table
-//! can outgrow the rows its pane leaves it. This module decides which lines of
+//! The queue screen and its routines view each draw a pane that can be
+//! taller than the terminal, and the dispatch board's task table can outgrow
+//! the rows its pane leaves it. This module decides which lines of
 //! the pane stay in view and spends the pane's bottom row on a marker that
 //! says how many items are out of sight. It lives here, outside any one
 //! screen, so the screens' markers read the same and cannot drift apart.

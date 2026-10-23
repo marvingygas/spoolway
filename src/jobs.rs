@@ -207,7 +207,7 @@ impl Job {
     }
 
     /// The path the job's `routine` resolves to under the checkout's
-    /// `.spoolway/routines/`.
+    /// routines directory, [`Repo::routines_dir`].
     ///
     /// Confined to that directory: `routine` is a project-supplied string,
     /// and an absolute path or a `..` component would let a job queue —
@@ -231,10 +231,10 @@ impl Job {
             });
         if escapes {
             bail!(
-                "job `{}` routine `{}` must be a path inside .spoolway/routines/ — no leading `/` \
-                 and no `..`",
+                "job `{}` routine `{}` must be a path inside {} — no leading `/` and no `..`",
                 self.name,
-                self.spec.routine
+                self.spec.routine,
+                routines_dir_named(&repo.routines_dir())
             );
         }
         Ok(repo.routines_dir().join(rel))
@@ -316,8 +316,9 @@ impl Job {
             return Some(fault(
                 true,
                 format!(
-                    "routine {} is not under .spoolway/routines/",
-                    self.spec.routine
+                    "routine {} is not under {}",
+                    self.spec.routine,
+                    routines_dir_named(&repo.routines_dir())
                 ),
                 "edit or delete the job on the routines tab (o)",
             ));
@@ -372,6 +373,18 @@ pub struct RoutineFault {
     /// The reason alone, the part of `clause` before its fix — for the
     /// routines tab's details, which give their own fix under it.
     pub reason: String,
+}
+
+/// `routines_dir` as a message names it, with a trailing `/`: by its path
+/// from the project root, `.spoolway/routines/`, when it ends in that, and
+/// by its full path otherwise. A project joined to a workspace keeps its
+/// routines elsewhere (`config/routines/`), where a `.spoolway/` path would
+/// send a person to a directory that holds none of them.
+pub fn routines_dir_named(routines_dir: &Path) -> String {
+    match routines_dir.ends_with(crate::config::ROUTINES_DIR) {
+        true => format!("{}/", crate::config::ROUTINES_DIR),
+        false => format!("{}/", routines_dir.display()),
+    }
 }
 
 /// Both stores merged into one list: the user store first, then the project
@@ -2394,6 +2407,21 @@ mod tests {
         assert!(
             actions.is_empty() && problems.is_empty(),
             "named once per minute: {actions:?} {problems:?}"
+        );
+    }
+
+    /// The routines directory is named from the project root in a project
+    /// with its own setup, and by its full path in one joined to a
+    /// workspace, whose routines are not under `.spoolway/` at all.
+    #[test]
+    fn the_routines_directory_is_named_where_its_routines_are() {
+        assert_eq!(
+            routines_dir_named(Path::new("/src/shop/.spoolway/routines")),
+            ".spoolway/routines/"
+        );
+        assert_eq!(
+            routines_dir_named(Path::new("/ws/config/routines")),
+            "/ws/config/routines/"
         );
     }
 

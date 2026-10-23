@@ -4787,11 +4787,11 @@ enum Mode {
 ///
 /// `row` is that row's own key — a task's [`TaskKey`] or a group's
 /// [`GroupKey`] on the pending screen, a routine's or a routine task's
-/// path on the routines pane, or a job's name and store for its row there. The queue reader can re-read the groups while
-/// the menu is open, and [`adopt_groups`] keeps the cursor on a group by its
-/// key but not on a task, so `enter` checks the highlighted row is still
-/// this one before acting, rather than run gate on whichever task slid
-/// under the cursor.
+/// path on the routines pane, or a job's name and store for its row there.
+/// The queue reader can re-read the groups while the menu is open, and
+/// [`adopt_groups`] keeps the cursor on a group by its key but not on a
+/// task, so `enter` checks the highlighted row is still this one before
+/// acting, rather than run gate on whichever task slid under the cursor.
 ///
 /// `routines` is the routines pane the menu was opened over, when it was:
 /// that pane stays drawn under it, and `esc` goes back there.
@@ -8622,6 +8622,7 @@ fn orphan_jobs<'a>(
     let Ok(jobs) = jobs else {
         return Vec::new();
     };
+    let routines_dir = crate::jobs::routines_dir_named(&repo.routines_dir());
     jobs.iter()
         .filter(|job| {
             let target = job.target(repo).ok();
@@ -8634,13 +8635,13 @@ fn orphan_jobs<'a>(
             let missing = fault.as_ref().is_some_and(|fault| fault.missing);
             let reason = match fault {
                 Some(fault) if fault.missing => {
-                    format!("No routine {} under .spoolway/routines/.", job.spec.routine)
+                    format!("No routine {} under {routines_dir}.", job.spec.routine)
                 }
                 Some(fault) => format!("{}.", fault.reason),
                 // `routine_fault` has nothing to say about a `routine` that
                 // escapes the routines directory, which `target` refuses.
                 None if job.target(repo).is_err() => format!(
-                    "{} is outside .spoolway/routines/, where every routine is.",
+                    "{} is outside {routines_dir}, where every routine is.",
                     job.spec.routine
                 ),
                 // A top-level folder that appeared after the list was read.
@@ -8849,29 +8850,11 @@ fn render_routines(
     nav: &RoutineNav,
     footer: &str,
 ) -> Vec<String> {
-    let routines = panes.routines;
     let layout = layout(footer);
-    let orphans = orphan_jobs(panes.repo, routines, jobs);
-    let (left, left_starts) =
-        routine_folder_lines(panes.routines_dir, routines, &orphans, nav, layout.left);
+    let orphans = orphan_jobs(panes.repo, panes.routines, jobs);
     let (right, right_starts, focus) = routine_details_lines(panes, jobs, nav, layout.right);
-
-    let folder_line = left_starts
-        .get(nav.folder_cursor)
-        .or(left_starts.last())
-        .copied()
-        .unwrap_or(0);
     two_pane_frame(
-        &window(
-            &left,
-            Items {
-                starts: &left_starts,
-                noun: "folder",
-            },
-            (folder_line, folder_line),
-            layout.rows,
-            layout.left,
-        ),
+        &routine_list_pane(panes.routines_dir, panes.routines, &orphans, nav, layout),
         &window(
             &right,
             Items {
@@ -8885,6 +8868,42 @@ fn render_routines(
         "routines",
         "details",
         layout,
+    )
+}
+
+/// The routines tab's left pane: [`routine_folder_lines`], cut to the rows
+/// `layout` leaves it, with the cursor's row kept in view.
+///
+/// Its scroll marker counts folders while every row is a routine. Once job
+/// rows sit under the routines it counts rows, since the rows out of sight
+/// below are then jobs as often as folders, and `↓ 2 folders below` over two
+/// hidden jobs would send a person looking for routines that are not there.
+fn routine_list_pane(
+    routines_dir: &std::path::Path,
+    routines: &[RoutineFolder],
+    orphans: &[Orphan],
+    nav: &RoutineNav,
+    layout: Layout,
+) -> Vec<String> {
+    let (lines, starts) = routine_folder_lines(routines_dir, routines, orphans, nav, layout.left);
+    let line = starts
+        .get(nav.folder_cursor)
+        .or(starts.last())
+        .copied()
+        .unwrap_or(0);
+    let noun = match orphans.is_empty() {
+        true => "folder",
+        false => "row",
+    };
+    window(
+        &lines,
+        Items {
+            starts: &starts,
+            noun,
+        },
+        (line, line),
+        layout.rows,
+        layout.left,
     )
 }
 
@@ -9137,9 +9156,9 @@ fn fit_keys(row: String, width: usize) -> String {
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
 /// notice opened from it, the options menu opened on it, delete routine's
 /// and delete job's popups, the routine picker, new job's and edit job's
-/// popups and the notice they end on, or the tool-requirements gate or the issue question
-/// a routine submit stopped at. `None` for everything drawn over
-/// the pending screen.
+/// popups and the notice they end on, or the tool-requirements gate or the
+/// issue question a routine submit stopped at. `None` for everything drawn
+/// over the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
         Mode::Routines(nav)
@@ -9437,6 +9456,7 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
         tasks: 2,
         jobs: vec![("nightly-audit".to_string(), crate::jobs::Scope::User)],
     };
+    let folders = vec![("nightly".to_string(), std::path::PathBuf::from("nightly"))];
     let pending = vec![DeleteGroup {
         name: "cart".to_string(),
         tasks: vec![super::pending_delete::DeleteEntry {
@@ -9452,6 +9472,10 @@ pub(crate) fn queue_asking_panels() -> Vec<(&'static str, Vec<String>)> {
             gate_steps_panel("wire", &steps, Some("review"), 0),
         ),
         ("delete routine", delete_routine_panel(&routine)),
+        (
+            "routine picker",
+            pick_routine_panel("nightly-audit", &folders, 0),
+        ),
         (
             "delete pending",
             delete_pending_panel("delete wire", &pending, (80, None)),
@@ -22664,8 +22688,8 @@ mod tests {
         write_job(repo, Scope::Project, "deps-only", "nightly/audit-deps.md");
     }
 
-    /// The list for `seed_orphans`, cursor on `cursor`, at the left pane's
-    /// width in the routines tab's mockups.
+    /// The list for `seed_orphans`, cursor on `cursor`, at a 24-column left
+    /// pane.
     fn orphan_list(repo: &Repo, cursor: usize) -> (Vec<String>, Vec<usize>) {
         let routines = super::super::routines::list_routines(repo).unwrap();
         let jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
@@ -22698,6 +22722,41 @@ mod tests {
         assert!(lines.iter().all(|line| line.chars().count() <= 24));
     }
 
+    /// A list too tall for its pane counts what is out of sight in rows
+    /// once job rows sit under the routines, since the hidden rows below are
+    /// jobs; with no job row it counts folders, as every row is one.
+    #[test]
+    fn the_routines_lists_scroll_marker_counts_rows_once_job_rows_are_in_it() {
+        let (repo, _root_guard) = fixture("routines-orphan-scroll");
+        seed_orphans(&repo);
+        write_routine(
+            &repo,
+            "weekly",
+            "audit-docs",
+            &task_text("audit-docs", "group: weekly\n", BODY),
+        );
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+        let orphans = orphan_jobs(&repo, &routines, &jobs);
+        let layout = Layout {
+            left: 24,
+            right: MOCKUP_DETAILS_WIDTH,
+            rows: Some(2),
+        };
+        let pane = |orphans: &[Orphan]| {
+            routine_list_pane(
+                &repo.routines_dir(),
+                &routines,
+                orphans,
+                &RoutineNav::new(),
+                layout,
+            )
+        };
+
+        assert_eq!(pane(&orphans), ["> [ ] maintenance", "↓ 4 rows below"]);
+        assert_eq!(pane(&[]), ["> [ ] maintenance", "↓ 2 folders below"]);
+    }
+
     /// A job on a routine the tab lists gets no row of its own, and with no
     /// such job there is no blank line under the routines either.
     #[test]
@@ -22713,8 +22772,8 @@ mod tests {
     }
 
     /// A job row's details are the job's config, `Next:` saying it never
-    /// fires, then why and what to do, with no tasks — as the mockup draws a
-    /// job whose routine is missing. A job on a task file says that instead.
+    /// fires, then why and what to do, with no tasks, for a job whose
+    /// routine is missing. A job on a task file says that instead.
     #[test]
     fn a_job_rows_details_say_why_it_never_fires() {
         let (repo, _root_guard) = fixture("routines-orphan-details");
@@ -22891,8 +22950,8 @@ mod tests {
         assert!(last.contains("> nightly-old"), "{last}");
     }
 
-    /// A routine with one job draws that job's config, then `tasks` with the routine's tasks indented
-    /// under it.
+    /// A routine with one job draws that job's config, then `tasks` with the
+    /// routine's tasks indented under it.
     #[test]
     fn the_details_pane_draws_a_routines_job_above_its_tasks() {
         let (repo, _root_guard) = fixture("routines-details-scheduled");

@@ -5,9 +5,10 @@
 //! onto a renamed pipeline. Its new job and edit job walk the cron expression
 //! and the pipeline, then save through [`crate::jobs::write`] — see
 //! [`NewJobWalk`]. Pause, resume and delete are [`set_enabled`] and
-//! [`delete_job`]. No `jobs add`, no config key. A job only schedules: nothing here queues its
-//! routine, which fires when the dispatcher's clock crosses the schedule —
-//! running a routine now is the routines tab's `enter`.
+//! [`delete_job`]. No `jobs add`, no config key. A job only schedules:
+//! nothing here queues its routine, which fires when the dispatcher's clock
+//! crosses the schedule — running a routine now is the routines tab's
+//! `enter`.
 
 use std::path::{Path, PathBuf};
 
@@ -647,7 +648,8 @@ pub(super) fn set_enabled(
 }
 
 /// Delete the job `name` from the store `scope` names, and from no other —
-/// the routines tab's delete job comes here once its popup is answered. `Err` is the popup that says why it was not.
+/// the routines tab's delete job comes here once its popup is answered.
+/// `Err` is the popup that says why it was not.
 pub(super) fn delete_job(repo: &Repo, name: &str, scope: Scope) -> std::result::Result<(), Notice> {
     jobs::delete_in(repo, scope, name).map_err(|err| {
         Notice::new(
@@ -783,7 +785,7 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The `Next:` value, on this tab's detail pane and on the routines tab's.
+/// The `Next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
         return "paused".to_string();
@@ -797,7 +799,7 @@ pub(super) fn detail_next(job: &Job) -> String {
     }
 }
 
-/// The `Last:` value, on this tab's detail pane and on the routines tab's.
+/// The `Last:` value on the routines tab's details pane.
 pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
         Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
