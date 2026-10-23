@@ -2445,12 +2445,9 @@ fn resume_checked(
             )?;
             // The gate road lands the task on a step a settled lane of its
             // own may already sit on, the same as the other roads out of a
-            // stop, and the dispatcher would wait on that lane forever.
-            // Answered onto `blocked` there is no step to continue and the
-            // stop stands, so nothing is freed.
-            if task.stage() != crate::pipeline::BLOCKED {
-                free_stale_lanes(repo, pipelines, &task);
-            }
+            // stop, and the dispatcher would wait on that lane forever. It
+            // frees under the same conditions they do, `blocked` included.
+            free_stale_lanes(repo, pipelines, &task);
             Ok(())
         }
         road => back_onto_its_step(repo, pipelines, task, args, road),
@@ -9594,11 +9591,13 @@ mod tests {
         );
     }
 
-    /// A gate answered onto `blocked` closes no lane. The stop is still
-    /// standing, and the lane on the gated step is what a person resuming it
-    /// reads to see why it stopped, so freeing it would throw that screen away.
+    /// A gate answered onto `blocked` frees the settled lane on `blocked`
+    /// like every other road, and leaves the lane on the gated step open: the
+    /// step the task is sent to is the only one whose lane closes, and the
+    /// gated step's screen is what a person resuming it reads to see why it
+    /// stopped.
     #[test]
-    fn resuming_a_gate_onto_blocked_keeps_the_lanes_open() {
+    fn resuming_a_gate_onto_blocked_frees_only_the_blocked_lane() {
         let (mut repo, _root_guard) = fixture("gate-resume-onto-blocked");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = gate_pipelines();
@@ -9640,10 +9639,16 @@ mod tests {
         resume(&repo, &pipelines, &resume_args("ship", None), None).unwrap();
 
         assert_eq!(queued(&repo, "ship").stage(), crate::pipeline::BLOCKED);
+        let left: Vec<String> = headless
+            .list_lanes()
+            .unwrap()
+            .into_iter()
+            .map(|lane| lane.name)
+            .collect();
         assert_eq!(
-            headless.list_lanes().unwrap().len(),
-            2,
-            "answering a gate onto `blocked` must close nothing"
+            left,
+            [crate::mux::run_key("deploy", "ship")],
+            "only the lane on `blocked` closes; the gated step's lane stays"
         );
     }
 
