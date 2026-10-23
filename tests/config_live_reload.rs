@@ -15,6 +15,10 @@
 //! swaps the graph in and rewrites the snapshot lanes report on. One that
 //! would strand a task on a step that is gone, or whose pipeline file does not
 //! parse, is refused and leaves the run as it was.
+//!
+//! `spoolway dispatch reload` writes that request itself and prints the
+//! answer: `successfully loaded` and exit 0, or the whole refusal and a
+//! non-zero exit. With no dispatcher running it writes nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -229,6 +233,14 @@ impl Project {
             "the answer does not name its request:\n{text}"
         );
         text
+    }
+
+    /// Runs `spoolway dispatch reload` and waits for it to exit.
+    fn reload_command(&self) -> std::process::Output {
+        self.command()
+            .args(["dispatch", "reload"])
+            .output()
+            .expect("run spoolway dispatch reload")
     }
 
     fn pipeline_file(&self) -> PathBuf {
@@ -537,4 +549,90 @@ fn a_reload_is_refused_when_a_pipeline_file_does_not_parse() {
         "the refusal does not say why:\n{answer}"
     );
     assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_reload_command_prints_that_it_loaded_and_the_run_takes_the_edit() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+
+    let prompt = project.root.join(".spoolway/prompts/extra");
+    fs::create_dir_all(&prompt).expect("create prompt dir");
+    fs::write(prompt.join("PROMPT.md"), "do the rest\n").expect("write prompt");
+    fs::write(project.pipeline_file(), TWO_STEPS).expect("edit pipeline");
+
+    let output = project.reload_command();
+    assert!(
+        output.status.success(),
+        "the command did not exit 0: {output:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "successfully loaded"
+    );
+    assert!(
+        project.snapshot().contains("\"extra\""),
+        "the snapshot does not hold the new graph"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_reload_command_prints_the_whole_refusal_and_exits_non_zero() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    let before = project.snapshot();
+
+    // `ta` is running on `work`, and `tb` has no lane, so it waits on the
+    // step it was left on. The refusal names both.
+    let waiting = project.task_file("tb");
+    let text = fs::read_to_string(&waiting).expect("read task");
+    fs::write(&waiting, text.replace("stage: queued", "stage: work")).expect("park task");
+    fs::write(
+        project.pipeline_file(),
+        "steps:\n  - id: other\n    agent: claude\n    model: claude-sonnet-5-5\n    \
+         on_pass: done\n",
+    )
+    .expect("edit pipeline");
+
+    let output = project.reload_command();
+    assert!(!output.status.success(), "a refusal exited 0: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "reload refused — nothing changed, the run is still on what it had:\n  \
+         ta: sitting on `work`, which pipeline `solo` no longer defines\n  \
+         Put `work` back in solo.yml, or wait until ta has left it, then reload again.\n  \
+         tb: sitting on `work`, which pipeline `solo` no longer defines\n  \
+         Put `work` back in solo.yml, or wait until tb has left it, then reload again."
+    );
+    assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_reload_command_with_no_dispatcher_says_so_and_writes_no_request() {
+    let project = Project::new();
+    project.run(&["init", "--yes"]);
+
+    let output = project.reload_command();
+    assert!(!output.status.success(), "it exited 0: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "no dispatcher is running, so there is nothing to reload.\n  \
+         spoolway dispatch    # a new run loads every file as it is now"
+    );
+    let requests = fs::read_dir(project.base().join("home/.spoolway"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|home| home.path().join("reload/requests"))
+        .filter(|dir| dir.exists())
+        .flat_map(|dir| fs::read_dir(dir).expect("read requests").flatten())
+        .count();
+    assert_eq!(requests, 0, "a request was left with nobody to read it");
 }

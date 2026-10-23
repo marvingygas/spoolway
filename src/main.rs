@@ -628,6 +628,16 @@ fn run() -> Result<()> {
 
                 // Not built yet. Each of these is a slice of work in its own
                 // right; the surface is declared so the shape is visible.
+                // Before `routing`: a reload is what a person reaches for after
+                // an edit, and the edit may be the one the files' pipelines
+                // fail to load on. The dispatcher it asks does the loading.
+                Command::Dispatch(cli::DispatchArgs {
+                    command: Some(cli::DispatchCommand::Reload),
+                    ..
+                }) => {
+                    commands::refuse_json("dispatch reload", cli.json)?;
+                    exit_dispatch(commands::dispatch_reload(&repo))
+                }
                 Command::Dispatch(args) => {
                     exit_dispatch(commands::dispatch(&repo, routing(&graph)?, args))
                 }

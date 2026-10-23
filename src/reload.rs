@@ -131,13 +131,6 @@ fn answers_dir(repo: &Repo) -> PathBuf {
 /// The request is its file's name and nothing in the file is read, so the
 /// first event the watch sees, which comes while the file is still empty,
 /// already finds the whole request.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the board key and the terminal command write requests through this"
-    )
-)]
 pub fn request(repo: &Repo) -> Result<String> {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -150,13 +143,6 @@ pub fn request(repo: &Repo) -> Result<String> {
 
 /// The dispatcher's answer to request `id`, or `None` while it has not
 /// answered yet.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the board key and the terminal command read answers through this"
-    )
-)]
 pub fn answer(repo: &Repo, id: &str) -> Result<Option<Answer>> {
     // The id becomes part of a path below, so only what `request` makes is
     // looked up.

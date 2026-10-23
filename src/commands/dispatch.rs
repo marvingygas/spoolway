@@ -50,6 +50,62 @@ pub(crate) fn already_running(repo: &Repo, from_screen: bool) -> Result<bool> {
     Ok(crate::lock::Lock::holder(&repo.lock_file())?.is_some())
 }
 
+/// How often `spoolway dispatch reload` looks for its answer and for the
+/// dispatcher still holding the lock.
+const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `spoolway dispatch reload`: ask the running dispatcher to load the
+/// pipelines and config again, wait for its answer and print it.
+///
+/// Returns the process exit code: 0 for a good reload, 1 for a refusal, for no
+/// dispatcher, and for one that stopped before it answered.
+///
+/// There is no timeout. The wait ends when the answer lands or when the lock
+/// stops naming the dispatcher the request was written for. Without the second
+/// check a dispatcher that is stopped between the request and its next pass
+/// would leave this waiting for good. A request left behind that way is not
+/// wasted: the next dispatcher answers it as loaded at its start.
+pub fn dispatch_reload(repo: &Repo) -> Result<i32> {
+    let lock = repo.lock_file();
+    let Some(holder) = crate::lock::Lock::holder(&lock)? else {
+        // No request is written: nobody would read it, and it would sit in the
+        // project home until a later dispatcher swept it up.
+        eprintln!(
+            "no dispatcher is running, so there is nothing to reload.\n  \
+             spoolway dispatch    # a new run loads every file as it is now"
+        );
+        return Ok(1);
+    };
+    let id = crate::reload::request(repo)?;
+    loop {
+        if let Some(answer) = crate::reload::answer(repo, &id)? {
+            return Ok(match answer.outcome {
+                crate::reload::Outcome::Loaded => {
+                    println!("{}", answer.render());
+                    0
+                }
+                crate::reload::Outcome::Refused(_) => {
+                    eprintln!("{}", answer.render());
+                    1
+                }
+            });
+        }
+        if crate::lock::Lock::holder(&lock)? != Some(holder) {
+            // The dispatcher may have answered between the look above and the
+            // lock check, then stopped, so the answer is read once more.
+            if crate::reload::answer(repo, &id)?.is_some() {
+                continue;
+            }
+            eprintln!(
+                "the dispatcher stopped before answering, so nothing was reloaded.\n  \
+                 spoolway dispatch    # a new run loads every file as it is now"
+            );
+            return Ok(1);
+        }
+        std::thread::sleep(RELOAD_POLL);
+    }
+}
+
 /// Run the pipeline: one pass, or a loop on the dispatcher's fixed poll rate.
 ///
 /// Returns the code the process should exit with, rather than `()`, so a
@@ -1872,6 +1928,31 @@ mod tests {
             "unattended.max_cost_usd reached: $5.02 of $5.00\n\
              Every task is where its last lane left it."
         );
+    }
+
+    /// A dispatcher that stops before it answers must not leave `dispatch
+    /// reload` waiting. Without the lock check in the wait this test never
+    /// returns.
+    ///
+    /// The lock file is removed from another thread a moment after the
+    /// request is written, which is what a dispatcher that exits does to it.
+    #[test]
+    fn a_reload_stops_waiting_when_the_dispatcher_goes_away() {
+        let (repo, _root_guard) = fixture("reload-dispatcher-gone");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let lock_file = repo.lock_file();
+        let requests = crate::reload::requests_dir(&repo);
+        let remover = std::thread::spawn(move || {
+            while std::fs::read_dir(&requests).map_or(true, |mut dir| dir.next().is_none()) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::fs::remove_file(lock_file).unwrap();
+        });
+
+        let code = dispatch_reload(&repo).unwrap();
+        remover.join().unwrap();
+
+        assert_eq!(code, 1);
     }
 
     /// A dispatcher already running for this repo must send `spoolway

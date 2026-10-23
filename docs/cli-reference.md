@@ -781,6 +781,44 @@ is found or opened. A failure to find or open it is shown instead, on its own no
 | `4` | Another dispatcher or screen already holds the project |
 | `1` | Any other error |
 
+### `spoolway dispatch reload`
+
+Ask the running dispatcher to load every pipeline file and `config.toml` again, without stopping
+any lane. It writes a request, waits for the answer to that request and prints it. It does not
+start a run, and it takes no flags. `--json` is refused.
+
+```
+$ spoolway dispatch reload
+successfully loaded
+```
+
+| Outcome | Prints | Exit code |
+|---|---|---|
+| The dispatcher loaded the new files | `successfully loaded` on stdout | 0 |
+| The dispatcher refused | The whole refusal on stderr: what is in the way and how to fix it | 1 |
+| No dispatcher is running | Two lines on stderr, and no request is written | 1 |
+| The dispatcher stopped before it answered | That it stopped before answering, on stderr | 1 |
+
+A refusal changes nothing, and the run stays on what it had:
+
+```
+reload refused — nothing changed, the run is still on what it had:
+  fix-login: sitting on `review`, which pipeline `feature` no longer defines
+  Put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
+```
+
+With no dispatcher running it prints this, so it works even when a pipeline file is broken:
+
+```
+no dispatcher is running, so there is nothing to reload.
+  spoolway dispatch    # a new run loads every file as it is now
+```
+
+The command has no timeout of its own. It waits until the answer lands, or until the project's
+lock stops naming the dispatcher it asked. A dispatcher answers at the top of its next pass, which
+on Linux starts as soon as the request is written, and on other systems within 10 seconds. See
+[Reloading](dispatcher.md#reloading).
+
 ### `spoolway issue show <reference>`
 
 Read one issue through the `[issue_tracking]` hook's `fetch` event and print it as JSON:

@@ -858,7 +858,9 @@ tells you to restart the dispatcher and try again.
 ### Reloading
 
 A reload request makes the running dispatcher load every pipeline file and `config.toml` again
-without stopping any lane. A request is a file in `<home>/reload/requests/`. On Linux the
+without stopping any lane. In a terminal, `spoolway dispatch reload` writes the request, waits for
+the answer and prints it; see [`spoolway dispatch reload`](cli-reference.md#spoolway-dispatch-reload).
+A request is a file in `<home>/reload/requests/`. On Linux the
 dispatcher wakes when the file appears. On every system it answers at the top of its next pass. It writes the answer to
 `<home>/reload/answers/<request id>.json`, and the answer names the request it answers.
 
@@ -882,6 +884,10 @@ The dispatcher refuses a reload and changes nothing when one of these is true:
 A refusal leaves the pipelines, the config and `dispatch-pipelines.json` as they were. It prints
 the answer and adds one line to the [problem log](#the-problem-log). A good reload prints the
 answer and adds nothing to the log.
+
+`spoolway dispatch reload` checks while it waits that the lock still names the dispatcher it
+asked. If that dispatcher stops before it answers, the command says so and exits 1. With no
+dispatcher running it writes no request.
 
 A request found when a dispatcher starts is answered as loaded. The start has loaded every file, so
 the dispatcher does not load again. The dispatcher deletes answers after one hour.

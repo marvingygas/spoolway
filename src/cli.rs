@@ -1026,12 +1026,20 @@ impl Tracker {
 }
 
 #[derive(Debug, Args, Default)]
-#[command(long_about = "Run the pipeline, and show what it is doing.\n\n\
+#[command(
+    long_about = "Run the pipeline, and show what it is doing.\n\n\
         A resident run holds the terminal it was started in: each pass starts and tears down \
         what the queue calls for, and prints a line per pass to say what it did. `ctrl-c` stops \
         the run. Bare `spoolway`'s dispatch tab draws the live board instead — this is the \
-        plain print-per-pass command scripts, CI and the e2e suite drive.")]
+        plain print-per-pass command scripts, CI and the e2e suite drive.\n\n\
+        `spoolway dispatch reload` does not start a run: it asks the one already running to load \
+        the pipelines and config again, and prints the answer.",
+    args_conflicts_with_subcommands = true
+)]
 pub struct DispatchArgs {
+    #[command(subcommand)]
+    pub command: Option<DispatchCommand>,
+
     /// Stop for nobody: a block starts a lane on `blocked` instead of parking
     /// the task in front of a person. Every pipeline stages `blocked` —
     /// `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*`
@@ -1076,6 +1084,17 @@ pub struct DispatchArgs {
     /// refusal, a spend ceiling — goes to stderr for the screen to show.
     #[arg(long = "from-screen", hide = true)]
     pub screen: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DispatchCommand {
+    /// Ask the running dispatcher to load every pipeline and `config.toml`
+    /// again, wait for its answer and print it.
+    ///
+    /// Exits 0 on `successfully loaded`. A refusal prints the whole reason and
+    /// exits 1, and the run stays exactly as it was. With no dispatcher running
+    /// it writes no request and exits 1.
+    Reload,
 }
 
 impl DispatchArgs {
