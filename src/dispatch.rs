@@ -23924,6 +23924,44 @@ mod tests {
         );
     }
 
+    /// One queue, read by a pass and by the board: both name the same cap
+    /// and the same group for the slot that keeps `zed` out, because the
+    /// board asks `slot_holds` and `held_out` rather than working the hold
+    /// out for itself.
+    #[test]
+    fn the_board_names_the_hold_the_pass_keeps_a_task_out_with() {
+        let (mut repo, _root_guard) = fixture("reserve-board-agrees");
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 1;
+        let mut pipelines = pipelines_of(COMMAND_THEN_AGENT);
+        pipelines.pipelines.insert(
+            "solo".into(),
+            crate::pipeline::Pipeline::parse(
+                "solo",
+                "steps:\n  - id: work\n    agent: pi\n    prompt: implementer\n    \
+                 model: test-model\n    on_pass: done\n",
+            )
+            .unwrap(),
+        );
+        add_task_with(&repo, "cart", "test", |f| f.group = Some("cart".into()));
+        add_task_with(&repo, "zed", crate::pipeline::QUEUED, |f| {
+            f.group = Some("zed".into());
+            f.pipeline = Some("solo".into());
+        });
+
+        let report = run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+
+        let said = report
+            .actions
+            .iter()
+            .find(|a| a.starts_with("zed:"))
+            .unwrap_or_else(|| panic!("{:?}", report.actions));
+        assert!(said.contains("`pi` slot held for group `cart`"), "{said}");
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let zed = rows.iter().find(|r| r.id == "zed").unwrap();
+        assert_eq!(zed.next, "pi slot held for group cart");
+    }
+
     #[test]
     fn a_cap_full_of_running_lanes_is_not_blamed_on_a_hold() {
         let (mut repo, _root_guard) = fixture("reserve-full-by-running");

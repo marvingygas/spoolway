@@ -4607,6 +4607,135 @@ mod tests {
         assert!(line("claude").contains("slots 0/1"), "{lines:#?}");
     }
 
+    /// Under `reserve`, a cap with a slot held for a started group reads
+    /// `<live>/<cap> · <n> held`, and one with none reads as it always has.
+    #[test]
+    fn a_held_slot_is_counted_beside_its_profiles_figure() {
+        let (mut repo, _root_guard) = fixture("footer-held");
+        repo.config.agents.get_mut("claude").unwrap().concurrency = 2;
+        let pipelines = Pipelines::builtin();
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("claude", 1);
+        let draw = |held: &BTreeMap<crate::dispatch::Cap, usize>| -> Vec<String> {
+            footer(
+                &repo,
+                &pipelines,
+                &used,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                held,
+                &[],
+                &[],
+            )
+            .iter()
+            .map(|l| strip(l))
+            .collect()
+        };
+
+        let held = BTreeMap::from([(crate::dispatch::Cap::Profile("claude".into()), 1)]);
+        let lines = draw(&held);
+        let claude = lines.iter().find(|l| l.starts_with("claude")).unwrap();
+        assert!(claude.ends_with("slots 1/2 · 1 held"), "{lines:#?}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("held")).count(),
+            1,
+            "{lines:#?}"
+        );
+
+        let lines = draw(&BTreeMap::new());
+        assert!(!lines.iter().any(|l| l.contains("held")), "{lines:#?}");
+    }
+
+    /// A hold on a model's own `slots` row follows that model's figure, and
+    /// the profile's own figure does not count it.
+    #[test]
+    fn a_models_held_slot_follows_its_own_figure_not_the_profiles() {
+        let (mut repo, _root_guard) = fixture("footer-held-model");
+        repo.config.models.insert(
+            "small-local".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let used: BTreeMap<&str, usize> = BTreeMap::from([("pi", 1)]);
+        let agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::from([("pi", vec!["small-local"])]);
+        let held = BTreeMap::from([(crate::dispatch::Cap::Model("small-local".into()), 1)]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &agent_model,
+            &held,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let pi = lines.iter().find(|l| l.starts_with("pi")).unwrap();
+        assert!(
+            pi.contains("slots 1/\u{221e}") && !pi.contains("1/\u{221e} · "),
+            "{lines:#?}"
+        );
+        assert!(pi.ends_with("small-local   0/1 · 1 held"), "{lines:#?}");
+    }
+
+    /// The footer sits under a rule at most 60 columns wide, the narrowest
+    /// the board draws it. A held figure on a profile and on a model's own
+    /// row still fits inside that rule, so it neither wraps nor runs past it.
+    #[test]
+    fn a_held_footer_line_fits_under_the_rule() {
+        let (mut repo, _root_guard) = fixture("footer-held-narrow");
+        repo.config.agents.get_mut("claude").unwrap().concurrency = 2;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        repo.config.models.insert(
+            "small-local".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        let used: BTreeMap<&str, usize> = BTreeMap::from([("claude", 1), ("pi", 1)]);
+        let agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::from([("pi", vec!["small-local"])]);
+        let held = BTreeMap::from([
+            (crate::dispatch::Cap::Profile("claude".into()), 1),
+            (crate::dispatch::Cap::Profile("pi".into()), 1),
+            (crate::dispatch::Cap::Model("small-local".into()), 1),
+        ]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &agent_model,
+            &held,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("held")).count(),
+            2,
+            "{lines:#?}"
+        );
+        // One column of margin before every footer line, as the board
+        // prints it.
+        assert!(
+            lines.iter().all(|l| 1 + l.chars().count() <= 60),
+            "{lines:#?}"
+        );
+    }
+
     /// A profile running one lane on a step naming a pooled model and one on
     /// a step naming none — the `gh-378` mockup's own scenario — prints its
     /// own figure over both lanes beside the pool's figure over the one.

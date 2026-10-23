@@ -4296,13 +4296,9 @@ fn held_note(
     {
         return None;
     }
-    let start = crate::dispatch::land_past_hidden(
-        pipeline,
-        task,
-        pipeline.entry().to_string(),
-        dependents,
-    )
-    .destination;
+    let start =
+        crate::dispatch::land_past_hidden(pipeline, task, pipeline.entry().to_string(), dependents)
+            .destination;
     let step = pipeline
         .step(&start)
         .filter(|step| step.kind() == crate::pipeline::StepKind::Agent)?;
@@ -7156,6 +7152,166 @@ mod tests {
         assert_eq!(
             row("gate-filter").next,
             "waiting for a worker slot to free up"
+        );
+    }
+
+    /// An agent step, a command step, then another agent step, all on `pi`.
+    /// A task on `test` runs no lane, so its group holds a `pi` slot for
+    /// `shots` under `reserve`, and a queued task enters on `implement`.
+    const AGENT_COMMAND_AGENT: &str = "steps:\n  \
+         - id: implement\n    agent: pi\n    prompt: implementer\n    \
+         model: test-model\n    on_pass: test\n  \
+         - id: test\n    run: true\n    on_pass: shots\n  \
+         - id: shots\n    agent: pi\n    prompt: implementer\n    \
+         model: test-model\n    on_pass: done\n";
+
+    /// [`AGENT_COMMAND_AGENT`] as the `default` pipeline, beside the
+    /// builtin ones.
+    fn reserve_pipelines() -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", AGENT_COMMAND_AGENT).unwrap(),
+        );
+        pipelines
+    }
+
+    /// `cart-totals` of group `cart` on its command step, and `zed` of a
+    /// group that has never run, queued behind it, on a `pi` profile of
+    /// `slots` lanes.
+    fn cart_on_a_command_step(name: &str, slots: usize) -> (Repo, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
+        repo.config.dispatch.priority = crate::config::Priority::Reserve;
+        repo.config.agents.get_mut("pi").unwrap().concurrency = slots;
+        add_to(&repo, "cart-totals", &[], Some("test"), Some("cart"));
+        add_to(&repo, "zed", &[], None, Some("zed"));
+        (repo, root_guard)
+    }
+
+    /// The NEXT the board draws for `id`, with `lanes` live.
+    fn next_of(repo: &Repo, pipelines: &Pipelines, lanes: &[crate::mux::Lane], id: &str) -> String {
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(
+            repo,
+            &tasks,
+            pipelines,
+            &graph,
+            lanes,
+            &Default::default(),
+            None,
+        )
+        .unwrap();
+        rows.into_iter().find(|r| r.id == id).unwrap().next
+    }
+
+    /// Under `reserve`, a queued task a held slot keeps out names the cap and
+    /// the group holding it, where a free slot on the footer would otherwise
+    /// make its wait look like a stall. Fails without `held_note`: the row
+    /// reads "waiting for a worker slot to free up".
+    #[test]
+    fn a_task_a_hold_keeps_out_names_the_group_holding_its_slot() {
+        let (repo, _root_guard) = cart_on_a_command_step("held-next", 1);
+
+        assert_eq!(
+            next_of(&repo, &reserve_pipelines(), &[], "zed"),
+            "pi slot held for group cart"
+        );
+    }
+
+    /// The same queue under `group` and `any` holds nothing, so no row
+    /// says a slot is held.
+    #[test]
+    fn no_row_says_held_under_group_or_any() {
+        let (mut repo, _root_guard) = cart_on_a_command_step("held-next-other-priorities", 1);
+        for priority in [crate::config::Priority::Group, crate::config::Priority::Any] {
+            repo.config.dispatch.priority = priority;
+            assert_eq!(
+                next_of(&repo, &reserve_pipelines(), &[], "zed"),
+                "waiting for a worker slot to free up",
+                "{priority:?}"
+            );
+        }
+    }
+
+    /// A cap already full of running lanes keeps the task out whatever is
+    /// held, so the row says it waits for a worker slot and blames no group.
+    /// Fails if the board counted held slots without the running lanes.
+    #[test]
+    fn a_task_waiting_on_a_full_cap_still_waits_for_a_worker_slot() {
+        let (repo, _root_guard) = cart_on_a_command_step("held-next-full", 2);
+        add_to(&repo, "bill", &[], Some("implement"), Some("bill"));
+        add_to(&repo, "ann", &[], Some("implement"), Some("ann"));
+        let lanes = [
+            lane("bill · implement", &repo.root),
+            lane("ann · implement", &repo.root),
+        ];
+
+        assert_eq!(
+            next_of(&repo, &reserve_pipelines(), &lanes, "zed"),
+            "waiting for a worker slot to free up"
+        );
+    }
+
+    /// One lane running on a two-slot profile and one slot held: the hold is
+    /// what keeps `zed` out, so the row names it. Fails if the board leaves
+    /// `bill`'s lane out of either half: out of the running count, one held
+    /// of two lets `zed` in; out of `slot_holds`, `bill`'s group holds a slot
+    /// of its own and the row names it instead of `cart`.
+    #[test]
+    fn a_running_lane_and_a_hold_together_keep_a_task_out() {
+        let (repo, _root_guard) = cart_on_a_command_step("held-next-one-running", 2);
+        add_to(&repo, "bill", &[], Some("implement"), Some("bill"));
+        let lanes = [lane("bill · implement", &repo.root)];
+
+        assert_eq!(
+            next_of(&repo, &reserve_pipelines(), &lanes, "zed"),
+            "pi slot held for group cart"
+        );
+    }
+
+    /// A hold on a model's own `slots` row is named by the model, as the
+    /// footer names that row's figure, not by the profile.
+    #[test]
+    fn a_hold_on_a_models_own_slots_names_the_model() {
+        let (mut repo, _root_guard) = cart_on_a_command_step("held-next-model", 2);
+        repo.config.models.insert(
+            "test-model".into(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            next_of(&repo, &reserve_pipelines(), &[], "zed"),
+            "test-model slot held for group cart"
+        );
+    }
+
+    /// The footer's held count comes off the same reading: one slot on
+    /// `pi` under `reserve`, and none under `group`.
+    #[test]
+    fn the_footer_counts_the_holds_the_rows_name() {
+        let (mut repo, _root_guard) = cart_on_a_command_step("held-footer-count", 1);
+        let pipelines = reserve_pipelines();
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        let held = reserved(&repo, &pipelines, &tasks, &graph, &[]).held;
+        assert_eq!(
+            held,
+            BTreeMap::from([(
+                crate::dispatch::Cap::Profile("pi".into()),
+                vec!["cart".to_string()]
+            )])
+        );
+
+        repo.config.dispatch.priority = crate::config::Priority::Group;
+        assert!(
+            reserved(&repo, &pipelines, &tasks, &graph, &[])
+                .held
+                .is_empty()
         );
     }
 
