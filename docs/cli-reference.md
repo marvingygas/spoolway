@@ -414,8 +414,8 @@ spoolway queue list --json
 
 A running command step that has no pane reads `● running 9m 12s` in STATE, with the time it has run.
 
-`--json` prints the dispatcher's pid, one object per task, and an `unparseable` array. The `state` of a running command step is `running`, with no time. While a
-dispatcher runs, NEXT is routed on the pipelines that dispatcher loaded at start. See [Editing a
+`--json` prints the dispatcher's pid, one object per task, and an `unparseable` array. The `state` of a running command step is `running`, with no time.
+While a dispatcher runs, NEXT is routed on the pipelines that dispatcher loaded at start. See [Editing a
 pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 On a paused or blocked row, STEP and the `--json` `stage` name the step the stop came from, so a
