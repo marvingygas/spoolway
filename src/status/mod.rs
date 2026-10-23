@@ -7779,6 +7779,53 @@ mod tests {
         assert!(!crate::problem_log::path(&repo).exists());
     }
 
+    /// A task whose only lane for its current step is one the dispatcher has
+    /// marked `kept` — over, with its pane left open and idle — reads
+    /// `Queued`, because nothing is running for it. The same task reads
+    /// `Running` once a new lane for that step has a record with `kept`
+    /// false.
+    #[test]
+    fn a_task_whose_only_lane_for_its_step_is_kept_reads_queued_not_running() {
+        let (repo, _root_guard) = fixture("kept-lane-queued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let now = chrono::Utc::now().timestamp();
+        let write_record = |kept: bool| {
+            let records = serde_json::json!({ "login · implement": {
+                "started_at": now - 7200,
+                "last_progress": now - 600,
+                "output_hash": 0,
+                "kept": kept,
+            }});
+            std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
+        };
+        let state = || {
+            let mut l = lane("login · implement", &repo.root);
+            l.status = crate::mux::LaneStatus::Idle;
+            let rows = build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                &[l],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+            rows.into_iter().find(|r| r.id == "login").unwrap()
+        };
+
+        write_record(true);
+        let row = state();
+        assert!(matches!(row.state, State::Queued), "{}", row.state.word());
+
+        write_record(false);
+        let row = state();
+        assert!(matches!(row.state, State::Running), "{}", row.state.word());
+    }
+
     /// With no dispatcher up, a lane still in its turn counts — `Working`, a
     /// `Blocked` prompt and an `Unknown` alike — and one that has settled,
     /// `Done` or `Idle`, reads `✓ finished` with what moves it on.
