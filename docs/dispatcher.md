@@ -407,7 +407,7 @@ stateDiagram-v2
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `starting` | The dispatcher is booting the lane, or cutting the worktree and starting the run of a command step. herdr does not list a lane until the boot is well along. The logo turns the same as it does for `running`. |
-| `running` | A lane is working the current step. |
+| `running` | A lane is working the current step. A command step that runs with no pane also shows how long it has run, after the word, as `● running 9m 12s` or `● running 1h 04m`. This is the same figure as TIME. A command step in a pane and an agent lane read `● running`. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent · <time>`, counted from the model's last turn. A lane with no model turn counts from its last write before the first unanswered reminder. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
