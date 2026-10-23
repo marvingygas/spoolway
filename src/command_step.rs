@@ -1859,6 +1859,40 @@ mod tests {
         }
     }
 
+    /// A running command step's pid file carries the start time that
+    /// `lock::started_at` gives for its pid, whether the run is hidden or
+    /// shown in a pane.
+    ///
+    /// That second line is what lets a reader refuse a pid that now belongs
+    /// to another process. An empty line makes `lock::is_same_process`
+    /// trust the pid alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_running_commands_pid_file_holds_the_start_time_of_its_pid() {
+        for paned in [false, true] {
+            let f = Fixture::new(if paned {
+                "start-time-pane"
+            } else {
+                "start-time"
+            });
+            let pid = if paned {
+                f.start_in_pane("bench-demo", "sleep 60")
+            } else {
+                f.start("bench-demo", "sleep 60")
+            };
+            let written = std::fs::read_to_string(f.runs.pid_path("bench-demo")).unwrap();
+            let recorded = written.lines().nth(1).unwrap_or_default().to_string();
+            let expected = crate::lock::started_at(pid).expect("the run's wrapper is alive");
+
+            crate::headless::kill_group(pid);
+
+            assert_eq!(
+                recorded, expected,
+                "paned={paned}: the pid file's second line is not the start time of pid {pid}"
+            );
+        }
+    }
+
     /// A pid file from a binary that recorded no start time is the pid alone,
     /// and a live process at that pid still reads as the run.
     #[test]
