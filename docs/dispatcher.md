@@ -192,8 +192,21 @@ When more tasks are ready than there are free slots, the pass sorts them:
 
 With `dispatch.priority = "group"`, the default, a task from a group that has not started yet
 ranks behind every task from a group that is already running. It still takes a slot when no
-running group has ready work. `dispatch.priority = "reserve"` ranks tasks the same way as `group`.
-With `dispatch.priority = "any"` only the three rules apply.
+running group has ready work. With `dispatch.priority = "any"` only the three rules apply.
+
+`dispatch.priority = "reserve"` ranks tasks the same way as `group`, and also keeps a slot. A
+group that has started holds one slot until its last task is archived. A task from a group that
+has never run starts only while the lanes running on a cap plus the slots held on it stay below
+the cap. A started group is never kept out by another group's hold, so turning `reserve` on
+with more started groups than slots cannot stall them.
+
+A started group holds its slot while no lane is running on its current step. That covers a
+command step, the pause between two tasks of its chain, and a lane that is still starting. The
+slot is on the cap of the first agent step the group's `on_pass` path reaches. That is the
+model's `slots` row when the model has one. Otherwise it is the profile's `concurrency`, which a
+step with `slot: false` does not count against. A group whose task is `paused`, `hook_failed`
+or `blocked` with no unblocker lane holds nothing until it is resumed. A task kept out by a
+hold logs a line naming the cap and the group that holds it.
 
 A task that reaches a command step whose id some pipeline marks `serial: true` waits there
 unstarted while another task's run of that step id, on any pipeline, is going. The task's own

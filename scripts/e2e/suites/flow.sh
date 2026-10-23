@@ -12,6 +12,7 @@
 #
 # covers: agents.<profile>.concurrency — one slot admits one lane and the pass says what waits
 # covers: step.on_pass — the route a task took is on the record, step by step
+# covers: dispatch.priority — a started group keeps a slot through a command step under reserve
 # covers: dispatch.priority — an open group with no ready work of its own no longer holds slots from never-run groups
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -496,6 +497,68 @@ if drive chain-a gone 180 && drive chain-b gone 180 \
 else
   bad "the chain runs to its real end and both never-run groups land"
 fi
+
+# ------------------------------------------- reserve keeps a started group's slot
+# `dispatch.priority = "reserve"`: a group that has started keeps one slot
+# away from groups that have never run, even while its task sits on a command
+# step, which takes no agent slot. One slot, so the keep-out is the only thing
+# that can stop the latecomer: `held`'s task is on a twenty-second command step
+# when `late` is queued, and `late` must wait out the command and `held`'s
+# agent step rather than take the free slot. `held` is the first to start its
+# agent step; `late` follows only once that lane has finished.
+must "one slot" "$SPOOLWAY" config set agents.pi.concurrency 1
+must "reserve a slot for a started group" "$SPOOLWAY" config set dispatch.priority reserve
+mkdir -p "$SPOOLWAY_PROJECT_HOME/local/pipelines" "$SPOOLWAY_PROJECT_HOME/local/prompts/helper"
+printf 'description: A command step, then an agent step.\nsteps:\n  - id: wait\n    run: sleep 20\n    on_pass: finish\n  - id: finish\n    agent: pi\n    prompt: helper\n    model: %s\n    on_pass: done\n' \
+  "$(local_model)" > "$SPOOLWAY_PROJECT_HOME/local/pipelines/holding.yml"
+printf '# helper\n\nYou do one small thing and report it.\n' \
+  > "$SPOOLWAY_PROJECT_HOME/local/prompts/helper/PROMPT.md"
+dispatcher_stop
+task_doc "$LIVE/held.md" held "$BODY" "group: held-group" "pipeline: holding"
+must "the group that will hold" "$SPOOLWAY" queue add --from "$LIVE/held.md"
+dispatcher_start
+
+held_on_command() { [ "$(stage_of held)" = wait ]; }
+if poll_until 30 held_on_command; then
+  ok "the holding group's task reaches its command step"
+else
+  bad "the holding group's task reaches its command step (at \`$(stage_of held)\`)"
+fi
+
+task_doc "$LIVE/late.md" late "$BODY" "group: late-group"
+must "a never-run group, queued behind it" "$SPOOLWAY" queue add --from "$LIVE/late.md"
+
+if wait_for_text 30 "$E2E_DISPATCH_LOG" "late: waiting for a \`pi\` slot held for group \`held-group\`"; then
+  ok "a free slot is kept from the never-run group, and the pass names the holder"
+else
+  bad "a free slot is kept from the never-run group, and the pass names the holder"
+  tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+if grep -qF "started late · implement" "$E2E_DISPATCH_LOG" \
+  && ! grep -qF "started held · finish" "$E2E_DISPATCH_LOG"; then
+  bad "the never-run group does not start before the holder's agent step has"
+else
+  ok "the never-run group does not start before the holder's agent step has"
+fi
+
+if wait_for_text 60 "$E2E_DISPATCH_LOG" "started held · finish" \
+  && wait_for_text 60 "$E2E_DISPATCH_LOG" "started late · implement"; then
+  ok "the holder runs its agent step, and the never-run group starts after it"
+else
+  bad "the holder runs its agent step, and the never-run group starts after it"
+  tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+
+# Back to the shipped defaults for the scenarios below.
+must "back to group priority" "$SPOOLWAY" config set dispatch.priority group
+must "back to two slots" "$SPOOLWAY" config set agents.pi.concurrency 2
+dispatcher_restart
+if drive held gone 180 && drive late gone 180; then
+  ok "both groups land"
+else
+  bad "both groups land"
+fi
+rm -rf "$SPOOLWAY_PROJECT_HOME/local"
 
 # --------------------------------------------------- blocked has one turn, not a loop
 #
