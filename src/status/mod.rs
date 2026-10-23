@@ -3178,6 +3178,9 @@ struct Snapshot {
     used: BTreeMap<String, usize>,
     model_used: BTreeMap<String, usize>,
     agent_model: BTreeMap<String, Vec<String>>,
+    /// How many slots `reserve` holds on each cap, for the footer's
+    /// `· <n> held` — see [`reserved`].
+    held: BTreeMap<crate::dispatch::Cap, usize>,
     active_jobs: Vec<crate::jobs::ActiveJob>,
     /// Every pipeline file edited since the running dispatcher loaded them —
     /// see [`crate::pipeline_snapshot::changed_since_start`]. Read here, off
@@ -3201,6 +3204,7 @@ impl Snapshot {
             used: BTreeMap::new(),
             model_used: BTreeMap::new(),
             agent_model: BTreeMap::new(),
+            held: BTreeMap::new(),
             active_jobs: Vec::new(),
             changed_pipelines: Vec::new(),
             recent: VecDeque::new(),
@@ -3389,6 +3393,14 @@ fn build(
         .map(|(k, v)| (k.to_string(), v.into_iter().map(str::to_string).collect()))
         .collect();
 
+    // The footer's count of each hold, read off the same answer the queued
+    // rows' NEXT reads from.
+    let held = reserved(repo, pipelines, &tasks, &graph, &lanes)
+        .held
+        .into_iter()
+        .map(|(cap, groups)| (cap, groups.len()))
+        .collect();
+
     // The job ledger's own rows — every enabled job, ordered by next firing
     // — memoised, so a reading over an unchanged calendar does not re-scan
     // it for every enabled job.
@@ -3412,6 +3424,7 @@ fn build(
         used,
         model_used,
         agent_model,
+        held,
         active_jobs,
         changed_pipelines,
         recent,
@@ -3871,6 +3884,7 @@ fn paint_at(
         &used,
         &model_used,
         &agent_model,
+        &snapshot.held,
         &snapshot.active_jobs,
         &snapshot.changed_pipelines,
     ) {
@@ -4187,6 +4201,118 @@ fn slots_used<'a>(
         }
     }
     out
+}
+
+/// What `dispatch.priority = "reserve"` holds this frame: the groups holding
+/// a slot on each cap, and the lanes running on each cap. Both empty under
+/// any other priority.
+#[derive(Debug, Default)]
+struct Reserved {
+    /// [`crate::dispatch::slot_holds`]'s own answer, read off this frame's
+    /// queue and lanes.
+    held: BTreeMap<crate::dispatch::Cap, Vec<String>>,
+    /// Live lanes per cap, counted on every cap
+    /// [`crate::dispatch::running_caps`] names, as the pass counts them.
+    running: BTreeMap<crate::dispatch::Cap, usize>,
+}
+
+/// Which slots are held for a started group, and which lanes run on each
+/// cap, from the very functions the dispatcher's pass calls. A board that
+/// worked the holds out for itself could name a group the dispatcher is not
+/// holding a slot for.
+///
+/// Routed on the running dispatcher's copy of the pipelines when there is
+/// one, as [`build_rows`] routes NEXT, since that copy is what the pass holds
+/// slots by. The lanes are this project's own, as [`slots_used`] counts them.
+fn reserved(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    graph: &Graph,
+    lanes: &[crate::mux::Lane],
+) -> Reserved {
+    if repo.config.dispatch.priority != crate::config::Priority::Reserve {
+        return Reserved::default();
+    }
+    let routed = crate::pipeline_snapshot::for_tasks(repo, tasks).map(|r| r.pipelines);
+    let pipelines = routed.as_ref().unwrap_or(pipelines);
+    let step_ids = pipelines.all_step_ids();
+    let mine = crate::dispatch::our_checkouts(repo, tasks);
+    let mut lane_steps: Vec<(&str, &str)> = Vec::new();
+    let mut running: BTreeMap<crate::dispatch::Cap, usize> = BTreeMap::new();
+    for lane in lanes {
+        if !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
+            continue;
+        }
+        let Some((step_id, task)) = crate::mux::parse_lane(&lane.name, &step_ids, tasks) else {
+            continue;
+        };
+        // Every lane of ours goes to `slot_holds`, which asks `lane_counts`
+        // itself; only the running count below needs the test here.
+        lane_steps.push((step_id, task.id()));
+        let Ok(pipeline) = pipelines.for_task(task) else {
+            continue;
+        };
+        if !crate::dispatch::lane_counts(task, pipeline, step_id, repo.unattended()) {
+            continue;
+        }
+        let Some(step) = pipeline.step(step_id) else {
+            continue;
+        };
+        for cap in crate::dispatch::running_caps(&repo.config, step) {
+            *running.entry(cap).or_default() += 1;
+        }
+    }
+    let held = crate::dispatch::slot_holds(
+        repo,
+        pipelines,
+        repo.unattended(),
+        graph,
+        tasks,
+        &[],
+        &lane_steps,
+    );
+    Reserved { held, running }
+}
+
+/// The NEXT-column line for a queued task a slot hold keeps out:
+/// `<cap> slot held for group <group>`. `None` for a task no hold keeps out,
+/// which includes one whose cap is full of running lanes, since that task
+/// waits for a worker slot whatever is held.
+///
+/// Asks [`crate::dispatch::held_out`], the dispatcher's own check, of the step
+/// the task would start on. A model's cap is named by the model the step
+/// names, and a profile's by the profile, as the footer names them.
+fn held_note(
+    repo: &Repo,
+    pipeline: &crate::pipeline::Pipeline,
+    graph: &Graph,
+    task: &crate::task::Task,
+    dependents: usize,
+    reserved: &Reserved,
+) -> Option<String> {
+    if reserved.held.is_empty()
+        || !crate::dispatch::group_gate_holds(repo.config.dispatch.priority, graph, task)
+    {
+        return None;
+    }
+    let start = crate::dispatch::land_past_hidden(
+        pipeline,
+        task,
+        pipeline.entry().to_string(),
+        dependents,
+    )
+    .destination;
+    let step = pipeline
+        .step(&start)
+        .filter(|step| step.kind() == crate::pipeline::StepKind::Agent)?;
+    let running = |cap: &crate::dispatch::Cap| reserved.running.get(cap).copied().unwrap_or(0);
+    let held = crate::dispatch::held_out(&repo.config, step, running, &reserved.held)?;
+    let cap = match &held.cap {
+        crate::dispatch::Cap::Profile(name) => name.as_str(),
+        crate::dispatch::Cap::Model(_) => step.model.as_deref().unwrap_or_default(),
+    };
+    Some(format!("{cap} slot held for group {}", held.holders[0]))
 }
 
 /// What the run's live lanes are consuming, counted two ways.
@@ -4569,6 +4695,9 @@ fn build_rows(
     ledger: &crate::usage::LedgerTotals,
     grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
+    // Asked once a frame, not once a row: every queued row a hold might keep
+    // out reads the same holds. Routes for itself, the same way as below.
+    let reserved = reserved(repo, pipelines, tasks, graph, lanes);
     // Every row's NEXT names the step a resume takes, and while a dispatcher
     // runs `spoolway resume` takes it on the dispatcher's copy of the
     // pipelines. So both readers of these rows — the board and `queue list`
@@ -4747,7 +4876,10 @@ fn build_rows(
                 // The gate only ranks a candidate now, it does not drop one
                 // — so a task it has ranked behind another group is not
                 // held apart from every other task waiting on a worker
-                // slot, and reads the same line the rest of them do.
+                // slot, and reads the same line the rest of them do. Only a
+                // slot `reserve` holds for a started group is named apart,
+                // since the footer can then show a free slot the task may
+                // not take — see `held_note`.
                 //
                 // A lifecycle hook still running is the real wait: the task
                 // cannot leave `queued` until it exits, and it is stopped at
@@ -4775,12 +4907,15 @@ fn build_rows(
                     (None, Some(hook), _, _) => (State::Queued, hook, false),
                     (None, None, Some(ran), _) => (State::Starting, cutting_line(ran), false),
                     (None, None, None, Some(d)) => (State::Queued, d, false),
-                    // Said once nothing else holds the task, which is when
-                    // its dependency has finished: the base it is cut from
-                    // and opens against is not the dependency's branch.
+                    // Once nothing else holds the task, a slot held for a
+                    // started group under `reserve` is what keeps it out,
+                    // and the row names the group. Otherwise, when its
+                    // dependency has finished, the base it is cut from and
+                    // opens against is not the dependency's branch.
                     (None, None, None, None) => (
                         State::Queued,
-                        closed_dependency_note(repo, task)
+                        held_note(repo, pipeline, graph, task, dependents, &reserved)
+                            .or_else(|| closed_dependency_note(repo, task))
                             .unwrap_or_else(|| "waiting for a worker slot to free up".to_string()),
                         false,
                     ),

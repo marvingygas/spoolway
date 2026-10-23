@@ -914,12 +914,20 @@ struct Spend {
 /// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
 /// `pipelines` line under the slots, since the run keeps routing on what it
 /// loaded and an edit waits for a restart. Empty, and no line, otherwise.
+///
+/// `held` is how many slots `dispatch.priority = "reserve"` holds on each cap
+/// for a started group. A figure with a hold on its cap reads
+/// `<live>/<cap> · <n> held`, so a task waiting beside a free slot has its
+/// reason on screen; a cap with none, and every cap under any other priority,
+/// reads as it always has. A model's hold is on its own row's cap, so it
+/// follows the model's figure and never the profile's.
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
     used: &BTreeMap<&str, usize>,
     model_used: &BTreeMap<&str, usize>,
     agent_model: &BTreeMap<&str, Vec<&str>>,
+    held: &BTreeMap<crate::dispatch::Cap, usize>,
     jobs: &[crate::jobs::ActiveJob],
     changed_pipelines: &[String],
 ) -> Vec<String> {
@@ -992,6 +1000,7 @@ pub(super) fn footer(
                 0 => format!("{live}/∞"),
                 cap => format!("{live}/{cap}"),
             };
+            let own = own + &held_suffix(held, &crate::dispatch::Cap::Profile(name.clone()));
             // One line per profile, not one per pool: the un-pooled case
             // the mockup in `gh-378` draws (`pi` running one pooled lane and
             // one un-pooled one) needs both figures on the same row, or the
@@ -1002,7 +1011,14 @@ pub(super) fn footer(
                 .into_iter()
                 .map(|(model, slots)| {
                     let live = model_used.get(model).copied().unwrap_or(0);
-                    (model.to_string(), format!("{live}/{slots}"))
+                    let cap = crate::dispatch::Cap::Model(crate::dispatch::slot_key(
+                        &repo.config.models,
+                        model,
+                    ));
+                    (
+                        model.to_string(),
+                        format!("{live}/{slots}{}", held_suffix(held, &cap)),
+                    )
                 })
                 .collect();
             Some(Spend {
@@ -1064,6 +1080,15 @@ pub(super) fn footer(
         lines.extend(jobs_ledger(jobs, name_w));
     }
     lines
+}
+
+/// ` · <n> held` for a cap `reserve` holds `n` slots on, and nothing for one
+/// it holds none on.
+fn held_suffix(held: &BTreeMap<crate::dispatch::Cap, usize>, cap: &crate::dispatch::Cap) -> String {
+    match held.get(cap).copied().unwrap_or(0) {
+        0 => String::new(),
+        n => format!(" · {n} held"),
+    }
 }
 
 /// The job ledger: a `jobs   <n> active` line, then one
@@ -4358,6 +4383,7 @@ mod tests {
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4388,6 +4414,7 @@ mod tests {
                 &repo,
                 &pipelines,
                 &used,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &[],
@@ -4439,6 +4466,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4459,6 +4487,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
@@ -4484,6 +4513,7 @@ mod tests {
             footer(
                 &repo,
                 &pipelines,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
@@ -4553,6 +4583,7 @@ mod tests {
             &used,
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4607,6 +4638,7 @@ mod tests {
             &used,
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4662,6 +4694,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4725,6 +4758,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4780,6 +4814,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4828,6 +4863,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4866,6 +4902,7 @@ mod tests {
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -4892,6 +4929,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
@@ -4941,6 +4979,7 @@ mod tests {
             &repo,
             &pipelines,
             &used,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,

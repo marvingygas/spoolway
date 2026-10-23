@@ -4718,13 +4718,11 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
-            if let Some(agent) = step.agent.clone() {
-                *in_flight.entry(agent).or_insert(0) += 1;
-            }
-            if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                *model_in_flight
-                    .entry(slot_key(&self.repo.config.models, model))
-                    .or_insert(0) += 1;
+            for cap in running_caps(&self.repo.config, step) {
+                match cap {
+                    Cap::Profile(agent) => *in_flight.entry(agent).or_insert(0) += 1,
+                    Cap::Model(key) => *model_in_flight.entry(key).or_insert(0) += 1,
+                }
             }
         }
 
@@ -4932,30 +4930,25 @@ impl<'a> Dispatcher<'a> {
             // Under `reserve`, a group that has never run may start only
             // while the lanes running on a cap plus the slots held on it stay
             // under that cap. A group that is open is never held against, so
-            // it is not asked. Every cap the new lane would be counted on is
-            // asked, the profile's included even when a model row or
-            // `slot: false` keeps the check below from applying it: the lane
-            // still counts in `in_flight`, and would take the slot a started
-            // group is holding.
-            //
-            // Only a hold that keeps this task out is named. A cap already
-            // full of running lanes falls through to the ordinary check
-            // below, which says so without blaming a group.
+            // it is not asked. A cap already full of running lanes falls
+            // through to the ordinary check below, which says so without
+            // blaming a group — see [`held_out`].
             if candidate.gated {
-                let held_out = counted_caps(&self.repo.config, &step, &model_name)
-                    .into_iter()
-                    .find_map(|(cap, limit)| {
-                        let running = match &cap {
-                            Cap::Model(key) => model_in_flight.get(key),
-                            Cap::Profile(name) => in_flight.get(name),
-                        }
-                        .copied()
-                        .unwrap_or(0);
-                        let holders = holds.get(&cap).filter(|groups| !groups.is_empty())?;
-                        (running < limit && running + holders.len() >= limit)
-                            .then(|| (cap, limit, running, holders.clone()))
-                    });
-                if let Some((cap, limit, running, holders)) = held_out {
+                let running = |cap: &Cap| {
+                    match cap {
+                        Cap::Model(key) => model_in_flight.get(key),
+                        Cap::Profile(name) => in_flight.get(name),
+                    }
+                    .copied()
+                    .unwrap_or(0)
+                };
+                if let Some(HeldOut {
+                    cap,
+                    limit,
+                    running,
+                    holders,
+                }) = held_out(&self.repo.config, &step, running, &holds)
+                {
                     report.actions.push(format!(
                         "{}: waiting for a `{cap}` slot held for group `{}` \
                          ({running} running + {} held of {limit})",
@@ -9026,7 +9019,10 @@ struct Started {
 /// `[models]` row that sets its `slots`, else the literal name. Two spellings of one
 /// row (`qwen3`, `local/qwen3`) must share a count, because the cap describes
 /// the one server behind the row, not the name a step happened to use.
-fn slot_key(config_models: &BTreeMap<String, crate::usage::ModelPrice>, model: &str) -> String {
+pub(crate) fn slot_key(
+    config_models: &BTreeMap<String, crate::usage::ModelPrice>,
+    model: &str,
+) -> String {
     crate::models::row_setting(config_models, model, |row| row.slots != 0)
         .unwrap_or(model)
         .to_string()
@@ -9520,6 +9516,66 @@ pub(crate) fn slot_holds(
         }
     }
     holds
+}
+
+/// A slot hold that keeps a lane on `step` out: the cap it is on, that cap's
+/// size, the lanes running on it, and the groups holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldOut {
+    pub(crate) cap: Cap,
+    pub(crate) limit: usize,
+    pub(crate) running: usize,
+    pub(crate) holders: Vec<String>,
+}
+
+/// Whether [`slot_holds`]'s `holds` keep a new lane on `step` out, for a task
+/// of a group that has never run. `running` counts the lanes on a cap.
+///
+/// Every cap the lane would be counted on is asked, the profile's included
+/// even when a model row or `slot: false` keeps the ordinary cap check from
+/// applying it: the lane still counts on the profile, and would take the slot
+/// a started group is holding.
+///
+/// Only a hold that keeps the lane out is named. A cap already full of running
+/// lanes answers `None`, so the ordinary cap check says so without blaming a
+/// group that kept nothing out.
+///
+/// Shared by [`Dispatcher::start_lanes`] and the board's NEXT column, so the
+/// board names the group the dispatcher is really holding the slot for.
+pub(crate) fn held_out(
+    config: &crate::config::Config,
+    step: &Step,
+    running: impl Fn(&Cap) -> usize,
+    holds: &BTreeMap<Cap, Vec<String>>,
+) -> Option<HeldOut> {
+    counted_caps(config, step, &resolve_model(step))
+        .into_iter()
+        .find_map(|(cap, limit)| {
+            let running = running(&cap);
+            let holders = holds.get(&cap).filter(|groups| !groups.is_empty())?;
+            (running < limit && running + holders.len() >= limit).then(|| HeldOut {
+                limit,
+                running,
+                holders: holders.clone(),
+                cap,
+            })
+        })
+}
+
+/// The caps a running lane on `step` is counted on: its profile, and the
+/// `[models]` row its model resolves to, or the model's literal name when no
+/// row sets `slots`. What [`Dispatcher::start_lanes`] adds a lane to before
+/// it starts anything, and what the board counts to answer [`held_out`] the
+/// same way.
+pub(crate) fn running_caps(config: &crate::config::Config, step: &Step) -> Vec<Cap> {
+    let mut caps = Vec::new();
+    if let Some(agent) = step.agent.as_deref() {
+        caps.push(Cap::Profile(agent.to_string()));
+    }
+    if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
+        caps.push(Cap::Model(slot_key(&config.models, model)));
+    }
+    caps
 }
 
 /// Every cap a lane on `step` would be counted on in `start_lanes`: the
