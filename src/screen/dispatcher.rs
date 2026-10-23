@@ -16,6 +16,11 @@
 //! rare exception — and that becomes the tab's popup. It runs in a
 //! process group of its own, so a `ctrl-c` typed at the screen reaches the
 //! screen alone. The screen then decides to stop the child, the same as `q`.
+//!
+//! Every exit of the child also leaves one line in the project's problem log,
+//! written here: a killed child cannot write its own, and the screen is the
+//! one that sees the exit status and the stderr. A screen that quits does not
+//! wait for the exit, so its line is written as it asks, without a status.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -39,12 +44,61 @@ pub(crate) struct Dispatcher {
     /// what tells a run that stopped from a start that was refused before
     /// it got that far.
     ran: bool,
+    /// The problem log this child's exit is written to — see
+    /// [`crate::problem_log::path`]. Held as a path because the child
+    /// outlives the call that started it.
+    log: PathBuf,
+    /// Who asked it to stop, once someone has.
+    asked: Option<Asked>,
+    /// Whether its exit already has a line in the log. One exit, one line.
+    logged: bool,
+}
+
+/// Who asked the child to stop, as the log line names it.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Asked {
+    /// `enter` on the dispatch tab, or an answer to a popup it opened.
+    Enter,
+    /// The board itself ended.
+    Quit,
+}
+
+impl Asked {
+    fn said(self) -> &'static str {
+        match self {
+            Asked::Enter => "asked by the board (enter on the dispatch tab)",
+            Asked::Quit => "asked by the board, which was quitting",
+        }
+    }
+}
+
+/// How many of the child's last stderr lines the log line keeps. A panic
+/// with a backtrace is hundreds, and the log is read a line at a time.
+const LOG_STDERR_LINES: usize = 5;
+
+/// The longest a kept stderr line may be, in characters.
+const LOG_STDERR_WIDTH: usize = 300;
+
+/// The last lines of `text`, on one line: each trimmed and cut to
+/// [`LOG_STDERR_WIDTH`], joined with ` / `. Empty when it said nothing.
+fn last_lines(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let from = lines.len().saturating_sub(LOG_STDERR_LINES);
+    lines[from..]
+        .iter()
+        .map(|line| line.chars().take(LOG_STDERR_WIDTH).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 impl Dispatcher {
     /// Start `spoolway dispatch --from-screen` in `cwd`, with the binary
     /// this screen is running. A binary on `PATH` could be another version.
-    pub(crate) fn start(cwd: &Path) -> Result<Dispatcher> {
+    pub(crate) fn start(cwd: &Path, log: PathBuf) -> Result<Dispatcher> {
         let exe = std::env::current_exe().context("could not find the spoolway binary")?;
         let mut command = Command::new(runnable(&exe));
         // A child started through `/proc/self/exe` would otherwise call
@@ -58,14 +112,14 @@ impl Dispatcher {
             .arg("-C")
             .arg(cwd)
             .args(["dispatch", "--from-screen"]);
-        Dispatcher::spawn(command).context("could not start spoolway dispatch")
+        Dispatcher::spawn(command, log).context("could not start spoolway dispatch")
     }
 
     /// Run `command` as the tab's dispatcher: no terminal, stderr kept.
     /// Apart from [`Dispatcher::start`] so a test can stand a plain shell
     /// command in for `spoolway dispatch` — under `cargo test`,
     /// `current_exe` is the test binary itself.
-    pub(super) fn spawn(mut command: Command) -> Result<Dispatcher> {
+    pub(super) fn spawn(mut command: Command, log: PathBuf) -> Result<Dispatcher> {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -91,6 +145,9 @@ impl Dispatcher {
             reason,
             stopping: false,
             ran: false,
+            log,
+            asked: None,
+            logged: false,
         })
     }
 
@@ -98,9 +155,16 @@ impl Dispatcher {
     /// for the dispatch tab's own tests — see [`Dispatcher::spawn`].
     #[cfg(test)]
     pub(crate) fn stand_in(script: &str) -> Dispatcher {
+        let log = crate::scratch::root("dispatcher-stand-in-log").join("problems.log");
+        Dispatcher::stand_in_logging(script, log)
+    }
+
+    /// [`Dispatcher::stand_in`], writing its exit to `log`.
+    #[cfg(test)]
+    pub(crate) fn stand_in_logging(script: &str, log: PathBuf) -> Dispatcher {
         let mut command = Command::new("sh");
         command.args(["-c", script]);
-        Dispatcher::spawn(command).unwrap()
+        Dispatcher::spawn(command, log).unwrap()
     }
 
     /// The child's process id, which the dispatcher writes into `first-pass`
@@ -113,11 +177,13 @@ impl Dispatcher {
     /// answers: it settles what it holds, tears nothing down, and exits,
     /// leaving every lane running. Asked once. A second `SIGINT` would find
     /// the default action restored and kill the child where it stands.
-    pub(crate) fn stop(&mut self) {
+    pub(crate) fn stop(&mut self, by: Asked) {
         if self.stopping {
             return;
         }
         self.stopping = true;
+        self.asked = Some(by);
+
         #[cfg(unix)]
         // SAFETY: `kill` takes no pointers; a child that has already exited
         // earns ESRCH, which is the answer the next `ended` reads anyway.
@@ -160,9 +226,24 @@ impl Dispatcher {
             .take()
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
-        if self.stopping {
+        let kept = last_lines(&text);
+        if let Some(by) = self.asked {
+            if by == Asked::Enter {
+                let tail = match kept.is_empty() {
+                    true => String::new(),
+                    false => format!(": {kept}"),
+                };
+                self.log_line(&format!(
+                    "dispatcher {pid} stopped: {}; it exited with {status}{tail}",
+                    by.said()
+                ));
+            }
             return Some(None);
         }
+        self.log_line(&match kept.is_empty() {
+            true => format!("dispatcher {pid} exited with {status} and said nothing"),
+            false => format!("dispatcher {pid} exited with {status}, last said: {kept}"),
+        });
         // `main` puts the binary's name in front of every error. Inside the
         // screen that name is noise: the popup's title already says who
         // spoke.
@@ -178,6 +259,16 @@ impl Dispatcher {
     }
 }
 
+impl Dispatcher {
+    /// Write `line` to the problem log, once for this child: a second
+    /// exit line for the same child would say the same thing twice.
+    fn log_line(&mut self, line: &str) {
+        if !std::mem::replace(&mut self.logged, true) {
+            crate::problem_log::append_at(&self.log, line);
+        }
+    }
+}
+
 impl Drop for Dispatcher {
     /// However the screen ends — `q`, `ctrl-c`, or an error on its way out
     /// — dispatching stops with it. The child is not waited on: it settles
@@ -185,7 +276,17 @@ impl Drop for Dispatcher {
     /// the person waiting on a pass that is still finishing.
     fn drop(&mut self) {
         if matches!(self.process.try_wait(), Ok(None)) {
-            self.stop();
+            self.stop(Asked::Quit);
+            // The exit is never seen, so the line is written now, naming
+            // whoever asked first: a stop `enter` asked for a moment ago
+            // is still the reason, and its exit has not been reaped.
+            if let Some(by) = self.asked {
+                self.log_line(&format!(
+                    "dispatcher {} stopped: {}; the board left before it exited",
+                    self.process.id(),
+                    by.said()
+                ));
+            }
         }
     }
 }
@@ -488,8 +589,124 @@ mod tests {
     fn a_child_asked_to_stop_ends_without_a_popup() {
         let mut child = child("exec sleep 30");
         assert!(!child.stopping());
-        child.stop();
+        child.stop(Asked::Enter);
         assert!(child.stopping());
         assert_eq!(wait_ended(&mut child), None);
+    }
+
+    /// A fresh log path under a scratch directory, and what is in it.
+    fn log_in(name: &str) -> PathBuf {
+        crate::scratch::root(name).join("logs").join("p.log")
+    }
+
+    fn logged(log: &Path) -> String {
+        std::fs::read_to_string(log).unwrap_or_default()
+    }
+
+    /// An exit nobody asked for leaves one line naming the pid, the status
+    /// and the last of what it said.
+    #[test]
+    fn an_unasked_exit_is_logged_with_its_status_and_stderr() {
+        let log = log_in("dispatcher-log-unasked");
+        let mut child = Dispatcher::stand_in_logging("echo boom >&2; exit 4", log.clone());
+        let pid = child.pid();
+        wait_ended(&mut child).expect("an unasked exit gets a popup");
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dispatcher {pid} exited with exit status: 4, last said: boom"
+            )),
+            "{text}"
+        );
+    }
+
+    /// A child that said nothing is logged as having said nothing.
+    #[test]
+    fn a_silent_exit_is_logged_as_saying_nothing() {
+        let log = log_in("dispatcher-log-silent");
+        let mut child = Dispatcher::stand_in_logging("exit 0", log.clone());
+        wait_ended(&mut child);
+        assert!(
+            logged(&log).contains("exit status: 0 and said nothing"),
+            "{}",
+            logged(&log)
+        );
+    }
+
+    /// A panic's worth of stderr keeps only its last lines, on one line.
+    #[test]
+    fn a_long_stderr_is_cut_to_its_last_lines() {
+        let log = log_in("dispatcher-log-long");
+        let mut child = Dispatcher::stand_in_logging(
+            "i=1; while [ $i -le 40 ]; do echo line$i >&2; i=$((i+1)); done; exit 1",
+            log.clone(),
+        );
+        wait_ended(&mut child);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains("line36 / line37 / line38 / line39 / line40"),
+            "{text}"
+        );
+        assert!(!text.contains("line35"), "{text}");
+    }
+
+    /// A stop `enter` asked for names the board and `enter` as the reason,
+    /// and still shows no popup.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_enter_asked_for_is_logged_with_its_reason() {
+        let log = log_in("dispatcher-log-enter");
+        let mut child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
+        let pid = child.pid();
+        child.stop(Asked::Enter);
+        assert_eq!(wait_ended(&mut child), None);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dispatcher {pid} stopped: asked by the board (enter on the dispatch tab); \
+                 it exited with signal: 2 (SIGINT)"
+            )),
+            "{text}"
+        );
+    }
+
+    /// A board that quits does not wait for the exit, so the line is
+    /// written as the stop is asked, without a status.
+    #[cfg(unix)]
+    #[test]
+    fn a_board_that_quits_logs_the_stop_it_asked_for() {
+        let log = log_in("dispatcher-log-quit");
+        let child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
+        let pid = child.pid();
+        drop(child);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dispatcher {pid} stopped: asked by the board, which was quitting; \
+                 the board left before it exited"
+            )),
+            "{text}"
+        );
+    }
+
+    /// A stop `enter` asked for that the board quits over still gets its
+    /// line, naming `enter`, and only one.
+    #[cfg(unix)]
+    #[test]
+    fn a_quit_over_a_stop_enter_asked_for_keeps_that_reason() {
+        let log = log_in("dispatcher-log-enter-then-quit");
+        let mut child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
+        child.stop(Asked::Enter);
+        drop(child);
+        let text = logged(&log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains("(enter on the dispatch tab); the board left"),
+            "{text}"
+        );
     }
 }

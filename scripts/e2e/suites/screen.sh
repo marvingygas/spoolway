@@ -155,6 +155,13 @@ child_gone() {
 if poll_until 10 child_gone; then ok "the child is gone once the screen has ended"
 else bad "the child is gone once the screen has ended"; fi
 
+# Every exit of the board's dispatcher leaves a line in the problem log, named
+# off the project home the same way `problem_log::path` does. The stop above
+# was asked by `enter`, and the screen ended a few seconds later.
+PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
+has "the problem log names the stop enter asked for" \
+  "stopped: asked by the board (enter on the dispatch tab); it exited with" "$PROBLEM_LOG"
+
 # With a task queued and no step running, `enter` asks before it stops: a
 # stop then is silent, and the task just waits. `held-after` waits on
 # `held-gate`, which sits on `paused`, so the dispatcher started here claims

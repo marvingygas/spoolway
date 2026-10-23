@@ -76,6 +76,12 @@ pub fn append(repo: &Repo, message: &str) {
     let _ = write_line(&path(repo), message);
 }
 
+/// [`append`], for a caller that holds the log's path but not the `Repo` —
+/// the dispatch tab's child, which outlives the call that started it.
+pub fn append_at(path: &Path, message: &str) {
+    let _ = write_line(path, message);
+}
+
 fn write_line(path: &Path, message: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

@@ -519,7 +519,7 @@ impl DispatchTab {
     /// one.
     fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {
-            child.stop();
+            child.stop(super::dispatcher::Asked::Enter);
         }
     }
 
@@ -557,13 +557,16 @@ impl DispatchTab {
         };
         match crate::commands::warnings_popup(repo, &pipelines) {
             Some(gate) => self.popup = Some(Popup::Warnings(gate)),
-            None => self.start(cwd),
+            None => self.start(repo, cwd),
         }
     }
 
-    fn start(&mut self, cwd: &Path) {
+    fn start(&mut self, repo: &Repo, cwd: &Path) {
         let since = std::time::SystemTime::now();
-        self.started(super::dispatcher::Dispatcher::start(cwd), since);
+        self.started(
+            super::dispatcher::Dispatcher::start(cwd, crate::problem_log::path(repo)),
+            since,
+        );
     }
 
     /// What [`DispatchTab::start`] got back from starting the child at
@@ -620,7 +623,7 @@ impl DispatchTab {
                 if gate.hides() {
                     let _ = gate.hide(repo);
                 }
-                self.start(cwd);
+                self.start(repo, cwd);
             }
             // `let running steps finish`, the first of `STOP_ANSWERS`.
             (Popup::Stop(0), Key::Enter) => self.stop(),
