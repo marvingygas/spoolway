@@ -380,10 +380,11 @@ A build, a test suite, a formatter or a deploy script is a command step.
   still on a step that has become a command step, the dispatcher stops the lane, counts its
   usage and starts the command. Only one of the two runs on the task at a time.
 - The run's pid file holds the pid, the process start time, and a `started` line the command's
-  shell adds as the command begins. After a reboot, a live process
+  shell adds as the command begins. On Linux the shell writes the start time. On macOS spoolway
+  fills it in once the `started` line is there. After a reboot, a live process
   with the same pid but a different start time is not the run. The step reads as interrupted and
   runs again, and neither the timeout nor a cleanup signals that process. A pid file with no
-  start time is read as the pid alone. Only Linux records a start time.
+  start time is read as the pid alone.
 - A run killed without writing an exit code runs again. spoolway first stops every process the
   killed run left running, so two runs of a command are never alive at once. A run killed three
   times in a row blocks the task. The task's `## Status Log` names the run's log.
