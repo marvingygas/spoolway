@@ -92,9 +92,9 @@ has "still carrying that routine's group" "group: maintenance" \
   "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 
 # A second, solo pick: `→` reaches the routines tab, and `tab` moves the
-# cursor onto `maintenance`'s tasks pane, already on `prune`, its one task,
-# nested or not; `space` queues it alone. `prune-1` is taken by the batch
-# above, so this one mints the next number.
+# cursor onto `maintenance`'s tasks in the details pane, already on `prune`,
+# its one task, nested or not; `space` queues it alone. `prune-1` is taken by
+# the batch above, so this one mints the next number.
 #
 # `prune-1` lands first, the way a finished run leaves it: a group is one
 # chain, and `maintenance` still holding `prune-1` in the queue would make a

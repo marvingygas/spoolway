@@ -8136,10 +8136,11 @@ fn routine_folder_lines(
     (lines, starts)
 }
 
-/// The routines pane's own right-hand rows: the highlighted folder's own
-/// tasks — every one at or below it, the same set `enter` would queue —
-/// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
-/// pending task, minus the `Gate:` row a routine has no gate picker to set
+/// The task rows of the routines pane's details, which
+/// [`routine_details_lines`] draws under the job config: the highlighted
+/// folder's own tasks — every one at or below it, the same set `enter`
+/// would queue — each drawn the same `labeled_row` way [`tasks_pane_lines`]
+/// draws a pending task, minus the `Gate:` row a routine has no gate picker to set
 /// and the `Starts from:` and `Lands in:` rows, which this pane has never
 /// drawn, plus a `Problem:` row under any task whose id another routine
 /// file also holds. That row is why this takes every folder and
@@ -8164,8 +8165,8 @@ fn routine_task_lines(
     let mut focus = (0, 0);
     for (i, task) in folder.tasks.iter().enumerate() {
         // The first task sits straight under the `tasks` line
-        // [`render_routines`] draws above it, so only later ones open on a
-        // blank row.
+        // [`routine_details_lines`] draws above it, so only later ones open
+        // on a blank row.
         if i > 0 {
             lines.push(String::new());
         }
@@ -8510,12 +8511,14 @@ fn footer(state: &ScreenState) -> String {
         // `run_screen`'s own `Mode::Routines` arm read, rather than the
         // ordinary line's `f` and `h`, neither of which applies here. One
         // line per pane, as the pending screen's is, each naming the menu
-        // for its own row: new job and delete over the list, open over the
-        // tasks pane — see `routine_options`. No `esc`: over the list it
-        // does nothing, since this pane is the routines tab's whole screen,
-        // and over the tasks pane it goes back to the list, which `tab`
-        // already names. The same line under a notice or the options menu
-        // drawn over the pane.
+        // for its own row: new job and delete over the list, open over a
+        // task in the details pane — see `routine_options`. `tab` over the
+        // list is named `details`, the pane it leads to, whose cursor stops
+        // on the routine's tasks. No `esc`: over the list it does nothing,
+        // since this pane is the routines tab's whole screen, and over the
+        // details pane it goes back to the list, which `tab` already names.
+        // The same line under a notice or the options menu drawn over the
+        // pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
                 Focus::Groups => &[("o", "options"), ("tab", "details")],
@@ -21986,11 +21989,10 @@ mod tests {
     fn the_empty_routines_pane_names_its_own_path() {
         let (repo, _root_guard) = fixture("routines-empty");
 
-        // Checked against `routine_folder_lines` directly, at a width wide
-        // enough to hold the whole path: the left pane's own fixed 25
-        // columns — the same width the mockup itself draws — would truncate
-        // a scratch test repo's own long path well before this could tell
-        // "named the path" apart from "named nothing at all".
+        // Checked against `routine_folder_lines` directly, which cuts no
+        // row: the frame cuts it to the left pane's own 25 columns, which
+        // would truncate a scratch test repo's own long path well before
+        // this could tell "named the path" apart from "named nothing at all".
         let (lines, _) = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new());
         assert_eq!(
             lines,
