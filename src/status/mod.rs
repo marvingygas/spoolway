@@ -3393,8 +3393,8 @@ fn build(
         .map(|(k, v)| (k.to_string(), v.into_iter().map(str::to_string).collect()))
         .collect();
 
-    // The footer's count of each hold, read off the same answer the queued
-    // rows' NEXT reads from.
+    // The footer's count of each hold, read the way the queued rows' NEXT
+    // reads them in `build_rows`, so the two cannot disagree.
     let held = reserved(repo, pipelines, &tasks, &graph, &lanes)
         .held
         .into_iter()
@@ -7236,7 +7236,8 @@ mod tests {
 
     /// A cap already full of running lanes keeps the task out whatever is
     /// held, so the row says it waits for a worker slot and blames no group.
-    /// Fails if the board counted held slots without the running lanes.
+    /// Fails if `held_out` blamed a hold for a cap its running lanes already
+    /// fill.
     #[test]
     fn a_task_waiting_on_a_full_cap_still_waits_for_a_worker_slot() {
         let (repo, _root_guard) = cart_on_a_command_step("held-next-full", 2);

@@ -4684,9 +4684,10 @@ impl<'a> Dispatcher<'a> {
     /// well, and so are those of its shown commands, see [`lanes_over_limit`].
     ///
     /// `holds` is [`slot_holds`]'s answer for this pass. A candidate from a
-    /// group that has never run starts only while its cap's running lanes
-    /// plus the slots held on it stay under the cap. A candidate that starts
-    /// spends its own group's hold, since its lane now occupies the slot.
+    /// group that has never run starts only while, on every cap its lane is
+    /// counted on, the running lanes plus the slots held there stay under
+    /// that cap — see [`held_out`]. A candidate that starts spends its own
+    /// group's hold, since its lane now occupies the slot.
     #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
@@ -9564,9 +9565,9 @@ pub(crate) fn held_out(
 
 /// The caps a running lane on `step` is counted on: its profile, and the
 /// `[models]` row its model resolves to, or the model's literal name when no
-/// row sets `slots`. What [`Dispatcher::start_lanes`] adds a lane to before
-/// it starts anything, and what the board counts to answer [`held_out`] the
-/// same way.
+/// row sets `slots`. Where [`Dispatcher::start_lanes`] counts each running
+/// lane before it starts anything, and where the board counts them to ask
+/// [`held_out`] the same question.
 pub(crate) fn running_caps(config: &crate::config::Config, step: &Step) -> Vec<Cap> {
     let mut caps = Vec::new();
     if let Some(agent) = step.agent.as_deref() {

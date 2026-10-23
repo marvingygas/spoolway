@@ -921,6 +921,10 @@ struct Spend {
 /// reason on screen; a cap with none, and every cap under any other priority,
 /// reads as it always has. A model's hold is on its own row's cap, so it
 /// follows the model's figure and never the profile's.
+///
+/// Every argument is a distinct piece of state the reading took once —
+/// bundling them into a struct only to pass one reference would hide that.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -4685,9 +4689,9 @@ mod tests {
         assert!(pi.ends_with("small-local   0/1 · 1 held"), "{lines:#?}");
     }
 
-    /// The footer sits under a rule at most 60 columns wide, the narrowest
-    /// the board draws it. A held figure on a profile and on a model's own
-    /// row still fits inside that rule, so it neither wraps nor runs past it.
+    /// The footer is drawn unclipped under a rule of up to 60 columns. With a
+    /// held figure on a profile and on a model's own row, each line still
+    /// fits inside that rule, so it does not run past it or wrap.
     #[test]
     fn a_held_footer_line_fits_under_the_rule() {
         let (mut repo, _root_guard) = fixture("footer-held-narrow");
@@ -4728,12 +4732,9 @@ mod tests {
             2,
             "{lines:#?}"
         );
-        // One column of margin before every footer line, as the board
-        // prints it.
-        assert!(
-            lines.iter().all(|l| 1 + l.chars().count() <= 60),
-            "{lines:#?}"
-        );
+        // Under 60, for the one column of margin the board prints before
+        // every footer line.
+        assert!(lines.iter().all(|l| l.chars().count() < 60), "{lines:#?}");
     }
 
     /// A profile running one lane on a step naming a pooled model and one on
