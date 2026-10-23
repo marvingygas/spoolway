@@ -2829,7 +2829,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
         ));
 
         // The existence check above names a missing routine, so only a task
-        // file or a nested folder is named here.
+        // file, a nested folder or the routines directory itself is named here.
         findings.push(Finding::Check(
             format!("job `{name}` routine is a whole routine folder"),
             match job.routine_fault(repo) {

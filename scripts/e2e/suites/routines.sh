@@ -203,8 +203,9 @@ works "never the earlier run's own bare id" \
 
 # Delete (`o`, down, `enter`) deletes a routine and every job that points into it: a user job on the
 # whole `nightly` folder, a second project job on the same folder (the clash a
-# hand edit can make), and a user job on `maintenance` that has to survive. The folders sort `archived-reuse`,
-# `maintenance`, `nightly`, `release`, so `jj` puts the cursor on `nightly`.
+# hand edit can make), and a user job on `maintenance` that has to survive.
+# The folders sort `archived-reuse`, `maintenance`, `nightly`, `release`, so
+# `jj` puts the cursor on `nightly`.
 USER_STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
 PROJECT_STORE=.spoolway/jobs.toml
 cat >"$USER_STORE" <<'EOF'

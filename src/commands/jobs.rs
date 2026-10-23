@@ -1028,8 +1028,8 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
 
     // A routine has at most one job, paused or not: two enabled jobs on one
     // routine fire neither, and a paused one would clash once resumed. The
-    // second is refused here, whichever store holds the first. Targets are compared as resolved paths, so `nightly/` and
-    // `nightly` are one routine.
+    // second is refused here, whichever store holds the first. Targets are
+    // compared as resolved paths, so `nightly/` and `nightly` are one routine.
     let wanted = repo.routines_dir().join(&draft.routine);
     if let Some(holder) = current.iter().find(|job| {
         draft.editing.as_deref() != Some(job.name.as_str())

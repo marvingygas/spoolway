@@ -285,8 +285,9 @@ impl Job {
     }
 
     /// Whether the `routine` is not a top-level routine folder that exists:
-    /// missing, a task file, or a folder below a routine. `None` for a
-    /// whole routine, and for one that escapes the routines directory.
+    /// missing, a task file, a folder below a routine, or the routines
+    /// directory itself. `None` for a whole routine, and for one that
+    /// escapes the routines directory.
     pub fn routine_fault(&self, repo: &Repo) -> Option<RoutineFault> {
         let target = self.target(repo).ok()?;
         let rel = self.relative_target(repo)?;
