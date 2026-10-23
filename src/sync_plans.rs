@@ -9,9 +9,9 @@
 //! Each page is therefore handled in this order: the tasks naming it are
 //! rewritten first, and the page moves second. A crash between the two leaves
 //! tasks naming the workspace path while the page is still in the clone's
-//! folder, and the next sync moves it. A crash part-way through a page's several
-//! tasks leaves the page in place too, so that run finishes the rest the same
-//! way. A task that names the clone's path for a page that is already in the
+//! folder, and the next sync moves it. A crash part-way through a page's
+//! several tasks leaves the page in place too, so that run finishes the rest
+//! the same way. A task that names the clone's path for a page that is already in the
 //! workspace, because it came to name it after the page moved, is rewritten as
 //! well.
 //!
@@ -647,7 +647,8 @@ mod tests {
     }
 
     /// Fails before the change: there was no copy to fall back on when a
-    /// filesystem cannot hard link, and nothing checked it refuses a taken name.
+    /// filesystem cannot hard link, and nothing checked it refuses a taken
+    /// name.
     #[test]
     fn the_copy_fallback_never_replaces_a_page() {
         let (shop, _shop_2, _root) = two_clones("sync-plans-copy");
