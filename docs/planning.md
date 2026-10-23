@@ -358,7 +358,7 @@ Nothing creates the directory for you. `spoolway task contract` prints this shap
 project's own routines directory, for a producer writing a routine by hand. A routine is
 never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
-Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane,
+Bare `spoolway` has a routines tab, between the queue and eval tabs. Its left pane,
 titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
 pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
 
@@ -382,8 +382,7 @@ pane, titled `details`, shows the highlighted routine's job, then its tasks unde
  [space] select   [enter] queue   [o] options   [tab] details   [q] quit
 ```
 
-The job rows show the same values as the [jobs tab](jobs.md). What the job rows say depends on
-how many jobs point at the routine:
+What the job rows say depends on how many jobs point at the routine:
 
 | Jobs on the routine | What the pane shows |
 |---|---|
@@ -396,8 +395,12 @@ Two enabled jobs on one routine fire neither. The `Jobs:` row then reads
 `2 run this routine, so neither fires`. With one enabled and one paused job it reads
 `2 run this routine; only <name> fires`. Resuming the paused job stops both.
 
-The pane reads both job stores again while the list sits idle, so a job saved on the jobs tab or
-by hand shows without a key.
+A job whose routine is not a routine the list shows gets a row of its own at the bottom of the
+list, under a blank line, where it can be edited or deleted. See
+[A job without a routine](jobs.md#a-job-without-a-routine).
+
+The pane reads both job stores again while the list sits idle, so a job edited by hand shows
+without a key.
 
 | Key | What it does |
 |---|---|
@@ -486,7 +489,7 @@ store that will not read refuses the delete before anything is removed, naming t
 `spoolway doctor`.
 
 A job queues a routine on a cron schedule. Pick `new job` from a routine's options menu to make
-one: it opens the jobs tab's own schedule and pipeline panels for that routine, and `enter` on
+one: it opens the schedule and pipeline panels for that routine, and `enter` on
 the pipeline panel saves it. `edit job` opens the same two panels filled with the job's own
 values and saves the job back to the store it came from. `esc` on either panel cancels and writes
 nothing. See [Jobs](jobs.md).

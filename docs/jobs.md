@@ -157,49 +157,50 @@ The board shows the greeting and `Nothing queued`, and under them the job ledger
 With no job enabled and both stores parsing, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
 
-## The jobs screen
+## Writing a job
 
-<img src="screenshots/jobs.png" alt="the jobs screen">
+Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. A
+routine's details pane shows its job above its tasks, and the routine's options menu acts on
+that job. See [Routines](planning.md#routines).
 
-Bare `spoolway`'s jobs tab opens this screen. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
-`details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
-
-The routines tab writes a job too. A routine's options menu offers `new job`, `edit job`,
-`pause job` or `resume job`, and `delete job`. See [Routines](planning.md#routines).
-
-| Key | What it does |
-|---|---|
-| `↑` `↓` | Move. |
-| `n` | Write a new job. |
-| `o` | Open the options menu of the highlighted job, titled with its name. With no jobs it does nothing. |
-| `ctrl-c` | Leave the screen. |
-
-The options menu offers these items, in this order. `↑` `↓` move the cursor, `enter` runs the
-item under it, and `esc` closes the menu.
+A routine's options menu offers these items for its job.
 
 | Item | What it does |
 |---|---|
-| `edit` | Edit the job. |
-| `pause` | Pause the job. A paused job shows `resume` here instead, which resumes it. |
-| `delete` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
+| `new job` | Write a job for the routine. Offered only while the routine has no job. |
+| `edit job` | Edit the routine's job. |
+| `pause job` | Pause the job. A paused job shows `resume job` here instead, which resumes it. |
+| `delete job` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
 
-### The three choices
+### The two choices
 
-`n` and the options menu's `edit` walk three panels. `esc` on any of them writes nothing.
+`new job` and `edit job` walk two panels. `esc` on either writes nothing.
 
-1. The routine. This is the same routines browser as the routines tab, listing one
-   row per routine. `space` ticks a routine and `enter` picks it. A job runs a whole routine, so
-   no single task can be picked. `tab` moves focus onto the tasks pane, which shows what the
-   routine holds. There, `o` opens a menu titled with the task's id whose one item, `open`, opens
-   the task in your editor. `esc` cancels the picker from either pane.
-2. The schedule. The field states the expression in words and shows its next three firings as
+1. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
-3. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
+2. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
-The routines tab's `new job` starts on the schedule panel, for the routine its options menu was
-opened on, then walks the same pipeline panel and save. Its `edit job` does the same, with the
-job's own schedule and pipeline filled in. The job keeps its name, routine and store.
+`new job` writes a job for the routine its options menu was opened on. `edit job` opens with
+the job's own schedule and pipeline filled in, and the job keeps its name, routine and store.
+
+### A job without a routine
+
+A job whose `routine` is not a routine the tab lists gets a row of its own at the bottom of the
+routines list, under a blank line. The row is named after the job's `routine` value. It is
+marked `missing` when nothing has that path, and `not a routine` when the path is a task file, a
+folder inside a routine, or outside `.spoolway/routines/`. A name too long for the row is cut.
+
+The row's details show the job's schedule, pipeline, scope, next firing, last firing and name,
+then why it never fires. The row takes no tick, so `space` and `enter` do nothing on it, and
+`tab` does nothing either. Its key line is `[o] options   [q] quit`.
+
+Its options menu offers two items:
+
+| Item | What it does |
+|---|---|
+| `edit job` | Open the routine picker, which lists the routine folders and nothing else. `enter` picks the folder under the cursor, then the schedule and pipeline panels follow. The save points the job at that routine and keeps its name and store. `esc` on the picker writes nothing. |
+| `delete job` | Delete the job, after the same popup as a routine's `delete job`. |
 
 ### What the screen decides for you
 
@@ -208,10 +209,9 @@ the store file by hand when the routine's tasks set no `base:`. Editing a job on
 a `base` already in the file.
 
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
-gives the job `nightly`. This is the same whether the walk started on the jobs tab or the
-routines tab. A save is refused, with a notice naming the job, when the routine already has a
-job in either store. A job in the project store is written by hand once; the screen then edits it
-in place.
+gives the job `nightly`. A save is refused, with a notice naming the job, when the routine
+already has a job in either store. A job in the project store is written by hand once; the
+screen then edits it in place.
 
 ## The cron grammar
 
@@ -277,7 +277,8 @@ spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 ```
 
-Bare `spoolway`'s jobs tab and routines tab are where a job is written, edited, paused or deleted.
+Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. See
+[Writing a job](#writing-a-job).
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST

@@ -369,8 +369,10 @@ sed 's/\x1b\[[0-9;]*m//g' "$ORPHAN" >"$ORPHAN.plain"
 has "a job without a routine gets a row named after its routine" "> nightly    " "$ORPHAN.plain"
 has "marked missing at the row's edge" "missing" "$ORPHAN.plain"
 has "its details say it never fires" "never, its routine is missing" "$ORPHAN.plain"
-has "and why" "No routine nightly under .spoolway/routines/." "$ORPHAN.plain"
-has "and what to do" "Press o to point this job at a routine, or delete it." "$ORPHAN.plain"
+# The two sentences under them wrap on a narrow pane, so only their
+# openings are matched.
+has "and why" "No routine nightly" "$ORPHAN.plain"
+has "and what to do" "Press o to point" "$ORPHAN.plain"
 has "its key line is options and quit" "[o] options   [q] quit" "$ORPHAN.plain"
 
 # The row takes no tick and queues nothing: `space` ticks `archived-reuse`,
