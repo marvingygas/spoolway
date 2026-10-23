@@ -66,6 +66,8 @@ job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a ta
 job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit or delete the job on the routines tab (o)
 ```
 
+A project joined to a workspace keeps its routines elsewhere. Its lines, and the details of a job's own row on the routines tab, name that directory's full path in place of `.spoolway/routines/`.
+
 A firing that fails is recorded for its minute and is not tried again on every pass. This covers
 a failing `open` hook, one that is stopped after 60 seconds, and a routine that cannot be queued, such as one with a `gate_at:` that
 names no step. The dispatcher names the failure once for that minute. Only an `origin` that

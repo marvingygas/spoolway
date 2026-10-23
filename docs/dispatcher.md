@@ -590,8 +590,8 @@ warnings screen shown before a run does not include it.
 | A terminal editor is chosen on the headless backend | The error says the backend has no pane to open a command in. |
 
 A refusal shows in a popup titled `open task`. The popup holds the whole error, including its fix,
-and closes with `enter` alone. It appears on the board, the queue screen's tasks and routines
-panes, and the jobs routine picker, and the text is the same on each. The board keeps redrawing
+and closes with `enter` alone. It appears on the board and on the queue screen's tasks and routines
+panes, and the text is the same on each. The board keeps redrawing
 and the dispatcher keeps running while the popup is open.
 
 ### Resume picker

@@ -340,7 +340,7 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   `~/.spoolway/<project>/jobs.toml`, or set `base:` in every routine task. A job whose routine
   tasks set no `base:` no longer fires, where 0.9.0 cut them from the branch the main checkout had
   out. The dispatcher names it with ``job <name>: `<task>` sets no `base:`, and the job has no
-  `base` key.`` The jobs screen has no `base` field, so add the key by hand.
+  `base` key.`` The routines tab has no `base` field, so add the key by hand.
 - Commit `.spoolway/spoolway-version`. A binary older than the version it names refuses to write
   the project, and the same holds for `.spoolway-version` in each user skills folder. Delete the
   marker to take an older binary's copies on purpose.

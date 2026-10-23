@@ -51,8 +51,8 @@ say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt
 
 ### `spoolway`
 
-At a terminal, with no other command typed, opens one screen: five tabs, dispatch, queue,
-routines, jobs and eval, in that order. It opens on the queue tab.
+At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
+routines and eval, in that order. It opens on the queue tab.
 
 ```
 spoolway
@@ -97,8 +97,8 @@ The screen checks for changes once a second. The queue tab reads the pending and
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
 with no title, as wide and as tall as the margin allows, from a `spoolway dispatch` child
-it starts and stops. The key line draws under the box, the same as under the queue, routines,
-jobs and eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens
+it starts and stops. The key line draws under the box, the same as under the queue, routines
+and eval screens. The queue and eval tabs draw the queue and eval screens
 described below; the routines tab draws the routine list, see
 [Routines](planning.md#routines). Typed bare, `spoolway queue`, `spoolway jobs` and `spoolway
 eval` print their usage or their tables instead.
