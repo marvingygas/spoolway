@@ -146,7 +146,8 @@ pane, titled `tasks`, lists the highlighted group's tasks and what each waits on
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
-`plan:`. Plan rows sit right under the queueable groups, newest first, and above the done
+`plan:`. In home mode a task in any clone of the workspace counts, so a page leaves every
+clone's list once one clone cuts it. Plan rows sit right under the queueable groups, newest first, and above the done
 groups. A plan row shows only its name, without the date in front of it, with no checkbox and
 no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-tasks`:
 
@@ -165,9 +166,11 @@ instead. Only pages written after the time kept in the `plans-since` file beside
 shown. In home mode that file is the workspace's, so every clone uses the same cutoff. Older
 pages stay off the screen.
 
-When the `plans/` folder cannot be read, the screen lists the groups without plan rows and
-shows a notice titled `plans not listed`. The notice names the read error. It appears once per
-error, and the plan rows return on the next reload after the folder reads again.
+When the plan list cannot be read, the screen lists the groups without plan rows and shows a
+notice titled `plans not listed`. The cause is the `plans/` folder. In home mode it is also
+another clone's pending, queue or archive folder, or the workspace's `project.toml`. The notice
+names the read error. It appears once per error, and the plan rows return on the next reload
+after the path reads again.
 
 | Key | What it does |
 |---|---|
@@ -283,7 +286,8 @@ Some outcomes open a notice instead of closing the popup:
 ### Deleting a plan page
 
 `delete` on a plan row removes the plan's `.html` page from `plans/`, so a plan nobody will cut
-leaves the list. It removes that one file. A folder under `plans/` stays. The popup is titled
+leaves the list. It removes that one file. A folder under `plans/` stays. In home mode a
+clone cannot delete a page that a task in another clone names. The popup is titled
 `delete plan <name>` and names the page:
 
 ```
@@ -306,8 +310,8 @@ Two outcomes open a notice instead:
 
 | Title | When | What it says |
 |---|---|---|
-| `not deleted` | A task names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
-| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` Only `esc` closes it. |
+| `not deleted` | A task, in home mode in any clone, names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
+| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` In home mode, another clone's pending, queue or archive folder that cannot be read is also such an error, and it names the folder. Only `esc` closes it. |
 
 ### Trials
 

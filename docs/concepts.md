@@ -91,7 +91,8 @@ Plan pages are the exception. They belong to the workspace, so every clone lists
 the workspace's own `plans/` folder, beside `config/` and `dispatchers/`. One `plans-since`
 file sits beside it. When the workspace has none yet, it is written from the oldest
 `plans-since` any clone's dispatcher folder holds, so pages people were already waiting on
-stay listed. `spoolway config path` prints the folder on its `plans:` line.
+stay listed. `spoolway config path` prints the folder on its `plans:` line. A page stays listed
+on every clone until a pending, queued or archived task in any clone names it in `plan:`.
 
 The workspace's project jobs fire once for all its clones. Their firing record is the
 workspace's own `jobs.state.json`. See [Jobs](jobs.md#a-project-job-in-a-home-mode-workspace).

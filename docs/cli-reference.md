@@ -593,7 +593,7 @@ checkout is not checked.
 
 Print one line per group with open tasks: the group, how many tasks are open, and their ids.
 After the groups, it prints one line for each plan page that no task with a `group:` names,
-newest first. A plan line always reads `0 open — plan <path>`.
+newest first. In home mode a task in any clone of the workspace counts. A plan line always reads `0 open — plan <path>`.
 
 ```
 $ spoolway group list
@@ -603,7 +603,8 @@ search                        0 open — plan /home/you/.spoolway/shop-4k2p9x/pl
 ```
 
 If the plan pages cannot be read, the group lines still print. A notice on stderr names the
-path that failed.
+path that failed. In home mode that path can also be another clone's pending, queue or archive
+folder, or the workspace's `project.toml`.
 
 ### `spoolway dispatch`
 
