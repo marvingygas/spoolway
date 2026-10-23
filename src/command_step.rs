@@ -411,7 +411,8 @@ impl Runs {
         // while `sed` still ran, and that reader would take the file for one
         // from an older binary. Field 22 of `/proc/$$/stat` is counted from
         // the last `)` as `lock::started_at` does; where there is no `/proc`
-        // the time is empty and the pid stands alone.
+        // the time is empty here, and [`Runs::fill_in_start_time`] writes it
+        // once the pid file has been seen.
         body.push_str(&format!(
             "__spoolway_t=$(sed 's/^.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f20)\n\
              printf '%s\\n%s\\n' \"$$\" \"$__spoolway_t\" >{pid_path}\n"
@@ -532,11 +533,87 @@ impl Runs {
     /// on PATH, a backend that dropped the script on the floor.
     pub fn await_started(&self, key: &str) -> Result<u32> {
         match crate::headless::await_pid_file(|| self.read_pid(key)) {
-            Some(pid) => Ok(pid),
+            Some(pid) => {
+                self.fill_in_start_time(key, pid);
+                Ok(pid)
+            }
             None => bail!(
                 "`{key}` was spawned but never reported a pid — see {}",
                 self.log_path(key).display()
             ),
+        }
+    }
+
+    /// Put the wrapper's start time on the pid file's second line when the
+    /// wrapper could not.
+    ///
+    /// The wrapper reads its start time from `/proc`, which macOS does not
+    /// have, and a shell there cannot produce the seconds and microseconds
+    /// `lock::started_at` compares against. Left empty, the line makes
+    /// [`crate::lock::is_same_process`] trust the pid alone, so a pid file that
+    /// outlives its run could get an unrelated process's group signalled. The
+    /// spawning side knows the pid once the file exists, so it asks
+    /// `lock::started_at` and rewrites the file whole, `started` mark included,
+    /// through a rename so a reader sees the old file or the new one.
+    ///
+    /// A line the wrapper already filled, as on Linux, is left alone. So is a
+    /// pid with no readable start time: the file then stays as the wrapper
+    /// wrote it.
+    ///
+    /// The rewrite waits for the `started` mark first. The command's own shell
+    /// appends it once, and an append that landed after the rename, or on the
+    /// old file just before it, would be lost; without the mark a `TERM` that
+    /// reaches a command that caught it and exited `0` would find no mark, and
+    /// the run would read as interrupted and run again. After the mark nothing
+    /// appends any more. A mark that never comes within the five seconds
+    /// [`crate::headless::await_pid_file`] allows a pid file leaves the line
+    /// empty, as does a pid file that is gone by then.
+    ///
+    /// A stop in another process removes the pid file, or rewrites it without
+    /// the mark, and must not be undone by a rename that lands after it. So the
+    /// file is read again just before the rename and the fill is dropped if it
+    /// changed. A stop landing in the few microseconds between that read and
+    /// the rename still loses to the rename; the file then holds the pid, the
+    /// time and the mark of a run that is being stopped, and the next arrival
+    /// at the step clears it as it clears any run's files.
+    fn fill_in_start_time(&self, key: &str, pid: u32) {
+        let path = self.pid_path(key);
+        let waited = std::time::Instant::now();
+        let raw = loop {
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            let mut lines = raw.lines();
+            let first = lines.next().unwrap_or_default().trim();
+            let recorded = lines.next().unwrap_or_default().trim();
+            if first.parse() != Ok(pid) || !recorded.is_empty() {
+                return;
+            }
+            if lines.any(|line| line == "started") {
+                break raw;
+            }
+            if waited.elapsed() >= std::time::Duration::from_secs(5) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let Some(started) = crate::lock::started_at(pid) else {
+            return;
+        };
+        let mut filled = format!("{pid}\n{started}\n");
+        for rest in raw.lines().skip(2) {
+            filled.push_str(rest);
+            filled.push('\n');
+        }
+        // Not `<key>.pid.tmp`: `stop_in_place` writes that name, and the two
+        // could overwrite each other's file.
+        let tmp = self.dir.join(format!("{key}.pid.fill"));
+        if std::fs::write(&tmp, filled).is_err() {
+            return;
+        }
+        let unchanged = std::fs::read_to_string(&path).is_ok_and(|now| now == raw);
+        if !unchanged || std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -1856,6 +1933,78 @@ mod tests {
             let _ = decoy.kill();
             let _ = decoy.wait();
             assert!(survived, "visit={visit}: the decoy's group was signalled");
+        }
+    }
+
+    /// A wrapper that could not read its start time leaves the line empty, and
+    /// the spawning side fills it in with `lock::started_at`, keeping the
+    /// `started` mark. A line the wrapper did fill is not touched.
+    ///
+    /// The empty line is written by hand because Linux's wrapper always fills
+    /// it, so this is how the macOS shape is reached here. Without
+    /// `fill_in_start_time` the line stays empty.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_empty_start_time_is_filled_in_from_the_live_pid() {
+        let f = Fixture::new("fill-in-start-time");
+        let pid = f.start("bench-demo", "sleep 60");
+        let expected = crate::lock::started_at(pid).expect("the run's wrapper is alive");
+        let pid_file = f.runs.pid_path("bench-demo");
+
+        // The real child appends `started` once. A hand-written file made
+        // before that would take a second one.
+        while !std::fs::read_to_string(&pid_file).is_ok_and(|raw| raw.contains("started")) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::write(&pid_file, format!("{pid}\n\nstarted\n")).unwrap();
+        f.runs.await_started("bench-demo").unwrap();
+        let filled = std::fs::read_to_string(&pid_file).unwrap();
+
+        std::fs::write(&pid_file, format!("{pid}\n123.456\nstarted\n")).unwrap();
+        f.runs.await_started("bench-demo").unwrap();
+        let kept = std::fs::read_to_string(&pid_file).unwrap();
+
+        crate::headless::kill_group(pid);
+
+        assert_eq!(filled, format!("{pid}\n{expected}\nstarted\n"));
+        assert_eq!(
+            kept,
+            format!("{pid}\n123.456\nstarted\n"),
+            "a start time the wrapper wrote is the wrapper's"
+        );
+    }
+
+    /// A running command step's pid file carries the start time that
+    /// `lock::started_at` gives for its pid, whether the run is hidden or
+    /// shown in a pane.
+    ///
+    /// That second line is what lets a reader refuse a pid that now belongs
+    /// to another process. An empty line makes `lock::is_same_process`
+    /// trust the pid alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_running_commands_pid_file_holds_the_start_time_of_its_pid() {
+        for paned in [false, true] {
+            let f = Fixture::new(if paned {
+                "start-time-pane"
+            } else {
+                "start-time"
+            });
+            let pid = if paned {
+                f.start_in_pane("bench-demo", "sleep 60")
+            } else {
+                f.start("bench-demo", "sleep 60")
+            };
+            let written = std::fs::read_to_string(f.runs.pid_path("bench-demo")).unwrap();
+            let recorded = written.lines().nth(1).unwrap_or_default().to_string();
+            let expected = crate::lock::started_at(pid).expect("the run's wrapper is alive");
+
+            crate::headless::kill_group(pid);
+
+            assert_eq!(
+                recorded, expected,
+                "paned={paned}: the pid file's second line is not the start time of pid {pid}"
+            );
         }
     }
 

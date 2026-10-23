@@ -297,6 +297,14 @@ pub struct Row {
     /// why a paused row's own figures stop moving the moment it lands there
     /// — see gh-378 / issue #380.
     pub lane_time: Option<i64>,
+    /// How long a running hidden command step's run has gone, in seconds,
+    /// which the STATE cell draws after `● running`. A hidden step has no
+    /// pane, so this row is the only sign it is still working, and without
+    /// the time a two-hour run reads the same as a stalled one. `None` on
+    /// every other row: an agent lane and a command shown in a pane have a
+    /// pane to look at, and a run that has exited or not started has nothing
+    /// to time.
+    pub hidden_run: Option<i64>,
     /// What happens to this task next: the step it goes to, or — when it is
     /// stuck — what has to happen before it goes anywhere.
     pub next: String,
@@ -3154,6 +3162,7 @@ fn opening_rows(repo: &Repo, tasks: &[crate::task::Task]) -> Vec<Row> {
             out: None,
             cost: None,
             lane_time: None,
+            hidden_run: None,
             next: format!(
                 "opening ticket {} (stopped at {})",
                 crate::tracking::minutes(ran),
@@ -4999,6 +5008,17 @@ fn build_rows(
                 .map(|launched| (chrono::Utc::now().timestamp() - launched).max(0)),
             false => None,
         };
+        // Live goes by whether the lane itself is open, not by whether a
+        // transcript could be read from it — a lane that has just launched is
+        // live before it has written a byte, and its clock still runs.
+        // A command run's clock comes off its own pid file rather than
+        // `launched_at`, which is the last *lane*'s launch and would date a
+        // running `gate` to whatever agent step ran before it.
+        let lane_time = match (command_run, live) {
+            (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
+            (None, true) => elapsed,
+            (None, false) => lane_time_at(ledger, task.id(), origin),
+        };
         let held_by_teardown = parked_on_blocked && teardown_hold(task).is_some();
         let row_stage = match held_by_teardown {
             true => crate::pipeline::BLOCKED,
@@ -5045,18 +5065,17 @@ fn build_rows(
                 Some(session) => session.cost,
                 None => cost_at(ledger, task.id(), origin),
             },
-            // Live goes by whether the lane itself is open, not by whether a
-            // transcript could be read from it — a lane that has just
-            // launched is live before it has written a byte, and its clock
-            // still runs.
-            // A command run's clock comes off its own pid file rather than
-            // `launched_at`, which is the last *lane*'s launch and would date
-            // a running `gate` to whatever agent step ran before it.
-            lane_time: match (command_run, live) {
-                (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
-                (None, true) => elapsed,
-                (None, false) => lane_time_at(ledger, task.id(), origin),
-            },
+            lane_time,
+            // The TIME figure itself, not a second read of the pid file: a
+            // read of its own would land on a later instant, and a redraw
+            // across a second boundary would draw STATE and TIME a second
+            // apart. Only while the step hides its command: a shown run has
+            // a pane of its own, so its row stays as it was.
+            hidden_run: command_run
+                .filter(|_| {
+                    step.is_some_and(|step| step.hides_command(repo.config.dispatch.hide_commands))
+                })
+                .and(lane_time),
             next,
             resumable,
         });
@@ -5474,6 +5493,7 @@ fn unroutable_row(
         out: None,
         cost: None,
         lane_time: None,
+        hidden_run: None,
         next: refusal.to_string(),
         resumable: false,
     }
@@ -5585,6 +5605,7 @@ fn done_rows(repo: &Repo, pipelines: &Pipelines, live: &[Row]) -> Result<Vec<Row
                 out: None,
                 cost: None,
                 lane_time: None,
+                hidden_run: None,
                 next: String::new(),
                 resumable: false,
             })
@@ -8502,6 +8523,131 @@ mod tests {
         // Its own clock, off the pid file, and not the last lane's
         // `launched_at` — which this task never set at all.
         assert!(row.lane_time.is_some(), "a run in flight answers with one");
+    }
+
+    /// A hidden command step has no pane, so its row draws how long its run
+    /// has gone after `● running`, in `queue list`'s table as on the board,
+    /// and a run past the hour still leaves NEXT in line with the row above.
+    /// A command shown in a pane, an agent lane, a run not started and a run
+    /// that has exited all keep the bare word.
+    #[test]
+    fn a_running_hidden_command_step_draws_its_elapsed_time() {
+        let (mut repo, _root_guard) = fixture("command-step-hidden-elapsed");
+        let mut pipelines = Pipelines::builtin();
+        // The project hides its commands, and `bugfix`'s own step is shown
+        // in spite of it: the step's `hide:` is the one that decides.
+        repo.config.dispatch.hide_commands = true;
+        let bugfix = pipelines.pipelines.get_mut("bugfix").unwrap();
+        let shown = bugfix
+            .steps
+            .iter_mut()
+            .find(|s| s.kind() == crate::pipeline::StepKind::Command)
+            .unwrap();
+        shown.hide = Some(false);
+        let shown_step = shown.id.clone();
+        // `handover` is the default pipeline's command step.
+        // A group apiece, since one group is one chain.
+        add_to(&repo, "a-hidden", &[], Some("handover"), Some("group-one"));
+        add_to(&repo, "b-agent", &[], Some("implement"), Some("group-two"));
+        add_to(
+            &repo,
+            "c-shown",
+            &[],
+            Some(&shown_step),
+            Some("group-three"),
+        );
+        let mut task = repo.task("c-shown").unwrap();
+        task.front.pipeline = Some("bugfix".to_string());
+        task.save().unwrap();
+        let mut task = repo.task("b-agent").unwrap();
+        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let lanes = [lane("b-agent · implement", &repo.root)];
+        let build = || {
+            build_rows(
+                &repo,
+                &tasks,
+                &pipelines,
+                &graph,
+                &lanes,
+                &Default::default(),
+                None,
+            )
+            .unwrap()
+        };
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        // The wrapper's pid file as `Runs::start` leaves it — a live pid,
+        // this test's own — dated `ago` seconds back, which is the start
+        // `Runs::elapsed` reads.
+        let start = |step: &str, id: &str, ago: u64| {
+            let key = crate::command_step::Runs::key(step, id);
+            let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&dir).unwrap();
+            let pid = dir.join(format!("{key}.pid"));
+            std::fs::write(&pid, std::process::id().to_string()).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&pid)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(ago))
+                .unwrap();
+            key
+        };
+        let line = |table: &str, id: &str| {
+            table
+                .lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("no line for {id}: {table}"))
+                .to_string()
+        };
+
+        // Not started yet: nothing to time.
+        let rows = build();
+        let hidden = rows.iter().find(|r| r.id == "a-hidden").unwrap();
+        assert!(matches!(hidden.state, State::Queued));
+        assert_eq!(hidden.hidden_run, None);
+
+        let hidden_key = start("handover", "a-hidden", 3840);
+        start(&shown_step, "c-shown", 3840);
+        let rows = build();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert!(matches!(row("a-hidden").state, State::Running));
+        let ran = row("a-hidden").hidden_run.expect("a hidden run answers");
+        assert!((3840..=3845).contains(&ran), "{ran}");
+        // One figure for STATE and TIME, so the board never draws the two a
+        // second apart.
+        assert_eq!(Some(ran), row("a-hidden").lane_time);
+        for id in ["b-agent", "c-shown"] {
+            assert!(matches!(row(id).state, State::Running), "{id}");
+            assert_eq!(row(id).hidden_run, None, "{id}");
+        }
+        let table = plain_table(&rows);
+        assert!(
+            line(&table, "a-hidden").contains("● running 1h 04m "),
+            "{table}"
+        );
+        for id in ["b-agent", "c-shown"] {
+            assert!(line(&table, id).contains("● running  "), "{table}");
+            assert!(!line(&table, id).contains("1h 04m"), "{table}");
+        }
+        // NEXT starts in one column on every row, the widened one included.
+        let next_at = |id: &str| {
+            let line = line(&table, id);
+            let next = &row(id).next;
+            line[..line.find(next.as_str()).unwrap()].chars().count()
+        };
+        assert_eq!(next_at("a-hidden"), next_at("b-agent"), "{table}");
+        assert_eq!(next_at("a-hidden"), next_at("c-shown"), "{table}");
+
+        // Exited: the run is over, so the row stops timing it.
+        runs.record_exit(&hidden_key, 0).unwrap();
+        let rows = build();
+        let hidden = rows.iter().find(|r| r.id == "a-hidden").unwrap();
+        assert!(!matches!(hidden.state, State::Running));
+        assert_eq!(hidden.hidden_run, None);
     }
 
     /// A task held on a `serial:` step reads `○ waiting` and names the task
