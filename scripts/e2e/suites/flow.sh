@@ -14,6 +14,7 @@
 # covers: step.on_pass — the route a task took is on the record, step by step
 # covers: dispatch.priority — a started group keeps a slot through a command step under reserve
 # covers: dispatch.priority — an open group with no ready work of its own no longer holds slots from never-run groups
+# covers: dispatch.priority — the board counts a held slot beside its cap and names the holding group in NEXT
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -534,6 +535,30 @@ else
   bad "a free slot is kept from the never-run group, and the pass names the holder"
   tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
+# The board says the same thing the pass does. Its footer counts the hold
+# beside the cap, and `late`'s NEXT names the group that holds the slot. A
+# board of its own takes the dispatcher over for the look, since the screen
+# stops the resident one on opening: `held`'s command step is a detached
+# process and `held`'s lane is a task on disk, so the hold outlives the swap.
+# The wording is read off the last frame with its colour codes taken out.
+screen_start "$LIVE/board.out"
+screen_dispatch
+board_text() { screen_last_frame | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g'; }
+board_says_hold() {
+  local frame
+  frame=$(board_text)
+  grep -qE 'pi +slots [0-9]+/1 · 1 held' <<<"$frame" \
+    && grep -qF 'pi slot held for group held-group' <<<"$frame"
+}
+if poll_until 30 board_says_hold; then
+  ok "the board counts the held slot in the footer and names the holding group in NEXT"
+else
+  bad "the board counts the held slot in the footer and names the holding group in NEXT"
+  board_text | sed 's/^/        /'
+fi
+screen_stop
+dispatcher_start
+
 if wait_for_text 60 "$E2E_DISPATCH_LOG" "started held · finish" \
   && wait_for_text 60 "$E2E_DISPATCH_LOG" "started late · implement"; then
   ok "the holder runs its agent step, and the never-run group starts"
