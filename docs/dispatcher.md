@@ -405,7 +405,7 @@ stateDiagram-v2
 
 | State | Meaning |
 |---|---|
-| `queued` | Waiting for its dependencies and a free slot. |
+| `queued` | Waiting for its dependencies and a free slot. Also a task back on a step whose old lane is still open and idle, until a new lane starts. |
 | `starting` | The dispatcher is booting the lane, or cutting the worktree and starting the run of a command step. herdr does not list a lane until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
@@ -417,7 +417,7 @@ stateDiagram-v2
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
 | `held` | The task's pipeline name belongs to both a tracked and a private pipeline. The dispatcher starts nothing for the task. Drawn `○ held`. NEXT reads ``private `<name>` clashes with the tracked one: spoolway pipeline rename <name> <new-name>``. Other tasks run as usual. See [`pipeline rename`](cli-reference.md#spoolway-pipeline-rename-old-new). |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
-| `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
+| `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. An open, idle lane left from an earlier visit to the step does not make a row `finished`. |
 
 ### Recent moves
 
@@ -1035,6 +1035,10 @@ A finished lane does not count as running. A profile's `concurrency` and a model
 count only the lane on the step the task is on. A follow-up you type into a finished pane runs
 outside every cap, the same as a session you started by hand. A report from a
 finished lane is refused, because the task has left its step.
+
+The board and the footer also leave a finished lane out. A task that comes back to a step whose
+old lane is still open reads `queued` until the dispatcher starts a new lane for that step. The
+old lane takes no footer slot, and a stop with `interrupt them now` does not park the task.
 
 A step that comes back replaces its own pane. A review that fails and sends the task round again
 splits the old review pane, and then closes it. The new pane takes the old one's whole area, so
