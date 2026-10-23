@@ -247,6 +247,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // `crate::pipeline_snapshot`. Before any lane exists, so no lane of
     // this run can report ahead of it.
     crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
+    // A request a dead dispatcher left is answered here, as loaded: this start
+    // has just loaded every file, and serving it as well would load twice.
+    crate::reload::settle_left_behind(repo);
 
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -286,12 +289,18 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // the wait below falls back to the plain interval alone, exactly as it
     // behaved before this task.
     let watch = crate::screen::open_dir_watch(&repo.commands_dir());
+    // The same wake for a request to reload, so it is read at once instead of
+    // up to `interval` later — see `crate::reload`.
+    let reload_watch = crate::screen::open_dir_watch(&crate::reload::requests_dir(repo));
 
     // The config this run is using. Starts as the one `main` loaded and is
     // replaced at the top of any pass that finds `config.toml` or the config
     // override changed, by whatever they say then — see `ConfigWatch` and
     // `reload_config`.
     let mut live = repo.clone();
+    // The pipelines this run routes on. Starts as the ones `main` loaded and
+    // is replaced whole by a good reload — see `crate::reload::serve`.
+    let mut live_pipelines = pipelines.clone();
     // The parse error the last reload reported, so a config that stays broken
     // is announced on the pass that found it and not on every pass after.
     let mut reload_error: Option<String> = None;
@@ -324,7 +333,19 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
         config_watch.reload(&mut live, &mut reload_error, &mut record_error);
-        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref())
+        // Ahead of the dispatcher this pass builds, so no lane launches on the
+        // old graph once the snapshot holds the new one.
+        if let Some(answer) = crate::reload::serve(&mut live, &mut live_pipelines) {
+            let line = format!("reload: {}", answer.render());
+            crate::problem_log::append(repo, &line);
+            println!("  {line}");
+            // The answer's own files are not in the watched directory, but the
+            // request's removal is, and would end the next wait at once.
+            if let Some(reload_watch) = &reload_watch {
+                reload_watch.drain();
+            }
+        }
+        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, &live_pipelines, mux.as_ref())
             .with_memory(std::mem::take(&mut pass_memory));
 
         let mut spent_out = None;
@@ -386,7 +407,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(ceiling) = spent_out {
-            stop(&live, pipelines, mux.as_ref())?;
+            stop(&live, &live_pipelines, mux.as_ref())?;
             // The screen shows stderr as the reason its dispatcher stopped,
             // and prints nothing of stdout at all.
             if args.screen {
@@ -410,7 +431,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(&live, pipelines, mux.as_ref())?;
+            stop(&live, &live_pipelines, mux.as_ref())?;
             if let Some(line) = ctrl_c_line(args.screen) {
                 crate::problem_log::append(repo, &line);
             }
@@ -427,7 +448,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
                 if idle_may_end(repo) && !args.screen {
-                    stop(&live, pipelines, mux.as_ref())?;
+                    stop(&live, &live_pipelines, mux.as_ref())?;
                     crate::problem_log::append(
                         repo,
                         &stop_line("stopped on an empty queue", "every task is done"),
@@ -464,7 +485,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         consecutive_working = 0;
 
         // The wait between passes: the floor alone, unless a finished
-        // background command wakes it early — see
+        // background command or a request to reload wakes it early — see
         // `crate::screen::open_dir_watch`'s own doc.
         println!(
             "  next pass in {}",
@@ -475,16 +496,23 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             if crate::platform::stop::asked() {
                 break;
             }
-            let Some(watch) = &watch else {
+            let watches: Vec<&crate::screen::DirWatch> =
+                watch.iter().chain(reload_watch.iter()).collect();
+            if watches.is_empty() {
                 // The floor alone, in the same slices as before — see
                 // `crate::screen::open_dir_watch`'s own doc — so a stop asked
                 // for mid-wait is still noticed within a second rather than a
                 // whole interval later.
                 std::thread::sleep(crate::status::POLL.min(left));
                 continue;
-            };
-            let ready = crate::screen::poll_ready(&[watch.fd()], left);
-            if ready[0] && watch.drain() {
+            }
+            let fds: Vec<_> = watches.iter().map(|watch| watch.fd()).collect();
+            let ready = crate::screen::poll_ready(&fds, left);
+            let mut woken = false;
+            for (watch, ready) in watches.iter().zip(ready) {
+                woken |= ready && watch.drain();
+            }
+            if woken {
                 break;
             }
         }
@@ -574,16 +602,17 @@ impl ConfigWatch {
 /// written is announced the same way as a reload error, once per distinct
 /// message in `record_reported`.
 ///
-/// Pipelines are not reloaded here. They follow the rule for pipeline files:
-/// the dispatcher keeps what it loaded at start. See `crate::pipeline_snapshot`.
+/// Pipelines are not reloaded here. The dispatcher keeps what it loaded until
+/// a person asks for a reload — see `crate::reload`, which also takes this
+/// config at that moment. See `crate::pipeline_snapshot`.
 ///
 /// Three groups of keys are fixed at start even though `config get` shows
 /// their new value at once: `unattended.blocked_agent`, `blocked_model`,
 /// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
-/// the pipelines when they load; `unattended.enabled` is settled once into
-/// the lock; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
-/// environment the dispatcher started with. A change to any of them needs a
-/// restart.
+/// the pipelines when they load, so only a reload or a restart brings them
+/// in; `unattended.enabled` is settled once into the lock, and only a restart
+/// changes it; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
+/// environment the dispatcher started with, and only a restart changes it.
 fn reload_config(
     live: &mut Repo,
     reported: &mut Option<String>,

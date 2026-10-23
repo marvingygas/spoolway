@@ -9,6 +9,12 @@
 //! must say so once. A lane that reports while the file is broken must still
 //! land its report, and so must the dispatcher over a `config.toml` that has
 //! been moved aside.
+//!
+//! A request to reload, written as a file in the project home, makes the same
+//! dispatcher load the pipelines again at the top of its next pass. A good one
+//! swaps the graph in and rewrites the snapshot lanes report on. One that
+//! would strand a task on a step that is gone, or whose pipeline file does not
+//! parse, is refused and leaves the run as it was.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -171,6 +177,66 @@ impl Project {
             "---\nid: {id}\ntitle: job\ngroup: {group}\npipeline: solo\nbase: plan/demo\n---\n\n\
              ## Intend\n\nx\n"
         )
+    }
+
+    /// Starts `spoolway dispatch` in the project, logging to `dispatch_out`.
+    fn start_dispatcher(&mut self) {
+        let out = fs::File::create(self.dispatch_out()).expect("create dispatcher log");
+        let child = self
+            .command()
+            .arg("dispatch")
+            .stdout(out.try_clone().expect("clone log"))
+            .stderr(out)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("start dispatcher");
+        self.dispatcher = Some(child);
+    }
+
+    /// The project's folder under the test's `HOME`, found by the snapshot
+    /// the running dispatcher writes into it.
+    fn project_home(&self) -> PathBuf {
+        let mut found = None;
+        self.wait_for("the dispatcher's snapshot", |p| {
+            found = fs::read_dir(p.base().join("home/.spoolway"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|dir| dir.join("dispatch-pipelines.json").exists());
+            found.is_some()
+        });
+        found.expect("project home")
+    }
+
+    fn snapshot(&self) -> String {
+        fs::read_to_string(self.project_home().join("dispatch-pipelines.json"))
+            .expect("read snapshot")
+    }
+
+    /// Writes a request the way `reload::request` does, and answers what the
+    /// dispatcher said to it.
+    fn reload(&self, id: &str) -> String {
+        let home = self.project_home();
+        let requests = home.join("reload/requests");
+        fs::create_dir_all(&requests).expect("create requests dir");
+        fs::write(requests.join(id), id).expect("write request");
+        let answer = home.join(format!("reload/answers/{id}.json"));
+        self.wait_for("the reload to be answered", |_| answer.exists());
+        let text = fs::read_to_string(answer).expect("read answer");
+        assert!(
+            text.contains(&format!("\"request\":\"{id}\"")),
+            "the answer does not name its request:\n{text}"
+        );
+        text
+    }
+
+    fn pipeline_file(&self) -> PathBuf {
+        self.root.join(".spoolway/pipelines/solo.yml")
+    }
+
+    fn task_file(&self, id: &str) -> PathBuf {
+        self.project_home().join("queue").join(format!("{id}.md"))
     }
 
     fn set_up(&self) {
@@ -355,4 +421,120 @@ fn raising_concurrency_mid_run_starts_the_second_lane_and_a_bad_config_is_report
         "report did not say the file was missing:\n{stderr}"
     );
     fs::write(&config, good).expect("restore config");
+}
+
+/// Two steps instead of one, the second with a prompt of its own.
+const TWO_STEPS: &str = "steps:\n  - id: work\n    agent: claude\n    model: claude-sonnet-5-5\n    \
+    on_pass: extra\n  - id: extra\n    agent: claude\n    model: claude-sonnet-5-5\n    \
+    on_pass: done\n";
+
+#[cfg(unix)]
+#[test]
+fn a_reload_request_swaps_in_an_edited_pipeline_before_the_next_lane_reports() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+
+    let prompt = project.root.join(".spoolway/prompts/extra");
+    fs::create_dir_all(&prompt).expect("create prompt dir");
+    fs::write(prompt.join("PROMPT.md"), "do the rest\n").expect("write prompt");
+    fs::write(project.pipeline_file(), TWO_STEPS).expect("edit pipeline");
+    assert!(
+        !project.snapshot().contains("\"extra\""),
+        "the run took up an edit nobody asked it to"
+    );
+    let check = project
+        .command()
+        .args(["pipeline", "check"])
+        .output()
+        .expect("run pipeline check");
+    assert!(
+        String::from_utf8_lossy(&check.stdout).contains("solo.yml changed since"),
+        "pipeline check does not name the waiting edit:\n{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    let answer = project.reload("1-1");
+    assert!(answer.contains("Loaded"), "reload was not taken:\n{answer}");
+    assert!(
+        project.snapshot().contains("\"extra\""),
+        "the snapshot does not hold the new graph"
+    );
+    let check = project
+        .command()
+        .args(["pipeline", "check"])
+        .output()
+        .expect("run pipeline check");
+    assert!(
+        !String::from_utf8_lossy(&check.stdout).contains("changed since"),
+        "pipeline check still names the reloaded file:\n{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    // The lane that was already running reports on the new graph, so its
+    // task moves to the step that exists only there.
+    let (status, stderr) = project.report_from_lane("ta");
+    assert_eq!(status.trim(), "0", "report failed:\n{stderr}");
+    let task = fs::read_to_string(project.task_file("ta")).expect("read task");
+    assert!(
+        task.contains("stage: extra"),
+        "the report did not route on the new graph:\n{task}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reload_is_refused_when_a_task_waits_on_a_step_the_edit_deleted() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    let before = project.snapshot();
+
+    // `tb` has no lane, so it waits on the step it was left on.
+    let waiting = project.task_file("tb");
+    let text = fs::read_to_string(&waiting).expect("read task");
+    fs::write(&waiting, text.replace("stage: queued", "stage: work")).expect("park task");
+    fs::write(
+        project.pipeline_file(),
+        "steps:\n  - id: other\n    agent: claude\n    model: claude-sonnet-5-5\n    \
+         on_pass: done\n",
+    )
+    .expect("edit pipeline");
+
+    let answer = project.reload("2-1");
+    assert!(
+        answer.contains("Refused"),
+        "reload was not refused:\n{answer}"
+    );
+    assert!(
+        answer.contains("tb: sitting on `work`, which pipeline `solo` no longer defines")
+            && answer.contains("Put `work` back in solo.yml, or wait until tb has left it"),
+        "the refusal does not name the task and the fix:\n{answer}"
+    );
+    assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reload_is_refused_when_a_pipeline_file_does_not_parse() {
+    let mut project = Project::new();
+    project.set_up();
+    project.start_dispatcher();
+    project.wait_for("the first lane to start", |p| p.started().len() == 1);
+    let before = project.snapshot();
+
+    fs::write(project.pipeline_file(), "steps: [this is: not a pipeline\n").expect("break file");
+
+    let answer = project.reload("3-1");
+    assert!(
+        answer.contains("Refused"),
+        "reload was not refused:\n{answer}"
+    );
+    assert!(
+        answer.contains("the pipelines do not load"),
+        "the refusal does not say why:\n{answer}"
+    );
+    assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
 }

@@ -1,24 +1,26 @@
 //! The pipelines the running dispatcher loaded, written down so every other
 //! process in the project routes on the same graph it does.
 //!
-//! The dispatcher reads the pipeline files once, at start, and keeps that
-//! copy for the whole run. Every other command is its own process and reads
-//! the files again. Before this, an edit made while tasks ran split the two:
-//! a lane's `spoolway report` routed its task onto a step the dispatcher's
-//! copy did not have, and the task sat there until somebody restarted it.
+//! The dispatcher reads the pipeline files at start, and again when a person
+//! asks for a reload — see [`crate::reload`] — and keeps that copy between.
+//! Every other command is its own process and reads the files again. Before
+//! this, an edit made while tasks ran split the two: a lane's `spoolway
+//! report` routed its task onto a step the dispatcher's copy did not have,
+//! and the task sat there until somebody restarted it.
 //!
 //! So the dispatcher that holds the project's lock writes what it loaded
-//! here, right after taking the lock, and `report`, `resume`, `queue resume`,
-//! `queue route`, `queue list`, the board's rows and its `r` and `queue add`
-//! route on this copy for as long as that dispatcher lives. Each decodes only
-//! the pipelines its own tasks name, so a pipeline file somebody broke
-//! mid-run no longer fails every lane's report — the dispatcher validated
-//! this copy when it started, and nothing here reads the files again.
+//! here, right after taking the lock and again after each good reload, and
+//! `report`, `resume`, `queue resume`, `queue route`, `queue list`, the
+//! board's rows and its `r` and `queue add` route on this copy for as long as
+//! that dispatcher lives. Each decodes only the pipelines its own tasks name,
+//! so a pipeline file somebody broke mid-run no longer fails every lane's
+//! report — the dispatcher validated this copy when it loaded it, and nothing
+//! here reads the files again.
 //!
 //! The snapshot also keeps the text of every file the load read. That is
 //! how the board's footer and `pipeline check` can name each file edited
-//! since the run started: the edit is real on disk and waiting, and the only
-//! thing that applies it is a restart.
+//! since the run started: the edit is real on disk and waiting, and what
+//! applies it is a restart or a reload.
 //!
 //! The config the dispatcher last loaded cleanly is kept beside it, under
 //! the same lock, for a lane's `report` and a `spoolway stack` step to run
@@ -69,7 +71,8 @@ struct Written {
     sources: BTreeMap<String, String>,
 }
 
-/// Write the snapshot for the dispatcher that has just taken `repo`'s lock.
+/// Write the snapshot for the dispatcher that holds `repo`'s lock: just after
+/// it took the lock, and again each time a reload swaps its pipelines.
 ///
 /// `pipelines` is what that dispatcher loaded. The sources are read here,
 /// a moment after the load, so an edit landing in between is recorded as

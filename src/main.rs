@@ -45,6 +45,7 @@ mod problem_log;
 mod prompt;
 mod release;
 mod release_notes;
+mod reload;
 mod repo;
 mod retain;
 // The whole module is `#[cfg(test)]` inside — a walk over `commands::
