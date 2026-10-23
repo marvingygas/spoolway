@@ -196,10 +196,11 @@ fi
 rm -f .spoolway/pipelines/adopt.yml
 
 # ---------------------------- a pipeline edited mid-run waits for the restart
-# The dispatcher reads its pipelines once, at start. A lane's own `spoolway
-# report` is another process, and it must route on what that dispatcher
-# loaded — not on the file as it is now — or an edit made mid-run moves the
-# task onto a step the running dispatcher has never heard of. So: a lane on
+# The dispatcher reads its pipelines at start, and again on a reload request
+# that nothing here sends. A lane's own `spoolway report` is another process,
+# and it must route on what that dispatcher loaded — not on the file as it is
+# now — or an edit made mid-run moves the task onto a step the running
+# dispatcher has never heard of. So: a lane on
 # `a` lingers while `t.yml` gains a step `x` between `a` and `b`, then
 # reports its pass. The task must go to `b` as loaded, and `x` must run only
 # for a task the restarted dispatcher routes. Each command step appends its

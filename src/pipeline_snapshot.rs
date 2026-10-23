@@ -76,9 +76,10 @@ struct Written {
 ///
 /// `pipelines` is what that dispatcher loaded. The sources are read here,
 /// a moment after the load, so an edit landing in between is recorded as
-/// already applied and is never named as waiting on a restart. That window
-/// is the dispatcher's own start-up checks, and anything wider would mean
-/// threading the file text through [`Pipelines::load`] for every caller.
+/// already applied and is never named as waiting on a restart or a reload.
+/// That window is the dispatcher's own start-up checks, or on a reload the
+/// queue read and the check of it, and anything wider would mean threading the
+/// file text through [`Pipelines::load`] for every caller.
 ///
 /// Replaces whatever is there, whoever wrote it: only one dispatcher holds
 /// the lock, so an older snapshot belongs to a run that has ended.

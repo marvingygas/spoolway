@@ -249,7 +249,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
     // A request a dead dispatcher left is answered here, as loaded: this start
     // has just loaded every file, and serving it as well would load twice.
-    crate::reload::settle_left_behind(repo);
+    for problem in crate::reload::settle_left_behind(repo) {
+        crate::problem_log::append(repo, &problem);
+        println!("  ! {problem}");
+    }
 
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -335,14 +338,30 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         config_watch.reload(&mut live, &mut reload_error, &mut record_error);
         // Ahead of the dispatcher this pass builds, so no lane launches on the
         // old graph once the snapshot holds the new one.
-        if let Some(answer) = crate::reload::serve(&mut live, &mut live_pipelines) {
-            let line = format!("reload: {}", answer.render());
-            crate::problem_log::append(repo, &line);
-            println!("  {line}");
-            // The answer's own files are not in the watched directory, but the
-            // request's removal is, and would end the next wait at once.
-            if let Some(reload_watch) = &reload_watch {
-                reload_watch.drain();
+        //
+        // The watch is drained before the requests are read. A request that
+        // lands after the read keeps its event for the wait below to wake on,
+        // where a drain after the read would swallow it. The cost is that
+        // clearing a request's file wakes the next wait once, for a pass that
+        // finds nothing.
+        if let Some(reload_watch) = &reload_watch {
+            reload_watch.drain();
+        }
+        if let Some(served) = crate::reload::serve(&mut live, &mut live_pipelines) {
+            // A refusal is a problem and goes in the log, on one line. A good
+            // reload is only said.
+            match served.answer.problem_line() {
+                Some(line) => {
+                    crate::problem_log::append(repo, &line);
+                    for line in served.answer.render().lines() {
+                        println!("  {line}");
+                    }
+                }
+                None => println!("  reload: {}", served.answer.render()),
+            }
+            for problem in &served.problems {
+                crate::problem_log::append(repo, problem);
+                println!("  ! {problem}");
             }
         }
         let mut dispatcher = crate::dispatch::Dispatcher::new(&live, &live_pipelines, mux.as_ref())

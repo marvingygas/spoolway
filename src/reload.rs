@@ -16,13 +16,16 @@
 //! [`request`] writes one file under `reload/requests/`, named by the id it
 //! returns. The directory is watched, which wakes the dispatcher's wait
 //! between passes. At the top of its next pass the dispatcher calls [`serve`],
-//! which answers every request it finds under `reload/answers/`, and
-//! [`answer`] reads that answer back by id.
+//! which answers every request it finds under `reload/requests/` by writing
+//! one file under `reload/answers/`, and [`answer`] reads that answer back by
+//! id.
 //!
 //! A reload is refused, and changes nothing, when the new pipelines do not
-//! load, or when a task in the queue sits on a step, or names a pipeline, the
-//! new pipelines lack. No command moves a task off a step that is gone, so the
-//! one edit that strands work is the one this refuses.
+//! load, or when a task in the queue is recorded on a step, or names a
+//! pipeline, the new pipelines lack. A running lane whose step is gone is no
+//! longer recognised by the dispatcher, which then drops its spend record, and
+//! a task held on a gone step can only be moved by hand with `spoolway resume
+//! --stage`. So the one edit that strands work is the one this refuses.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -61,7 +64,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reason {
     /// The fact, as a sentence that starts with the task it is about when it
-    /// is about one.
+    /// is about one. Never longer than one line.
     pub what: String,
     /// What to do about it, ending in the reload to try again.
     pub fix: String,
@@ -82,6 +85,22 @@ impl Answer {
                 text
             }
         }
+    }
+
+    /// A refusal on one line, for the problem log, which keeps one line per
+    /// problem. `None` for a good reload, which is no problem.
+    pub fn problem_line(&self) -> Option<String> {
+        let Outcome::Refused(reasons) = &self.outcome else {
+            return None;
+        };
+        let reasons: Vec<String> = reasons
+            .iter()
+            .map(|reason| format!("{} {}", reason.what, reason.fix))
+            .collect();
+        Some(format!(
+            "reload refused, nothing changed: {}",
+            reasons.join(" | ")
+        ))
     }
 }
 
@@ -109,8 +128,9 @@ fn answers_dir(repo: &Repo) -> PathBuf {
 /// to read it is answered as loaded by the next dispatcher at its start, since
 /// a start loads every file anyway.
 ///
-/// The file is created in place, not renamed into place, so the one event the
-/// watch sees already finds the whole request there.
+/// The request is its file's name and nothing in the file is read, so the
+/// first event the watch sees, which comes while the file is still empty,
+/// already finds the whole request.
 #[cfg_attr(
     not(test),
     expect(
@@ -154,36 +174,49 @@ pub fn answer(repo: &Repo, id: &str) -> Result<Option<Answer>> {
         .with_context(|| format!("reading {}", path.display()))
 }
 
-/// The ids of the requests waiting, oldest first. A name starting with a dot
-/// is a file still being written by something else, and is not a request.
+/// The ids of the requests waiting, sorted by name. The name starts with the
+/// asker's pid, so the order says nothing about which request came first.
 fn pending(repo: &Repo) -> Vec<String> {
     let mut ids: Vec<String> = std::fs::read_dir(requests_dir(repo))
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| !name.starts_with('.'))
         .collect();
     ids.sort();
     ids
 }
 
-/// Answer every id in `ids` with `outcome`, then clear the requests. The
-/// answers go first: a request that vanished before its answer existed would
-/// leave the asker waiting for nothing.
-fn settle(repo: &Repo, ids: &[String], outcome: &Outcome) {
+/// Answer every id in `ids` with `outcome`, then clear the requests that were
+/// answered, and return a sentence for each answer that could not be written.
+///
+/// A request is cleared only once its answer exists. One cleared without it
+/// would leave the asker waiting for nothing, so a request whose answer failed
+/// stays, and the next pass tries it again.
+fn settle(repo: &Repo, ids: &[String], outcome: &Outcome) -> Vec<String> {
     let answers = answers_dir(repo);
     prune_answers(&answers);
+    let mut problems = Vec::new();
     for id in ids {
         let answer = Answer {
             request: id.clone(),
             outcome: outcome.clone(),
         };
-        if let Ok(text) = serde_json::to_string(&answer) {
-            let _ = crate::task::write_atomic(&answers.join(format!("{id}.json")), text);
+        let path = answers.join(format!("{id}.json"));
+        let written = serde_json::to_string(&answer)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| crate::task::write_atomic(&path, text));
+        match written {
+            Ok(()) => {
+                let _ = std::fs::remove_file(requests_dir(repo).join(id));
+            }
+            Err(err) => problems.push(format!(
+                "the answer to reload request {id} could not be written: {err:#}. The request \
+                 stays, and the next pass answers it again"
+            )),
         }
-        let _ = std::fs::remove_file(requests_dir(repo).join(id));
     }
+    problems
 }
 
 fn prune_answers(dir: &std::path::Path) {
@@ -200,16 +233,27 @@ fn prune_answers(dir: &std::path::Path) {
     }
 }
 
-/// Answer, as loaded, every request a dead dispatcher left behind.
+/// Answer, as loaded, every request a dead dispatcher left behind, and return
+/// a sentence for each answer that could not be written.
 ///
 /// Called by a dispatcher right after it takes the lock. It has just loaded
 /// every file, so there is nothing more for those requests to ask for, and
 /// serving them as well would load twice.
-pub(crate) fn settle_left_behind(repo: &Repo) {
+pub(crate) fn settle_left_behind(repo: &Repo) -> Vec<String> {
     let ids = pending(repo);
-    if !ids.is_empty() {
-        settle(repo, &ids, &Outcome::Loaded);
+    if ids.is_empty() {
+        return Vec::new();
     }
+    settle(repo, &ids, &Outcome::Loaded)
+}
+
+/// What [`serve`] did.
+pub(crate) struct Served {
+    /// The answer, as the first request waiting gets it. Every request waiting
+    /// gets the same one, differing only in the request it names.
+    pub answer: Answer,
+    /// Each answer that could not be written, as a sentence.
+    pub problems: Vec<String>,
 }
 
 /// Serve the requests waiting, at the top of a pass.
@@ -218,15 +262,14 @@ pub(crate) fn settle_left_behind(repo: &Repo) {
 /// `live`'s root with the config as it now stands, checks them, and on a good
 /// load rewrites the snapshot and then replaces `pipelines` and `live.config`.
 /// The snapshot is written before the swap and before anything else runs, so
-/// no lane launches on a graph its own `report` would not route on. Every
-/// request waiting gets the same answer.
+/// no lane launches on a graph its own `report` would not route on.
 ///
 /// All of it is built and checked before anything is touched. A refusal, or a
 /// snapshot that cannot be written, leaves `pipelines`, `live.config` and the
 /// snapshot as they were.
-pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Answer> {
+pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served> {
     let ids = pending(live);
-    let last = ids.last()?.clone();
+    let first = ids.first()?.clone();
     let outcome = match try_reload(live) {
         Ok((config, loaded)) => match crate::pipeline_snapshot::write(live, &loaded) {
             Ok(()) => {
@@ -241,10 +284,13 @@ pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Answer
         },
         Err(reasons) => Outcome::Refused(reasons),
     };
-    settle(live, &ids, &outcome);
-    Some(Answer {
-        request: last,
-        outcome,
+    let problems = settle(live, &ids, &outcome);
+    Some(Served {
+        answer: Answer {
+            request: first,
+            outcome,
+        },
+        problems,
     })
 }
 
@@ -263,27 +309,37 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
             fix: "Fix the file it names, then reload again.".to_string(),
         }]
     })?;
-    let (tasks, _unreadable) = live.tasks_and_problems().map_err(|err| {
+    let (tasks, unreadable) = live.tasks_and_problems().map_err(|err| {
         vec![Reason {
             what: format!("the queue cannot be read: {err:#}"),
             fix: "Make the queue readable, then reload again.".to_string(),
         }]
     })?;
-    let stranded = stranded(&loaded, &tasks);
-    if stranded.is_empty() {
+    // A task file that does not parse has no step to read, so the check below
+    // cannot say whether the edit strands it. Refused rather than guessed at.
+    let mut refusals: Vec<Reason> = unreadable
+        .iter()
+        .map(|file| Reason {
+            what: format!("{} cannot be checked", file.path.display()),
+            fix: "Fix or remove that queue file, then reload again.".to_string(),
+        })
+        .collect();
+    refusals.extend(stranded(&loaded, &tasks));
+    if refusals.is_empty() {
         Ok((config, loaded))
     } else {
-        Err(stranded)
+        Err(refusals)
     }
 }
 
 /// Every task, running or waiting, that the new pipelines would leave without
-/// the step it sits on or the pipeline it names.
+/// a step it is recorded on or the pipeline it names.
 ///
-/// A task on a reserved stage sits on no step. A task on a name two files
-/// claim is held by the dispatcher in any case, and a task naming no pipeline
-/// is refused at the start of a run, so neither says anything about this
-/// reload.
+/// A task is recorded on its `stage:` and, while held, on the step it was held
+/// at — see [`crate::commands::missing_recorded_steps`], which `pipeline check`
+/// reads as well. A task on a name two files claim is held by the dispatcher in
+/// any case, and a task naming no pipeline is refused at the start of a run, so
+/// neither says anything about this reload.
 fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
     let mut reasons = Vec::new();
     for task in tasks {
@@ -303,14 +359,15 @@ fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
             });
             continue;
         };
-        let stage = task.stage();
-        if !crate::pipeline::RESERVED.contains(&stage) && pipeline.step(stage).is_none() {
+        for (field, step) in crate::commands::missing_recorded_steps(task, pipeline) {
+            let held = match field {
+                "stage" => format!("sitting on `{step}`"),
+                _ => format!("held at `{step}` (`{field}`)"),
+            };
             reasons.push(Reason {
-                what: format!(
-                    "{id}: sitting on `{stage}`, which pipeline `{name}` no longer defines"
-                ),
+                what: format!("{id}: {held}, which pipeline `{name}` no longer defines"),
                 fix: format!(
-                    "Put `{stage}` back in {name}.yml, or wait until {id} has left it, then \
+                    "Put `{step}` back in {name}.yml, or wait until {id} has left it, then \
                      reload again."
                 ),
             });
@@ -429,5 +486,193 @@ mod tests {
     fn an_answer_is_not_looked_up_by_a_path() {
         let (repo, _root) = fixture("reload-answer-path");
         assert_eq!(answer(&repo, "../config").unwrap(), None);
+    }
+
+    /// A project whose config and `feature` pipeline load, with a lock held
+    /// so a snapshot can be written, and one task on `stage`.
+    fn served_project(
+        name: &str,
+        stage: &str,
+    ) -> (
+        Repo,
+        Pipelines,
+        crate::scratch::ScratchRoot,
+        crate::lock::Lock,
+    ) {
+        let (repo, root) = fixture(name);
+        crate::config::Config::default().save(&repo.root).unwrap();
+        let file = Pipelines::file_in(&repo.root, "feature");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let yaml = "steps:\n  - id: build\n    run: x\n    on_pass: review\n  - id: review\n    \
+                    run: y\n    on_pass: done\n";
+        std::fs::write(&file, yaml).unwrap();
+        let held = Pipelines::load(&repo.root, &repo.config).unwrap();
+        let text = format!("---\nid: fix-login\npipeline: feature\nstage: {stage}\n---\nbody\n");
+        std::fs::write(repo.queue_dir().join("fix-login.md"), text).unwrap();
+        let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        (repo, held, root, lock)
+    }
+
+    /// A refusal touches nothing: not the pipelines the run holds, not the
+    /// config, not the snapshot, even when the config on disk has moved on.
+    #[test]
+    fn a_refusal_leaves_the_pipelines_the_config_and_the_snapshot_as_they_were() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-refusal", "review");
+        let mut edited = repo.config.clone();
+        edited.agents.get_mut("claude").unwrap().concurrency += 1;
+        edited.save(&repo.root).unwrap();
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "feature"),
+            "steps:\n  - id: build\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
+        let before = held.names().join(",");
+        let cap_before = repo.config.agents["claude"].concurrency;
+        let id = request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        assert!(matches!(served.answer.outcome, Outcome::Refused(_)));
+        assert!(served.problems.is_empty(), "{:?}", served.problems);
+        assert!(held.pipelines["feature"].step("review").is_some());
+        assert_eq!(held.names().join(","), before);
+        assert_eq!(repo.config.agents["claude"].concurrency, cap_before);
+        assert!(!crate::pipeline_snapshot::path(&repo).exists());
+        assert_eq!(
+            answer(&repo, &id).unwrap().unwrap().outcome,
+            served.answer.outcome
+        );
+    }
+
+    /// A config.toml that no longer loads refuses the reload and says so.
+    #[test]
+    fn a_config_that_does_not_load_refuses_the_reload() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-bad-config", "build");
+        std::fs::write(
+            crate::config::Config::path_in(&repo.root),
+            "this is = = not toml\n",
+        )
+        .unwrap();
+        request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        let Outcome::Refused(reasons) = served.answer.outcome else {
+            panic!("reload was not refused");
+        };
+        assert!(
+            reasons[0].what.starts_with("config.toml does not load"),
+            "{reasons:?}"
+        );
+        assert!(!crate::pipeline_snapshot::path(&repo).exists());
+    }
+
+    /// A good reload swaps the pipelines in and writes the snapshot, and the
+    /// snapshot holds what was swapped in.
+    #[test]
+    fn a_good_reload_swaps_the_pipelines_and_writes_the_snapshot() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-good", "build");
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "feature"),
+            "steps:\n  - id: build\n    run: x\n    on_pass: ship\n  - id: ship\n    run: y\n    \
+             on_pass: done\n",
+        )
+        .unwrap();
+        request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        assert_eq!(served.answer.outcome, Outcome::Loaded);
+        assert!(held.pipelines["feature"].step("ship").is_some());
+        let snapshot = crate::pipeline_snapshot::LoadedPipelines::live(&repo).unwrap();
+        assert!(
+            snapshot.pipelines(&["feature"]).unwrap().pipelines["feature"]
+                .step("ship")
+                .is_some()
+        );
+        assert!(pending(&repo).is_empty());
+    }
+
+    /// A queue file that does not parse cannot be checked, so it refuses the
+    /// reload by name instead of being left out of the check.
+    #[test]
+    fn an_unreadable_task_file_refuses_the_reload() {
+        let (mut repo, mut held, _root, _lock) = served_project("reload-unreadable", "build");
+        std::fs::write(repo.queue_dir().join("broken.md"), "no frontmatter at all").unwrap();
+        request(&repo).unwrap();
+
+        let served = serve(&mut repo, &mut held).unwrap();
+
+        let Outcome::Refused(reasons) = served.answer.outcome else {
+            panic!("reload was not refused");
+        };
+        assert!(
+            reasons[0].what.contains("broken.md cannot be checked"),
+            "{reasons:?}"
+        );
+    }
+
+    /// A task held at a step records it in `paused_at`, `blocked_from` or
+    /// `parked_from`, and its lane is still open there, so the step counts
+    /// even though `stage:` is a reserved word.
+    #[test]
+    fn a_held_task_is_stranded_by_the_step_it_was_held_at() {
+        let loaded = pipelines("steps:\n  - id: build\n    run: x\n    on_pass: done\n");
+        let held = Task::parse(
+            PathBuf::from("held.md"),
+            "---\nid: held\npipeline: feature\nstage: paused\nparked_from: review\n---\nbody\n",
+        )
+        .unwrap();
+        let reasons = stranded(&loaded, &[held]);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert_eq!(
+            reasons[0].what,
+            "held: held at `review` (`parked_from`), which pipeline `feature` no longer defines"
+        );
+    }
+
+    /// An answer that cannot be written leaves its request in place, so the
+    /// asker is answered on a later pass instead of never.
+    #[test]
+    fn a_request_whose_answer_cannot_be_written_stays() {
+        let (repo, _root) = fixture("reload-answer-unwritable");
+        let id = request(&repo).unwrap();
+        // A file where the answers directory belongs.
+        std::fs::write(repo.home().join("reload").join("answers"), "").unwrap();
+
+        let problems = settle(&repo, std::slice::from_ref(&id), &Outcome::Loaded);
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains(&id), "{problems:?}");
+        assert_eq!(pending(&repo), [id]);
+    }
+
+    /// A refusal fits the problem log's one line per problem.
+    #[test]
+    fn a_refusal_is_one_line_in_the_problem_log_and_a_good_reload_is_none() {
+        let refused = Answer {
+            request: "1-1".to_string(),
+            outcome: Outcome::Refused(vec![
+                Reason {
+                    what: "a: gone".into(),
+                    fix: "Put it back.".into(),
+                },
+                Reason {
+                    what: "b: gone".into(),
+                    fix: "Put it back.".into(),
+                },
+            ]),
+        };
+        let line = refused.problem_line().unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.contains("a: gone") && line.contains("b: gone"),
+            "{line}"
+        );
+        let loaded = Answer {
+            request: "1-1".to_string(),
+            outcome: Outcome::Loaded,
+        };
+        assert_eq!(loaded.problem_line(), None);
     }
 }
