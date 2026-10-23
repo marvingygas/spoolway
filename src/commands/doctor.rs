@@ -6624,7 +6624,6 @@ mod tests {
         }
         let wslpath = |_: &Path| -> Result<String> { unreachable!() };
         let inputs = crate::editor::Inputs {
-            file: d.join("editor.toml"),
             visual: None,
             editor: None,
             path: bin.into_os_string(),
@@ -6640,16 +6639,15 @@ mod tests {
             "  ok    editor — vim, from the vim fallback — in a pane, Linux paths\n\n1 checks passed.\n"
         );
 
-        std::fs::write(
-            d.join("editor.toml"),
-            "[editor]\ncommand = \"notepd.exe\"\n",
-        )
-        .unwrap();
+        let inputs = crate::editor::Inputs {
+            visual: Some("notepd.exe".into()),
+            ..inputs
+        };
         let mut report = Report::default();
         report.record(editor_finding(&inputs, None));
         let text = report.render(false);
         assert!(
-            text.starts_with("  note  editor: `notepd.exe` is not on PATH — fix command in"),
+            text.starts_with("  note  editor: `notepd.exe` is not on PATH — set $VISUAL or"),
             "{text}"
         );
         assert!(text.ends_with("0 checks passed.\n"), "{text}");
@@ -6665,13 +6663,14 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
-            let vim = bin.join("vim");
-            std::fs::write(&vim, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&vim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for name in ["vim", "notepad.exe"] {
+                let program = bin.join(name);
+                std::fs::write(&program, "#!/bin/sh\n").unwrap();
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         let wslpath = |_: &Path| -> Result<String> { unreachable!() };
         let inputs = crate::editor::Inputs {
-            file: d.join("editor.toml"),
             visual: None,
             editor: None,
             path: bin.into_os_string(),
@@ -6689,35 +6688,31 @@ mod tests {
         );
         assert!(text.ends_with("0 checks passed.\n"), "{text}");
 
-        std::fs::write(
-            d.join("editor.toml"),
-            "[editor]\ncommand = \"vim\"\nwindow = true\n",
-        )
-        .unwrap();
+        let inputs = crate::editor::Inputs {
+            visual: Some("notepad.exe".into()),
+            ..inputs
+        };
         let mut report = Report::default();
         report.record(editor_finding(&inputs, Some("headless")));
-        assert!(report.render(true).starts_with("  ok    editor — vim"));
+        assert!(
+            report
+                .render(true)
+                .starts_with("  ok    editor — notepad.exe, from $VISUAL")
+        );
     }
 
     /// The editor never affects a run, so the pre-dispatch warnings carry no
-    /// editor finding, even when `editor.toml` is broken.
+    /// editor finding, even when the editor named is not on `PATH`.
     #[test]
     fn cheap_findings_carries_no_editor_finding() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-editor");
-        let home = crate::scratch::root("doctor-cheap-editor-home");
-        std::fs::create_dir_all(home.join(".spoolway")).unwrap();
-        std::fs::write(
-            home.join(".spoolway").join("editor.toml"),
-            "[editor\ncommand = ",
-        )
-        .unwrap();
-        crate::platform::test_home::pin(&home);
+        let _editor = crate::editor::pin_editor("notepd.exe");
 
         let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default(), false);
         assert!(
             warnings.iter().all(|w| match w {
                 Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) =>
-                    !t.starts_with("editor") && !t.contains("editor.toml"),
+                    !t.starts_with("editor") && !t.contains("notepd.exe"),
             }),
             "{warnings:?}"
         );

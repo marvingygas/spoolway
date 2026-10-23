@@ -7527,9 +7527,8 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 /// `Err` this discarded would leave a person picking open task with no sign it
 /// did anything at all. Among the refusals are a terminal editor on a backend
 /// with no pane to open one in — headless, which refuses the way
-/// `Mux::open_command`'s default does — an `editor.toml` that does not parse,
-/// an editor program that is not on `PATH`, and a path `wslpath` cannot
-/// convert.
+/// `Mux::open_command`'s default does — an editor program that is not on
+/// `PATH`, and a path `wslpath` cannot convert.
 fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode {
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
         return Mode::Browsing;
@@ -16745,7 +16744,7 @@ mod tests {
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
         let (mut repo, _root_guard) = fixture("screen-hosted-routines-popup");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -21437,7 +21436,7 @@ mod tests {
     #[test]
     fn picking_open_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("screen-open-headless");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
@@ -21701,7 +21700,7 @@ mod tests {
     #[test]
     fn picking_open_in_routines_with_no_multiplexer_surfaces_the_refusal() {
         let (mut repo, _root_guard) = fixture("routines-open-headless");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -22261,7 +22260,7 @@ mod tests {
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
         let (mut repo, _root_guard) = fixture("routine-new-job-tasks-pane");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_two_routines(&repo);
 

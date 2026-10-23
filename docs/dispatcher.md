@@ -585,59 +585,55 @@ from a shell.
 
 ### Editor
 
-`open task` runs one editor, chosen in this order. The first one that is set wins.
+`open task` runs one editor, chosen in this order. The first one that is set to something other
+than blank wins.
 
 | Order | Source |
 |---|---|
-| 1 | `command` under `[editor]` in `~/.spoolway/editor.toml` |
-| 2 | `$VISUAL` |
-| 3 | `$EDITOR` |
-| 4 | `vim` |
+| 1 | `$VISUAL` |
+| 2 | `$EDITOR` |
+| 3 | `vim` |
+
+spoolway has no editor setting of its own. To use another editor, name it once in your shell
+profile, for example `export VISUAL=notepad.exe`. A file at `~/.spoolway/editor.toml` from an
+earlier version is not read, and nothing warns about it.
 
 The same choice serves every item that opens a task file in the terminal screens. These are
 `open task` on the board and on the queue screen's tasks and routines panes, and `open` on the jobs
-routine picker. `spoolway config edit` and `spoolway config override` do not use it. They wait for
-the editor to close and then check the file, so they keep their own order: `$VISUAL`, then `$EDITOR`, then `vi`. Setting `editor.toml` does not change them.
+routine picker. `spoolway config edit` and `spoolway config override` do not use it yet. They wait
+for the editor to close and then check the file, so they keep their own order: `$VISUAL`, then
+`$EDITOR`, then `vi`.
 
-`editor.toml` is written by hand. This example opens tasks in Notepad:
+The variable may hold flags, such as `code --wait`. The task path is added at the end.
 
-```toml
-[editor]
-command = "notepad.exe"
-```
-
-| Key | Default | What it controls |
-|---|---|---|
-| `command` | none | The command to run. It may hold flags, such as `code --wait`. The task path is added at the end. |
-| `window` | `true` when the program ends in `.exe`, otherwise `false` | `true` starts the editor in the background with no pane. `false` opens it in a pane. |
-
-A window editor runs in a session of its own, so quitting spoolway leaves it open. It starts on
-every backend, the headless one included. A terminal editor opens in a pane, and the headless
-backend has no pane to open it in.
+A program whose first word ends in `.exe` opens in its own window. spoolway starts it in the
+background with no pane, in a session of its own, so quitting spoolway leaves it open. It starts on
+every backend, the headless one included. Any other editor opens in a pane, and the headless
+backend has no pane to open it in. A Windows editor set without the `.exe` suffix therefore opens
+in a pane, not in its own window.
 
 On WSL, a command whose program ends in `.exe` receives the Windows form of the path, such as
 `\\wsl.localhost\Ubuntu\home\you\...`. Other commands receive the Linux path.
 
-Some `.exe` programs want the Linux path instead. To keep it, point `command` at a small wrapper
+Some `.exe` programs want the Linux path instead. To keep it, point `$VISUAL` at a small wrapper
 script whose name does not end in `.exe`. The script runs the program itself and passes the path on.
-The wrapper also loses the `.exe` default for `window`, so set `window = true` if the program draws
-its own window.
+The wrapper opens in a pane, because only the `.exe` suffix makes an editor open in its own window.
 
 `spoolway doctor` reports the choice. With `--verbose` it prints one `editor` row that names the
-program, where it came from, whether it opens its own window, and whether paths are converted for
-Windows. When the setting cannot work, doctor prints a note with the same fix the popup gives. The
-note covers a program that is not on `PATH`, an `editor.toml` that does not parse, and a missing
-`wslpath` on WSL. On the headless backend it also covers a terminal editor, which has no pane to
-open in. It is never a failure and does not change the count of checks passed. The
+program, where it came from (`$VISUAL`, `$EDITOR` or the vim fallback), whether it opens its own
+window, and whether paths are converted for Windows. When the setting cannot work, doctor prints a
+note with the same fix the popup gives. The note covers a program that is not on `PATH` and a
+missing `wslpath` on WSL. On the headless backend it also covers a terminal editor, which has no
+pane to open in. It is never a failure and does not change the count of checks passed. The
 warnings screen shown before a run does not include it.
 
 `open task` refuses and starts nothing in these cases:
 
 | Case | What the refusal says |
 |---|---|
-| `editor.toml` does not parse, or holds a key other than `[editor]` `command` and `window` | The error names the file and the parser's own message. The next editor is not tried. |
-| The command is empty | The error says the command is empty and names the fix. |
-| The program is not on `PATH` | The error names the program and says to fix `command` or delete the file. |
+| The command has no program, such as `''` | The error says the editor command is empty and says to set `$VISUAL` or `$EDITOR` to an editor on `PATH`, or unset both to use vim. |
+| The program is not on `PATH` | The error names the program and says to set `$VISUAL` or `$EDITOR` to an editor on `PATH`, or unset both to use vim. |
+| `wslpath` is not on `PATH`, for an `.exe` editor on WSL | The error says to install it, or to set `$VISUAL` or `$EDITOR` to a wrapper script without the `.exe` suffix. |
 | The Windows path conversion fails | The error names the task path and says why the conversion failed. |
 | A terminal editor is chosen on the headless backend | The error says the backend has no pane to open a command in. |
 
