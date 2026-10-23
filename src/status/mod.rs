@@ -496,8 +496,9 @@ impl Board {
     /// Drawn inside an untitled box with the key line under it — see
     /// `paint` — so the tab reads like the three beside it.
     ///
-    /// `popup` is the tab's own — a start gate, or why its dispatcher ended
-    /// — drawn over the table the same way the board's confirm panels are.
+    /// `popup` is the tab's own — a start gate, why its dispatcher ended, or
+    /// where the reload `u` asked for has got to — drawn over the table the
+    /// same way the board's confirm panels are.
     /// The board's own panel wins while one is open: the tab opens no popup
     /// of its own until the board is at rest.
     ///
@@ -7693,7 +7694,7 @@ mod tests {
 
     /// An empty board with no dispatcher is the greeting and nothing else: no
     /// rule, no slots lines, no jobs ledger even with a job enabled, no
-    /// `pipelines` notice and no parse warning — and only `enter` on the key
+    /// `update` notice and no parse warning — and only `enter` on the key
     /// line.
     #[test]
     fn an_empty_board_draws_only_its_greeting() {

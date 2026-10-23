@@ -913,7 +913,8 @@ struct Spend {
 /// `waiting` is every pipeline file edited since the running dispatcher
 /// started, then every config key whose new value it has not taken up — see
 /// [`crate::pipeline_snapshot`]. Named on an `update` line under the slots,
-/// since the run keeps routing on what it loaded and an edit waits for `u`.
+/// since the run keeps routing on what it loaded and an edit waits for a
+/// reload, which `u` on this board asks for.
 /// Empty, and no line, otherwise.
 ///
 /// `held` is how many slots `dispatch.priority = "reserve"` holds on each cap

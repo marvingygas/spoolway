@@ -455,9 +455,10 @@ fn update_panel(line: &str) -> Vec<String> {
 }
 
 /// How wide [`refused_panel`] wraps a reason. Narrower than
-/// [`super::NOTICE_WRAP`], so a reason about a task's step — its id, the
-/// step and the pipeline in one sentence — breaks after the pipeline's name
-/// and keeps `no longer defines` together on the line under it.
+/// [`super::NOTICE_WRAP`]: the reason met most, a stranded step, names a task,
+/// its step and its pipeline in one sentence, and at this width it breaks
+/// after the pipeline's name for an id of usual length, keeping `no longer
+/// defines` together on the line under it.
 const REFUSAL_WRAP: usize = 58;
 
 /// The popup a refused reload opens: that nothing changed, then each reason
