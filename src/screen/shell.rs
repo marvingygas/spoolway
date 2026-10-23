@@ -454,6 +454,11 @@ fn update_panel(line: &str) -> Vec<String> {
     )
 }
 
+/// How wide every line inside [`refused_panel`] is padded: one column past
+/// [`REFUSAL_WRAP`], so the longest wrapped line keeps a column clear on its
+/// right, and the box is the same 63 columns inside whatever its reasons say.
+const REFUSAL_WIDTH: usize = REFUSAL_WRAP + 1;
+
 /// How wide [`refused_panel`] wraps a reason. Narrower than
 /// [`super::NOTICE_WRAP`]: the reason met most, a stranded step, names a task,
 /// its step and its pipeline in one sentence, and at this width it breaks
@@ -465,7 +470,7 @@ const REFUSAL_WRAP: usize = 58;
 /// and its fix, every line the dispatcher sent, over `[enter] confirm`.
 fn refused_panel(reasons: &[crate::reload::Reason]) -> Vec<String> {
     let mut body = vec![
-        String::new(),
+        format!("{:<REFUSAL_WIDTH$}", ""),
         "Nothing changed. The run is still on what it had.".to_string(),
     ];
     for reason in reasons {
@@ -512,12 +517,14 @@ fn updated(repo: &Repo, id: &str, holder: u32) -> Option<Popup> {
     // check, then stopped, so the answer is read once more.
     match crate::reload::answer(repo, id) {
         Ok(Some(answer)) => Some(answered(answer)),
-        _ => Some(update_notice(
-            "The dispatcher stopped before answering, so nothing was reloaded. A new \
-             run loads every file as it is now.",
-        )),
+        _ => Some(update_notice(UNANSWERED)),
     }
 }
+
+/// What the board says of a reload whose dispatcher let go of the lock
+/// before it answered.
+const UNANSWERED: &str = "The dispatcher stopped before answering, so nothing was \
+                          reloaded. A new run loads every file as it is now.";
 
 /// The popup for the dispatcher's `answer`.
 fn answered(answer: crate::reload::Answer) -> Popup {
@@ -583,8 +590,14 @@ impl DispatchTab {
     /// Settles `u`'s popup first, child or none, since the dispatcher asked
     /// may have been started in a terminal: `Updating` gives way to what its
     /// request came to, and `Loaded` closes once its second is up. A child
-    /// that ended in the same look then puts its own popup over that.
+    /// that ended in the same look then puts its own popup over that, saying
+    /// too that the reload went unanswered when the child was the one asked.
     fn reap(&mut self, repo: &Repo) {
+        // Read before `Updating` is settled below, which replaces it.
+        let asked = match &self.popup {
+            Some(Popup::Updating { id, holder }) => Some((id.clone(), *holder)),
+            _ => None,
+        };
         match &self.popup {
             Some(Popup::Updating { id, holder }) => {
                 if let Some(popup) = updated(repo, id, *holder) {
@@ -597,10 +610,24 @@ impl DispatchTab {
         let Some(child) = self.child.as_mut() else {
             return;
         };
+        let pid = child.pid();
         if let Some(ended) = child.ended(&repo.lock_file()) {
             self.child = None;
             match ended {
-                Some(panel) => self.popup = Some(Popup::Ended(panel)),
+                // The child is the dispatcher `u` asked whenever it holds
+                // the lock, since no second dispatcher starts while it does.
+                // Its exit popup then covers the notice that the reload went
+                // unanswered, so it says that too, unless the answer landed
+                // before it went.
+                Some(ended) => {
+                    let unanswered = asked.is_some_and(|(id, holder)| {
+                        holder == pid && !matches!(crate::reload::answer(repo, &id), Ok(Some(_)))
+                    });
+                    self.popup = Some(Popup::Ended(match unanswered {
+                        true => ended.panel_with(UNANSWERED),
+                        false => ended.panel(),
+                    }));
+                }
                 // Stopped by `enter` or the stop popup before its first
                 // pass: nothing is starting any more.
                 None => {
@@ -2124,11 +2151,11 @@ mod tests {
                   reload again."
                 .to_string(),
         }]);
-        let row = |text: &str| format!("│{:<61}│", format!("  {text}"));
+        let row = |text: &str| format!("│{:<63}│", format!("  {text}"));
         assert_eq!(
             panel,
             [
-                format!("{TOP_LEFT}─ reload refused {}{TOP_RIGHT}", "─".repeat(44)),
+                format!("{TOP_LEFT}─ reload refused {}{TOP_RIGHT}", "─".repeat(46)),
                 row(""),
                 row("Nothing changed. The run is still on what it had."),
                 row(""),
@@ -2139,7 +2166,7 @@ mod tests {
                 row("has left it, then press u again."),
                 row(""),
                 row("[enter] confirm"),
-                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(61)),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(63)),
             ]
         );
     }
@@ -2193,6 +2220,42 @@ mod tests {
         assert!(popup.reads_keys());
         let text = popup.panel().join("\n");
         assert!(text.contains("─ update config "), "{text}");
+        assert!(
+            text.contains("The dispatcher stopped before answering"),
+            "{text}"
+        );
+        assert!(text.contains("[enter] confirm"), "{text}");
+        tab.answer(&repo, &Pipelines::builtin(), &repo.root, Key::Enter);
+        assert!(tab.popup.is_none());
+    }
+
+    // When the dispatcher asked is the tab's own child and it dies unasked
+    // under `updating config…`, its exit popup, which goes over the notice
+    // above, says too that the reload went unanswered, and `enter` closes
+    // it. Fails before the change: the exit popup gave the exit status alone.
+    #[test]
+    fn the_tabs_own_dispatcher_dying_before_answering_says_so() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-child-gone");
+        let child = stand_in("kill -9 $$");
+        let holder = child.pid();
+        let mut tab = DispatchTab {
+            child: Some(child),
+            popup: Some(Popup::Updating {
+                id: crate::reload::request(&repo).unwrap(),
+                holder,
+            }),
+        };
+        for _ in 0..500 {
+            tab.reap(&repo);
+            if tab.child.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let popup = tab.popup.as_ref().expect("the exit popup is up");
+        assert!(popup.reads_keys());
+        let text = popup.panel().join("\n");
+        assert!(text.contains("SIGKILL"), "{text}");
         assert!(
             text.contains("The dispatcher stopped before answering"),
             "{text}"
