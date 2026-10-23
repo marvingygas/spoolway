@@ -190,6 +190,21 @@ has "the workspace's page is kept" "the workspace's copy" "$WS/plans/2026-10-12-
 has "the clone's page stays where it was" "the clone's copy" "$CLASH_OLD"
 rm -f "$WS/dispatchers/proj/pending/clash.md" "$CLASH_OLD" "$WS/plans/2026-10-12-clash.html"
 
+# A sync killed between rewriting a task and moving its page leaves the task
+# naming the workspace path while the page is still in the clone's folder.
+# The next sync must finish the move and leave the task alone.
+HALF_OLD="$WS/dispatchers/proj/plans/2026-10-12-half.html"
+HALF_NEW="$WS/plans/2026-10-12-half.html"
+echo "<html>a page whose move was cut short</html>" > "$HALF_OLD"
+printf -- '---\nid: half\ngroup: half\ntitle: a task already relinked\nplan: %s\n---\n\nbody\n' \
+  "$HALF_NEW" > "$WS/dispatchers/proj/pending/half.md"
+"$SPOOLWAY" sync >/dev/null 2>&1
+if [ -e "$HALF_NEW" ] && [ ! -e "$HALF_OLD" ]; then ok "a sync finishes a move whose task was already relinked"
+else bad "a sync finishes a move whose task was already relinked"; fi
+has "the relinked task still names the workspace page" "plan: $HALF_NEW" \
+  "$WS/dispatchers/proj/pending/half.md"
+rm -f "$WS/dispatchers/proj/pending/half.md" "$HALF_NEW"
+
 # `--replace` takes a path spelled under `.spoolway/`, which in home mode is
 # the workspace's `config/` and not a folder of the checkout. The checkout has
 # no such file, so before this resolved through the setup folder the command
