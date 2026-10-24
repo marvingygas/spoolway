@@ -106,7 +106,8 @@ is the workspace's own `plans/`, shared by every clone of the workspace.
 
 Every page has three sections in this order: Context, Decisions and Mockup. Context is one block of
 at most three sentences. It opens on the outcome a person can approve or reject, then says what is
-true today. A list of every path the plan touches follows it. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
+true today. A list of every path the plan touches follows it. The template is
+`assets/skills/claude/spoolway-plan/assets/template.html`.
 
 The page rail shows the plan name. A small copy icon sits right after it. Clicking the icon
 copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds. Beside the `Switch theme` button, a `Reload`
