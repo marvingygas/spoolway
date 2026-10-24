@@ -10,8 +10,8 @@
 # release's SHA256SUMS, checks the file against its line there, and renames it
 # into the install directory. It needs only sh, uname, curl or wget, and
 # sha256sum or shasum. It never builds from source (a host with no file is
-# refused), never writes outside the install directory, and never edits a shell
-# profile: when the directory is not on PATH it prints the line to add.
+# refused), never writes outside the install directory and one temporary
+# directory it removes on exit, and never edits a shell profile: when the directory is not on PATH it prints the line to add.
 #
 # The release job replaces the version placeholder below with the release's own
 # version, so the files come from `releases/download/v<version>/` and never
@@ -43,10 +43,10 @@ die() { # die <line>... — each argument is printed on its own line
   first=1
   for line in "$@"; do
     if [ "$first" = 1 ]; then
-      echo "spoolway: $line" >&2
+      printf 'spoolway: %s\n' "$line" >&2
       first=0
     else
-      echo "$line" >&2
+      printf '%s\n' "$line" >&2
     fi
   done
   exit 1
@@ -110,9 +110,16 @@ main() {
 
   pick_asset
 
-  default_dir="$HOME/.local/bin"
+  if [ -z "${SPOOLWAY_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+    die "HOME is not set, so the default install directory ~/.local/bin is unknown." \
+      "Set SPOOLWAY_INSTALL_DIR to a directory you can write to and run the install line again."
+  fi
+  default_dir="${HOME:-}/.local/bin"
   dir="${SPOOLWAY_INSTALL_DIR:-$default_dir}"
-  target="$dir/spoolway"
+  # A trailing slash would print /opt/bin//spoolway and hide /opt/bin from the
+  # PATH check below, which compares whole entries. A bare / stays as it is.
+  while [ "$dir" != / ] && [ "${dir%/}" != "$dir" ]; do dir="${dir%/}"; done
+  target="${dir%/}/spoolway"
   base_url="${SPOOLWAY_BASE_URL:-https://github.com/$repo/releases/download}/v$version"
 
   work=$(mktemp -d 2>/dev/null) ||
@@ -122,7 +129,7 @@ main() {
   trap 'rm -rf "$work"; [ -n "$tmp" ] && rm -f "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
 
-  echo "spoolway: downloading $asset (v$version)"
+  printf 'spoolway: downloading %s (v%s)\n' "$asset" "$version"
   download "$base_url/$asset" "$work/$asset" ||
     die "could not download $asset (v$version) from $base_url." \
       "Check your network, and that release v$version has this file, then run the install line again."
@@ -143,6 +150,13 @@ main() {
       "The download is damaged or was changed. Nothing was installed."
   fi
   echo "spoolway: checksum verified"
+
+  # mv would move the new file into a directory instead of replacing it, and
+  # report success.
+  if [ -d "$target" ]; then
+    die "$target is a directory, so spoolway cannot be installed there." \
+      "Move it away, or set SPOOLWAY_INSTALL_DIR to another directory, and run the install line again."
+  fi
 
   # Read the old version before the rename replaces the file. A copy that
   # cannot report one still counts as replaced.
@@ -166,14 +180,14 @@ main() {
   tmp=
 
   if [ -n "$replaced" ]; then
-    echo "spoolway: replaced $replaced with v$version -> $target"
+    printf 'spoolway: replaced %s with v%s -> %s\n' "$replaced" "$version" "$target"
     # A rerun over the same version changed nothing for a project to apply.
     if [ "$old" != "$version" ]; then
       echo
       echo "Run spoolway sync in each project to apply the update."
     fi
   else
-    echo "spoolway: installed v$version -> $target"
+    printf 'spoolway: installed v%s -> %s\n' "$version" "$target"
   fi
 
   case ":$PATH:" in
@@ -182,10 +196,10 @@ main() {
       line="$dir"
       [ "$dir" = "$default_dir" ] && line='$HOME/.local/bin'
       echo
-      echo "spoolway: $dir is not on your PATH. Add this line to your"
+      printf 'spoolway: %s is not on your PATH. Add this line to your\n' "$dir"
       echo "shell profile, then open a new terminal:"
       echo
-      echo "  export PATH=\"$line:\$PATH\""
+      printf '  export PATH="%s:$PATH"\n' "$line"
       ;;
   esac
 }
