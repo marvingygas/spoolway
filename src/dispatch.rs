@@ -24598,8 +24598,12 @@ mod tests {
 
         run_pass_with(&repo, &mux, &pipelines);
 
+        // Which two start is the ranking's answer; the order their `start`
+        // calls land in is not, since the lanes launch side by side.
+        let mut started = mux.did("start");
+        started.sort();
         assert_eq!(
-            mux.did("start"),
+            started,
             ["start a · shots", "start b · shots"],
             "{:?}",
             mux.calls()
