@@ -238,7 +238,7 @@ reading the file whole.
    one count above it and two below, floored at 1. At the floor, add the missing counts above instead. A count
    that was the recommended one keeps its `(Recommended)` mark. Draw each count's breakdown in
    the layout above, and draw the person's own breakdown under the chosen count. Open the
-   question text with the notes line, such as `notes: 3 tasks`. Ask it again with one AskUserQuestion.
+   question text with the usual `Split <group>: <counts> tasks` line, naming the redrawn counts. Ask it again with one AskUserQuestion.
 
    The answer to the redrawn ballot stands, unless it asks for yet another unseen split. Then
    redraw again. A pick of any count a ballot drew is taken as picked, with no further

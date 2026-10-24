@@ -80,8 +80,9 @@ section and wait for your letter.
 Pick any count a ballot drew and the tasks are taken as picked, with no second question. Ask for
 a split no ballot drew and the ballot is drawn again. That means typing a count into Other,
 asking for one in a note on any option, or asking in Other to re-route a task. The new ballot
-marks your count `(chosen)`, with one count above it and two below. The answer to it stands,
-unless it asks for yet another unseen split.
+marks your count `(chosen)`, with one count above it and two below. Codex shows one below,
+because its ballots hold three options. The answer to it stands, unless it asks for yet another
+unseen split.
 
 A note on the task ballot can still set a chain's base, as in `3 from #412`. That is not a new
 split, so it does not redraw for a count.
