@@ -71,35 +71,48 @@ A gate can pause a task for a person after a step reports.
 
 ## Install
 
+spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
+
+### npm
+
 ```
 npm install -g spoolway
 ```
 
-The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release. Run
-`spoolway sync` in each project to list the files the new release rewrites and apply them when
-you confirm. `spoolway whats-new` prints the release notes offline.
+The package is a small wrapper around a prebuilt binary.
 
-Or download one file that needs nothing else and never updates itself:
+### Standalone
+
+One file that needs nothing else:
 
 ```
 curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
 ```
 
-It installs to `~/.local/bin`. Run the same line again to update. See
+It installs to `~/.local/bin`. See
 [Standalone download](docs/installation.md#standalone-download) for the file per platform.
 
-From source instead, in a clone of this repository:
+### From source
+
+In a clone of this repository:
 
 ```
 cargo install --path .
 ```
 
-As a herdr plugin:
+### herdr plugin
 
 ```
 herdr plugin install marvingygas/spoolway
 ```
+
+### Updating
+
+| Command | What it does |
+|---|---|
+| `spoolway update` | Installs a newer release. A standalone binary never updates itself: run the install line again. |
+| `spoolway sync` | Run in each project after an update. Lists the files the new release rewrites and applies them when you confirm. |
+| `spoolway whats-new` | Prints the release notes offline. |
 
 Platform notes and requirements in full: **[Installation and setup](docs/installation.md)**.
 
