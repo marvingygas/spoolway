@@ -278,6 +278,11 @@ jobs:
           while read -r triple download; do
             install -m 0755 "artifacts/$triple/spoolway" "dist/$download"
           done < <(jq -r '.targets[] | select(.download != null) | "\(.triple) \(.download)"' npm/targets.json)
+          # The script is stamped with this release's version so the files it
+          # downloads come from this release and never from `latest`.
+          sed "s/@SPOOLWAY_VERSION@/${GITHUB_REF_NAME#v}/" scripts/install.sh > dist/install.sh
+          chmod 0755 dist/install.sh
+          grep -q "^version=\"${GITHUB_REF_NAME#v}\"\$" dist/install.sh
           ( cd dist && sha256sum ./* > SHA256SUMS )
           cat dist/SHA256SUMS
 

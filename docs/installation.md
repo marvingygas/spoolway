@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh", "src/memory.rs"]
+covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh", "scripts/install.sh", "src/memory.rs"]
 ---
 
 # Installation and setup
@@ -31,10 +31,38 @@ From source, in a clone of this repository:
 cargo install --path .
 ```
 
-By hand: every GitHub release has one executable file per platform, named `spoolway-linux-x64`,
-`spoolway-linux-arm64`, `spoolway-macos-arm64` or `spoolway-macos-x64`, and a `SHA256SUMS` file.
-Download the file for your platform, run `chmod +x` on it and put it on your `PATH`. Both Linux
-files are static builds that start on any distribution.
+## Standalone download
+
+One file, nothing else to install. It never updates itself: run the install line again to get the
+latest release.
+
+```
+curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
+```
+
+It writes `~/.local/bin/spoolway`. Set `SPOOLWAY_INSTALL_DIR` to put it somewhere else.
+
+By hand: download your platform's file from the latest release, then make it executable.
+
+| Platform | File |
+|---|---|
+| Linux x64 (any) | `spoolway-linux-x64` |
+| Linux arm64 (any) | `spoolway-linux-arm64` |
+| macOS Apple Silicon | `spoolway-macos-arm64` |
+| macOS Intel | `spoolway-macos-x64` |
+
+```
+chmod +x spoolway-linux-x64
+```
+
+On macOS, a file downloaded in a browser is blocked with "the developer cannot be verified". Clear
+the block once:
+
+```
+xattr -d com.apple.quarantine spoolway-macos-arm64
+```
+
+Windows has no build. Run spoolway inside WSL with the Linux file.
 
 As a herdr plugin:
 
