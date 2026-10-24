@@ -2515,7 +2515,8 @@ const CACHE_HINT_HEADER: &str = "# Start a fresh conversation when the last repl
 
 /// The two lines earlier releases opened the example with. A file written by
 /// one still carries them, and [`find_cache_hint`] must find that example too,
-/// or `config set` would leave it beside the new one.
+/// or `config set` would leave it as it stands, under the old lines and not
+/// re-seated, and `sync` and `doctor` would call the file behind.
 const LEGACY_CACHE_HINT_HEADER: &str = "# How long a session's prompt cache is trusted to stay warm.\n\
      # Unset means no limit. Uncomment a row to choose one.\n";
 
@@ -4681,10 +4682,10 @@ mod tests {
     }
 
     /// A file written by an earlier release opens its example with the old
-    /// header; `config set` swaps it for the current one rather than leaving
-    /// both.
+    /// header; `config set` re-seats it under the current one instead of
+    /// leaving it as it was.
     #[test]
-    fn an_example_under_the_old_header_is_replaced_not_duplicated() {
+    fn an_example_under_the_old_header_is_reseated_under_the_new_one() {
         let rendered = cache_hint(&["gpt-*"]);
         let rendered = format!("[dispatch]\n\n{rendered}\n[models.\"zz\"]\nlocal = true\n");
         let text = rendered.replace(CACHE_HINT_HEADER, LEGACY_CACHE_HINT_HEADER);

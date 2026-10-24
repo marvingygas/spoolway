@@ -3948,8 +3948,8 @@ mod tests {
     }
 
     /// A config written before the cache-lifetime example was reworded opens
-    /// it with the old two lines. `sync` leaves one example, under the new
-    /// header, rather than the old one beside a new one.
+    /// it with the old two lines. After `sync` the file has the new header
+    /// once, the old header nowhere, and one `claude-*` row.
     #[test]
     fn a_config_with_the_old_cache_example_header_ends_with_one_example() {
         let (repo, _root_guard) = fixture("config-old-cache-header");
