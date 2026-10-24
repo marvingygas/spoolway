@@ -65,7 +65,16 @@ latest release.
 curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
 ```
 
-It writes `~/.local/bin/spoolway`. Set `SPOOLWAY_INSTALL_DIR` to put it somewhere else.
+It downloads the file for your platform from the same release as the script and checks it against
+`SHA256SUMS`. It then writes `~/.local/bin/spoolway`. Set `SPOOLWAY_INSTALL_DIR` to put it somewhere
+else. When the directory is not on your `PATH`, the script prints the line to add to your shell
+profile. It does not edit the profile.
+
+When it replaces an older copy, it prints `Run spoolway sync in each project to apply the update.`
+
+The script refuses and exits 1, leaving the install directory unchanged, when the checksum does not
+match, when the platform has no release file, or when a directory already sits at the target path.
+It needs `sh`, `uname`, `curl` or `wget`, and `sha256sum` or `shasum`.
 
 By hand: download your platform's file from the latest release, then make it executable.
 
