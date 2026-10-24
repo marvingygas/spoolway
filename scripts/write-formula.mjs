@@ -9,6 +9,10 @@
 // platform can never be paired with another platform's file. A target with no
 // download file is not part of the formula. A download with no checksum line
 // is an error, because a formula without its checksum cannot be installed.
+//
+// The formula has no `version` line: Homebrew reads the version from the url,
+// and `brew audit --strict` rejects a version line that repeats it. The desc
+// says "command-line" for the same audit.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -53,9 +57,8 @@ function block(os, cpu) {
 }
 
 process.stdout.write(`class Spoolway < Formula
-  desc "Descriptive agent workflow builder run by a minimal command line state machine"
+  desc "Descriptive agent workflow builder run by a minimal command-line state machine"
   homepage "https://github.com/marvingygas/spoolway"
-  version "${version}"
   license "MIT"
 
   on_macos do

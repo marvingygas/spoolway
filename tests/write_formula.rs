@@ -76,7 +76,7 @@ fn formula_pairs_each_platform_with_its_own_file_and_checksum() {
         )
     };
     let want = format!(
-        "class Spoolway < Formula\n  desc \"Descriptive agent workflow builder run by a minimal command line state machine\"\n  homepage \"https://github.com/marvingygas/spoolway\"\n  version \"0.15.0\"\n  license \"MIT\"\n\n  on_macos do\n{}{}  end\n\n  on_linux do\n{}{}  end\n\n  def install\n    bin.install Dir[\"spoolway-*\"].first => \"spoolway\"\n  end\n\n  test do\n    assert_match version.to_s, shell_output(\"#{{bin}}/spoolway --version\")\n  end\nend\n",
+        "class Spoolway < Formula\n  desc \"Descriptive agent workflow builder run by a minimal command-line state machine\"\n  homepage \"https://github.com/marvingygas/spoolway\"\n  license \"MIT\"\n\n  on_macos do\n{}{}  end\n\n  on_linux do\n{}{}  end\n\n  def install\n    bin.install Dir[\"spoolway-*\"].first => \"spoolway\"\n  end\n\n  test do\n    assert_match version.to_s, shell_output(\"#{{bin}}/spoolway --version\")\n  end\nend\n",
         block("on_arm", "spoolway-macos-arm64", 4),
         block("on_intel", "spoolway-macos-x64", 5),
         block("on_arm", "spoolway-linux-arm64", 2),

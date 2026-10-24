@@ -336,8 +336,18 @@ jobs:
             echo 'Follow "Homebrew tap setup" in docs/releasing.md, then re-run this job.' >&2
             exit 1
           fi
-          gh release download "$VERSION" --pattern SHA256SUMS
-          node scripts/write-formula.mjs "${VERSION#v}" SHA256SUMS > spoolway.rb
+          published() {
+            echo "Error: $1" >&2
+            echo "npm and the GitHub release for $VERSION are already published." >&2
+            echo "$2" >&2
+            exit 1
+          }
+          gh release download "$VERSION" --pattern SHA256SUMS ||
+            published "SHA256SUMS could not be downloaded from the $VERSION release, so the formula was not written." \
+              "Check that the assets job uploaded SHA256SUMS, then re-run this job."
+          node scripts/write-formula.mjs "${VERSION#v}" SHA256SUMS > spoolway.rb ||
+            published "the formula for $VERSION could not be written; the reason is above." \
+              "Fix what it names, then re-run this job."
           cat spoolway.rb
         env:
           HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
@@ -345,9 +355,17 @@ jobs:
 
       - name: Push it to the tap
         run: |
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/marvingygas/homebrew-tap.git" tap
+          published() {
+            echo "Error: $1" >&2
+            echo "npm and the GitHub release for $VERSION are already published." >&2
+            echo "Check that HOMEBREW_TAP_TOKEN can write to marvingygas/homebrew-tap, then re-run this job." >&2
+            exit 1
+          }
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/marvingygas/homebrew-tap.git" tap ||
+            published "marvingygas/homebrew-tap could not be cloned, so the formula was not pushed."
           cd tap
-          if grep -q "^  version \"${VERSION#v}\"\$" Formula/spoolway.rb 2>/dev/null; then
+          # The formula has no version line, so its urls name the version.
+          if grep -qF "/releases/download/${VERSION}/" Formula/spoolway.rb 2>/dev/null; then
             echo "The tap already names spoolway ${VERSION#v}, so nothing was pushed."
             exit 0
           fi
@@ -356,13 +374,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/spoolway.rb
-          git commit -m "spoolway ${VERSION#v}"
-          git push origin HEAD || {
-            echo "Error: pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed." >&2
-            echo "npm and the GitHub release for $VERSION are already published." >&2
-            echo "Check that HOMEBREW_TAP_TOKEN can write to the tap, then re-run this job." >&2
-            exit 1
-          }
+          git commit -m "spoolway ${VERSION#v}" ||
+            published "the formula for spoolway ${VERSION#v} could not be committed to the tap."
+          git push origin HEAD ||
+            published "pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed."
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -371,12 +386,20 @@ jobs:
       # the binary must report the tagged version.
       - name: Install it
         run: |
-          brew install marvingygas/tap/spoolway
-          brew test marvingygas/tap/spoolway
-          brew audit --strict marvingygas/tap/spoolway
-          reported="$(spoolway --version)"
-          if [ "$reported" != "spoolway ${VERSION#v}" ]; then
-            echo "Error: the brew install reports \"$reported\", not \"spoolway ${VERSION#v}\"." >&2
-            echo "npm and the GitHub release for $VERSION are already published; check the formula in marvingygas/homebrew-tap." >&2
+          published() {
+            echo "Error: $1" >&2
+            echo "npm and the GitHub release for $VERSION are already published, and the tap has the formula." >&2
+            echo "Fix Formula/spoolway.rb in marvingygas/homebrew-tap, then re-run this job." >&2
             exit 1
+          }
+          brew install marvingygas/tap/spoolway ||
+            published "brew install marvingygas/tap/spoolway failed; its error is above."
+          brew test marvingygas/tap/spoolway ||
+            published "brew test marvingygas/tap/spoolway failed; its error is above."
+          brew audit --strict marvingygas/tap/spoolway ||
+            published "brew audit --strict marvingygas/tap/spoolway failed; its findings are above."
+          reported="$(spoolway --version)" ||
+            published "the brew-installed spoolway did not run."
+          if [ "$reported" != "spoolway ${VERSION#v}" ]; then
+            published "the brew install reports \"$reported\", not \"spoolway ${VERSION#v}\"."
           fi
