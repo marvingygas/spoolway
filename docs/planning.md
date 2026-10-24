@@ -77,17 +77,14 @@ Each option draws its groups numbered, in dependency order:
 asks with a question and a preview per option. Codex and pi print each option as a lettered
 section and wait for your letter.
 
-Picking an option that is not the recommended one, on the group ballot or on any task ballot,
-ends on one more ballot. So does typing your own split into Other. This confirm ballot draws
-the whole breakdown: each group on one line, and each task under it with its size and
-pipeline. Tasks are numbered once across the breakdown. `Write them` writes the tasks as drawn.
-`Pick again` goes back to the group ballot. When you take every recommendation, the tasks are
-written straight away.
+Pick any count a ballot drew and the tasks are taken as picked, with no second question. Ask for
+a split no ballot drew and the ballot is drawn again. That means typing a count into Other,
+asking for one in a note on any option, or asking in Other to re-route a task. The new ballot
+marks your count `(chosen)`, with one count above it and two below. The answer to it stands,
+unless it asks for yet another unseen split.
 
-A note on the confirm ballot's answer can re-route a task, as in `2 to impl`. It can also set a
-chain's base, as in `3 from #412`, the way the split ballot's note does. Join parts with commas.
-The ballot is drawn again with the change in place, and asked again until an answer has no note.
-A pipeline the project does not define brings the ballot back unchanged, with the names it has.
+A note on the task ballot can still set a chain's base, as in `3 from #412`. That is not a new
+split, so it does not redraw for a count.
 
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`. The plan page's absolute path goes into each task's
