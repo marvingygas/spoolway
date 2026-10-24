@@ -6,8 +6,8 @@
 //! outside `kill` cannot land there, so the dispatcher shoots itself.
 //!
 //! `SPOOLWAY_TEST_KILL_AT=<point>` names the moment. The variable is read only
-//! when `SPOOLWAY_TEST_BACKEND` is also set, which is the gate the headless
-//! backend already has, and only in a process that called [`arm`], which only
+//! when `SPOOLWAY_TEST_BACKEND` is also set, which is the variable that
+//! picks the headless backend, and only in a process that called [`arm`], which only
 //! `spoolway dispatch` does. Any other command, or a dispatcher run without
 //! the test marker, never looks at it.
 //!

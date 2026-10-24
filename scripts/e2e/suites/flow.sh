@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A task's whole life, live.
 #
-# `dispatch.backend = headless` runs lanes as real detached processes, so this
+# `SPOOLWAY_TEST_BACKEND=headless` runs lanes as real detached processes, so this
 # is the pipeline actually running: queued -> implement -> review -> create-pr
 # -> done, with a lane per step, a real worktree, a real pull request, and
 # the archive at the end.

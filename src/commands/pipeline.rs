@@ -1048,6 +1048,31 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
     problems
 }
 
+/// Every step a task is recorded on that `pipeline` has no step for, as the
+/// field that records it and the step it names.
+///
+/// A task can be stopped on any of four fields: `stage:` for a running one,
+/// `paused_at` for a gate, `blocked_from` for a block and `parked_from` for a
+/// `p` park. The reserved stages are stand-ins rather than steps, so they are
+/// never reported as missing. Shared by `pipeline check` and by a reload of
+/// the running dispatcher, so the two never disagree on which task an edit
+/// strands.
+pub(crate) fn missing_recorded_steps<'a>(
+    task: &'a crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+) -> Vec<(&'static str, &'a str)> {
+    [
+        ("stage", Some(task.stage())),
+        ("paused_at", task.front.paused_at.as_deref()),
+        ("blocked_from", task.front.blocked_from.as_deref()),
+        ("parked_from", task.front.parked_from.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(field, step)| Some((field, step?)))
+    .filter(|(_, step)| !crate::pipeline::RESERVED.contains(step) && pipeline.step(step).is_none())
+    .collect()
+}
+
 /// Name every live task a pipeline edit has stranded.
 ///
 /// A deleted pipeline stops the whole dispatcher at its next start, and a
@@ -1097,17 +1122,7 @@ fn live_task_problems(
             ));
             continue;
         };
-        let recorded = [
-            ("stage", Some(task.stage())),
-            ("paused_at", task.front.paused_at.as_deref()),
-            ("blocked_from", task.front.blocked_from.as_deref()),
-            ("parked_from", task.front.parked_from.as_deref()),
-        ];
-        for (field, step) in recorded {
-            let Some(step) = step else { continue };
-            if crate::pipeline::RESERVED.contains(&step) || pipeline.step(step).is_some() {
-                continue;
-            }
+        for (field, step) in missing_recorded_steps(task, pipeline) {
             problems.push(format!(
                 "live task `{}` has `{field}: {step}`, and pipeline `{}` has no such step",
                 task.id(),

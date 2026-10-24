@@ -270,7 +270,6 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 
 ```toml
 [dispatch]
-backend = "herdr"            # where lanes run
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
 priority = "group"           # fill a free slot from a group already running first; "any" weighs every ready task; "reserve" also holds a slot for each started group

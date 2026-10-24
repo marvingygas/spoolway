@@ -476,10 +476,14 @@ pub struct WatchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DispatchConfig {
-    /// Where lanes run: a real herdr pane. `headless` is spoolway's own
-    /// test backend — see [`Backend::Headless`] — refused outside the
-    /// harness that sets `SPOOLWAY_TEST_BACKEND`.
-    pub backend: Backend,
+    /// Retired: where lanes run. Every run uses herdr; the end-to-end
+    /// harness alone picks the headless backend, by exporting
+    /// `SPOOLWAY_TEST_BACKEND=headless` — see `crate::mux::backend`. Kept
+    /// only so an existing config still parses, whatever it holds; dropped
+    /// unconditionally on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    backend: Option<toml::Value>,
 
     /// How long a lane may say nothing before the dispatcher reminds it to
     /// report.
@@ -508,10 +512,9 @@ pub struct DispatchConfig {
     pub lane_quiet: Duration,
 
     /// Retired: how a tmux run was laid out in the multiplexer. The tmux
-    /// backend is gone — see [`Backend::Herdr`]'s own note — so there is no
-    /// multiplexer left for this to lay out. Kept only so an existing config
-    /// still parses, whatever it holds; dropped unconditionally on the next
-    /// save.
+    /// backend is gone, so there is no multiplexer left for this to lay out.
+    /// Kept only so an existing config still parses, whatever it holds;
+    /// dropped unconditionally on the next save.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     tmux_mode: Option<toml::Value>,
@@ -693,7 +696,7 @@ pub struct DispatchConfig {
 impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
-            backend: Backend::default(),
+            backend: None,
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
             // minutes the shipped pipelines allow their longest command —
             // `scripts/gate.sh` and `scripts/e2e-pr.sh` both carry
@@ -887,63 +890,6 @@ impl Default for UnattendedConfig {
             blocked_effort: String::new(),
             blocked_session: true,
             blocked_prompt: "unblocker".into(),
-        }
-    }
-}
-
-/// Where spoolway runs its lanes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Backend {
-    /// A multiplexer, where every agent runs in a real pane and any lane can be
-    /// watched, attached to, or taken over by hand.
-    ///
-    /// The old value `tmux` still parses, to this: the tmux backend is gone,
-    /// and a config that named it loads as herdr instead — see
-    /// [`Config::migrate`]'s own note on the switch. The next save rewrites
-    /// the key.
-    #[default]
-    #[serde(alias = "tmux")]
-    Herdr,
-
-    /// No multiplexer at all: each turn is its own detached process, logging to
-    /// a file, and the conversation is carried across turns by the session id
-    /// the profile already pins with `{session_id}`.
-    ///
-    /// Every scheduling decision is identical — the dispatcher reconciles from
-    /// the task file's `stage:` and the live lane list either way. What changes
-    /// is what a *person* can do: there is no pane to attach to, so watching a
-    /// lane means reading its log and answering one means resuming its session.
-    /// The dispatch run's own board narrates the run either way.
-    ///
-    /// Nothing here draws anywhere a person can see, so `spoolway dispatch`
-    /// refuses to start on this backend unless `SPOOLWAY_TEST_BACKEND` is set
-    /// in the environment — see `crate::headless::TEST_BACKEND_ENV` — which
-    /// only the end-to-end harness exports. A config edited onto `headless`
-    /// by hand is refused the same way a herdr run outside any pane is.
-    Headless,
-}
-
-impl Backend {
-    /// The spellings a person may type for `dispatch.backend`, in the order
-    /// error messages list them. `tmux` is not among them: it still loads, as
-    /// the alias on [`Backend::Herdr`], but only so an old file keeps working.
-    pub const NAMES: [&'static str; 2] = ["herdr", "headless"];
-
-    /// The backend `text` names, or an error naming the values that are
-    /// allowed.
-    ///
-    /// `config set` calls this before it writes, because deserialising alone
-    /// accepts the retired `tmux` and saves `herdr` in its place — a different
-    /// value from the one typed.
-    pub fn parse_typed(text: &str) -> Result<Backend> {
-        match text {
-            "herdr" => Ok(Backend::Herdr),
-            "headless" => Ok(Backend::Headless),
-            other => bail!(
-                "`{other}` is not a backend — use {}",
-                Self::NAMES.join(" or ")
-            ),
         }
     }
 }
@@ -1609,6 +1555,7 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
 /// A field retired later belongs here as well as under `skip_serializing`.
 const RETIRED_KEYS: &[(&str, &str)] = &[
     ("dispatch", "interval"),
+    ("dispatch", "backend"),
     ("dispatch", "tmux_mode"),
     ("dispatch", "herdr_mode"),
     ("dispatch", "keep_finished_lanes"),
@@ -2044,7 +1991,7 @@ impl Config {
     }
 
     /// [`Config::load_tracked`] with every notice silenced — no "retired"
-    /// note, no tmux-backend note, nothing from an `[agents.*]` table — and
+    /// note, nothing from an `[agents.*]` table — and
     /// `config.migrate()` run directly, with no call through
     /// [`Config::load_with_notices`] at all.
     ///
@@ -2086,30 +2033,6 @@ impl Config {
                 let (stripped, mut notices) = strip_refused_keys(&raw, &path)?;
                 let mut config: Config = toml::from_str(&stripped)
                     .with_context(|| format!("parsing {}", path.display()))?;
-                // The alias on `Backend::Herdr` already turned a `tmux` value
-                // into `Herdr` by the time `config` exists — this is only
-                // what tells a person it happened, since the typed value
-                // alone cannot be told apart from a file that always said
-                // `herdr`. Read off a second, untyped parse of the same
-                // `raw` text rather than the alias itself, which is exactly
-                // what [`Config::migrate`] cannot see either.
-                let named_tmux_backend = toml::from_str::<toml::Value>(&raw)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("dispatch")?
-                            .get("backend")?
-                            .as_str()
-                            .map(str::to_string)
-                    })
-                    .as_deref()
-                    == Some("tmux");
-                if named_tmux_backend {
-                    notices.push(format!(
-                        "note: dispatch.backend = \"tmux\" in {} — the tmux backend is gone, \
-                         so this now loads as \"herdr\". The key is rewritten on the next save.",
-                        path.display(),
-                    ));
-                }
                 // `dispatch.worktree_root` still parses — the field stays on
                 // `DispatchConfig` for exactly this — but nothing reads it
                 // any more, so a project that set it to a real path deserves
@@ -3969,23 +3892,24 @@ mod tests {
         assert!(Config::default().dispatch.tear_lanes_on_stop.is_none());
     }
 
-    /// A config naming `backend = "tmux"` — the tmux backend is gone — still
-    /// parses, loads as `Backend::Herdr`, earns a notice saying so, and never
-    /// comes back out as `tmux` on the next save.
+    /// A config naming `backend` under `[dispatch]`, with any value it ever
+    /// held, still parses, earns no unknown-key note, and never comes back
+    /// out on the next save.
     #[test]
-    fn a_backend_of_tmux_loads_as_herdr_with_a_notice() {
-        with_override_fixture("backend-tmux", "[dispatch]\nbackend = \"tmux\"\n", |root| {
-            let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
-            assert_eq!(config.dispatch.backend, Backend::Herdr);
-            assert!(
-                notices.iter().any(|n| n.contains("dispatch.backend")
-                    && n.contains("tmux")
-                    && n.contains("herdr")),
-                "no notice explained the switch: {notices:?}"
-            );
-            let rendered = toml::to_string(&config).unwrap();
-            assert!(rendered.contains("backend = \"herdr\""), "{rendered}");
-        });
+    fn a_retired_backend_key_loads_whatever_it_holds_and_is_not_written_back() {
+        for value in ["herdr", "headless", "tmux"] {
+            let raw = format!("[dispatch]\nbackend = \"{value}\"\n");
+            with_override_fixture("backend-retired", &raw, |root| {
+                let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
+                assert!(
+                    !notices.iter().any(|n| n.contains("backend")),
+                    "a retired key is not an unknown one: {notices:?}"
+                );
+                let rendered = toml::to_string(&config).unwrap();
+                assert!(!rendered.contains("backend"), "{rendered}");
+            });
+        }
+        assert!(Config::default().dispatch.backend.is_none());
     }
 
     /// `lane_child_ceiling` is written even while it holds its default, so a
@@ -4376,11 +4300,10 @@ mod tests {
     /// that names it. A key that is only misspelt is not an error.
     #[test]
     fn unknown_keys_load_with_a_note_naming_each() {
-        let raw = "[dispatch]\nlane_quite = \"5m\"\nbackend = \"headless\"\n\n\
+        let raw = "[dispatch]\nlane_quite = \"5m\"\n\n\
                     [models.\"m\"]\nflavour = 1\n\n[unatended]\nx = 1\n";
         with_override_fixture("unknown-keys", raw, |root| {
-            let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
-            assert_eq!(config.dispatch.backend, Backend::Headless);
+            let (_config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
             for name in ["dispatch.lane_quite", "models.m.flavour", "`unatended`"] {
                 assert!(
                     notices
@@ -4404,7 +4327,7 @@ mod tests {
     /// `commands::doctor::tests::each_workspace_note_has_a_row_in_the_warnings_popup`.
     #[test]
     fn each_load_note_has_a_row_in_the_warnings_popup() {
-        let raw = "[dispatch]\ninterval = \"5m\"\nbackend = \"tmux\"\n\
+        let raw = "[dispatch]\ninterval = \"5m\"\n\
                    worktree_root = \"/elsewhere/worktrees\"\ntear_lanes_on_stop = true\n\
                    herdr_mode = \"split\"\nlane_quite = \"5m\"\n\n\
                    [issue_tracking]\non_fail = \"pause\"\n\n\
@@ -4423,10 +4346,6 @@ mod tests {
             (
                 "`dispatch.lane_quite` in",
                 &["does not know:", "dispatch.lane_quite"],
-            ),
-            (
-                "dispatch.backend = \"tmux\" in",
-                &["dispatch.backend = \"tmux\" in this checkout's config"],
             ),
             (
                 "dispatch.worktree_root in",

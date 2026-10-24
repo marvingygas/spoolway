@@ -234,6 +234,11 @@ Set `enabled = true` under `[unattended]` in `config.toml`, or pass `--unattende
 `spoolway dispatch`. A task that blocks still lands on `blocked`. A lane is then started there
 to clear it.
 
+The run keeps that mode until a [reload](dispatcher.md#reloading), which sets it to the value of
+`enabled`. A reload that turns unattended on restarts the count of `max_output_tokens` and
+`max_cost_usd` at zero. A reload that turns it off stops new lanes on `blocked`. A lane already
+there finishes its turn.
+
 ```mermaid
 flowchart LR
   A[a step blocks] --> B[blocked]

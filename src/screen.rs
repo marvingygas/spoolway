@@ -311,8 +311,10 @@ pub(crate) fn poll_ready(
         .collect()
 }
 
-/// Watches the commands directory for anything that used to be learned only
-/// by rereading it — see [`crate::dispatch::PROBE_INTERVAL`]'s own doc.
+/// Watches a directory for anything that used to be learned only by rereading
+/// it — see [`crate::dispatch::PROBE_INTERVAL`]'s own doc. The dispatcher
+/// opens one on the commands directory, and one on the directory a request to
+/// reload lands in — see [`crate::reload`].
 /// Built once, outside `commands::dispatch`'s own loop, and polled alongside
 /// stdin every time that loop waits — see [`poll_ready`].
 ///
@@ -340,7 +342,9 @@ impl DirWatch {
         // renames the last run's log out of the way) or removed
         // (`IN_DELETE`, a `.pane` file forgotten once its pane closes, or a
         // task's run files cleaned up on archive) — everything either side
-        // of this watch actually does to the commands directory.
+        // of this watch actually does to the commands directory. A request to
+        // reload is one more new file (`IN_CREATE`), and clearing it one more
+        // `IN_DELETE`, in the other directory this is opened on.
         const MASK: u32 =
             libc::IN_CREATE | libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_DELETE;
 

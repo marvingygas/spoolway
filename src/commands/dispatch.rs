@@ -50,6 +50,62 @@ pub(crate) fn already_running(repo: &Repo, from_screen: bool) -> Result<bool> {
     Ok(crate::lock::Lock::holder(&repo.lock_file())?.is_some())
 }
 
+/// How often `spoolway dispatch reload` looks for its answer and for the
+/// dispatcher still holding the lock.
+const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `spoolway dispatch reload`: ask the running dispatcher to load the
+/// pipelines and config again, wait for its answer and print it.
+///
+/// Returns the process exit code: 0 for a good reload, 1 for a refusal, for no
+/// dispatcher, and for one that stopped before it answered.
+///
+/// There is no timeout. The wait ends when the answer lands or when the lock
+/// stops naming the dispatcher the request was written for. Without the second
+/// check a dispatcher that is stopped between the request and its next pass
+/// would leave this waiting for good. A request left behind that way is not
+/// wasted: the next dispatcher answers it as loaded at its start.
+pub fn dispatch_reload(repo: &Repo) -> Result<i32> {
+    let lock = repo.lock_file();
+    let Some(holder) = crate::lock::Lock::holder(&lock)? else {
+        // No request is written: nobody would read it, and it would sit in the
+        // project home until a later dispatcher swept it up.
+        eprintln!(
+            "no dispatcher is running, so there is nothing to reload.\n  \
+             spoolway dispatch    # a new run loads every file as it is now"
+        );
+        return Ok(1);
+    };
+    let id = crate::reload::request(repo)?;
+    loop {
+        if let Some(answer) = crate::reload::answer(repo, &id)? {
+            return Ok(match answer.outcome {
+                crate::reload::Outcome::Loaded => {
+                    println!("{}", answer.render());
+                    0
+                }
+                crate::reload::Outcome::Refused(_) => {
+                    eprintln!("{}", answer.render());
+                    1
+                }
+            });
+        }
+        if crate::lock::Lock::holder(&lock)? != Some(holder) {
+            // The dispatcher may have answered between the look above and the
+            // lock check, then stopped, so the answer is read once more.
+            if crate::reload::answer(repo, &id)?.is_some() {
+                continue;
+            }
+            eprintln!(
+                "the dispatcher stopped before answering, so nothing was reloaded.\n  \
+                 spoolway dispatch    # a new run loads every file as it is now"
+            );
+            return Ok(1);
+        }
+        std::thread::sleep(RELOAD_POLL);
+    }
+}
+
 /// Run the pipeline: one pass, or a loop on the dispatcher's fixed poll rate.
 ///
 /// Returns the code the process should exit with, rather than `()`, so a
@@ -59,10 +115,10 @@ pub(crate) fn already_running(repo: &Repo, from_screen: bool) -> Result<bool> {
 /// still `Err` — see `crate::main` for where each of these becomes a
 /// process exit code.
 pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<i32> {
-    // The mode is settled here, once, and written into the lock — every lane's
+    // The mode is settled here, and written into the lock — every lane's
     // own `spoolway report` reads it back from there, so a `--unattended` typed
     // on this command line reaches the processes that actually decide what a
-    // block does.
+    // block does. A reload switches it to `unattended.enabled` later.
     let unattended = args.unattended(&repo.config);
 
     // An unattended run staffs `blocked` instead of parking a task for a
@@ -179,10 +235,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
     // There is one way to start a run and it is visible: refused here, in the
     // same early group as the three checks above, so a run begun in a
-    // backgrounded shell or a `backend = headless` config edit outside the
-    // harness is stopped before it takes the lock or writes anywhere, not
-    // found and killed by hand once it is already spending. No exemption —
-    // not an environment override, not a per-platform carve-out.
+    // backgrounded shell is stopped before it takes the lock or writes
+    // anywhere, not found and killed by hand once it is already spending. The
+    // headless backend, which nothing draws, can only be picked by the
+    // harness's own `SPOOLWAY_TEST_BACKEND=headless`.
     check_dispatcher_visible(mux.as_ref())?;
     // The test-only kill hook is armed for this process alone, and a bad
     // `SPOOLWAY_TEST_KILL_AT` name is refused here, before anything is spent.
@@ -246,7 +302,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // graph this dispatcher does rather than on files edited since. See
     // `crate::pipeline_snapshot`. Before any lane exists, so no lane of
     // this run can report ahead of it.
-    crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
+    crate::pipeline_snapshot::write(repo, pipelines, &repo.config.unattended)
+        .context("refusing to start")?;
+    // A request a dead dispatcher left is answered here, as loaded: this start
+    // has just loaded every file, and serving it as well would load twice.
+    for problem in crate::reload::settle_left_behind(repo) {
+        crate::problem_log::append(repo, &problem);
+        println!("  ! {problem}");
+    }
 
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -286,12 +349,18 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // the wait below falls back to the plain interval alone, exactly as it
     // behaved before this task.
     let watch = crate::screen::open_dir_watch(&repo.commands_dir());
+    // The same wake for a request to reload, so it is read at once instead of
+    // up to `interval` later — see `crate::reload`.
+    let reload_watch = crate::screen::open_dir_watch(&crate::reload::requests_dir(repo));
 
     // The config this run is using. Starts as the one `main` loaded and is
     // replaced at the top of any pass that finds `config.toml` or the config
     // override changed, by whatever they say then — see `ConfigWatch` and
     // `reload_config`.
     let mut live = repo.clone();
+    // The pipelines this run routes on. Starts as the ones `main` loaded and
+    // is replaced whole by a good reload — see `crate::reload::serve`.
+    let mut live_pipelines = pipelines.clone();
     // The parse error the last reload reported, so a config that stays broken
     // is announced on the pass that found it and not on every pass after.
     let mut reload_error: Option<String> = None;
@@ -324,7 +393,35 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
         config_watch.reload(&mut live, &mut reload_error, &mut record_error);
-        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref())
+        // Ahead of the dispatcher this pass builds, so no lane launches on the
+        // old graph once the snapshot holds the new one.
+        //
+        // The watch is drained before the requests are read. A request that
+        // lands after the read keeps its event for the wait below to wake on,
+        // where a drain after the read would swallow it. The cost is that
+        // clearing a request's file wakes the next wait once, for a pass that
+        // finds nothing.
+        if let Some(reload_watch) = &reload_watch {
+            reload_watch.drain();
+        }
+        if let Some(served) = crate::reload::serve(&mut live, &mut live_pipelines) {
+            // A refusal is a problem and goes in the log, on one line. A good
+            // reload is only said.
+            match served.answer.problem_line() {
+                Some(line) => {
+                    crate::problem_log::append(repo, &line);
+                    for line in served.answer.render().lines() {
+                        println!("  {line}");
+                    }
+                }
+                None => println!("  reload: {}", served.answer.render()),
+            }
+            for problem in &served.problems {
+                crate::problem_log::append(repo, problem);
+                println!("  ! {problem}");
+            }
+        }
+        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, &live_pipelines, mux.as_ref())
             .with_memory(std::mem::take(&mut pass_memory));
 
         let mut spent_out = None;
@@ -386,7 +483,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(ceiling) = spent_out {
-            stop(&live, pipelines, mux.as_ref())?;
+            stop(&live, &live_pipelines, mux.as_ref())?;
             // The screen shows stderr as the reason its dispatcher stopped,
             // and prints nothing of stdout at all.
             if args.screen {
@@ -410,7 +507,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(&live, pipelines, mux.as_ref())?;
+            stop(&live, &live_pipelines, mux.as_ref())?;
             if let Some(line) = ctrl_c_line(args.screen) {
                 crate::problem_log::append(repo, &line);
             }
@@ -427,7 +524,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
                 if idle_may_end(repo) && !args.screen {
-                    stop(&live, pipelines, mux.as_ref())?;
+                    stop(&live, &live_pipelines, mux.as_ref())?;
                     crate::problem_log::append(
                         repo,
                         &stop_line("stopped on an empty queue", "every task is done"),
@@ -464,7 +561,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         consecutive_working = 0;
 
         // The wait between passes: the floor alone, unless a finished
-        // background command wakes it early — see
+        // background command or a request to reload wakes it early — see
         // `crate::screen::open_dir_watch`'s own doc.
         println!(
             "  next pass in {}",
@@ -475,16 +572,23 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             if crate::platform::stop::asked() {
                 break;
             }
-            let Some(watch) = &watch else {
+            let watches: Vec<&crate::screen::DirWatch> =
+                watch.iter().chain(reload_watch.iter()).collect();
+            if watches.is_empty() {
                 // The floor alone, in the same slices as before — see
                 // `crate::screen::open_dir_watch`'s own doc — so a stop asked
                 // for mid-wait is still noticed within a second rather than a
                 // whole interval later.
                 std::thread::sleep(crate::status::POLL.min(left));
                 continue;
-            };
-            let ready = crate::screen::poll_ready(&[watch.fd()], left);
-            if ready[0] && watch.drain() {
+            }
+            let fds: Vec<_> = watches.iter().map(|watch| watch.fd()).collect();
+            let ready = crate::screen::poll_ready(&fds, left);
+            let mut woken = false;
+            for (watch, ready) in watches.iter().zip(ready) {
+                woken |= ready && watch.drain();
+            }
+            if woken {
                 break;
             }
         }
@@ -574,15 +678,17 @@ impl ConfigWatch {
 /// written is announced the same way as a reload error, once per distinct
 /// message in `record_reported`.
 ///
-/// Pipelines are not reloaded here. They follow the rule for pipeline files:
-/// the dispatcher keeps what it loaded at start. See `crate::pipeline_snapshot`.
+/// Pipelines are not reloaded here. The dispatcher keeps what it loaded until
+/// a person asks for a reload — see `crate::reload`, which also takes this
+/// config at that moment. See `crate::pipeline_snapshot`.
 ///
 /// Three groups of keys are fixed at start even though `config get` shows
 /// their new value at once: `unattended.blocked_agent`, `blocked_model`,
 /// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
-/// the pipelines when they load; `unattended.enabled` is settled once into
-/// the lock; `dispatch.backend` picks the multiplexer once. A change to any
-/// of them needs a restart.
+/// the pipelines when they load, so only a reload or a restart brings them
+/// in; `unattended.enabled` is written into the lock, so only a reload or a
+/// restart changes the run's mode; `SPOOLWAY_TEST_BACKEND` picks the multiplexer once, from the
+/// environment the dispatcher started with, and only a restart changes it.
 fn reload_config(
     live: &mut Repo,
     reported: &mut Option<String>,
@@ -1461,8 +1567,8 @@ pub(crate) fn check_backend_checkout(
                     "{} has no main checkout herdr can resolve a workspace onto",
                     repo.root.display()
                 ),
-                fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
-                      dispatch.backend headless"
+                fix: "a bare repository, say. Run spoolway from a clone that has a \
+                      working tree."
                     .to_string(),
             }));
         }
@@ -1500,43 +1606,24 @@ pub(crate) fn check_backend_checkout(
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
 
-/// Refuse a start nobody can see: a herdr run outside any pane, or a
-/// `backend = headless` run started without the end-to-end harness's own
-/// marker.
+/// Refuse a start nobody can see: a herdr run outside any pane.
 ///
-/// Not a third [`Refusal`]: neither half of this reads as a `doctor` row —
-/// there is no dispatcher yet for `doctor` to ask whether it is visible —
-/// and the herdr half's own message is the multi-line shape the task's
-/// mockup draws, not the single line [`refuse`] joins a reason and a fix
-/// into.
+/// Not a third [`Refusal`]: it does not read as a `doctor` row — there is no
+/// dispatcher yet for `doctor` to ask whether it is visible — and its message
+/// is the multi-line shape the task's mockup draws, not the single line
+/// [`refuse`] joins a reason and a fix into.
 ///
-/// `headless` is checked by name rather than by a trait method the way the
-/// herdr half is: the marker gates the backend itself, not any property a
-/// `Mux` could answer for — a fake pane to ask about would be one more thing
-/// for a test double to get right for no reason a real backend needs.
+/// `headless` is checked by name rather than by a trait method: it is only
+/// ever chosen by the harness's own `SPOOLWAY_TEST_BACKEND=headless` — see
+/// [`crate::mux::backend`] — which is the marker that nothing needs to draw
+/// it, and a fake pane to ask about would be one more thing for a test double
+/// to get right for no reason a real backend needs.
 fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
     if mux.name() == "headless" {
-        return check_headless_marker();
+        return Ok(());
     }
     if !mux.in_own_pane() {
         bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
-    }
-    Ok(())
-}
-
-/// Refuse `backend = headless` unless the end-to-end harness's marker is
-/// exported. Split out of [`check_dispatcher_visible`] so `doctor`'s "lanes
-/// can be started" row gives the very reason a start gives, rather than
-/// passing a backend `dispatch` then refuses.
-pub(crate) fn check_headless_marker() -> Result<()> {
-    if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
-        bail!(
-            "backend = headless is spoolway's own test backend — nothing draws it \
-             anywhere a person can see, so only the end-to-end harness runs it, with \
-             {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
-             herdr",
-            crate::headless::TEST_BACKEND_ENV
-        );
     }
     Ok(())
 }
@@ -1842,6 +1929,31 @@ mod tests {
             "unattended.max_cost_usd reached: $5.02 of $5.00\n\
              Every task is where its last lane left it."
         );
+    }
+
+    /// A dispatcher that stops before it answers must not leave `dispatch
+    /// reload` waiting. Without the lock check in the wait this test never
+    /// returns.
+    ///
+    /// The lock file is removed from another thread a moment after the
+    /// request is written, which is what a dispatcher that exits does to it.
+    #[test]
+    fn a_reload_stops_waiting_when_the_dispatcher_goes_away() {
+        let (repo, _root_guard) = fixture("reload-dispatcher-gone");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let lock_file = repo.lock_file();
+        let requests = crate::reload::requests_dir(&repo);
+        let remover = std::thread::spawn(move || {
+            while std::fs::read_dir(&requests).map_or(true, |mut dir| dir.next().is_none()) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::fs::remove_file(lock_file).unwrap();
+        });
+
+        let code = dispatch_reload(&repo).unwrap();
+        remover.join().unwrap();
+
+        assert_eq!(code, 1);
     }
 
     /// A dispatcher already running for this repo must send `spoolway
@@ -2642,7 +2754,7 @@ mod tests {
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
         assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
         assert!(
-            !bare.contains("dispatch.backend"),
+            !bare.contains("working tree"),
             "a doctor row must carry the short reason alone, not the fix: {bare}"
         );
 
@@ -2650,7 +2762,7 @@ mod tests {
             "{:#}",
             refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
         );
-        assert!(refused.contains("dispatch.backend"), "{refused}");
+        assert!(refused.contains("working tree"), "{refused}");
     }
 
     /// herdr against a dispatcher started inside a linked worktree of its
@@ -2691,8 +2803,8 @@ mod tests {
             "the fix names the checkout to run from instead: {refused}"
         );
         assert!(
-            !refused.contains("dispatch.backend"),
-            "no backend switch is offered — herdr is refused this checkout, not this project: \
+            !refused.contains("working tree"),
+            "no clone is suggested — herdr is refused this checkout, not this project: \
              {refused}"
         );
 
@@ -2728,42 +2840,17 @@ mod tests {
         assert!(check_dispatcher_visible(&mux).is_ok());
     }
 
-    /// `backend = headless` with no harness marker is refused, naming it as
-    /// the test backend and offering the way back to herdr.
-    ///
-    /// Read through [`crate::platform::env_var`] rather than `std::env::var`
-    /// so the marker can be set per-thread below without touching the real
-    /// process environment every other test shares.
+    /// The headless backend, which only the harness can pick, passes with no
+    /// pane at all — `in_own_pane: false` proves the pane check meant for
+    /// herdr is not what it answers to.
     #[test]
-    fn dispatcher_visible_refuses_headless_with_no_marker() {
+    fn dispatcher_visible_passes_headless_without_a_pane() {
         let mux = StubMux {
             name: "headless",
             available: true,
             in_own_pane: false,
         };
-        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
-        assert!(err.contains("test backend"), "{err}");
-        assert!(
-            err.contains("spoolway config set dispatch.backend herdr"),
-            "{err}"
-        );
-    }
-
-    /// The same run passes once the end-to-end harness's own marker is set —
-    /// `in_own_pane: false` alongside it, to prove the marker is what gates
-    /// this backend rather than the pane check meant for herdr.
-    #[test]
-    fn dispatcher_visible_passes_headless_with_the_marker_set() {
-        let mux = StubMux {
-            name: "headless",
-            available: true,
-            in_own_pane: false,
-        };
-        let result =
-            crate::platform::test_env::with_env(crate::headless::TEST_BACKEND_ENV, "1", || {
-                check_dispatcher_visible(&mux)
-            });
-        assert!(result.is_ok());
+        assert!(check_dispatcher_visible(&mux).is_ok());
     }
 
     /// A project with no layer at all is nothing to ask about — the gate

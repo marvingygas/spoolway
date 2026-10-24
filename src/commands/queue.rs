@@ -11944,7 +11944,8 @@ mod tests {
     fn queue_add_on_a_running_dispatcher_refuses_a_pipeline_it_never_loaded() {
         let (repo, _root) = fixture("queue-add-on-snapshot");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin(), &repo.config.unattended)
+            .unwrap();
         let loaded = crate::pipeline_snapshot::LoadedPipelines::live(&repo).unwrap();
 
         let submit = |id: &str, pipeline: &str| {
@@ -13470,8 +13471,8 @@ mod tests {
     /// `parked_from: blocked`.
     #[test]
     fn queue_pause_interrupts_a_blocked_tasks_live_unblocker() {
-        let (mut repo, _root_guard) = fixture("queue-pause-blocked");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("queue-pause-blocked");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
@@ -13638,8 +13639,8 @@ mod tests {
     /// refuses it with `spoolway resume`'s message and leaves it alone.
     #[test]
     fn queue_resume_refuses_a_task_with_a_live_lane() {
-        let (mut repo, _root_guard) = fixture("queue-resume-live-lane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("queue-resume-live-lane");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -13667,8 +13668,8 @@ mod tests {
     /// `queue pause`, and its file is left exactly as it was.
     #[test]
     fn queue_resume_refuses_a_blocked_task_with_a_live_unblocker() {
-        let (mut repo, _root_guard) = fixture("queue-resume-blocked-live");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("queue-resume-blocked-live");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
@@ -13697,8 +13698,8 @@ mod tests {
     /// start a second lane beside it.
     #[test]
     fn queue_resume_refuses_a_blocked_task_the_dispatcher_has_claimed() {
-        let (mut repo, _root_guard) = fixture("queue-resume-blocked-claimed");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("queue-resume-blocked-claimed");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[]);
         let mut task = queued(&repo, "stuck");
@@ -16744,9 +16745,9 @@ mod tests {
     #[test]
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
-        let (mut repo, _root_guard) = fixture("screen-hosted-routines-popup");
+        let (repo, _root_guard) = fixture("screen-hosted-routines-popup");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         write_routine(
             &repo,
             "nightly",
@@ -21436,9 +21437,9 @@ mod tests {
     /// no sign it did anything at all.
     #[test]
     fn picking_open_with_no_multiplexer_surfaces_the_refusal() {
-        let (mut repo, _root_guard) = fixture("screen-open-headless");
+        let (repo, _root_guard) = fixture("screen-open-headless");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
@@ -21700,9 +21701,9 @@ mod tests {
     /// `Mode::Routines` afterwards, not falling back to `Mode::Browsing`.
     #[test]
     fn picking_open_in_routines_with_no_multiplexer_surfaces_the_refusal() {
-        let (mut repo, _root_guard) = fixture("routines-open-headless");
+        let (repo, _root_guard) = fixture("routines-open-headless");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         write_routine(
             &repo,
             "nightly",
@@ -22260,9 +22261,9 @@ mod tests {
     /// multiplexer.
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
-        let (mut repo, _root_guard) = fixture("routine-new-job-tasks-pane");
+        let (repo, _root_guard) = fixture("routine-new-job-tasks-pane");
         let _home = crate::editor::pin_terminal_editor();
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        crate::mux::force_headless_for_test();
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();

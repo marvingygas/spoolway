@@ -174,15 +174,13 @@ PROFILE
   # prompt's own opening line: `stacker`'s `You own git.` under `own_prompts`,
   # and the shipped prompt's `# Create PR` under this opt-out.
   [ -n "${SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS:-}" ] || own_prompts
-  # `spoolway dispatch` refuses `backend = headless` outright unless this is
-  # set — the backend draws nowhere a person can see, so only this harness
-  # (no multiplexer in CI) may run it. Exported here, beside the config edit
-  # that picks the backend, so every later `dispatch` this suite's own shell
-  # spawns — including the resident one `dispatcher_start` sets going in
-  # lib.sh — inherits it the same way it already inherits
+  # `headless` here is what picks the headless backend: it draws nowhere a
+  # person can see, so only this harness (no multiplexer in CI) may run it,
+  # and no config key can. Exported here so every later `dispatch` this
+  # suite's own shell spawns — including the resident one `dispatcher_start`
+  # sets going in lib.sh — inherits it the same way it already inherits
   # `SPOOLWAY_PROJECT_HOME`.
-  export SPOOLWAY_TEST_BACKEND=1
-  must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
+  export SPOOLWAY_TEST_BACKEND=headless
   # How long a lane may be quiet before the watchdog reminds it to report.
   # It ships at fifteen minutes, which is patience for a real lane waiting on
   # a real test run — and far longer than any suite here is willing to sit.

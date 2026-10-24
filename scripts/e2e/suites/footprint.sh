@@ -115,7 +115,9 @@ done
 make_shim herdr "$HERDRBIN/herdr"
 PATH="$SHIMS:$PATH"; export PATH
 
-must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+# Any value but `headless` runs herdr, here the double above; `1` also keeps
+# the test-only gates open, as the harness's own export does.
+export SPOOLWAY_TEST_BACKEND=1
 must "the lane patience" "$SPOOLWAY" config set dispatch.lane_quiet 1h
 must "room for every lane" "$SPOOLWAY" config set dispatch.visible_lanes "$LANES"
 

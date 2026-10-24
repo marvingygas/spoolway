@@ -528,7 +528,7 @@ mod tests {
             text.contains(&crate::confkv::reference_table()),
             "config contract does not carry config.toml's own header table verbatim"
         );
-        assert!(text.contains("dispatch.backend"));
+        assert!(text.contains("dispatch.lane_quiet"));
         assert!(text.contains("spoolway config set"));
         assert!(text.contains("spoolway config override"));
     }

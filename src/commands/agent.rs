@@ -400,7 +400,7 @@ fn resume_clause(
         return Clause::Warn(
             "no headless row, so this kind runs only under a multiplexer:".into(),
             vec![
-                "`dispatch.backend = \"headless\"` refuses to start it rather than guessing \
+                "the headless test backend refuses to start it rather than guessing \
                  a flag at a real binary"
                     .into(),
                 "a step with `session: true` opens fresh every time".into(),

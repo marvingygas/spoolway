@@ -62,6 +62,43 @@ pub struct Lock {
     started: String,
 }
 
+/// A mode line [`Lock::switch_mode`] replaced, kept so a reload that fails
+/// after the switch can put the lock back exactly as it was.
+#[derive(Debug)]
+pub(crate) struct ModeSwitch {
+    path: PathBuf,
+    previous: String,
+    modified: std::time::SystemTime,
+}
+
+/// What [`ModeSwitch::undo`] could not put back. The two differ in what the
+/// run is left with, so the caller has to be able to tell them apart.
+#[derive(Debug)]
+pub(crate) enum UndoError {
+    /// The old text is not back: the lock still has the new mode line.
+    Text(anyhow::Error),
+    /// The old text is back, and so is the mode, but the modified time is
+    /// still the switch's.
+    Time(anyhow::Error),
+}
+
+impl ModeSwitch {
+    /// Put the old text back, and the old modified time with it. The time is
+    /// restored because it starts the run's spend window: a switch that was
+    /// undone must not have moved it.
+    pub(crate) fn undo(self) -> std::result::Result<(), UndoError> {
+        crate::task::write_atomic(&self.path, self.previous).map_err(UndoError::Text)?;
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&self.path)
+            .with_context(|| format!("reopening {}", self.path.display()))
+            .map_err(UndoError::Time)?;
+        file.set_modified(self.modified)
+            .with_context(|| format!("restoring the modified time of {}", self.path.display()))
+            .map_err(UndoError::Time)
+    }
+}
+
 /// The line a dispatcher prints when [`Lock::still_held`] says it lost its
 /// lock. One line for every way of losing it — deleted, re-taken, or
 /// overwritten — because the reader's next step is the same: look at who
@@ -178,9 +215,10 @@ impl Lock {
     ///
     /// The lock is the right place to ask because the question is about *this
     /// run*, not about the project: `spoolway dispatch --unattended` is a
-    /// decision somebody made this afternoon, and config.toml never hears about
-    /// it. A lane's `spoolway report` reads it here and gets the answer its own
-    /// dispatcher started with, however the two disagree with the file.
+    /// decision somebody made this afternoon, and config.toml does not hear
+    /// about it until a reload makes the run follow the file. A lane's
+    /// `spoolway report` reads it here and gets the answer its own dispatcher
+    /// is in now, however the two disagree with the file.
     ///
     /// `None` from a stale lock is the honest answer rather than a cautious
     /// one: a person running `spoolway report` by hand in their own checkout
@@ -196,6 +234,46 @@ impl Lock {
             ATTENDED => Some(false),
             _ => None,
         }
+    }
+
+    /// Rewrite the mode line of the lock this process holds, when it differs
+    /// from `unattended`, and hand back the means to put the old line back.
+    /// `None` when the mode already matches, or when the file does not name
+    /// this process, whose lock it is then not to edit.
+    ///
+    /// Only the third line changes. The pid and start lines are what
+    /// [`Lock::still_held`] compares, so a rewrite that touched them would
+    /// make the dispatcher stop itself on the next pass.
+    ///
+    /// The file is replaced only when the mode changes, because its modified
+    /// time is the start of the run's spend window — see
+    /// [`crate::status::run_start`]. A rewrite that changed nothing would
+    /// forget everything the unattended ceilings had counted so far.
+    pub(crate) fn switch_mode(path: &Path, unattended: bool) -> Result<Option<ModeSwitch>> {
+        let previous = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let mut lines: Vec<&str> = previous.lines().collect();
+        let ours = lines.first().map(|pid| pid.trim()) == Some(&std::process::id().to_string());
+        let wanted = match unattended {
+            true => UNATTENDED,
+            false => ATTENDED,
+        };
+        if !ours || lines.len() < 3 || lines[2].trim() == wanted {
+            return Ok(None);
+        }
+        let modified = std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .with_context(|| format!("reading {}", path.display()))?;
+        lines[2] = wanted;
+        crate::task::write_atomic(path, format!("{}\n", lines.join("\n")))?;
+        Ok(Some(ModeSwitch {
+            path: path.to_path_buf(),
+            previous,
+            modified,
+        }))
     }
 
     /// The pid of a live dispatcher, if there is one.
@@ -979,6 +1057,45 @@ mod tests {
         let _held = Lock::acquire(&path, false, None).unwrap();
         let err = Lock::acquire(&path, false, None).unwrap_err();
         assert!(!err.to_string().contains("delete"), "{err}");
+        drop(dir);
+    }
+
+    /// A switch changes the mode line and nothing else, so the dispatcher
+    /// still holds its lock, and a switch to the mode it already has leaves
+    /// the file and its modified time alone.
+    #[test]
+    fn switching_the_mode_rewrites_only_the_mode_line_and_only_on_a_change() {
+        let (path, dir) = scratch("switch-mode");
+        let lock = Lock::acquire(&path, false, Some("w1:p1")).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert!(Lock::switch_mode(&path, false).unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+
+        let switch = Lock::switch_mode(&path, true).unwrap().expect("a change");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before.replacen("\nattended\n", "\nunattended\n", 1));
+        assert_eq!(Lock::unattended(&path), Some(true));
+        assert!(lock.still_held());
+
+        switch.undo().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+        drop(dir);
+    }
+
+    /// A lock that names another process is not this one's to edit.
+    #[test]
+    fn a_lock_another_process_holds_is_not_switched() {
+        let (path, dir) = scratch("switch-foreign");
+        std::fs::write(&path, "1\nstart\nattended\n\n").unwrap();
+        assert!(Lock::switch_mode(&path, true).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "1\nstart\nattended\n\n"
+        );
         drop(dir);
     }
 

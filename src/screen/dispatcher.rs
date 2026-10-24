@@ -207,9 +207,8 @@ impl Dispatcher {
         self.asked.is_some()
     }
 
-    /// `None` while the child is still running. Once it has exited, the
-    /// popup that says why, or `Some(None)` for a child that stopped because
-    /// it was asked to.
+    /// `None` while the child is still running. Once it has exited, why,
+    /// or `Some(None)` for a child that stopped because it was asked to.
     ///
     /// Whether it ever ran decides the popup's title, and two things say
     /// so. A clean exit is one: under `--from-screen` every refusal before
@@ -220,7 +219,7 @@ impl Dispatcher {
     /// call. That is only while the dispatch tab is open, which is why it
     /// is not the only witness: it catches the rarer run that held the
     /// lock and then failed, provided the tab was open to see it.
-    pub(crate) fn ended(&mut self, lock_file: &Path) -> Option<Option<Vec<String>>> {
+    pub(crate) fn ended(&mut self, lock_file: &Path) -> Option<Option<Ended>> {
         let pid = self.process.id();
         if !self.ran && crate::lock::Lock::holder(lock_file).ok().flatten() == Some(pid) {
             self.ran = true;
@@ -236,13 +235,34 @@ impl Dispatcher {
         // spoke.
         let text = text.trim();
         let text = text.strip_prefix("spoolway: ").unwrap_or(text);
-        Some(Some(match text.is_empty() {
-            true => popup(
-                self.ran,
-                &format!("It exited with {status} and said nothing."),
-            ),
-            false => popup(self.ran, text),
+        let reason = match text.is_empty() {
+            true => format!("It exited with {status} and said nothing."),
+            false => text.to_string(),
+        };
+        Some(Some(Ended {
+            ran: self.ran,
+            reason,
         }))
+    }
+}
+
+/// Why a child ended without being asked to: what it said, and whether it
+/// ever ran, which picks the title of the popup that says so.
+pub(crate) struct Ended {
+    ran: bool,
+    reason: String,
+}
+
+impl Ended {
+    /// The popup saying why — see [`popup`].
+    pub(crate) fn panel(&self) -> Vec<String> {
+        popup(self.ran, &self.reason)
+    }
+
+    /// The same popup with `more` as a paragraph of its own under the
+    /// reason: what else the child's going left undone.
+    pub(crate) fn panel_with(&self, more: &str) -> Vec<String> {
+        popup(self.ran, &format!("{}\n\n{more}", self.reason))
     }
 }
 
@@ -529,7 +549,7 @@ mod tests {
         let lock = crate::scratch::root("dispatcher-no-lock").join("dispatch.pid");
         for _ in 0..500 {
             if let Some(ended) = child.ended(&lock) {
-                return ended;
+                return ended.map(|ended| ended.panel());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

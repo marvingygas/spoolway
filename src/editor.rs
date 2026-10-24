@@ -155,7 +155,7 @@ pub(crate) fn describe(inputs: &Inputs, no_pane: Option<&str>) -> Result<String>
         bail!(
             "`{}` opens in a pane, and the {backend} backend has no pane to open it in — \
              set window = true under [editor] in ~/.spoolway/editor.toml if it draws its \
-             own window, or run `spoolway config set dispatch.backend herdr`",
+             own window, or run spoolway outside the test harness",
             chosen.program
         );
     }

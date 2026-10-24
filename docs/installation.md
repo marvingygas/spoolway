@@ -327,7 +327,7 @@ spoolway doctor
 - every prompt a step names exists and passes its checks
 - each pipeline's `task_template:` names a file that exists
 - the configured issue-tracking hook has Unix line endings and an executable bit
-- the configured backend is one `spoolway dispatch` accepts
+- herdr is available to start lanes
 
 When a step runs the deprecated stack command, `doctor` prints one `note` line. It says
 the command is deprecated and names each `pipeline · step` that runs it. It also says to run

@@ -1026,12 +1026,20 @@ impl Tracker {
 }
 
 #[derive(Debug, Args, Default)]
-#[command(long_about = "Run the pipeline, and show what it is doing.\n\n\
+#[command(
+    long_about = "Run the pipeline, and show what it is doing.\n\n\
         A resident run holds the terminal it was started in: each pass starts and tears down \
         what the queue calls for, and prints a line per pass to say what it did. `ctrl-c` stops \
         the run. Bare `spoolway`'s dispatch tab draws the live board instead — this is the \
-        plain print-per-pass command scripts, CI and the e2e suite drive.")]
+        plain print-per-pass command scripts, CI and the e2e suite drive.\n\n\
+        `spoolway dispatch reload` does not start a run: it asks the one already running to load \
+        the pipelines and config again, and prints the answer.",
+    args_conflicts_with_subcommands = true
+)]
 pub struct DispatchArgs {
+    #[command(subcommand)]
+    pub command: Option<DispatchCommand>,
+
     /// Stop for nobody: a block starts a lane on `blocked` instead of parking
     /// the task in front of a person. Every pipeline stages `blocked` —
     /// `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*`
@@ -1053,7 +1061,9 @@ pub struct DispatchArgs {
     /// Overrides `unattended.enabled` for this run only, which is the shape
     /// the setting wants — the overnight run and the one you sit with are the
     /// same project on the same afternoon. `--attended` is the other direction,
-    /// for a project that leaves the config on.
+    /// for a project that leaves the config on. Both hold until the next
+    /// `spoolway dispatch reload`, which sets the mode back to what
+    /// `unattended.enabled` says.
     ///
     /// With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd`
     /// set this run has no ceiling of any kind: no block can park a task, so
@@ -1063,7 +1073,7 @@ pub struct DispatchArgs {
     pub unattended: bool,
 
     /// Park blocked tasks in front of a person for this run, whatever
-    /// `unattended.enabled` says.
+    /// `unattended.enabled` says, until the next `spoolway dispatch reload`.
     #[arg(long, overrides_with = "unattended")]
     pub attended: bool,
 
@@ -1076,6 +1086,17 @@ pub struct DispatchArgs {
     /// refusal, a spend ceiling — goes to stderr for the screen to show.
     #[arg(long = "from-screen", hide = true)]
     pub screen: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DispatchCommand {
+    /// Ask the running dispatcher to load every pipeline and `config.toml`
+    /// again, wait for its answer and print it.
+    ///
+    /// Exits 0 on `successfully loaded`. A refusal prints the whole reason and
+    /// exits 1, and the run stays exactly as it was. With no dispatcher running
+    /// it writes no request and exits 1.
+    Reload,
 }
 
 impl DispatchArgs {

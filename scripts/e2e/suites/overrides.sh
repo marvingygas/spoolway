@@ -345,7 +345,7 @@ works "the checkout is clean again" git_clean
 # right function, and the process exiting zero with something on stdout.
 works "config contract exits zero" "$SPOOLWAY" config contract
 says "and prints the register config.toml's own header renders from" \
-  "dispatch.backend" \
+  "dispatch.lane_quiet" \
   "$SPOOLWAY" config contract
 
 works "override contract exits zero" "$SPOOLWAY" override contract

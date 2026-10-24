@@ -137,7 +137,12 @@ dispatching` stops the child. `keep it running` and `esc` close the popup and le
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
 finishing` for one, left out once none are). `r` and the `o` options menu work whether or not
-a child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
+a child is running. `u` asks whichever dispatcher holds the project's lock, the tab's child or
+one started in a terminal, to load every pipeline file and `config.toml` again. It shows
+`updating config…`, then `successfully loaded` for one second, or the refusal in a popup closed
+with `enter`. The key line offers `[u] update config` only while a dispatcher holds the lock. See
+[Updating the config](dispatcher.md#updating-the-config). `q` or `ctrl-c` quits the whole screen
+and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
@@ -619,8 +624,8 @@ see [`spoolway`](#spoolway).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
-| `--attended` | | Park blocked tasks for a person, whatever the config says |
+| `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. Holds until the first `spoolway dispatch reload`. See [Unattended runs](pipelines.md#unattended-runs) |
+| `--attended` | | Park blocked tasks for a person, whatever the config says. Holds until the first `spoolway dispatch reload`. |
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
 See [The dispatcher](dispatcher.md#running-it).
@@ -780,6 +785,48 @@ is found or opened. A failure to find or open it is shown instead, on its own no
 | `3` | Empty queue and no job enabled |
 | `4` | Another dispatcher or screen already holds the project |
 | `1` | Any other error |
+
+### `spoolway dispatch reload`
+
+Ask the running dispatcher to load every pipeline file and `config.toml` again, without stopping
+any lane. It writes a request, waits for the answer to that request and prints it. It does not
+start a run, and it takes no flags. `--json` is refused.
+
+A good reload also sets the run to attended or unattended, as `unattended.enabled` says, even when
+the run started with `--unattended` or `--attended`. A reload refuses a config that turns
+`unattended.enabled` on with a blank `unattended.blocked_model`.
+
+```
+$ spoolway dispatch reload
+successfully loaded
+```
+
+| Outcome | Prints | Exit code |
+|---|---|---|
+| The dispatcher loaded the new files | `successfully loaded` on stdout | 0 |
+| The dispatcher refused | The whole refusal on stderr: what is in the way and how to fix it | 1 |
+| No dispatcher is running | Two lines on stderr, and no request is written | 1 |
+| The dispatcher stopped before it answered | That it stopped before answering, on stderr | 1 |
+
+A refusal changes nothing, and the run stays on what it had:
+
+```
+reload refused — nothing changed, the run is still on what it had:
+  fix-login: sitting on `review`, which pipeline `feature` no longer defines
+  Put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
+```
+
+With no dispatcher running it prints this, so it works even when a pipeline file or `config.toml` is broken:
+
+```
+no dispatcher is running, so there is nothing to reload.
+  spoolway dispatch    # a new run loads every file as it is now
+```
+
+The command has no timeout of its own. It waits until the answer lands, or until the project's
+lock stops naming the dispatcher it asked. A dispatcher answers at the top of its next pass, which
+on Linux starts as soon as the request is written, and on other systems within 10 seconds. See
+[Reloading](dispatcher.md#reloading).
 
 ### `spoolway issue show <reference>`
 
@@ -1574,7 +1621,7 @@ spoolway config edit
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
 | `path` | Print every place this project's setup lives: the setup folder, the plans folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","plans","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
-| `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
+| `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as a negative `unattended.max_cost_usd`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
 | `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vi`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 The `plans:` line follows `setup:`. In repo mode it names `plans/` in the project's home. In home
@@ -2060,9 +2107,6 @@ A note names each `pipeline · step` that runs the deprecated stack command. See
 A note names each file `sync` refuses, on its own line with the reason. A refused file is not
 counted in the `file(s) are behind this spoolway` note. See [Files spoolway
 refuses](installation.md#files-spoolway-refuses).
-
-The `lanes can be started` check fails for `dispatch.backend = "headless"` unless
-`SPOOLWAY_TEST_BACKEND` is set. It gives the same reason `spoolway dispatch` gives.
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it

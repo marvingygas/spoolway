@@ -8,7 +8,8 @@
 # What is asserted is the order of the frames it drew: the first is the queue
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
 # a dispatcher and, with no step running and nothing queued, stops it at once
-# with no popup. With a task queued it asks first.
+# with no popup. With a task queued it asks first. `u` there asks the running
+# dispatcher to reload, and the popup it opens closes itself once loaded.
 # While one screen is open, a second `spoolway` or `spoolway dispatch` in
 # the same project refuses. A refusal on the queue tab is drawn in a popup
 # over the tab, and so is what a clean submission queued, ending on whether a
@@ -212,6 +213,32 @@ works "and the queued task is still queued" grep -q '^stage: queued' \
   "$SPOOLWAY_PROJECT_HOME/queue/held-after.md"
 screen_stop
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/held-after.md"
+
+# `u` on the dispatch tab reaches the dispatcher the tab started through a
+# reload request in the project home, and its answer comes back the same way:
+# a real child serving a real request, which no unit test runs. The key line
+# offers `u` once the lock is held. `updating config…` stays up until the
+# answer lands; `successfully loaded` then shows and closes itself, with no
+# key pressed. Looked for in the whole log since `u`, not in the last frame:
+# it is up for a second, and a poll can land either side of it.
+UPDATE="$LIVE/update.txt"
+screen_start "$UPDATE"
+screen_dispatch
+if poll_until 10 now_says "[u] update config"
+then ok "the key line offers u while the dispatcher holds the lock"
+else bad "the key line offers u while the dispatcher holds the lock"; fi
+UPDATE_MARK=$(wc -l < "$UPDATE")
+screen_press u
+if poll_until 15 screen_drew_since "$UPDATE_MARK" "successfully loaded"
+then ok "u reloads the running dispatcher and says it loaded"
+else bad "u reloads the running dispatcher and says it loaded"; fi
+works "under the update config popup" screen_drew_since "$UPDATE_MARK" "─ update config "
+if poll_until 10 now_lacks "successfully loaded"
+then ok "and the popup closes itself"
+else bad "and the popup closes itself"; fi
+screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "leaving the dispatcher running" "dispatcher running · pid " "$LAST"
+screen_stop
 
 # The warnings gate checks the pipelines on disk when `enter` is pressed, not
 # the copy the screen opened with. A pipeline written while the screen is up,

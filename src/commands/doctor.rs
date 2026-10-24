@@ -1644,8 +1644,8 @@ fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
 }
 
 /// One row for each note a config load prints to stderr that no other row
-/// here already names: two hard-retired keys, the gone tmux backend, two
-/// retired `dispatch` settings, and an agent profile's retired `env` table.
+/// here already names: two hard-retired keys, two retired `dispatch`
+/// settings, and an agent profile's retired `env` table.
 /// Bare `spoolway` prints none of those notes — see
 /// `overrides::QUIET_NOTES` — so these rows are where it says them, in the
 /// "before dispatching" popup. Read off the raw file, as
@@ -1668,17 +1668,6 @@ fn load_note_rows(checkout: &Path) -> Vec<Finding> {
                  drop the key"
             ));
         }
-    }
-    if dispatch
-        .and_then(|d| d.get("backend"))
-        .and_then(toml::Value::as_str)
-        == Some("tmux")
-    {
-        notes.push(
-            "dispatch.backend = \"tmux\" in this checkout's config — the tmux backend is gone, \
-             so it loads as \"herdr\"; the key is rewritten on the next save"
-                .into(),
-        );
     }
     if dispatch.and_then(|d| d.get("tear_lanes_on_stop")).is_some() {
         notes.push(
@@ -1907,17 +1896,12 @@ fn branch_and_forge_checks(
 /// Whether a lane can be started at all — the one check that never depends on
 /// the pipeline or the config, only on whether the terminal multiplexer this
 /// machine has is one spoolway knows how to drive, and whether `dispatch`
-/// would accept it: `headless` is available everywhere but refused outside
-/// the end-to-end harness, and a pass here must not contradict that.
+/// would accept it.
 fn mux_check(mux: &dyn Mux) -> Finding {
     Finding::Check(
         "lanes can be started".into(),
         if mux.is_available() {
-            if mux.name() == "headless" {
-                crate::commands::dispatch::check_headless_marker().map(|()| Some(mux.name().into()))
-            } else {
-                Ok(Some(mux.name().into()))
-            }
+            Ok(Some(mux.name().into()))
         } else {
             Err(anyhow::anyhow!("{}", mux.unavailable()))
         },
@@ -4283,25 +4267,6 @@ mod tests {
         assert!(!custom.contains("run `spoolway init`"), "{custom}");
         assert!(custom.contains("write it yourself"), "{custom}");
         assert!(custom.contains("unblock-v2"), "{custom}");
-    }
-
-    /// `headless` answers as available everywhere, but `dispatch` refuses it
-    /// outside the end-to-end harness, so the row must fail with that
-    /// refusal unless the marker is exported.
-    #[test]
-    fn lanes_row_fails_for_headless_unless_the_test_marker_is_set() {
-        let (repo, _root_guard) = scratch_repo("headless-row");
-        let mux = crate::headless::Headless::new(&repo.root, &repo.home, repo.root.join("lanes"));
-        let marker = crate::headless::TEST_BACKEND_ENV;
-
-        let finding = mux_check(&mux);
-        let Finding::Check(_, Err(err)) = finding else {
-            panic!("headless without the marker must fail the row");
-        };
-        assert!(format!("{err:#}").contains(marker), "{err:#}");
-
-        let finding = crate::platform::test_env::with_env(marker, "1", || mux_check(&mux));
-        assert!(matches!(finding, Finding::Check(_, Ok(Some(name))) if name == "headless"));
     }
 
     #[test]

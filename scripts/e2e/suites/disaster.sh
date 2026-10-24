@@ -4,7 +4,7 @@
 # over a still-running lane, a lane that reports with nobody listening, and a
 # stop that leaves every lane running.
 #
-# `dispatch.backend = headless` makes every lane a real `setsid` process of
+# `SPOOLWAY_TEST_BACKEND=headless` makes every lane a real `setsid` process of
 # its own — see `fixture.sh` — which is what makes a kill of the
 # *dispatcher's* group the disaster scenario exactly: the lane is in a
 # session of its own by construction, and survives untouched. So most of

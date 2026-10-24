@@ -727,9 +727,10 @@ pub struct Dispatcher<'a> {
     /// see [`PassMemory`]. A dispatcher built for one pass alone starts with
     /// none, so it asks everything.
     memory: PassMemory,
-    /// Whether this run stops for a person. Settled once when the run takes its
-    /// lock and carried here rather than re-read per decision, so that one pass
-    /// cannot make half its choices in each mode.
+    /// Whether this run stops for a person. Read off the lock when the pass is
+    /// built and carried here rather than re-read per decision, so that one
+    /// pass cannot make half its choices in each mode. A reload rewrites the
+    /// lock between passes, never during one.
     unattended: bool,
     /// What each session in the usage ledger has already banked, by session
     /// id — folded once per pass out of [`Dispatcher::ledger`], rather than
@@ -6354,7 +6355,7 @@ impl<'a> Dispatcher<'a> {
     ///
     /// Falls back to the old detached run whenever the backend has none to
     /// offer: [`crate::mux::Mux::run_in_pane`] answers `None` for headless,
-    /// which is what makes `backend = "headless"` silently keep working —
+    /// which is what makes the headless backend silently keep working —
     /// nothing here treats a declined pane as a problem to report.
     ///
     /// `run_in_pane` is handed the dispatcher's own environment as an
@@ -10173,7 +10174,7 @@ mod tests {
             self
         }
         /// A backend whose lanes do not survive between turns — what
-        /// `backend = "headless"` is.
+        /// the headless backend is.
         fn detached(mut self) -> FakeMux {
             self.resident = false;
             self
@@ -27395,8 +27396,8 @@ mod tests {
     /// `done`, and the task waiting on it is no longer held back.
     #[test]
     fn a_task_closed_as_done_by_hand_is_archived_and_frees_its_dependent() {
-        let (mut repo, _root_guard) = fixture("close-as-done");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let (repo, _root_guard) = fixture("close-as-done");
+        crate::mux::force_headless_for_test();
         let path = add_task_with(&repo, "parent", crate::pipeline::BLOCKED, |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/parent".into());

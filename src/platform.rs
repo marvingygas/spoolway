@@ -802,6 +802,10 @@ pub fn remove_test_env(key: &str) {
 /// dispatcher exported them for *that* lane, so a fixture calling `report()`
 /// with no worktree of its own fell back on the lane's real one and committed
 /// its work as `wip(demo): release`.
+///
+/// `SPOOLWAY_TEST_BACKEND` is read the same way. A developer who exports
+/// `headless` in the shell that runs `cargo test` would otherwise put every
+/// board reading, which runs on a thread of its own, on the headless backend.
 pub fn env_var(key: &str) -> Result<String, std::env::VarError> {
     #[cfg(test)]
     {
@@ -826,12 +830,15 @@ pub(crate) mod test_env {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    /// The variables a dispatcher exports into a lane, which [`super::env_var`]
-    /// never reads from the real environment in a test build.
-    pub(crate) const LANE_VARS: [&str; 3] = [
+    /// The variables [`super::env_var`] never reads from the real environment
+    /// in a test build: the three a dispatcher exports into a lane, and the
+    /// harness's backend choice, which a developer may export in the shell
+    /// that runs the tests.
+    pub(crate) const LANE_VARS: [&str; 4] = [
         crate::commands::TASK_ENV,
         "SPOOLWAY_WORKTREE",
         "SPOOLWAY_HEAD",
+        crate::headless::TEST_BACKEND_ENV,
     ];
 
     thread_local! {

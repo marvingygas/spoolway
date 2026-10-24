@@ -88,7 +88,6 @@ These keys are refused:
 
 | Key | Refused when | Allowed |
 |---|---|---|
-| `dispatch.backend` | The value is not `herdr` or `headless`, such as `tmux` or `zellij` | `herdr`, `headless` |
 | `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
 | `models.<glob>.input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`, and the same rates under an `above_<N>k_tokens` tier | The value is negative, `inf` or `NaN` | A finite number of dollars per million tokens, 0 or more |
 | `unattended.max_cost_usd` | The value is negative, `inf` or `NaN` | A finite number of dollars, 0 or more |
@@ -119,9 +118,6 @@ Setting a tier rate to `0` where the row has no tier writes no tier. The line na
 model keeps.
 
 ```
-$ spoolway config set dispatch.backend tmux
-spoolway: dispatch.backend: `tmux` is not a backend — use herdr or headless
-
 $ spoolway config set unattended.blocked_agent ghost
 unattended.blocked_agent = ghost
 warning: no agent `ghost` in [agents] yet — `spoolway doctor` fails until one is added
@@ -344,9 +340,9 @@ on a detached HEAD refuse, as `config set` does.
 | `pipelines/<name>.yml` | After the dispatcher restarts, the same as an edit to a pipeline file. |
 
 The same rule holds for the tracked `.spoolway/config.toml`. `spoolway config get` shows a new
-value at once. The running dispatcher keeps the old value of `dispatch.backend`,
-`unattended.enabled` and the `unattended.blocked_*` keys until you restart it. See [Editing a
-pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+value at once. The running dispatcher keeps the old value of
+`unattended.enabled` and the `unattended.blocked_*` keys until you run `spoolway dispatch reload`
+or restart it. See [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
@@ -373,7 +369,6 @@ The refusal tells the lane to write the change it wanted into its report, so a p
 
 ```toml
 [dispatch]
-backend = "herdr"
 lane_quiet = "15m"
 auto_commit = true
 priority = "group"
@@ -385,7 +380,6 @@ lane_layout = "panes"
 
 | Key | Default | What it controls |
 |---|---|---|
-| `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report, and again after each further stretch of silence. A reminder the lane does not answer is never counted and never escalates the task. Only a lane that answers three reminders without reporting is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. Zero is refused. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. `reserve` ranks as `group` does, and also holds one slot on the cap of its next agent step for each group that has started. A group that has never run starts only while a slot is free beyond the held ones. See [What runs next](dispatcher.md#what-runs-next). |
@@ -419,7 +413,7 @@ These keys apply only when nobody is watching. See [Unattended runs](pipelines.m
 
 | Key | Default | What it controls |
 |---|---|---|
-| `enabled` | `false` | `true` staffs `blocked` with the unblocker lane instead of parking the task for a person. `gate:` still pauses the task for a person. `spoolway dispatch --unattended` or `--attended` overrides this for one run. |
+| `enabled` | `false` | `true` staffs `blocked` with the unblocker lane instead of parking the task for a person. `gate:` still pauses the task for a person. `spoolway dispatch --unattended` or `--attended` overrides this until the first `spoolway dispatch reload`, which sets the run to this value. |
 | `max_output_tokens` | `0` | Output tokens one unattended run may spend before the dispatcher stops starting lanes. `0` is no limit. Live lanes finish. |
 | `max_cost_usd` | `0.0` | Dollars one unattended run may spend before the dispatcher stops starting lanes. `0.0` is no limit. Whichever limit is hit first stops the run. See [Cost accounting](cost.md). |
 | `blocked_agent` | `claude` | The `[agents.*]` profile that runs the `blocked` step. A pipeline may override these five keys in its own `blocked` step. `spoolway init`, run again with no `--provider`, reads this key as the project's own provider; pointing it at a profile `init` did not create falls back to the menu's default, `claude`. |
@@ -996,7 +990,6 @@ inline table such as `issue_tracking = { ..., on_fail = "" }`. Commands that wri
 such as `spoolway config set`, `spoolway init --tracker` and `spoolway override promote`,
 leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
 `dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
-`dispatch.backend` set to `tmux` (which loads as `herdr` instead),
 `dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode`, `dispatch.keep_finished_lanes` and an `[agents.<profile>.env]` table. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
@@ -1014,6 +1007,7 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
+| `dispatch.backend` (`herdr` or `headless`) | Nothing. Every run uses herdr. Only the test harness picks the headless backend, by exporting `SPOOLWAY_TEST_BACKEND=headless`; see [Testing](testing.md). |
 | `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
 | `dispatch.keep_finished_lanes` | `dispatch.visible_lanes`. `true` loads as `"all"` and `false` as `1`. |
 | `housekeeping.price_max_age_days` | Nothing. `spoolway models` prints how old the price table is. |
