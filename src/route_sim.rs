@@ -126,7 +126,7 @@ mod tests {
             } else {
                 out += "    agent: claude\n";
                 if rng.chance(15) {
-                    out += "    gate: true\n";
+                    out += "    gate: on_pass\n";
                 }
             }
 

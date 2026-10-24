@@ -2538,6 +2538,13 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
                 renamed = Some((ids, dropped));
             }
         }
+        // `gate: true` and `gate: false` still load, so this is not a repair:
+        // it brings a gate to the spelling that names its outcome.
+        let mut gated = None;
+        if let Some((text, done)) = rewrite_gate(&on_disk, Layout::Steps) {
+            on_disk = text;
+            gated = Some(done);
+        }
 
         // A shape this release stopped loading — `loop: 0` is the one an
         // earlier release still ran — is refused by name, fenced or not, and
@@ -2574,7 +2581,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         }
 
         let region = crate::pipeline::KEY_BLOCK;
-        let mut changed = renamed.is_some();
+        let mut changed = renamed.is_some() || gated.is_some();
         match region.read(&on_disk) {
             // Half a fence is the one shape worth saying something about: the
             // lines under a start marker with no end could be anyone's, so
@@ -2599,7 +2606,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
                     ));
                     continue;
                 }
-                if renamed.is_none() {
+                if renamed.is_none() && gated.is_none() {
                     outcomes.push(Outcome::Kept);
                 }
             }
@@ -2632,6 +2639,10 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         if let Some((ids, dropped)) = renamed {
             outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
             outcomes.push(rename_note(&shown, &name, &ids, &dropped, Layout::Steps));
+        }
+        if let Some(done) = gated {
+            outcomes.push(Outcome::wrote(&shown, gate_wrote(&done)));
+            outcomes.extend(gate_notes(&shown, &done));
         }
         if changed {
             acts.push(Act::write(path, &shown, on_disk));
@@ -2746,6 +2757,10 @@ fn rename_outside_checkout(
         }
         Renamed::Done { text, ids, dropped } => (text, Some((ids, dropped))),
     };
+    let (text, gated) = match rewrite_gate(&text, layout) {
+        Some((text, done)) => (text, Some(done)),
+        None => (text, None),
+    };
     let stuck = headless_left(&text, layout);
     if !stuck.is_empty() {
         let why = stuck
@@ -2756,9 +2771,15 @@ fn rename_outside_checkout(
         outcomes.push(Outcome::blocked(&shown, format!("{consequence}: {why}")));
         return;
     }
-    if let Some((ids, dropped)) = renamed {
-        outcomes.push(Outcome::wrote(&shown, rename_wrote(&ids, &dropped)));
-        outcomes.push(rename_note(&shown, name, &ids, &dropped, layout));
+    if let Some((ids, dropped)) = &renamed {
+        outcomes.push(Outcome::wrote(&shown, rename_wrote(ids, dropped)));
+        outcomes.push(rename_note(&shown, name, ids, dropped, layout));
+    }
+    if let Some(done) = &gated {
+        outcomes.push(Outcome::wrote(&shown, gate_wrote(done)));
+        outcomes.extend(gate_notes(&shown, done));
+    }
+    if renamed.is_some() || gated.is_some() {
         acts.push(Act::write(path, &shown, text));
     }
 }
@@ -2853,6 +2874,151 @@ fn rename_note(
     Outcome::migrated(shown, long, short)
 }
 
+/// What [`rewrite_gate`] did to one step: its id, and whether the key was
+/// deleted (`gate: false`) rather than rewritten (`gate: true`).
+struct GateRewrite {
+    id: String,
+    dropped: bool,
+}
+
+/// Rewrite `gate: true` to `gate: on_pass` on every step of a pipeline file or
+/// patch, and delete `gate: false`, changing no other byte.
+///
+/// `gate:` was a yes or no that held a pass; it now names the outcome it
+/// holds. A pipeline still carrying `true` or `false` loads and behaves as it
+/// did, so this only brings the file to the new spelling. `false` is the
+/// default, so the line is deleted rather than renamed to nothing — a list
+/// item it opens gives its dash to the next key, as in [`rename_headless`].
+/// A patch keeps its `gate: false`: there it can switch off a gate the
+/// tracked step declares, and deleting the line would hand the gate back.
+///
+/// A line edit like [`rename_headless`], and with the same limits: a flow
+/// style step, a quoted key or a value that is not a plain boolean is left as
+/// it is, which still loads. `None` when nothing needed rewriting.
+fn rewrite_gate(text: &str, layout: Layout) -> Option<(String, Vec<GateRewrite>)> {
+    enum Line {
+        OnPass,
+        Drop,
+        DropOpening { next: usize },
+    }
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let (steps, top) = step_spans(&lines, layout)?;
+    let mut edits: Vec<(usize, Line)> = Vec::new();
+    let mut done: Vec<GateRewrite> = Vec::new();
+    for step in &steps {
+        let mut id = step.id.clone();
+        let mut found = None;
+        for (at, line) in lines.iter().enumerate().take(step.to).skip(step.from) {
+            if !has_content(line) {
+                continue;
+            }
+            let opens_item = at == step.from && matches!(layout, Layout::Steps);
+            let column = step.key_indent;
+            let on_key = match opens_item {
+                true => line.len() >= column && line.is_char_boundary(column),
+                false => indent_of(line) == column,
+            };
+            if !on_key {
+                continue;
+            }
+            let rest = &line[column..];
+            if is_key_line(rest, "gate") {
+                let value = rest["gate:".len()..]
+                    .split(" #")
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                let edit = match serde_norway::from_str::<bool>(value) {
+                    Ok(true) => Line::OnPass,
+                    Ok(false) if matches!(layout, Layout::Patch) => continue,
+                    Ok(false) if !opens_item => Line::Drop,
+                    Ok(false) => match (at + 1..step.to).find(|&n| has_content(lines[n])) {
+                        Some(next) if indent_of(lines[next]) == step.key_indent => {
+                            Line::DropOpening { next }
+                        }
+                        _ => continue,
+                    },
+                    Err(_) => continue,
+                };
+                found = Some((at, edit));
+            } else if is_key_line(rest, "id") && matches!(layout, Layout::Steps) {
+                id = rest["id:".len()..]
+                    .split(" #")
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_string();
+            }
+        }
+        if let Some((at, edit)) = found {
+            done.push(GateRewrite {
+                id,
+                dropped: !matches!(edit, Line::OnPass),
+            });
+            edits.push((at, edit));
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    for (at, line) in lines.iter().enumerate() {
+        if edits
+            .iter()
+            .any(|(_, edit)| matches!(edit, Line::DropOpening { next } if *next == at))
+        {
+            out.push_str(&line[..top]);
+            out.push('-');
+            out.push_str(&line[top + 1..]);
+            continue;
+        }
+        match edits.iter().find(|(edited, _)| *edited == at) {
+            Some((_, Line::Drop | Line::DropOpening { .. })) => {}
+            Some((_, Line::OnPass)) => {
+                let key = line.find("gate:").expect("an edited line names the key");
+                let body = line.trim_end_matches(['\r', '\n']);
+                // Whatever followed the value, a trailing comment and the
+                // line ending, stays as it was.
+                let tail = match body.find(" #") {
+                    Some(comment) => &line[comment..],
+                    None => &line[body.len()..],
+                };
+                out.push_str(&line[..key]);
+                out.push_str("gate: on_pass");
+                out.push_str(tail);
+            }
+            None => out.push_str(line),
+        }
+    }
+    Some((out, done))
+}
+
+/// The `wrote` line under a file [`rewrite_gate`] changed.
+fn gate_wrote(done: &[GateRewrite]) -> &'static str {
+    match (
+        done.iter().any(|step| !step.dropped),
+        done.iter().any(|step| step.dropped),
+    ) {
+        (true, false) => "`gate: true` rewritten to `gate: on_pass`",
+        (false, _) => "`gate: false` removed",
+        (true, true) => "`gate: true` rewritten to `gate: on_pass`, and `gate: false` removed",
+    }
+}
+
+/// One note per step [`rewrite_gate`] changed, each naming the file it is in.
+fn gate_notes(shown: &str, done: &[GateRewrite]) -> Vec<Outcome> {
+    done.iter()
+        .map(|step| {
+            let line = match step.dropped {
+                true => format!("{shown}: step `{}`: gate: false → removed", step.id),
+                false => format!("{shown}: step `{}`: gate: true → gate: on_pass", step.id),
+            };
+            Outcome::migrated(shown, line.clone(), line)
+        })
+        .collect()
+}
+
 /// Why `sync` still refuses a file whose `headless:` it could not rename:
 /// the key sits on a line [`rename_headless`] does not read.
 fn unrenamed_message(step_id: &str) -> String {
@@ -2916,47 +3082,42 @@ enum Renamed {
     },
 }
 
-/// Rename the `headless:` key of every step in a pipeline file or patch to
-/// `hide:`, and change nothing else, not one other byte.
-///
-/// The exception is `headless: false`, whose line is deleted. In 0.13.0 it
-/// only spelled out the default and still followed `dispatch.hide_commands`,
-/// while `hide: false` forces a pane. Renaming it would turn a step that
-/// followed the project setting into one that ignores it. A `headless: false`
-/// on the line that opens a list item (`- headless: false`) is deleted too, and
-/// the dash moves onto the item's next key. Only a step with no other key is
-/// left for [`unrenamed_message`]. Any spelling the loader reads as false
-/// counts, so `False` is dropped like `false`.
-///
-/// A line edit, not a re-serialisation, so comments, ordering, quoting and
-/// line endings survive, and it touches a line only when its key is exactly
-/// `headless:` at the indentation of the step's own keys. That excludes a
-/// `headless` inside a comment, a `description:` or a `run:` value, and the
-/// lines of a block scalar, which sit deeper than the key that opens them.
-/// A step written in flow style (`- {id: a, headless: true}`), a quoted key
-/// (`"headless": true`) and a list item opened by a `-` on a line of its own
-/// have no such line and are left as they are; the file then still names
-/// `headless:`, and the caller refuses it with [`unrenamed_message`].
-fn rename_headless(text: &str, layout: Layout) -> Renamed {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
-    let content = |line: &str| {
-        let trimmed = line.trim();
-        !trimmed.is_empty() && !trimmed.starts_with('#')
-    };
-    let is_key = |rest: &str, key: &str| {
-        rest.strip_prefix(key)
-            .and_then(|after| after.strip_prefix(':'))
-            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '\r', '\n']))
-    };
+/// One step's lines in a pipeline file or patch: where its keys sit and which
+/// lines are its own.
+struct StepSpan {
+    id: String,
+    key_indent: usize,
+    from: usize,
+    to: usize,
+}
 
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// A line that says something: not blank, not a comment.
+fn has_content(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('#')
+}
+
+/// Whether `rest` opens with the mapping key `key`.
+fn is_key_line(rest: &str, key: &str) -> bool {
+    rest.strip_prefix(key)
+        .and_then(|after| after.strip_prefix(':'))
+        .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '\r', '\n']))
+}
+
+/// The steps of a pipeline file or patch as line spans, and the indentation
+/// of the first, which opens every item. `None` when there is no `steps:` to
+/// read. Shared by the line edits [`rename_headless`] and [`rewrite_gate`]
+/// make, so both find a step's keys the same way.
+fn step_spans(lines: &[&str], layout: Layout) -> Option<(Vec<StepSpan>, usize)> {
+    let (indent, content, is_key) = (indent_of, has_content, is_key_line);
     // The span of `steps:`: from the line after it to the next top-level key.
-    let Some(start) = lines
-        .iter()
-        .position(|line| indent(line) == 0 && is_key(line.trim_start_matches('\u{feff}'), "steps"))
-    else {
-        return Renamed::Nothing;
-    };
+    let start = lines.iter().position(|line| {
+        indent(line) == 0 && is_key(line.trim_start_matches('\u{feff}'), "steps")
+    })?;
     let end = lines[start + 1..]
         .iter()
         .position(|line| content(line) && indent(line) == 0 && !line.starts_with('-'))
@@ -2965,17 +3126,9 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
     // Each step is the lines from its opening line up to the next one. Its keys
     // sit at `key_indent`: in a list, where the text after the dash starts;
     // in a patch, where the line under the id starts.
-    struct Step {
-        id: String,
-        key_indent: usize,
-        from: usize,
-        to: usize,
-    }
-    let mut steps: Vec<Step> = Vec::new();
+    let mut steps: Vec<StepSpan> = Vec::new();
     let body = start + 1..end;
-    let Some(first) = body.clone().find(|&at| content(lines[at])) else {
-        return Renamed::Nothing;
-    };
+    let first = body.clone().find(|&at| content(lines[at]))?;
     let top = indent(lines[first]);
     for at in body.clone().filter(|&at| content(lines[at])) {
         let line = lines[at];
@@ -3009,7 +3162,7 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
                 .trim_matches(['"', '\''])
                 .to_string(),
         };
-        steps.push(Step {
+        steps.push(StepSpan {
             id,
             key_indent,
             from: at,
@@ -3019,6 +3172,36 @@ fn rename_headless(text: &str, layout: Layout) -> Renamed {
     for pair in 0..steps.len().saturating_sub(1) {
         steps[pair].to = steps[pair + 1].from;
     }
+    Some((steps, top))
+}
+
+/// Rename the `headless:` key of every step in a pipeline file or patch to
+/// `hide:`, and change nothing else, not one other byte.
+///
+/// The exception is `headless: false`, whose line is deleted. In 0.13.0 it
+/// only spelled out the default and still followed `dispatch.hide_commands`,
+/// while `hide: false` forces a pane. Renaming it would turn a step that
+/// followed the project setting into one that ignores it. A `headless: false`
+/// on the line that opens a list item (`- headless: false`) is deleted too, and
+/// the dash moves onto the item's next key. Only a step with no other key is
+/// left for [`unrenamed_message`]. Any spelling the loader reads as false
+/// counts, so `False` is dropped like `false`.
+///
+/// A line edit, not a re-serialisation, so comments, ordering, quoting and
+/// line endings survive, and it touches a line only when its key is exactly
+/// `headless:` at the indentation of the step's own keys. That excludes a
+/// `headless` inside a comment, a `description:` or a `run:` value, and the
+/// lines of a block scalar, which sit deeper than the key that opens them.
+/// A step written in flow style (`- {id: a, headless: true}`), a quoted key
+/// (`"headless": true`) and a list item opened by a `-` on a line of its own
+/// have no such line and are left as they are; the file then still names
+/// `headless:`, and the caller refuses it with [`unrenamed_message`].
+fn rename_headless(text: &str, layout: Layout) -> Renamed {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let (indent, content, is_key) = (indent_of, has_content, is_key_line);
+    let Some((steps, top)) = step_spans(&lines, layout) else {
+        return Renamed::Nothing;
+    };
 
     let mut edits: Vec<(usize, Edit)> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
@@ -5659,6 +5842,98 @@ mod tests {
             rename_headless(alone, Layout::Steps),
             Renamed::Nothing
         ));
+    }
+
+    /// `gate: true` becomes `gate: on_pass` and `gate: false` is deleted,
+    /// every other byte kept: the comment after a value, a list item the key
+    /// opens, a Windows line ending, and a gate already named or written in
+    /// a form the line edit does not read.
+    #[test]
+    fn rewrite_gate_renames_true_and_drops_false_and_nothing_else() {
+        let before = "steps:\n  - id: a\n    agent: x\n    gate: true # ask\n    on_pass: b\n  \
+                      - id: b\n    agent: x\n    gate: false\n    on_pass: c\n  \
+                      - gate: False\n    id: c\n    agent: x\n    on_pass: d\n  \
+                      - id: d\n    agent: x\n    gate: on_fail\n    on_fail: a\n  \
+                      - {id: e, agent: x, gate: true}\n";
+        let (text, done) = rewrite_gate(before, Layout::Steps).expect("three steps to change");
+        assert_eq!(
+            text,
+            "steps:\n  - id: a\n    agent: x\n    gate: on_pass # ask\n    on_pass: b\n  \
+             - id: b\n    agent: x\n    on_pass: c\n  \
+             - id: c\n    agent: x\n    on_pass: d\n  \
+             - id: d\n    agent: x\n    gate: on_fail\n    on_fail: a\n  \
+             - {id: e, agent: x, gate: true}\n"
+        );
+        let seen: Vec<_> = done
+            .iter()
+            .map(|step| (step.id.as_str(), step.dropped))
+            .collect();
+        assert_eq!(seen, [("a", false), ("b", true), ("c", true)]);
+
+        let crlf = "steps:\r\n- id: a\r\n  gate: true\r\n  on_pass: done\r\n";
+        assert_eq!(
+            rewrite_gate(crlf, Layout::Steps).unwrap().0,
+            "steps:\r\n- id: a\r\n  gate: on_pass\r\n  on_pass: done\r\n"
+        );
+
+        let named = "steps:\n  - id: a\n    agent: x\n    gate: always\n";
+        assert!(rewrite_gate(named, Layout::Steps).is_none());
+    }
+
+    /// In a patch `gate: false` can switch off a gate the tracked step
+    /// declares, so only `true` is rewritten there and the `false` stays.
+    #[test]
+    fn rewrite_gate_keeps_a_patchs_gate_false() {
+        let patch = "steps:\n  review:\n    gate: false\n  deploy:\n    gate: true\n";
+        let (text, done) = rewrite_gate(patch, Layout::Patch).unwrap();
+        assert_eq!(
+            text,
+            "steps:\n  review:\n    gate: false\n  deploy:\n    gate: on_pass\n"
+        );
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id, "deploy");
+    }
+
+    /// A pipeline file with `gate: true` and `gate: false` is rewritten by
+    /// `sync`, which prints one line per step, and a second run finds nothing.
+    #[test]
+    fn sync_rewrites_gate_in_a_pipeline_file_and_says_so() {
+        let (repo, _root_guard) = fixture("pipeline-gate-values");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("release.yml");
+        std::fs::write(
+            &path,
+            "steps:\n  - id: approve\n    agent: x\n    gate: true\n    on_pass: next\n  \
+             - id: next\n    agent: x\n    gate: false\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "steps:\n  - id: approve\n    agent: x\n    gate: on_pass\n    on_pass: next\n  \
+             - id: next\n    agent: x\n    on_pass: done\n"
+        );
+        let notes = format!("{:?}", migration_notes(&outcomes));
+        assert!(
+            notes.contains("pipelines/release.yml: step `approve`: gate: true → gate: on_pass"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("step `next`: gate: false → removed"),
+            "{notes}"
+        );
+
+        let mut again = Vec::new();
+        pipelines(&repo, &args(), &mut again).unwrap();
+        assert!(
+            dedup_paths(&again).0.is_empty(),
+            "{:?}",
+            outcome_lines(&again)
+        );
     }
 
     /// A file whose only `headless:` is `false` is written without the key,

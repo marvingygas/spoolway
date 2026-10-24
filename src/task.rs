@@ -412,10 +412,10 @@ pub struct Frontmatter {
     /// see `spoolway report`, where an agent step's pause is decided, and the
     /// dispatcher's command arm, where a command step's is. Set by whoever wrote
     /// the task, so a producer can hold work for a person without
-    /// giving the task a pipeline of its own; a step's own `gate: true`
+    /// giving the task a pipeline of its own; a step's own `gate:`
     /// still gates every task that reaches it, this or not, but on
-    /// narrower terms than this field's: it only ever catches a pass, and
-    /// only one whose destination is not already `blocked`.
+    /// narrower terms than this field's: it only ever catches the outcome it
+    /// names, and only one whose destination is not already `blocked`.
     ///
     /// The step rather than a plain on-or-off for the same reason `paused_at`
     /// is: "the end" is a guess in a pipeline with more than one step routing
@@ -597,7 +597,7 @@ pub struct Frontmatter {
     pub paused_at: Option<String>,
 
     /// Which road caught this pause — `"gate"` for a step's own
-    /// `gate: true`, `"schedule"` for a task's own `gate_at`. `gate_at`
+    /// `gate:`, `"schedule"` for a task's own `gate_at`. `gate_at`
     /// clears itself the moment it fires (see `commands::report` and the
     /// dispatcher's command arm), so this
     /// is the one thing left to say which of the two ever held the task;

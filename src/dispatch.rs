@@ -23731,9 +23731,10 @@ mod tests {
         for pipeline in Pipelines::builtin().pipelines.values() {
             for step in &pipeline.steps {
                 assert!(
-                    !step.gate,
+                    step.gate.is_none(),
                     "pipeline `{}` step `{}` gates",
-                    pipeline.name, step.id
+                    pipeline.name,
+                    step.id
                 );
             }
         }
@@ -29528,7 +29529,7 @@ mod tests {
             .iter_mut()
             .find(|s| s.id == "implement")
             .unwrap();
-        step.gate = true;
+        step.gate = Some(crate::pipeline::GateOn::OnPass);
         let on_pass = step.on_pass.clone().unwrap();
 
         drive(&repo, &pipelines, &mux, &path, "paused");
@@ -29586,7 +29587,7 @@ mod tests {
             .iter_mut()
             .find(|s| s.id == "implement")
             .unwrap()
-            .gate = true;
+            .gate = Some(crate::pipeline::GateOn::OnPass);
 
         drive(&repo, &pipelines, &mux, &path, "blocked");
 
@@ -29611,7 +29612,7 @@ mod tests {
             .iter_mut()
             .find(|s| s.id == "implement")
             .unwrap();
-        step.gate = true;
+        step.gate = Some(crate::pipeline::GateOn::OnPass);
         step.on_fail = step.on_pass.clone();
         let onward = step.on_pass.clone().unwrap();
 
@@ -31267,7 +31268,7 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = repo.task("t").unwrap();
 
-        assert!(!step.gate);
+        assert!(step.gate.is_none());
         let prompt = sent(&repo, &task, pipeline, step);
         assert!(!prompt.to_lowercase().contains("held here for a person"));
         assert!(!prompt.contains("dispatch.gates"));

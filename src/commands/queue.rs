@@ -263,8 +263,9 @@ struct RouteHook {
 struct RouteStep {
     id: String,
     description: Option<String>,
-    /// The step's own `gate: true`: a pass waits for a person.
-    gate: bool,
+    /// The step's own `gate:`, as the pipeline spells it: the outcome that
+    /// waits for a person.
+    gate: Option<String>,
     /// The task's own `gate_at` names this step: whatever it reports waits
     /// for a person.
     gate_at: bool,
@@ -316,7 +317,7 @@ fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<R
             RouteStep {
                 id: step.id.clone(),
                 description: step.description.clone(),
-                gate: step.gate,
+                gate: step.gate.as_ref().map(|gate| gate.as_str().to_string()),
                 gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
                 on_pass: land(Outcome::Pass),
                 on_fail: land(Outcome::Fail),
@@ -456,10 +457,12 @@ fn render_route(route: &RouteView) -> String {
             true => "▸ ",
             false => "  ",
         };
-        let held = match (step.gate_at, step.gate) {
+        let held = match (step.gate_at, step.gate.as_deref()) {
             (true, _) => Some("Whatever it reports waits for a person."),
-            (false, true) => Some("A pass waits for a person."),
-            (false, false) => None,
+            (false, Some("on_fail")) => Some("A fail waits for a person."),
+            (false, Some("always")) => Some("A pass or a fail waits for a person."),
+            (false, Some(_)) => Some("A pass waits for a person."),
+            (false, None) => None,
         };
         let about = [step.description.as_deref(), held]
             .into_iter()
@@ -28222,6 +28225,39 @@ body\n";
         );
     }
 
+    /// Each value of `gate:` is named by what it holds, so a person reading
+    /// the route is not told a pass waits when the gate holds a fail.
+    #[test]
+    fn route_says_which_outcome_each_gate_holds() {
+        let (repo, _root_guard) = fixture("route-gate-values");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+        for (gate, says) in [
+            ("on_pass", "Ship it. A pass waits for a person."),
+            ("on_fail", "Ship it. A fail waits for a person."),
+            ("always", "Ship it. A pass or a fail waits for a person."),
+        ] {
+            let mut pipelines = route_pipelines();
+            pipelines
+                .pipelines
+                .get_mut("default")
+                .unwrap()
+                .steps
+                .iter_mut()
+                .find(|step| step.id == "deploy")
+                .unwrap()
+                .gate = Some(match gate {
+                "on_pass" => crate::pipeline::GateOn::OnPass,
+                "on_fail" => crate::pipeline::GateOn::OnFail,
+                _ => crate::pipeline::GateOn::Always,
+            });
+            let text = render_route(&route_view(&queued(&repo, "ship"), &pipelines, 0).unwrap());
+            assert!(text.contains(says), "{gate}: {text}");
+        }
+    }
+
     /// The task's own `gate_at` holds whatever its step reports, not only a
     /// pass, and the entry says so.
     #[test]
@@ -28302,7 +28338,7 @@ body\n";
             .map(|step| step["id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["build", "deploy", "announce"]);
-        assert_eq!(json["steps"][1]["gate"], true);
+        assert_eq!(json["steps"][1]["gate"], "on_pass");
         assert_eq!(json["steps"][1]["on_fail"], "build");
     }
 

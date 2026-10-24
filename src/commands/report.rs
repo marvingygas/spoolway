@@ -679,7 +679,7 @@ pub fn route(
             // the pause as a caught pass and send a command that never exited
             // 0 down its `on_pass`.
             None if pipeline.step(&origin).is_some_and(|step| {
-                step.gate && step.kind() == crate::pipeline::StepKind::Agent
+                step.gates_pass() && step.kind() == crate::pipeline::StepKind::Agent
             }) =>
             {
                 task.front.paused_at = Some(origin.clone());
@@ -935,9 +935,11 @@ pub fn route(
     // against a small local model, three gates, and not one of them held. A
     // mechanism that needs no cooperation cannot be argued with.
     //
-    // `gate: true` only ever means this: a pass. A `--fail` goes round the loop
-    // the pipeline drew, which is not the thing a gate is protecting, and a
-    // `--block` already stops in front of a person with the reason attached —
+    // `gate: on_pass` holds a pass and `gate: on_fail` a fail, so which of the
+    // two this branch catches is `gate_hold`'s to say. Without `on_fail` or
+    // `always`, a `--fail` goes round the loop the pipeline drew, which is not
+    // the thing a pass gate is protecting, and a `--block` already stops in
+    // front of a person with the reason attached —
     // turning that into an approval would throw the blocker away and offer to
     // let unfinished work past instead. A task's own `gate_at` — the `if
     // scheduled` branch below — answers a different question and holds
@@ -951,9 +953,9 @@ pub fn route(
     // those: it is a person's decision by design, and a run with nobody in it
     // is not a reason to make that decision unattended — it is a reason to
     // wait longer for the person who will.
-    // Two ways a step earns this, not one: the pipeline's own `gate: true`,
-    // which holds every task that reaches the step and only ever catches its
-    // pass, and a task's own `gate_at`, set by whoever wrote its task to
+    // Two ways a step earns this, not one: the pipeline's own `gate:`,
+    // which holds every task that reaches the step and only ever catches the
+    // outcome it names, and a task's own `gate_at`, set by whoever wrote its task to
     // hold this one task without giving it a pipeline of its own — and which
     // catches this step's outcome whatever it was, `destination` already
     // carrying whatever `apply_loop_budget` and the `blocked` check above made
@@ -992,7 +994,7 @@ pub fn route(
         });
         // Spent, not standing, whoever wrote it — the board's pause panel is
         // the example, but a `gate_at` typed by hand into the task fires and
-        // clears exactly the same way. A step's own `gate: true` is the one
+        // clears exactly the same way. A step's own `gate:` is the one
         // that holds every task that ever reaches it. Left set, a later
         // route that brought this task back onto the same step — a loop, a
         // `--stage` reroute — would gate it a second time nobody asked for.
@@ -1022,9 +1024,9 @@ pub fn route(
     // A gated *pass* never reaches here: it is turned into `paused` above,
     // before `destination` can equal `blocked`, and unattended does not
     // change that — see `unattended.enabled`. A `--block` from a step whose
-    // only gate is `gate: true` is a different report, though, and does
-    // reach this resume like any other block; a `gate: true` only holds the
-    // work it approves, not the work that stopped short of it. A task's own
+    // only gate is `gate:` is a different report, though, and does
+    // reach this resume like any other block; a `gate:` only holds the
+    // outcome it names, not the work that stopped short of it. A task's own
     // `gate_at` is not that step: it holds a `--block` the same as a pass, so
     // one caught by a schedule never reaches this resume at all — see the
     // `if scheduled` branch above.
@@ -1705,8 +1707,8 @@ pub enum Gate {
     /// A task's own `gate_at`, set by whoever wrote its task — catches
     /// this step's outcome whatever it was.
     Schedule,
-    /// A step's own `gate: true` — catches a pass and only a pass, and only
-    /// one whose destination is not already `blocked`.
+    /// A step's own `gate:` — catches the outcome it names, and only one
+    /// whose destination is not already `blocked`.
     Step,
 }
 
@@ -1722,11 +1724,12 @@ impl Gate {
 }
 
 /// Whether `step` holds this task for `outcome`/`destination` — the two
-/// roads [`report`] parks a pass in front of a person for, and the
+/// roads [`report`] parks a report in front of a person for, and the
 /// dispatcher parks a command step's exit for, carrying
-/// both clauses a hand copy of this once dropped: a step's own `gate: true`
-/// only ever catches a pass whose destination is not already `blocked`,
-/// where a task's own `gate_at` catches whatever is reported. `Schedule`
+/// both clauses a hand copy of this once dropped: a step's own `gate:`
+/// only ever catches the outcome it names (`on_pass`, `on_fail` or `always`)
+/// and only one whose destination is not already `blocked`, where a task's
+/// own `gate_at` catches whatever is reported. `Schedule`
 /// wins the ambiguity when a task carries both, since it answers a broader
 /// question and is spent the moment it fires either way — see [`report`]'s
 /// own use of this.
@@ -1734,7 +1737,12 @@ pub fn gate_hold(task: &Task, step: &Step, outcome: Outcome, destination: &str) 
     if task.front.gate_at.as_deref() == Some(step.id.as_str()) {
         return Some(Gate::Schedule);
     }
-    if step.gate && outcome == Outcome::Pass && destination != crate::pipeline::BLOCKED {
+    let held = step.gate.as_ref().is_some_and(|gate| match outcome {
+        Outcome::Pass => gate.holds_pass(),
+        Outcome::Fail => gate.holds_fail(),
+        _ => false,
+    });
+    if held && destination != crate::pipeline::BLOCKED {
         return Some(Gate::Step);
     }
     None
@@ -1781,7 +1789,7 @@ fn route_from<'a>(pipeline: &'a Pipeline, origin: &str) -> Vec<&'a Step> {
 pub fn first_gated_from(pipeline: &Pipeline, origin: &str) -> Option<String> {
     route_from(pipeline, origin)
         .into_iter()
-        .find(|step| step.gate)
+        .find(|step| step.gates_pass())
         .map(|step| step.id.clone())
 }
 
@@ -8539,6 +8547,116 @@ mod tests {
         assert_eq!(task.stage(), "announce", "resume takes the `on_pass` route");
         assert_eq!(task.front.paused_at, None);
         assert_eq!(task.front.paused_by, None, "cleared alongside paused_at");
+    }
+
+    /// `deploy` from [`gate_pipelines`], gated with `gate`, reports `outcome`;
+    /// the stage the task lands on and the step it is held at.
+    fn landing_after(gate: &str, outcome: Outcome) -> (String, Option<String>) {
+        let (repo, _root_guard) = fixture(&format!("gate-value-{gate}-{outcome:?}"));
+        let yaml = "steps:\n  \
+             - id: build\n    agent: pi\n    on_pass: deploy\n  \
+             - id: deploy\n    agent: pi\n    gate: GATE\n    loop: 2\n    on_pass: announce\n    \
+               on_fail: build\n  \
+             - id: announce\n    agent: pi\n    on_pass: done\n"
+            .replace("GATE", gate);
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", &yaml).unwrap(),
+        );
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+        report_outcome(&repo, &pipelines, "ship", outcome);
+        let task = queued(&repo, "ship");
+        (task.stage().to_string(), task.front.paused_at.clone())
+    }
+
+    /// `gate:` names what it holds. `on_pass` holds a pass and lets a fail
+    /// round the loop, `on_fail` the reverse, `always` holds both, and
+    /// `true`, the spelling every pipeline written before the names carries,
+    /// holds a pass as it always did.
+    #[test]
+    fn a_gate_holds_the_outcome_it_names() {
+        let held = |at: &str| (crate::pipeline::PAUSED.to_string(), Some(at.to_string()));
+        assert_eq!(landing_after("on_pass", Outcome::Pass), held("deploy"));
+        assert_eq!(landing_after("on_pass", Outcome::Fail).0, "build");
+        assert_eq!(landing_after("on_fail", Outcome::Fail), held("deploy"));
+        assert_eq!(landing_after("on_fail", Outcome::Pass).0, "announce");
+        assert_eq!(landing_after("always", Outcome::Pass), held("deploy"));
+        assert_eq!(landing_after("always", Outcome::Fail), held("deploy"));
+        assert_eq!(landing_after("true", Outcome::Pass), held("deploy"));
+        assert_eq!(landing_after("true", Outcome::Fail).0, "build");
+        assert_eq!(landing_after("false", Outcome::Pass).0, "announce");
+    }
+
+    /// A fail held by a step's own `gate: on_fail` resumes down that step's
+    /// `on_fail`, as a fail a task's `gate_at` caught does, rather than on
+    /// by `on_pass`.
+    #[test]
+    fn a_held_fail_resumes_down_the_steps_on_fail() {
+        let (repo, _root_guard) = fixture("gate-on-fail-resume");
+        let mut pipelines = gate_pipelines();
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "deploy")
+            .unwrap()
+            .gate = Some(crate::pipeline::GateOn::OnFail);
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "ship", Outcome::Fail);
+        assert_eq!(queued(&repo, "ship").stage(), crate::pipeline::PAUSED);
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "ship".into(),
+                stage: None,
+                message: None,
+                skip_hook: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(queued(&repo, "ship").stage(), "build");
+    }
+
+    /// An unblocker's `--pass` from `blocked` is held at the gate of the
+    /// step the task blocked on only when that gate holds a pass. A `gate:
+    /// on_fail` there holds nothing the unblocker reports, so reading it as
+    /// a pass gate would park a pass nobody asked to see.
+    #[test]
+    fn only_a_gate_that_holds_a_pass_holds_an_unblockers_pass() {
+        let route = |gate: &str| {
+            let yaml = format!(
+                "steps:\n  - id: look\n    agent: pi\n    gate: {gate}\n    \
+                 on_pass: e2e\n    on_fail: look2\n  \
+                 - id: look2\n    agent: pi\n    on_pass: e2e\n  \
+                 - id: e2e\n    agent: pi\n    on_pass: done\n"
+            );
+            crate::pipeline::Pipeline::parse("default", &yaml).unwrap()
+        };
+        for (gate, held) in [("on_pass", true), ("always", true), ("on_fail", false)] {
+            assert_eq!(
+                first_gated_from(&route(gate), "look").as_deref(),
+                held.then_some("look"),
+                "{gate}"
+            );
+            assert_eq!(
+                gate_between(&route(gate), "look", "e2e").as_deref(),
+                held.then_some("look"),
+                "{gate}"
+            );
+        }
     }
 
     /// A gated pass writes two status-log lines, not one: spoolway's own

@@ -918,8 +918,8 @@ pub(crate) fn report_contract(
 
     // `blocked` asks this of the step it stands in for, not of itself: a
     // plain `--pass` is taken at the unblocker's word for `origin`, so
-    // `origin`'s own `gate: true` is what would hold it — never `blocked`'s,
-    // which no pipeline may even declare. Only an agent origin is held: a
+    // `origin`'s own `gate:` is what would hold it, when it holds a pass —
+    // never `blocked`'s, which no pipeline may even declare. Only an agent origin is held: a
     // command step has no work for the unblocker to stand in for, so `route`
     // hands it straight back to run again, with no person asked. A task's own
     // `gate_at` plays no part here: it catches this step's outcome before the
@@ -927,7 +927,7 @@ pub(crate) fn report_contract(
     let gate = match &origin {
         Some(origin) => pipeline
             .step(origin)
-            .filter(|step| step.gate && step.kind() == crate::pipeline::StepKind::Agent)
+            .filter(|step| step.gates_pass() && step.kind() == crate::pipeline::StepKind::Agent)
             .map(|_| crate::commands::Gate::Step),
         None => {
             let hypothetical_destination = step

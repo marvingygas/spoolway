@@ -127,7 +127,7 @@ pub enum Command {
     /// it is so you don't have to.
     ///
     /// A task on `blocked` resumes the step it stopped on. A task on `paused`
-    /// finished a `gate: true` step and is waiting for you to let it past —
+    /// finished a gated step and is waiting for you to let it past —
     /// this sends it on to wherever the step's `on_pass` points. `--stage`
     /// overrides that route by hand, and still works on a paused task:
     /// naming a step is you choosing where it goes, gate or no gate.
