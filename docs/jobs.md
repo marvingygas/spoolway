@@ -63,7 +63,7 @@ The dispatcher names a job that cannot fire in the same way, once per matching m
 
 ```
 job dependabot-weekly · due now · skipped, dependabot-review runs routine dependabot too; deactivate one on the routines tab (o → deactivate job)
-job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; pick a routine folder on the routines tab (o)
+job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; point the job at dependabot on the routines tab (o)
 job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit the job on the routines tab (o)
 ```
 
