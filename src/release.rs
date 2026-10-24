@@ -10,11 +10,16 @@
 //! names the version and no command for that reason.
 //!
 //! Nothing here opens a socket. spoolway ships no HTTP client and gains none:
-//! the binary arrives through npm, so npm is asked what the latest version is
-//! and npm is what installs it — integrity, platform selection and the atomic
-//! swap are all already its job, and hand-rolling a rename over a running
-//! executable is the one thing [`crate::config`]'s own documentation warns
-//! kills a dispatcher mid-pass.
+//! an npm install asks npm what the latest version is and npm is what installs
+//! it — integrity, platform selection and the atomic swap are all already its
+//! job, and hand-rolling a rename over a running executable is the one thing
+//! [`crate::config`]'s own documentation warns kills a dispatcher mid-pass.
+//!
+//! Only a global npm install does any of that. A binary anywhere else
+//! ([`Channel::Other`]) is standalone: it never starts npm, never spawns the
+//! refresh child and never looks for a newer release. `spoolway update` on it
+//! prints [`INSTALL_LINE`] and stops. The channel is checked before any lookup,
+//! so there is no path on which a standalone binary reaches npm.
 //!
 //! The passive check reads a **cache and only a cache**. A lookup older than
 //! [`MAX_AGE`] spawns a detached child that refreshes it for the *next* read;
@@ -76,6 +81,13 @@ pub const ENV_SKIP: &str = "SPOOLWAY_SKIP_VERSION_CHECK";
 /// exec, install, exec. See [`upgrade`].
 pub const ENV_UPGRADED: &str = "SPOOLWAY_UPGRADED";
 
+/// The one line that fetches the latest standalone release.
+///
+/// What `spoolway update` prints on a binary npm did not install. Defined once
+/// so the text a person is told to run cannot drift between callers.
+pub const INSTALL_LINE: &str =
+    "curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh";
+
 /// The version this binary was built as.
 pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -89,9 +101,10 @@ pub enum Channel {
     /// executable sits under `node_modules/@spoolway/<platform>/bin/`. This is
     /// the one channel spoolway can upgrade, because npm does the work.
     Npm,
-    /// Anything else — `cargo install`, an unpacked release archive, a binary
-    /// copied onto `PATH` by hand, a Nix store path. Upgradable, just not from
-    /// here, and saying so is the whole point of the variant.
+    /// Anything else — a release download, `cargo install`, a binary copied
+    /// onto `PATH` by hand, a Nix store path, a build under `target/`. Standalone:
+    /// it never looks for updates and never starts npm, and `spoolway update`
+    /// tells the person the install line instead.
     Other,
 }
 
@@ -255,7 +268,19 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
 ///
 /// Reads one file. Everything that can go wrong — no home directory, no cache,
 /// a corrupt cache, a clock that moved — comes back `None`.
+///
+/// A binary npm did not install answers `None` before it reads anything, so
+/// the refresh child, and the `npm view` behind it, never start for it.
 pub fn newer() -> Option<String> {
+    newer_on(Channel::detect())
+}
+
+/// [`newer`] for a given channel, so a test can pick one without the real
+/// executable's path.
+fn newer_on(channel: Channel) -> Option<String> {
+    if channel == Channel::Other {
+        return None;
+    }
     let path = cache_path()?;
     let cached = std::fs::read_to_string(&path)
         .ok()
@@ -400,8 +425,11 @@ pub enum Upgrade {
     Current,
     /// Installed, and the caller should hand over to the new binary.
     Installed(String),
-    /// A newer version exists and this install cannot take it from here.
+    /// A newer version exists and the npm install of it failed.
     Unmanaged(String),
+    /// This binary was not installed by npm, so nothing was looked up and
+    /// nothing can be installed from here.
+    Standalone,
     /// A dispatcher is running, so the binary it is executing is not being
     /// rewritten under it.
     Dispatching(String, u32),
@@ -410,7 +438,8 @@ pub enum Upgrade {
 /// Take the newer release, when there is one and it is safe to.
 ///
 /// Asks npm directly rather than trusting [`newer`]'s cache — see the module
-/// doc for why this is the one caller that does.
+/// doc for why this is the one caller that does. A binary npm did not install
+/// asks nothing and answers [`Upgrade::Standalone`].
 ///
 /// `lock_file` is the project's own dispatch lock —
 /// [`crate::repo::Repo::lock_file`] for every real caller.
@@ -423,7 +452,9 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     if std::env::var_os(ENV_UPGRADED).is_some() {
         return Upgrade::Current;
     }
-    decide_upgrade(lock_file, published, newer)
+    decide_upgrade(Channel::detect(), lock_file, published, newer, |target| {
+        npm(&["install", "-g", target, "--ignore-scripts"])
+    })
 }
 
 /// How long a lookup made on `update`'s behalf may run before it is treated
@@ -465,21 +496,30 @@ fn bounded(
     rx.recv_timeout(deadline).ok().flatten()
 }
 
-/// The decision half of [`upgrade`], with the live lookup and the cache
-/// fallback passed in rather than called directly.
+/// The decision half of [`upgrade`], with the channel, the live lookup, the
+/// cache fallback and the install passed in rather than called directly.
 ///
 /// Split out so a test can hand in a stubbed `live` answer and a `cached`
 /// closure that panics if ever called — proving the cache is bypassed
 /// outright, and only reached on a failed lookup — without seeding a real
 /// cache file, standing up a fake `npm` on `PATH`, or touching the process
-/// environment at all. `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
+/// environment at all. A test binary sits under `target/`, which is
+/// [`Channel::Other`], so the channel is an argument for the same reason. `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
 /// thread, so a stub that never answers proves the bound rather than hanging
 /// the test.
 fn decide_upgrade(
+    channel: Channel,
     lock_file: &Path,
     live: impl FnOnce() -> Option<String> + Send + 'static,
     cached: impl FnOnce() -> Option<String>,
+    install: impl FnOnce(&str) -> Option<String>,
 ) -> Upgrade {
+    // Before the notice and before `live`: a standalone binary must not so
+    // much as announce an npm lookup, and a check placed after `bounded`
+    // would already have started npm.
+    if channel == Channel::Other {
+        return Upgrade::Standalone;
+    }
     println!("Checking npm for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
     // get the newer binary — a cache the passive check would happily wait a
@@ -501,9 +541,6 @@ fn decide_upgrade(
     let Some(version) = version else {
         return Upgrade::Current;
     };
-    if Channel::detect() == Channel::Other {
-        return Upgrade::Unmanaged(version);
-    }
     // Refuse rather than rely on a remembered release rule: a running dispatcher
     // is executing the file npm is about to replace, and a half-written binary is
     // a dispatcher that dies mid-pass.
@@ -516,7 +553,7 @@ fn decide_upgrade(
     // is what makes the npm install work under `--ignore-scripts` in the first
     // place; the wrapper contains no lifecycle install script.
     let target = format!("{PACKAGE}@{version}");
-    match npm(&["install", "-g", &target, "--ignore-scripts"]) {
+    match install(&target) {
         Some(_) => Upgrade::Installed(version),
         None => Upgrade::Unmanaged(version),
     }
@@ -613,12 +650,16 @@ fn published_version_cell() -> &'static Mutex<Reading> {
 /// runs once a second, so the reading is taken on a background thread once
 /// per [`PUBLISHED_CHECK_INTERVAL`] and every call in between answers from
 /// what it left. The first call of a run therefore says `None`, the same as
-/// [`installed_newer`]'s.
+/// [`installed_newer`]'s. A binary npm did not install says `None` without
+/// starting that thread.
 ///
 /// Gates nothing itself: whether the header wants it at all —
 /// `housekeeping.update_check` and [`ENV_SKIP`] — is the caller's to decide,
 /// before it calls, so a check that is turned off never starts a reading.
 pub fn published_newer() -> Option<String> {
+    if Channel::detect() == Channel::Other {
+        return None;
+    }
     cached_reading(
         published_version_cell(),
         newer,
@@ -1195,15 +1236,16 @@ mod tests {
     fn upgrade_asks_npm_rather_than_trusting_a_cache_that_has_not_caught_up() {
         let answered = newer_than_current();
         let result = decide_upgrade(
+            Channel::Npm,
             Path::new("/does/not/exist/lock"),
             || Some(newer_than_current()),
             || panic!("the cache must not be consulted once npm has answered"),
+            |_| None,
         );
 
-        // A test binary is never laid out the way npm installs one, so this
-        // is `Unmanaged` rather than `Installed` either way — the point is
-        // which version it names: npm's live answer, not a cache that has
-        // not caught up.
+        // The stubbed install fails, so this is `Unmanaged` rather than
+        // `Installed` — the point is which version it names: npm's live
+        // answer, not a cache that has not caught up.
         assert_eq!(result, Upgrade::Unmanaged(answered));
     }
 
@@ -1213,9 +1255,11 @@ mod tests {
     #[test]
     fn a_failed_live_lookup_falls_back_to_the_cache() {
         let result = decide_upgrade(
+            Channel::Npm,
             Path::new("/does/not/exist/lock"),
             || None,
             || Some("0.4.0".to_string()),
+            |_| None,
         );
         assert_eq!(result, Upgrade::Unmanaged("0.4.0".to_string()));
     }
@@ -1228,9 +1272,11 @@ mod tests {
     #[test]
     fn npm_answering_with_nothing_newer_ends_it_without_the_cache() {
         let result = decide_upgrade(
+            Channel::Npm,
             Path::new("/does/not/exist/lock"),
             || Some(current().to_string()),
             || panic!("the cache must not get a second vote once npm has answered"),
+            |_| None,
         );
         assert_eq!(result, Upgrade::Current);
     }
@@ -1250,12 +1296,14 @@ mod tests {
     fn a_live_lookup_that_never_answers_gives_up_after_a_bounded_wait() {
         let start = std::time::Instant::now();
         let result = decide_upgrade(
+            Channel::Npm,
             Path::new("/does/not/exist/lock"),
             || {
                 std::thread::sleep(Duration::from_secs(20));
                 Some("0.9.9".to_string())
             },
             || Some("0.4.0".to_string()),
+            |_| None,
         );
         assert!(
             start.elapsed() < Duration::from_secs(10),
@@ -1266,6 +1314,43 @@ mod tests {
         // A lookup that gave up is exactly a failed lookup: the cache's
         // answer is what `update` should fall back to.
         assert_eq!(result, Upgrade::Unmanaged("0.4.0".to_string()));
+    }
+
+    /// A standalone binary asks nothing: none of the lookup, the cache or the
+    /// install runs, so each panics if reached. Before the channel was an
+    /// argument, `decide_upgrade` ran `live` first and only then looked at the
+    /// channel, so these closures were called.
+    #[test]
+    fn a_standalone_binary_never_looks_anything_up() {
+        let result = decide_upgrade(
+            Channel::Other,
+            Path::new("/does/not/exist/lock"),
+            || panic!("a standalone binary must not run the npm lookup"),
+            || panic!("a standalone binary must not read the cache"),
+            |_| panic!("a standalone binary must not install anything"),
+        );
+        assert_eq!(result, Upgrade::Standalone);
+    }
+
+    /// A standalone binary answers before touching the cache file or spawning
+    /// the refresh child. The state directory here is empty, which reads as a
+    /// stale cache and would spawn `spoolway __version-check`, and that child
+    /// stamps a cache file into it.
+    #[test]
+    fn a_standalone_binary_leaves_the_cache_alone() {
+        let dir = crate::scratch::root("release-standalone-cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &dir);
+        assert_eq!(newer_on(Channel::Other), None);
+        std::thread::sleep(Duration::from_millis(300));
+        let touched = cache_path().is_some_and(|path| path.exists());
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        assert!(!touched, "the standalone check wrote a cache");
     }
 
     /// The state file is the machine's, not the project's: every checkout runs
