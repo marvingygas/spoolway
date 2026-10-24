@@ -117,6 +117,16 @@ pub enum Channel {
 }
 
 impl Channel {
+    /// The name a cache record carries for this channel, so one channel's
+    /// answer is never read as another's.
+    fn name(self) -> &'static str {
+        match self {
+            Channel::Npm => "npm",
+            Channel::Homebrew => "homebrew",
+            Channel::Other => "other",
+        }
+    }
+
     /// Where this binary lives, resolved once.
     ///
     /// Keyed off the path rather than off anything npm sets in the
@@ -167,7 +177,7 @@ impl Channel {
             .any(|pair| pair[1] == "node_modules" && (pair[0] == "lib" || pair[0] == "npm"));
         let cellar = parts
             .windows(2)
-            .any(|pair| pair[0] == "Cellar" && pair[1] == PACKAGE);
+            .any(|pair| pair[0] == "Cellar" && pair[1] == BREW_FORMULA_NAME);
         match (global, cellar) {
             (true, _) => Channel::Npm,
             (false, true) => Channel::Homebrew,
@@ -179,14 +189,23 @@ impl Channel {
 /// What a cached lookup left behind.
 ///
 /// Hand-rolled rather than serde-derived: this file is written by one process
-/// and read by another, and keeping it to two flat fields means a partially
+/// and read by another, and keeping it to three flat fields means a partially
 /// written or hand-mangled file is a parse that returns `None` rather than a
 /// dependency between two spoolway versions' struct shapes.
+///
+/// The file is the machine's, and an npm install and a Homebrew install can
+/// share it, for example while somebody moves from one to the other. The
+/// record therefore says which channel's lookup wrote it, so one install's
+/// answer, or its stamp for a failed lookup, cannot hide the other's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
     pub version: String,
     /// Unix seconds at which the lookup was made.
     pub checked: u64,
+    /// [`Channel::name`] of the install that made the lookup. A file written
+    /// before this field existed has none, and only npm wrote those, so it
+    /// reads as `npm`.
+    pub channel: String,
 }
 
 impl Cached {
@@ -195,13 +214,18 @@ impl Cached {
         Some(Cached {
             version: value.get("version")?.as_str()?.trim().to_string(),
             checked: value.get("checked")?.as_u64()?,
+            channel: value
+                .get("channel")
+                .and_then(|c| c.as_str())
+                .unwrap_or(Channel::Npm.name())
+                .to_string(),
         })
     }
 
     fn render(&self) -> String {
         format!(
-            "{{\"version\":\"{}\",\"checked\":{}}}\n",
-            self.version, self.checked
+            "{{\"version\":\"{}\",\"checked\":{},\"channel\":\"{}\"}}\n",
+            self.version, self.checked, self.channel
         )
     }
 
@@ -308,10 +332,7 @@ fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
         return None;
     }
     let path = path?;
-    let cached = std::fs::read_to_string(&path)
-        .ok()
-        .as_deref()
-        .and_then(Cached::parse);
+    let cached = read_cache(&path, channel);
 
     // Spawned whether or not the cache had a usable answer, and before the
     // answer is returned: a machine that has never checked is exactly the one
@@ -331,8 +352,9 @@ fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
 ///
 /// The child is spoolway itself, on a hidden subcommand — the same trick npm's
 /// own update-notifier uses: it needs a process that outlives this command,
-/// runs `npm view`, and writes a file, which this binary already knows how to
-/// do without shelling out to a script of its own.
+/// runs the channel's lookup (`npm view`, or `brew info` on a Homebrew
+/// install), and writes a file, which this binary already knows how to do
+/// without shelling out to a script of its own.
 ///
 /// Through `libc::setsid()`, called in the child between fork and exec, for
 /// the reason [`crate::headless`] detaches lanes the same way: a child that
@@ -392,17 +414,19 @@ pub const REFRESH_COMMAND: &str = "__version-check";
 /// waiting on, so it may block on the network for as long as the lookup takes.
 pub fn refresh() {
     let Some(path) = cache_path() else { return };
-    let Some(version) = (match Channel::detect() {
+    let channel = Channel::detect();
+    let Some(version) = (match channel {
         Channel::Homebrew => brew_published(),
         _ => published(),
     }) else {
-        // Nothing published, no npm, no network. The cache is still stamped,
+        // Nothing published, no npm or brew, no network. The cache is still stamped,
         // so a machine that cannot answer is asked once a day rather than on
         // every reading — which is the difference between a quiet failure and
         // a fork on every board refresh.
         let stamp = Cached {
             version: current().to_string(),
             checked: now(),
+            channel: channel.name().to_string(),
         };
         write_cache(&path, &stamp);
         return;
@@ -412,8 +436,20 @@ pub fn refresh() {
         &Cached {
             version,
             checked: now(),
+            channel: channel.name().to_string(),
         },
     );
+}
+
+/// The record in `path`, when it parses and was written by `channel`'s own
+/// lookup. A record from another channel is no record: trusting it would let
+/// one install's answer, or its stamp for a failed lookup, silence the other.
+fn read_cache(path: &Path, channel: Channel) -> Option<Cached> {
+    std::fs::read_to_string(path)
+        .ok()
+        .as_deref()
+        .and_then(Cached::parse)
+        .filter(|cached| cached.channel == channel.name())
 }
 
 fn write_cache(path: &Path, cached: &Cached) {
@@ -435,7 +471,13 @@ fn published() -> Option<String> {
     }
 }
 
-/// The formula this binary was installed from, as brew names it.
+/// The formula's own name, which is also the folder it gets under `Cellar`.
+/// Kept apart from [`PACKAGE`], the npm package name, so renaming one does not
+/// quietly turn every install of the other into [`Channel::Other`].
+const BREW_FORMULA_NAME: &str = "spoolway";
+
+/// The formula this binary was installed from, as brew names it: the tap, then
+/// [`BREW_FORMULA_NAME`].
 const BREW_FORMULA: &str = "marvingygas/tap/spoolway";
 
 /// The version brew's copy of the formula is at, or `None` for anything at all
@@ -1176,6 +1218,33 @@ mod tests {
         );
     }
 
+    /// A record written before the channel was recorded reads as npm's, and a
+    /// reader on another channel does not take it.
+    #[test]
+    fn a_cache_record_belongs_to_the_channel_that_wrote_it() {
+        let old = Cached::parse("{\"version\":\"0.2.0\",\"checked\":5}").unwrap();
+        assert_eq!(old.channel, "npm");
+        let brew = Cached::parse("{\"version\":\"0.2.0\",\"checked\":5,\"channel\":\"homebrew\"}")
+            .unwrap();
+        assert_eq!(brew.channel, Channel::Homebrew.name());
+
+        let dir = crate::scratch::root("release-cache-channel");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("latest.json");
+        write_cache(&path, &brew);
+        // The npm reader sees a record from another channel as no record, so
+        // `newer_at` refreshes it rather than trusting a stamp it did not make.
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew));
+        assert_eq!(read_cache(&path, Channel::Npm), None);
+    }
+
+    /// The formula spelling brew is asked for ends in the folder name the
+    /// channel is keyed off.
+    #[test]
+    fn the_brew_formula_ends_in_the_cellar_folder_name() {
+        assert!(BREW_FORMULA.ends_with(&format!("/{BREW_FORMULA_NAME}")));
+    }
+
     /// Only a non-empty `formulae[0].versions.stable` is an answer.
     #[test]
     fn brew_output_that_does_not_name_a_version_is_no_answer() {
@@ -1254,6 +1323,7 @@ mod tests {
         let cached = Cached {
             version: "0.2.0".into(),
             checked: 1_700_000_000,
+            channel: "homebrew".into(),
         };
         assert_eq!(Cached::parse(&cached.render()), Some(cached));
 
@@ -1268,6 +1338,7 @@ mod tests {
         let cached = |checked| Cached {
             version: "0.2.0".into(),
             checked,
+            channel: "npm".into(),
         };
         assert!(!cached(1000).stale(1000));
         assert!(!cached(1000).stale(1000 + day - 1));
@@ -1464,6 +1535,7 @@ mod tests {
             &Cached {
                 version: newer_than_current(),
                 checked: now(),
+                channel: "npm".into(),
             },
         );
         assert_eq!(
