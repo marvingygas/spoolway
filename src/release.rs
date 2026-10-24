@@ -517,14 +517,43 @@ fn brew_published() -> Option<String> {
 /// was, and `brew info` then answers from that, which is the best answer there
 /// is. Its output is dropped because the notice `update` prints is all the
 /// person needs while it runs.
-fn brew_published_after_update() -> Option<String> {
-    let _ = Command::new("brew")
+///
+/// `deadline` is the same bound [`bounded`] waits for, and the update is
+/// killed when it passes. [`bounded`] abandons the thread this runs on but
+/// cannot stop a child, and a `brew update` left fetching would be working on
+/// the taps while the caller, falling back to the cache, starts `brew upgrade`
+/// on them. A killed update answers `None`, so the caller falls back to the
+/// cache as it does for any lookup that did not finish.
+fn brew_published_after_update(deadline: Duration) -> Option<String> {
+    let mut update = Command::new("brew");
+    update
         .arg("update")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    status_within(&mut update, deadline)?;
     brew_published()
+}
+
+/// Run `command` and wait for it for at most `deadline`. Past that the child is
+/// killed and reaped, and the answer is `None`, the same as for a command that
+/// could not be started.
+fn status_within(command: &mut Command, deadline: Duration) -> Option<std::process::ExitStatus> {
+    let mut child = command.spawn().ok()?;
+    let end = std::time::Instant::now() + deadline;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Run `brew upgrade` for the formula with its output going straight to the
@@ -601,9 +630,9 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
         return Upgrade::Current;
     }
     let channel = Channel::detect();
-    let live = match channel {
-        Channel::Homebrew => brew_published_after_update,
-        _ => published,
+    let live = move || match channel {
+        Channel::Homebrew => brew_published_after_update(BREW_LOOKUP_DEADLINE),
+        _ => published(),
     };
     decide_upgrade(channel, lock_file, live, newer, |target| {
         npm(&["install", "-g", target, "--ignore-scripts"])
@@ -627,12 +656,25 @@ const LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
 /// connection, so npm's three would give up on nearly every run.
 const BREW_LOOKUP_DEADLINE: Duration = Duration::from_secs(30);
 
+/// What `update` asks, and how long it waits, on `channel`: the tool's name as
+/// the notice says it, and the lookup's bound. `None` for a binary that asks
+/// nothing.
+fn lookup_for(channel: Channel) -> Option<(&'static str, Duration)> {
+    match channel {
+        Channel::Npm => Some(("npm", LOOKUP_DEADLINE)),
+        Channel::Homebrew => Some(("Homebrew", BREW_LOOKUP_DEADLINE)),
+        Channel::Other => None,
+    }
+}
+
 /// Run `live` on its own thread and stop waiting on it after `deadline`.
 ///
 /// The thread is never joined: a `live` that is still blocked in npm's own
-/// retries when the deadline passes is left to finish (or not) on its own,
-/// the same way [`spawn_refresh`]'s detached child is never waited on. Its
-/// eventual answer, if any, is simply never read.
+/// retries, or in `brew update`, when the deadline passes is left to finish (or
+/// not) on its own, the same way [`spawn_refresh`]'s detached child is never
+/// waited on. Its eventual answer, if any, is simply never read. What `live`
+/// starts is not stopped from here, so a `live` that runs a child must bound it
+/// itself, as [`brew_published_after_update`] does.
 fn bounded(
     live: impl FnOnce() -> Option<String> + Send + 'static,
     deadline: Duration,
@@ -680,20 +722,18 @@ fn decide_upgrade(
     // already have started npm or brew. A Homebrew binary gets its own lookup
     // and must never reach `npm install -g`, which would put a second copy
     // beside the one brew owns.
-    let (tool, deadline) = match channel {
-        Channel::Npm => ("npm", LOOKUP_DEADLINE),
-        Channel::Homebrew => ("Homebrew", BREW_LOOKUP_DEADLINE),
-        Channel::Other => return Upgrade::Standalone,
+    let Some((tool, deadline)) = lookup_for(channel) else {
+        return Upgrade::Standalone;
     };
     println!("Checking {tool} for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
     // get the newer binary — a cache the passive check would happily wait a
     // day on is exactly what left `update` installing nothing on the run
-    // that mattered. `live()` returning `None` is "npm could not answer"
-    // (offline, not installed, npm itself erroring, or the deadline
+    // that mattered. `live()` returning `None` is "the tool could not answer"
+    // (offline, npm or brew not installed or erroring, or the deadline
     // passing) rather than "nothing newer", so that and only that falls back
-    // to the cache's own answer; npm actually answering settles it either
-    // way, cache or no cache.
+    // to the cache's own answer; npm or brew actually answering settles it
+    // either way, cache or no cache.
     let version = match bounded(live, deadline) {
         Some(latest) if is_newer(&latest, current()) => Some(latest),
         Some(_) => None,
@@ -1058,9 +1098,10 @@ fn reported_version(output: &str) -> Option<String> {
 /// installs 0.2.0 and carries on rather than handing over would report 0.2.0
 /// as current while still reading 0.1.0's compiled-in notes.
 ///
-/// Resolved through `PATH` rather than through `current_exe`, because
-/// `current_exe` on Unix is the *inode* this process is executing and npm has
-/// just written a different file at the name.
+/// Resolved through `PATH` rather than through `current_exe`. After an npm
+/// install, `current_exe` on Unix is the *inode* this process is executing and
+/// npm has just written a different file at the name. After a Homebrew
+/// upgrade, it names `Cellar/spoolway/<old version>/`, which brew has removed.
 ///
 /// `expect_version` is what the install just put down. `PATH` is not proof that
 /// the name now resolves to it — under `npx` or `node_modules/.bin` the first
@@ -1086,9 +1127,13 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
         Some(line) if line.split_whitespace().any(|word| word == expect_version) => {}
         Some(line) => anyhow::bail!(
             "the `spoolway` on PATH resolves to `{}`, which reports `{line}` rather than the \
-             installed {expect_version} — a different install (an `npx` or project-local \
-             copy); install spoolway {expect_version} the way this one was installed",
-            program.display()
+             installed {expect_version}, so it is a different install from the one just \
+             upgraded (this one ran from `{}`); put the upgraded spoolway's folder first on \
+             PATH, or remove the other copy (an npm, `npx` or project-local one), then run \
+             spoolway update again",
+            program.display(),
+            std::env::current_exe()
+                .map_or_else(|_| "an unknown path".into(), |p| p.display().to_string())
         ),
         None => anyhow::bail!(
             "the `spoolway` on PATH (`{}`) did not report a version — cannot confirm the \
@@ -1378,11 +1423,44 @@ mod tests {
         assert_eq!(outcome, Upgrade::Current);
     }
 
-    /// `brew update` fetches the tap, so the bound is long enough for that.
+    /// `brew update` fetches the tap, so the Homebrew lookup is given thirty
+    /// seconds where npm gets three, and a standalone binary is given none.
     #[test]
-    fn the_homebrew_lookup_gets_longer_than_npms() {
-        assert_eq!(BREW_LOOKUP_DEADLINE, Duration::from_secs(30));
-        assert!(BREW_LOOKUP_DEADLINE > LOOKUP_DEADLINE);
+    fn each_channel_is_given_its_own_lookup_bound() {
+        assert_eq!(
+            lookup_for(Channel::Homebrew),
+            Some(("Homebrew", Duration::from_secs(30)))
+        );
+        assert_eq!(
+            lookup_for(Channel::Npm),
+            Some(("npm", Duration::from_secs(3)))
+        );
+        assert_eq!(lookup_for(Channel::Other), None);
+    }
+
+    /// A child still running at the deadline is killed rather than left to
+    /// fetch while the caller moves on.
+    #[test]
+    fn a_command_past_its_deadline_is_killed_and_gives_no_answer() {
+        let started = std::time::Instant::now();
+        let mut sleeper = Command::new("sleep");
+        sleeper.arg("30");
+        assert_eq!(
+            status_within(&mut sleeper, Duration::from_millis(200)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let mut quick = Command::new("true");
+        let status = status_within(&mut quick, Duration::from_secs(10));
+        assert!(status.is_some_and(|status| status.success()));
+        assert_eq!(
+            status_within(
+                &mut Command::new("/no/such/program"),
+                Duration::from_secs(1)
+            ),
+            None
+        );
     }
 
     #[test]

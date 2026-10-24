@@ -39,9 +39,9 @@ pub enum Command {
 
     /// Install the newer binary, and nothing else.
     #[command(long_about = "Install the newer binary, and nothing else.\n\n\
-        Checks npm for a newer release, and if there is one and this install can take it, \
-        runs `npm install -g spoolway@<version> --ignore-scripts` and hands over to the new \
-        binary. Runs from any directory, project or not — installing a binary is a fact about \
+        Checks npm, or Homebrew on a Homebrew install, for a newer release, and if there is one \
+        and this install can take it, runs `npm install -g spoolway@<version> --ignore-scripts` \
+        (or `brew upgrade marvingygas/tap/spoolway`) and hands over to the new binary. Runs from any directory, project or not — installing a binary is a fact about \
         this machine's `PATH`, not about any project.\n\n\
         `spoolway sync` is what brings a project's own files forward — `config.toml`, every \
         tracked pipeline file, installed skills. See `spoolway sync --help`.")]

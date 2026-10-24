@@ -4,15 +4,15 @@
 //! pipeline key references, skills. That half moved to [`crate::sync`], and
 //! what is left here is a fact about this machine rather than about any
 //! project — which release npm or Homebrew has, which of them installed this
-//! binary, and whether a dispatcher is running the file this would replace. None of that
-//! needs a `.spoolway/` directory anywhere above the current one, so this
-//! runs from any directory, project or not — the one command besides
+//! binary, and whether a dispatcher is running the file this would replace.
+//! None of that needs a `.spoolway/` directory anywhere above the current one,
+//! so this runs from any directory, project or not — the one command besides
 //! `spoolway init` that does.
 //!
 //! The split is why this and [`crate::sync`] read almost the same, on
 //! purpose: installing a binary is done the moment npm or brew says so and
-//! the hand-over lands; bringing a checkout's files forward needs a checkout to
-//! land them in, and stays exactly where it always was.
+//! the hand-over lands; bringing a checkout's files forward needs a checkout
+//! to land them in, and stays exactly where it always was.
 
 use std::path::{Path, PathBuf};
 
@@ -67,9 +67,9 @@ fn closing_line(upgraded: Option<&str>) -> Option<&'static str> {
 }
 
 /// Whether this invocation is the successful far side of a person-facing npm
-/// handover. The terminal gate keeps stdout stable for scripts and pipes; a
-/// forged or stale environment value cannot otherwise make a piped run print
-/// a digest meant for a person at a terminal.
+/// or brew handover. The terminal gate keeps stdout stable for scripts and
+/// pipes; a forged or stale environment value cannot otherwise make a piped
+/// run print a digest meant for a person at a terminal.
 fn digest_previous(upgraded: Option<&str>, terminal: bool) -> Option<&str> {
     terminal.then_some(upgraded).flatten()
 }
@@ -165,8 +165,8 @@ where
 
         // The whole reason a channel is resolved before anything is said: a
         // binary neither npm nor Homebrew installed is told the install line
-        // instead of being handed a command that would not replace it. Nothing has been
-        // installed, so no sync reminder follows.
+        // instead of being handed a command that would not replace it. Nothing
+        // has been installed, so no sync reminder follows.
         Upgrade::Standalone => {
             println!(
                 "This spoolway ({}) was not installed by npm, so it does not",
