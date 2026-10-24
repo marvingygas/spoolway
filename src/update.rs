@@ -139,11 +139,10 @@ where
         }
 
         Upgrade::Unmanaged(version) => {
-            println!("spoolway {version} is out, but npm could not install it. Run");
             println!(
-                "npm install -g {}@{version} yourself to see why.",
-                crate::release::PACKAGE
+                "spoolway {version} is out. This binary was not installed by npm, so upgrade it"
             );
+            println!("the way you installed it.");
             println!();
             Ok(None)
         }
