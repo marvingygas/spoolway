@@ -21,6 +21,7 @@ program runs underneath.
 | Linux x64 | `@spoolway/linux-x64` | Supported |
 | Linux x64 (musl) | `@spoolway/linux-x64-musl` | Supported |
 | Linux arm64 | `@spoolway/linux-arm64` | Supported |
+| Linux arm64 (musl) | `@spoolway/linux-arm64-musl` | Supported |
 | macOS Apple Silicon | `@spoolway/darwin-arm64` | Supported |
 | macOS Intel | `@spoolway/darwin-x64` | Supported |
 
@@ -30,8 +31,10 @@ From source, in a clone of this repository:
 cargo install --path .
 ```
 
-By hand: every GitHub release has one archive per platform and a `SHA256SUMS` file. Unpack the
-archive and put the binary on your `PATH`.
+By hand: every GitHub release has one executable file per platform, named `spoolway-linux-x64`,
+`spoolway-linux-arm64`, `spoolway-macos-arm64` or `spoolway-macos-x64`, and a `SHA256SUMS` file.
+Download the file for your platform, run `chmod +x` on it and put it on your `PATH`. Both Linux
+files are static builds that start on any distribution.
 
 As a herdr plugin:
 
@@ -42,12 +45,12 @@ herdr plugin install marvingygas/spoolway
 `herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
 version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
 command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
-`scripts/fetch-or-build.sh`, which maps the host's platform onto one of the triples in
-[`npm/targets.json`](../npm/targets.json), downloads that platform's release archive and its
-`SHA256SUMS`, verifies the checksum, and unpacks the binary to `./bin/spoolway` inside the
-plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
+`scripts/fetch-or-build.sh`, which finds the entry in [`npm/targets.json`](../npm/targets.json)
+for the host's operating system and CPU, downloads the release file that entry names and the
+release's `SHA256SUMS`, verifies the checksum, and installs the file as `./bin/spoolway` inside
+the plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
 writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
-no matching triple, no release matches the manifest's version, or the checksum fails to verify,
+no release file, no release matches the manifest's version, or the checksum fails to verify,
 the script falls back to `cargo build --release` and copies the result into place instead of
 failing the install.
 

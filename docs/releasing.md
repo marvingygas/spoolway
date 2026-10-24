@@ -29,9 +29,21 @@ already happened.
 
 ## What ships
 
-- Five platform binaries, packed into five npm platform packages plus the `spoolway` wrapper.
-- A GitHub release with five archives and `SHA256SUMS`.
+- Six platform binaries, packed into six npm platform packages plus the `spoolway` wrapper.
+- A GitHub release with four executable files and `SHA256SUMS`. The files have no version in
+  their names and no archive around them.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
+
+| Release file | Built from |
+|---|---|
+| `spoolway-linux-x64` | `x86_64-unknown-linux-musl` |
+| `spoolway-linux-arm64` | `aarch64-unknown-linux-musl` |
+| `spoolway-macos-arm64` | `aarch64-apple-darwin` |
+| `spoolway-macos-x64` | `x86_64-apple-darwin` |
+
+Each platform in `npm/targets.json` names its release file in a `download` key, or `null` for an
+npm-only build. The two glibc builds are npm-only. The release fails before anything is published
+when a Linux release file is not statically linked.
 
 `Cargo.toml` is the only version source. `CHANGELOG.md` holds one section per version and its
 contract is written at the top of the file. Changes without a version yet collect in a
