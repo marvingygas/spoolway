@@ -846,9 +846,12 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
 Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
-menu offers `new job`, `edit job`, `deactivate job` or `activate job`, and `delete job`. A job whose
-routine is not a listed one gets a row of its own under the routines, whose menu offers
-`edit job` and `delete job`.
+menu offers `new job`, or `edit job` and `deactivate job` or `activate job` for its one job; a
+routine with two or more jobs offers `deactivate job <name>` or `activate job <name>` for each.
+`activate job` is refused, writing nothing, while another job on the routine is active. No menu
+deletes a job; `delete routine` deletes the jobs on the routine it removes. A job whose routine
+is not a listed one gets a row of its own under the routines, whose menu offers `edit job`
+alone.
 
 See [Jobs](jobs.md).
 

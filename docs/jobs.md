@@ -161,18 +161,35 @@ With no job enabled and both stores parsing, an empty queue stops the run as usu
 
 ## Writing a job
 
-Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or deleted. A
+Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or activated. A
 routine's details pane shows its job above its tasks, and the routine's options menu acts on
 that job. See [Routines](planning.md#routines).
 
-A routine's options menu offers these items for its job.
+A routine's options menu offers these items for its job, then `delete routine`.
 
 | Item | What it does |
 |---|---|
 | `new job` | Write a job for the routine. Offered only while the routine has no job. |
 | `edit job` | Edit the routine's job. |
 | `deactivate job` | Deactivate the job, keeping its schedule. An inactive job shows `activate job` here instead, which activates it. |
-| `delete job` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
+
+No menu deletes a job. Deactivating one keeps its schedule, and `delete routine` deletes the
+routine together with every job that points into it.
+
+A routine with two or more jobs offers, for each job sorted by name, `activate job <name>` for an
+inactive one or `deactivate job <name>` for an active one, and no `edit job`. Deactivate all but
+one of them to settle the clash.
+
+`activate job` writes nothing while another job on the same routine is active. It opens a popup
+titled `activate job` instead:
+
+```
+dependabot-review also runs dependabot and is active. Deactivate it first, then activate this one.
+```
+
+With two or more such jobs active, the popup names them all and reads `… also run <routine> and
+are active. Deactivate them first, …`. The check reads both stores again at the pick, so a job
+another hand activated after the menu opened still counts.
 
 ### The two choices
 
@@ -197,12 +214,11 @@ The row's details show the job's schedule, pipeline, scope, next firing, last fi
 then why it never fires. The row takes no tick, so `space` and `enter` do nothing on it, and
 `tab` does nothing either. Its key line is `[o] options   [q] quit`.
 
-Its options menu offers two items:
+Its options menu offers one item:
 
 | Item | What it does |
 |---|---|
 | `edit job` | Open the routine picker, which lists the routine folders and nothing else. `enter` picks the folder under the cursor, then the schedule and pipeline panels follow. The save points the job at that routine and keeps its name and store. `esc` on the picker writes nothing. |
-| `delete job` | Delete the job, after the same popup as a routine's `delete job`. |
 
 ### What the screen decides for you
 
@@ -279,7 +295,7 @@ spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 ```
 
-Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or deleted. See
+Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or activated. See
 [Writing a job](#writing-a-job).
 
 ```
