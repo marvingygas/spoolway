@@ -161,7 +161,7 @@ With no job enabled and both stores parsing, an empty queue stops the run as usu
 
 ## Writing a job
 
-Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. A
+Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or deleted. A
 routine's details pane shows its job above its tasks, and the routine's options menu acts on
 that job. See [Routines](planning.md#routines).
 
@@ -171,7 +171,7 @@ A routine's options menu offers these items for its job.
 |---|---|
 | `new job` | Write a job for the routine. Offered only while the routine has no job. |
 | `edit job` | Edit the routine's job. |
-| `pause job` | Pause the job. A paused job shows `resume job` here instead, which resumes it. |
+| `deactivate job` | Deactivate the job, keeping its schedule. An inactive job shows `activate job` here instead, which activates it. |
 | `delete job` | Delete the job, after a popup that asks first. Its one answer is `delete`: `enter` deletes the job, `esc` keeps it. |
 
 ### The two choices
@@ -279,16 +279,16 @@ spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 ```
 
-Bare `spoolway`'s routines tab is where a job is written, edited, paused or deleted. See
+Bare `spoolway`'s routines tab is where a job is written, edited, deactivated or deleted. See
 [Writing a job](#writing-a-job).
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST
 nightly-audit  user     0 3 * * 1-5   impl_fast   in 5h 48m   ok, 19h ago
 weekly-deps    project  0 3 * * sun   impl        Sun 03:00   ok, 3d ago
-lint-sweep     user     */30 * * * *  impl_fast   paused      -
+lint-sweep     user     */30 * * * *  impl_fast   inactive    -
 
-3 jobs, 2 enabled.
+3 jobs, 2 active.
   ~/.spoolway/spoolway/jobs.toml    2
   .spoolway/jobs.toml               1
 ```
@@ -299,7 +299,7 @@ A job with an unknown key adds a line under the table:
 warning: job `lint-sweep` has unknown key `enable` in ~/.spoolway/spoolway/jobs.toml — it will not fire until it is removed or corrected
 ```
 
-`NEXT` reads `paused` for a disabled job, `bad expr` for an expression that will not parse,
+`NEXT` reads `inactive` for a disabled job, `bad expr` for an expression that will not parse,
 and `never` for one that never comes round.
 
 A `--json` row carries `name`, `scope`, `schedule`, `pipeline`, `routine`, `enabled`,

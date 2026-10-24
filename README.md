@@ -256,7 +256,7 @@ routine  = "nightly"       # a top-level folder under .spoolway/routines/
 ```
 
 The routines tab shows a routine's job above its tasks. Press `o` on the routine to edit,
-pause or delete it.
+deactivate or delete it.
 
 ## Trials
 

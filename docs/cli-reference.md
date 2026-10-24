@@ -846,7 +846,7 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
 Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
-menu offers `new job`, `edit job`, `pause job` or `resume job`, and `delete job`. A job whose
+menu offers `new job`, `edit job`, `deactivate job` or `activate job`, and `delete job`. A job whose
 routine is not a listed one gets a row of its own under the routines, whose menu offers
 `edit job` and `delete job`.
 
@@ -873,7 +873,7 @@ spoolway jobs list
 spoolway jobs list --json
 ```
 
-`NEXT` reads `paused`, `bad expr`, `never`, or the next firing time. A job whose table holds an
+`NEXT` reads `inactive`, `bad expr`, `never`, or the next firing time. A job whose table holds an
 unknown key gets a `warning:` line under the table. `--json` prints one object per job, with its
 unknown keys under `unknown_keys`. See [Jobs](jobs.md).
 

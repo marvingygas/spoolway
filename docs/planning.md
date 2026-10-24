@@ -395,12 +395,12 @@ What the job rows say depends on how many jobs point at the routine:
 |---|---|
 | None | One row, `Schedule:    none`. |
 | One | `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and `Job:` rows. |
-| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `paused` on a paused one, and a line saying which to delete. |
+| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `inactive` on an inactive one, and a line saying which to delete. |
 | A job store that will not load | A `Jobs:` row, `will not load:` and the error. The tasks are still drawn. |
 
 Two enabled jobs on one routine fire neither. The `Jobs:` row then reads
-`2 run this routine, so neither fires`. With one enabled and one paused job it reads
-`2 run this routine; only <name> fires`. Resuming the paused job stops both.
+`2 run this routine, so neither fires`. With one enabled and one inactive job it reads
+`2 run this routine; only <name> fires`. Activating the inactive job stops both.
 
 A job whose routine is not a routine the list shows gets a row of its own at the bottom of the
 list, under a blank line, where it can be edited or deleted. See
@@ -424,8 +424,8 @@ highlighted row's name:
 |---|---|---|
 | `new job` | A routine with no job. | Make a job from the routine. See [Jobs](jobs.md). |
 | `edit job` | A routine with one job. | Change the job's schedule and pipeline. |
-| `pause job` | A routine with one enabled job. | Pause the job. |
-| `resume job` | A routine with one paused job. | Resume the job. |
+| `deactivate job` | A routine with one enabled job. | Deactivate the job. |
+| `activate job` | A routine with one inactive job. | Activate the job. |
 | `delete job` | A routine with one job. | Delete the job after a popup. The routine stays. |
 | `delete job <name>` | A routine with two or more jobs. One item per job, sorted by name. | Delete that job after a popup. The routine stays. |
 | `delete routine` | A routine. | Delete the routine and every job that points into it, after a popup. |
@@ -501,7 +501,7 @@ the pipeline panel saves it. `edit job` opens the same two panels filled with th
 values and saves the job back to the store it came from. `esc` on either panel cancels and writes
 nothing. See [Jobs](jobs.md).
 
-`pause job` and `resume job` write the job back to its own store with the schedule unchanged.
+`deactivate job` and `activate job` write the job back to its own store with the schedule unchanged.
 `delete job` opens a popup titled `delete this job` whose one answer is `delete`. `enter` deletes
 the job and `esc` keeps it.
 
