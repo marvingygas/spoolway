@@ -138,6 +138,7 @@ where
             let command = format!("brew upgrade {}", crate::release::BREW_FORMULA);
             println!("Installing spoolway {version}");
             println!("  {command}");
+            println!();
             let status = brew_upgrade().map_err(|err| {
                 anyhow::anyhow!(
                     "could not start brew ({err}), so spoolway {} is still installed; \
@@ -148,11 +149,13 @@ where
             if !status.success() {
                 // brew has already printed its own error. Its exit status is
                 // handed back so `update` exits with it rather than 0.
+                println!();
                 println!(
                     "brew upgrade did not finish, so spoolway {} is still installed.",
                     crate::release::current()
                 );
                 println!("Run it yourself to see the whole error:");
+                println!();
                 println!("  {command}");
                 return Ok(Some(status));
             }

@@ -20,7 +20,7 @@ const NEW_VERSION: &str = "99.1.2";
 
 const CHECKING: &str = "Checking Homebrew for a newer spoolway...\n";
 
-const INSTALLING: &str = "Installing spoolway 99.1.2\n  brew upgrade marvingygas/tap/spoolway\n";
+const INSTALLING: &str = "Installing spoolway 99.1.2\n  brew upgrade marvingygas/tap/spoolway\n\n";
 
 fn fake(path: &Path, body: &str) {
     std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
@@ -211,8 +211,8 @@ fn update_on_a_homebrew_binary_reports_a_failed_brew_upgrade() {
         stdout(&output),
         format!(
             "{CHECKING}{INSTALLING}\
-             brew upgrade did not finish, so spoolway {} is still installed.\n\
-             Run it yourself to see the whole error:\n  \
+             \nbrew upgrade did not finish, so spoolway {} is still installed.\n\
+             Run it yourself to see the whole error:\n\n  \
              brew upgrade marvingygas/tap/spoolway\n",
             env!("CARGO_PKG_VERSION")
         )
