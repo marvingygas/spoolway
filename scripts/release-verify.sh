@@ -78,14 +78,17 @@ done
 npm_wait spoolway
 
 # 4. The GitHub release carries one bare file per target that names a
-#    `download`, plus the checksums.
+#    `download`, plus the checksums. Releases tagged before targets.json
+#    gained that key shipped one archive per platform instead, so a tagged
+#    tree where no target has the key is counted by the old rule.
 assets="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
   || die "no GitHub release for $tag"
 count="$(printf '%s\n' "$assets" | grep -c . || true)"
-downloads="$(git show "$tag:npm/targets.json" | jq -r '[.targets[] | select(.download != null)] | length')"
+downloads="$(git show "$tag:npm/targets.json" \
+  | jq -r 'if any(.targets[]; has("download")) then [.targets[] | select(.download != null)] | length else (.targets | length) end')"
 expected=$(( downloads + 1 ))
 [ "$count" -eq "$expected" ] \
-  || die "$tag has $count release assets, expected $expected (one per download file plus SHA256SUMS)"
+  || die "$tag has $count release assets, expected $expected (one per download file, or per platform archive on older tags, plus SHA256SUMS)"
 printf '%s\n' "$assets" | grep -qxF SHA256SUMS || die "$tag has no SHA256SUMS asset"
 
 # 5. The published body is the tagged changelog section, byte for byte. The

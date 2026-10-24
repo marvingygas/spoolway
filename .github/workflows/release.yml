@@ -269,8 +269,9 @@ jobs:
         with:
           path: artifacts
 
-      # Artifact downloads drop the executable bit, so it has to be put back
-      # -- otherwise the download is a file nobody can run.
+      # Artifact downloads drop the executable bit, so the files are made
+      # 0755 here to checksum and upload runnable files. A release asset does
+      # not keep that mode, though: whoever downloads one must chmod +x it.
       - name: Collect the downloads
         run: |
           mkdir -p dist

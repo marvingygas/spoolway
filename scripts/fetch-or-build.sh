@@ -4,10 +4,11 @@
 # Fast path: map `uname` onto the npm/targets.json entry that names a release
 # download for this OS and CPU, download that bare file from the matching
 # release, verify it against that release's SHA256SUMS, and install it as
-# ./bin/spoolway (relative to the plugin root — herdr runs this with the plugin directory as $PWD and
-# HERDR_PLUGIN_ROOT pointing at it; see herdr-plugin.toml). `herdr plugin
-# uninstall` deletes the plugin directory and nothing else, so nothing here
-# may write outside it — no ~/.local/bin, no ~/.cargo/bin.
+# ./bin/spoolway (relative to the plugin root — herdr runs this with the
+# plugin directory as $PWD and HERDR_PLUGIN_ROOT pointing at it; see
+# herdr-plugin.toml). `herdr plugin uninstall` deletes the plugin directory
+# and nothing else, so nothing here may write outside it — no ~/.local/bin,
+# no ~/.cargo/bin.
 #
 # The release tag is read from herdr-plugin.toml's own `version`, which
 # verify.yml's `test` job keeps equal to Cargo.toml's.
@@ -76,7 +77,7 @@ sha256_of() { # prints the hex digest of file $1
   fi
 }
 
-# --- resolve the release download from npm/targets.json ----------------------
+# --- resolve the release download from npm/targets.json -------------------
 [ -f "$targets_json" ] || fallback "missing $targets_json"
 
 os=$(uname -s 2>/dev/null || echo unknown)

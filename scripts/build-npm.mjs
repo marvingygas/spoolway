@@ -134,7 +134,7 @@ function checkDownloadNames() {
   const dupes = named.filter((n, i) => named.indexOf(n) !== i);
   if (dupes.length) {
     throw new Error(
-      `npm/targets.json names the same download file twice: ${[...new Set(dupes)].join(", ")}`,
+      `npm/targets.json names the download file ${[...new Set(dupes)].join(", ")} for more than one target, so one would overwrite the other on the release page; give each target its own download name, or null.`,
     );
   }
 }
