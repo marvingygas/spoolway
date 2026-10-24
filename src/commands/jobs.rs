@@ -617,7 +617,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
     Notice::new(
         "job saved",
         format!(
-            "{} runs {when}, on {}.\nNext: {next}.\nEdit, pause or delete it with o on its routine.",
+            "{} runs {when}, on {}.\nNext: {next}.\nEdit or deactivate it with o on its routine.",
             draft.name(),
             draft.pipeline,
         ),
@@ -690,8 +690,8 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         .any(|job| job.name == name && draft.editing.as_deref() != Some(name.as_str()));
     if taken {
         return Err(format!(
-            "A job named `{name}` already exists. Delete it first — from `{}` or `{}` — then \
-             save this one.",
+            "A job named `{name}` already exists, in `{}` or `{}`. Pick another name and save \
+             again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
         ));
@@ -709,7 +709,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
     }) {
         return Err(format!(
             "Routine `{}` already has the job `{}`, in `{}`. A routine has at most one job: \
-             delete that job first, or pick another routine.",
+             edit that job instead, or pick another routine.",
             draft.routine,
             holder.name,
             store_label(repo, &holder.source),
@@ -1189,7 +1189,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("\nEdit, pause or delete it with o on its routine."),
+            text.ends_with("\nEdit or deactivate it with o on its routine."),
             "{text}"
         );
 
@@ -1245,6 +1245,10 @@ mod tests {
             refusal.contains("`first`") && refusal.contains("at most one job"),
             "{refusal}"
         );
+        assert!(
+            refusal.ends_with("edit that job instead, or pick another routine."),
+            "{refusal}"
+        );
         assert_eq!(jobs::load(&repo).unwrap().len(), 1, "nothing was written");
 
         draft.editing = Some("first".to_string());
@@ -1276,6 +1280,10 @@ mod tests {
 
         let refusal = commit_draft(&repo, draft).unwrap_err();
         assert!(refusal.contains("already exists"), "{refusal}");
+        assert!(
+            refusal.ends_with("Pick another name and save again."),
+            "{refusal}"
+        );
         assert!(
             refusal.contains(&store_label(&repo, &repo.user_jobs_file()))
                 && refusal.contains(&store_label(&repo, &repo.jobs_file())),

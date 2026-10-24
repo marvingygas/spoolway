@@ -8743,7 +8743,8 @@ fn highlighted_orphan<'a, 'b>(
 /// Every job is listed, inactive ones too. Two enabled jobs fire neither, by
 /// [`crate::jobs::Job::clashing_jobs`], the rule the dispatcher skips them
 /// by. An inactive one fires nowhere, but activating it beside an enabled
-/// one stops both, so it is a job to delete as much as a clashing one is.
+/// one stops both, so the fix asks for the enabled one to be deactivated
+/// first rather than for the inactive ones to go.
 fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let mut on = on.to_vec();
     on.sort_by(|a, b| a.name.cmp(&b.name));
@@ -8752,19 +8753,11 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let (headline, fix) = match live.as_slice() {
         [] => (
             format!("{} run this routine, all inactive", on.len()),
-            if two {
-                "Delete one with o before resuming the other."
-            } else {
-                "Delete all but one with o before resuming it."
-            },
+            "Activate one with o to fire it.",
         ),
         [job] => (
             format!("{} run this routine; only {} fires", on.len(), job.name),
-            if two {
-                "Delete the paused one with o, or resuming it stops both."
-            } else {
-                "Delete the paused ones with o, or resuming one stops both."
-            },
+            "Deactivate the active one with o before activating another.",
         ),
         _ => (
             format!(
@@ -8773,9 +8766,9 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
                 if two { "neither" } else { "none" }
             ),
             if two {
-                "Delete one with o to fire the other."
+                "Deactivate one with o to fire the other."
             } else {
-                "Delete all but one with o to fire it."
+                "Deactivate all but one with o to fire it."
             },
         ),
     };
@@ -8904,7 +8897,7 @@ fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<Strin
     lines.extend(wrapped(CONFIG_INDENT, &orphan.reason, width));
     lines.extend(wrapped(
         CONFIG_INDENT,
-        "Press o to point this job at a routine, or delete it.",
+        "Press o to point this job at a routine.",
         width,
     ));
     lines
@@ -22357,7 +22350,7 @@ mod tests {
         );
         assert!(saved.contains("Next: "), "{saved}");
         assert!(
-            saved.contains("Edit, pause or delete it with o on its routine."),
+            saved.contains("Edit or deactivate it with o on its routine."),
             "{saved}"
         );
         // The key line under the frame is the popup's own `[enter]
@@ -22388,7 +22381,7 @@ mod tests {
 
         assert!(last.contains("─ not saved "), "{last}");
         assert!(
-            last.contains("A job named `nightly` already exists."),
+            last.contains("A job named `nightly` already exists, in"),
             "{last}"
         );
         let jobs = crate::jobs::load(&repo).unwrap();
@@ -23117,7 +23110,7 @@ mod tests {
                 "  Job:         nightly-old",
                 "",
                 "  No routine nightly-old under .spoolway/routines/.",
-                "  Press o to point this job at a routine, or delete it.",
+                "  Press o to point this job at a routine.",
             ]
         );
         let task_file = details(3);
@@ -23335,7 +23328,7 @@ mod tests {
                 "  Jobs:        2 run this routine, so neither fires",
                 "                 dependabot-review   project",
                 "                 dependabot-weekly   user",
-                "               Delete one with o to fire the other.",
+                "               Deactivate one with o to fire the other.",
                 "",
                 "  tasks",
                 "    review-dependabot-prs",
@@ -23372,8 +23365,8 @@ mod tests {
                 "  Jobs:        2 run this routine; only b-live fires",
                 "                 a-paused   user, inactive",
                 "                 b-live     project",
-                "               Delete the paused one with o, or resuming it stops",
-                "               both.",
+                "               Deactivate the active one with o before activating",
+                "               another.",
                 "",
             ],
             "{pane:#?}"
@@ -23410,8 +23403,8 @@ mod tests {
                 "    fires",
                 "      dependabot-review   project",
                 "      dependabot-weekly   user",
-                "    Delete one with o to fire the",
-                "    other.",
+                "    Deactivate one with o to fire",
+                "    the other.",
                 "",
             ],
             "{pane:#?}"
@@ -23447,7 +23440,7 @@ mod tests {
 
         let pane = details_at(&repo, 35);
         assert_eq!(
-            pane[..11],
+            pane[..10],
             [
                 "",
                 "  Jobs:",
@@ -23457,8 +23450,7 @@ mod tests {
                 "        project, inactive",
                 "      dependabot-weekly",
                 "        user, inactive",
-                "    Delete one with o before",
-                "    resuming the other.",
+                "    Activate one with o to fire it.",
                 "",
             ],
             "{pane:#?}"

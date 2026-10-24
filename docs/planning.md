@@ -395,7 +395,7 @@ What the job rows say depends on how many jobs point at the routine:
 |---|---|
 | None | One row, `Schedule:    none`. |
 | One | `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and `Job:` rows. |
-| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `inactive` on an inactive one, and a line saying which to delete. |
+| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `inactive` on an inactive one, and a line saying which to deactivate or activate. |
 | A job store that will not load | A `Jobs:` row, `will not load:` and the error. The tasks are still drawn. |
 
 Two enabled jobs on one routine fire neither. The `Jobs:` row then reads

@@ -258,7 +258,7 @@ impl Job {
         }
         let names: Vec<&str> = others.iter().map(|job| job.name.as_str()).collect();
         Some(format!(
-            "{} run{} routine {} too; delete one on the routines tab (o → delete job)",
+            "{} run{} routine {} too; deactivate one on the routines tab (o → deactivate job)",
             names.join(", "),
             if names.len() == 1 { "s" } else { "" },
             self.relative_target(repo)?,
@@ -309,7 +309,7 @@ impl Job {
                     "routine `{}` is the routines directory itself, not a routine",
                     self.spec.routine
                 ),
-                "pick a routine folder, or delete the job, on the routines tab (o)",
+                "pick a routine folder on the routines tab (o)",
             ));
         }
         if !target.exists() {
@@ -320,7 +320,7 @@ impl Job {
                     self.spec.routine,
                     routines_dir_named(&repo.routines_dir())
                 ),
-                "edit or delete the job on the routines tab (o)",
+                "edit the job on the routines tab (o)",
             ));
         }
         let advice = if depth == 1 {
@@ -328,7 +328,7 @@ impl Job {
         } else {
             format!("point the job at {top}")
         };
-        let fix = format!("{advice}, or delete it, on the routines tab (o)");
+        let fix = format!("{advice} on the routines tab (o)");
         if target.is_file() {
             return Some(fault(
                 false,
@@ -2396,9 +2396,9 @@ mod tests {
             actions,
             [
                 "job dependabot-weekly · due now · skipped, dependabot-review runs routine \
-                 dependabot too; delete one on the routines tab (o → delete job)",
+                 dependabot too; deactivate one on the routines tab (o → deactivate job)",
                 "job dependabot-review · due now · skipped, dependabot-weekly runs routine \
-                 dependabot too; delete one on the routines tab (o → delete job)",
+                 dependabot too; deactivate one on the routines tab (o → deactivate job)",
             ]
         );
         assert!(repo.queued_ids().is_empty(), "neither job queued anything");
@@ -2491,12 +2491,11 @@ mod tests {
             actions,
             [
                 "job deep · due now · skipped, nested/inner is inside routine nested, not a \
-                 routine itself; point the job at nested, or delete it, on the routines tab (o)",
+                 routine itself; point the job at nested on the routines tab (o)",
                 "job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a \
-                 task, not a routine; point the job at dependabot, or delete it, on the \
-                 routines tab (o)",
+                 task, not a routine; point the job at dependabot on the routines tab (o)",
                 "job nightly-old · due now · skipped, routine nightly-old is not under \
-                 .spoolway/routines/; edit or delete the job on the routines tab (o)",
+                 .spoolway/routines/; edit the job on the routines tab (o)",
             ]
         );
         assert!(repo.queued_ids().is_empty(), "no job queued anything");

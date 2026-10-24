@@ -13,7 +13,8 @@ under `.spoolway/routines/`.
 A job runs a whole routine, which is a top-level folder under `.spoolway/routines/`. A routine
 has at most one job. A job on a task file, on a folder inside a routine, or on a routine that
 another enabled job also runs never fires. The dispatcher names it once per matching minute, and
-`spoolway doctor` fails a check for it. To fire again, delete or repoint the job.
+`spoolway doctor` fails a check for it. To fire again, deactivate the job it clashes with, or edit
+it to point at a whole routine.
 
 ## Overview
 
@@ -61,9 +62,9 @@ job nightly · due now · skipped, audit is still in the queue, at step queued
 The dispatcher names a job that cannot fire in the same way, once per matching minute:
 
 ```
-job dependabot-weekly · due now · skipped, dependabot-review runs routine dependabot too; delete one on the routines tab (o → delete job)
-job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; pick a routine folder, or delete it, on the routines tab (o)
-job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit or delete the job on the routines tab (o)
+job dependabot-weekly · due now · skipped, dependabot-review runs routine dependabot too; deactivate one on the routines tab (o → deactivate job)
+job deps-only · due now · skipped, dependabot/review-dependabot-prs.md is a task, not a routine; pick a routine folder on the routines tab (o)
+job nightly-old · due now · skipped, routine nightly-old is not under .spoolway/routines/; edit the job on the routines tab (o)
 ```
 
 A project joined to a workspace keeps its routines elsewhere. Its lines, and the details of a job's own row on the routines tab, name that directory's full path in place of `.spoolway/routines/`.
