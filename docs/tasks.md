@@ -387,9 +387,9 @@ To throw the step's conversation away and brief the step from scratch, run
 
 ### Paused is the other one, and it is not a block
 
-A task that passes a step with [`gate: true`](pipelines.md#gates) stops on `paused`. So does a
+A task that reports the outcome a step's [`gate:`](pipelines.md#gates) holds stops on `paused`. So does a
 task whose own `gate_at:` names the step it is reporting from, whatever that step reports. The
-same holds for a command step: `gate: true` holds a passing exit, and `gate_at:` holds any exit.
+same holds for a command step: `gate:` holds the exit its value names, and `gate_at:` holds any exit.
 Nothing went wrong. You decide whether it goes on.
 
 Press `r` on the paused row. The picker preselects the step a plain resume lands on, and
@@ -405,7 +405,7 @@ A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to th
 unblocker named with `--stage`. Without `--stage`, it sends the task to the `on_pass` of the step
 the task stopped at, which is where an unheld pass would have gone. A command step it stopped
 at runs again. The board's resume picker says the block was cleared. When the stopped step has
-`gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
+`gate: on_pass` or `gate: always`, the task waits at that step's gate instead, and the `gate_at` is spent.
 
 A `gate_at` that caught a `--fail`, at an agent step or a command step alike, sends a plain
 resume down that step's `on_fail`, the route the failure chose. The picker preselects that

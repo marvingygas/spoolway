@@ -480,7 +480,7 @@ A panel's body still names a file by the task's id.
 | `unblocked, moved to <step>` | The task left `blocked`. |
 | `unblocked by its lane, moved to <step>` | The `blocked` lane reported a pass. |
 | `left <step>, moved to <step>` | The task file does not say how the task left the step. |
-| `passed <step>, moved to paused (gate)` | The step has `gate: true`. |
+| `passed <step>, moved to paused (gate)` | The step has `gate: on_pass` or `gate: always`. |
 | `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
 | `passed <step>, done hook failed: <reason>` | The issue hook for `done` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
 | `<event> hook failed: <reason>` | The issue hook for `queued` or `started` exited non-zero, ran 10 minutes without exiting, or was killed three times in a row. |
@@ -985,9 +985,9 @@ the `unattended.blocked_*` keys until you restart it or it reloads on a request.
 
 ## Gates: when the pipeline waits for you
 
-A step with `gate: true` stops the task on `paused` after the step reports. The pane stays open
+A step with `gate:` stops the task on `paused` when the step reports the outcome the gate holds. The pane stays open
 for you to read. A shown command's pane stays open after the command exits, and a hidden command
-has no pane. The dispatcher stops the task on `paused` when the command exits with a pass.
+has no pane. The dispatcher stops the task on `paused` when the command exits with the outcome the gate holds.
 
 Press `r` on the paused row to open the [resume picker](#resume-picker). The natural next step
 is preselected, so `enter` lets the task past the gate. Move the cursor to another step and press
