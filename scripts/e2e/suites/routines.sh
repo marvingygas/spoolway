@@ -205,12 +205,12 @@ works "never the earlier run's own bare id" \
   _ "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"
 
 # Delete routine deletes a routine and every job that points into it: a user job on the
-# whole `nightly` folder, a second project job on the same folder (the clash a
-# hand edit can make), and a user job on `maintenance` that has to survive.
-# The folders sort `archived-reuse`, `maintenance`, `nightly`, `release`, so
-# `jj` puts the cursor on `nightly`. Its two jobs put delete job for each of
-# them on its menu, by name, above delete routine, so `o`, down, down,
-# `enter` picks delete routine.
+# whole `nightly` folder, a second, inactive project job on the same folder
+# (the clash a hand edit can make), and a user job on `maintenance` that has
+# to survive. The folders sort `archived-reuse`, `maintenance`, `nightly`,
+# `release`, so `jj` puts the cursor on `nightly`. Its two jobs put activate
+# job or deactivate job for each of them on its menu, by name, above delete
+# routine, so `o`, down, down, `enter` picks delete routine.
 USER_STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
 PROJECT_STORE=.spoolway/jobs.toml
 cat >"$USER_STORE" <<'EOF'
@@ -229,6 +229,7 @@ cat >"$PROJECT_STORE" <<'EOF'
 schedule = "0 5 * * *"
 pipeline = "bugfix"
 routine = "nightly"
+enabled = false
 EOF
 
 # Delete asks, esc keeps everything.
@@ -248,15 +249,29 @@ lacks "never a job on another routine" "weekly-prune" "$LAST"
 has "its one answer under the cursor" "> delete" "$LAST"
 has "under the shared key row" "[enter] confirm   [esc] close" "$LAST"
 
-# The menu that led there names each job.
+# The menu that led there names each job, offering to switch it.
 MENU="$LIVE/routine-two-jobs-menu.txt"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "a routine with two jobs offers to delete one" "delete job audit-docs" "$LAST"
-has "or the other" "delete job nightly-audit" "$LAST"
+has "a routine with two jobs offers to activate the inactive one" "> activate job audit-docs" "$LAST"
+has "or to deactivate the active one" "deactivate job nightly-audit" "$LAST"
 has "then delete routine" "delete routine" "$LAST"
 lacks "and never edit job" "edit job" "$LAST"
+lacks "nor delete job" "delete job" "$LAST"
+
+# Activate job beside an active job on the same routine (`o`, `enter`)
+# writes nothing and says why in a popup.
+REFUSED="$LIVE/routine-activate-refused.txt"
+on_screen '\x1b[Cjjo\r' "$REFUSED"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /also runs/ { last = $0 } END { print last }' \
+  "$REFUSED" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "activate job beside an active job opens a popup" "─ activate job " "$LAST"
+has "naming the active job and the routine" "nightly-audit also runs nightly" "$LAST"
+# The sentence wraps inside the popup, so its two halves are matched apart.
+has "and what to do instead" "and is active. Deactivate it" "$LAST"
+has "before activating this one" "then activate this one." "$LAST"
+has "activate job writes nothing" "enabled = false" "$PROJECT_STORE"
 
 # Delete asks, enter deletes the jobs and then the folder.
 on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\r' /dev/null
@@ -286,16 +301,16 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /job saved/ { last = $0 } END { pr
 has "and says so in a popup" "release runs at 03:00, Monday to Friday, on bugfix." "$LAST"
 
 # A routine with a job offers no second one: its menu is the job's own,
-# edit job, deactivate job, delete job, then delete routine.
+# edit job, deactivate job, then delete routine.
 MENU="$LIVE/routine-one-job-menu.txt"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with a job offers edit job first" "> edit job" "$LAST"
 has "then deactivate job" "deactivate job" "$LAST"
-has "then delete job" "delete job" "$LAST"
 has "then delete routine" "delete routine" "$LAST"
 lacks "and no new job" "new job" "$LAST"
+lacks "nor delete job" "delete job" "$LAST"
 
 # The right pane is titled details and draws the highlighted routine's job
 # above its tasks. `archived-reuse`, first under the cursor, has no job, so
@@ -345,15 +360,6 @@ has "keeping its routine" 'routine = "release"' "$USER_STORE"
 has "and its pipeline" 'pipeline = "bugfix"' "$USER_STORE"
 lacks "never copied into the project store" "[jobs.release]" "$PROJECT_STORE"
 
-# Delete job (`o`, down, down, `enter`) asks first: esc keeps the job, and
-# enter deletes it alone, leaving the routine.
-on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\x1b' /dev/null
-has "delete job then esc keeps the job" "[jobs.release]" "$USER_STORE"
-on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\r' /dev/null
-lacks "delete job then enter deletes the job" "[jobs.release]" "$USER_STORE"
-works "and leaves the routine" test -d .spoolway/routines/release
-has "and every other job" "[jobs.weekly-prune]" "$USER_STORE"
-
 # A job whose routine is gone gets a row of its own under the routines, after
 # a blank line: `nightly` was deleted above, so a job still naming it is
 # missing. The folders sort `archived-reuse`, `maintenance`, `release`, so
@@ -388,18 +394,13 @@ on_screen '\x1b[C jjj \r' /dev/null
 works "space and enter on the job's row queue nothing" \
   test "$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)" -eq "$QUEUED_BEFORE"
 
-# Its menu offers edit job and delete job, and nothing a routine offers.
+# Its menu offers edit job alone, and nothing a routine offers.
 MENU="$LIVE/routine-orphan-menu.txt"
 on_screen '\x1b[Cjjjo' "$MENU"
 sed 's/\x1b\[[0-9;]*m//g' "$MENU" >"$MENU.plain"
 has "the job's row offers edit job" "> edit job" "$MENU.plain"
-has "and delete job" "delete job" "$MENU.plain"
+lacks "and no delete job" "delete job" "$MENU.plain"
 lacks "and never delete routine" "delete routine" "$MENU.plain"
-
-# Delete job (`o`, down, `enter`) asks, and `enter` deletes the job alone.
-on_screen '\x1b[Cjjjo\x1b[B\r\r' /dev/null
-lacks "delete job on the job's row deletes it" "[jobs.nightly-old]" "$USER_STORE"
-has "and leaves every other job" "[jobs.weekly-prune]" "$USER_STORE"
 
 # A routine folder holding a file that will not parse is refused whole, and
 # the refusal names the file: queueing it any other way would leave the
