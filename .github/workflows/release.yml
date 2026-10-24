@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
 
-# Never interrupt publication halfway through the six registry writes.
+# Never interrupt publication halfway through the seven registry writes.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -69,6 +69,25 @@ jobs:
 
       - run: cargo build --release --locked --target ${{ matrix.target.triple }}
 
+      # A Linux file on the release page is promised to start on any distro,
+      # so one that quietly linked glibc (a mis-set triple, a changed linker)
+      # must stop the release here, before anything is published. `file`
+      # reports "statically linked" or "static-pie linked" for the musl
+      # builds and "dynamically linked" for a glibc one.
+      - name: Check the Linux download is statically linked
+        if: matrix.target.download != null && matrix.target.os == 'linux'
+        run: |
+          bin="target/${{ matrix.target.triple }}/release/spoolway"
+          info="$(file -b "$bin")"
+          echo "$info"
+          case "$info" in
+            *"statically linked"*|*"static-pie linked"*) ;;
+            *)
+              echo "${{ matrix.target.download }} is not statically linked, so it would not start on every distro; build ${{ matrix.target.triple }} with the musl target and the musl-tools linker." >&2
+              exit 1
+              ;;
+          esac
+
       # `if-no-files-found: error` means a missing binary fails here rather
       # than silently shipping a platform package with nothing in it.
       - uses: actions/upload-artifact@v7
@@ -84,7 +103,7 @@ jobs:
   # disagree about what a version shipped. Extracting the section in its own
   # job ahead of `publish` is what makes a missing, duplicated, or mistyped
   # heading fail before the first irreversible npm publish rather than after
-  # five packages are already on the registry.
+  # six packages are already on the registry.
   notes:
     runs-on: ubuntu-latest
     steps:
@@ -199,7 +218,7 @@ jobs:
             echo "::notice::repository is private; publishing without provenance"
           fi
 
-          # Publishing is six separate calls to a registry that keeps whatever
+          # Publishing is seven separate calls to a registry that keeps whatever
           # each one lands, so a failure half way through is a published state
           # nobody chose -- and it happened on the first real release, where the
           # token could write @spoolway/* but not the unscoped wrapper. Skipping
@@ -229,10 +248,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # npm is how spoolway is meant to be installed; this is the manual path --
-  # one archive per target on the release page, for anyone who wants the binary
-  # without a package manager. It hangs off `publish` rather than `build` so the
-  # tag/Cargo.toml check gates it too, and a release is never created for a
-  # version npm refused.
+  # one bare executable per platform on the release page, for anyone who wants
+  # the binary without a package manager. Only targets that name a `download`
+  # in npm/targets.json are attached (the static Linux builds and macOS), and
+  # the file name carries no version, so a link to it never goes stale. It
+  # hangs off `publish` rather than `build` so the tag/Cargo.toml check gates
+  # it too, and a release is never created for a version npm refused.
   assets:
     needs: publish
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish)
@@ -248,15 +269,15 @@ jobs:
         with:
           path: artifacts
 
-      # Artifact downloads drop the executable bit, so the archive has to put it
-      # back -- otherwise the tarball unpacks to a file nobody can run.
-      - name: Package
+      # Artifact downloads drop the executable bit, so the files are made
+      # 0755 here to checksum and upload runnable files. A release asset does
+      # not keep that mode, though: whoever downloads one must chmod +x it.
+      - name: Collect the downloads
         run: |
           mkdir -p dist
-          while read -r triple; do
-            chmod 0755 "artifacts/$triple/spoolway"
-            tar -czf "dist/spoolway-$triple.tar.gz" -C "artifacts/$triple" spoolway
-          done < <(jq -r '.targets[].triple' npm/targets.json)
+          while read -r triple download; do
+            install -m 0755 "artifacts/$triple/spoolway" "dist/$download"
+          done < <(jq -r '.targets[] | select(.download != null) | "\(.triple) \(.download)"' npm/targets.json)
           ( cd dist && sha256sum ./* > SHA256SUMS )
           cat dist/SHA256SUMS
 

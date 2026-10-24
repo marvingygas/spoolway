@@ -24,9 +24,9 @@ step and three panes and actions, one pair per command:
 The `dispatch` action opens bare `spoolway`, the one screen holding the dispatch, queue, jobs
 and eval tabs.
 
-The `[[build]]` step runs `scripts/fetch-or-build.sh`, which downloads the release archive
-matching the manifest's own `version`, verifies its `SHA256SUMS`, and unpacks the binary to
-`./bin/spoolway` — relative to the plugin's own root directory, which `herdr` names
+The `[[build]]` step runs `scripts/fetch-or-build.sh`, which downloads the release file for
+the host's operating system and CPU at the manifest's own `version`, verifies it against
+`SHA256SUMS`, and installs it as `./bin/spoolway` — relative to the plugin's own root directory, which `herdr` names
 `<repo>-<hash>/` under `~/.config/herdr/plugins/github/` (`spoolway-abc/`, say — the exact path
 is whatever `herdr plugin list --json`'s `plugin_root` field names). If no release matches, the
 script falls back to `cargo build --release`. Nothing it writes lands outside that directory, so
