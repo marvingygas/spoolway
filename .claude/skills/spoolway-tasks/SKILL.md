@@ -107,12 +107,12 @@ reading the file whole.
    sentence on what that count trades away.
 
    **A group count the ballot did not draw is redrawn.** The person may type a count into
-   Other, or ask for one in a note on any option. Draw the group ballot again with that count
-   second, marked `(chosen)`, with one count above it and two below, floored at 1. At the floor, add the missing
-   counts above instead. A count that was the recommended one keeps its `(Recommended)` mark.
-   Draw each count in the group layout above. The answer to the redrawn ballot stands, unless
-   it asks for yet another unseen count. Then redraw again. A pick of any count the ballot
-   drew is taken as picked.
+   Other, or ask for one in a note on any option. Draw the group ballot again with that
+   count second, marked `(chosen)`. Put one count above it and two below, floored at 1. At
+   the floor, add the missing counts above instead. A count that was the recommended one
+   keeps its `(Recommended)` mark. Draw each count in the group layout above. The answer to
+   the redrawn ballot stands, unless it asks for yet another count the ballot did not draw.
+   Then redraw again. A pick of any count the ballot drew is taken as picked.
 
    **Then, for each group, in dependency order, route each subject inside it to a pipeline and
    decompose against that pipeline's own shape.** Read the pipelines before choosing task
@@ -228,21 +228,23 @@ reading the file whole.
    pull request for, names a pull request from a fork (`isCrossRepository` is true — its
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
-   **A split no ballot drew is asked again, and nothing else is.** Only a count, or a different
-   breakdown asked for in words, is an unseen split. That covers a count typed into Other, a
-   count asked for in a note on any option, and a re-route asked for in Other, such as `make 2
-   a bugfix`. A `from` note is not an unseen split, and the note mechanism above handles it.
-   When one note holds both, resolve its `from` parts first and draw their bases in the redraw.
+   **A split no ballot drew is asked again, and nothing else is.** Only a count, or a
+   different breakdown asked for in words, is an unseen split. That covers a count typed
+   into Other or asked for in a note on any option. It also covers a re-route asked for in
+   Other, such as `make 2 a bugfix`. A `from` note is not an unseen split. The note
+   mechanism above handles it. When one note holds both, resolve its `from` parts first and
+   draw their bases in the redraw.
 
-   Redraw the task ballot with the asked-for count second, marked `(chosen)`, with
-   one count above it and two below, floored at 1. At the floor, add the missing counts above instead. A count
-   that was the recommended one keeps its `(Recommended)` mark. Draw each count's breakdown in
-   the layout above, and draw the person's own breakdown under the chosen count. Open the
-   question text with the usual `Split <group>: <counts> tasks` line, naming the redrawn counts. Ask it again with one AskUserQuestion.
+   Redraw the task ballot with the asked-for count second, marked `(chosen)`. Put one count
+   above it and two below, floored at 1. At the floor, add the missing counts above instead.
+   A count that was the recommended one keeps its `(Recommended)` mark. Draw each count's
+   breakdown in the layout above. Draw the person's own breakdown under the chosen count.
+   Open the question text with the usual `Split <group>: <counts> tasks` line, naming the
+   redrawn counts. Ask it again with one AskUserQuestion.
 
-   The answer to the redrawn ballot stands, unless it asks for yet another unseen split. Then
-   redraw again. A pick of any count a ballot drew is taken as picked, with no further
-   question, and step 3 goes on.
+   The answer to the redrawn ballot stands, unless it asks for yet another unseen split.
+   Then redraw again. A pick of any count a ballot drew is taken as picked, with no further
+   question. Then go on to step 3.
 
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
