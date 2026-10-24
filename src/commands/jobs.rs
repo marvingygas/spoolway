@@ -4,7 +4,7 @@
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
 //! onto a renamed pipeline. Its new job and edit job walk the cron expression
 //! and the pipeline, then save through [`crate::jobs::write`] — see
-//! [`NewJobWalk`]. Pause, resume and delete are [`set_enabled`] and
+//! [`NewJobWalk`]. Deactivate, activate and delete are [`set_enabled`] and
 //! [`delete_job`]. No `jobs add`, no config key. A job only schedules:
 //! nothing here queues its routine, which fires when the dispatcher's clock
 //! crosses the schedule — running a routine now is the routines tab's
@@ -36,6 +36,14 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    print!("{}", render_jobs_list(repo, &jobs, now_epoch));
+    Ok(())
+}
+
+/// [`jobs_list`]'s table, its summary line and its store counts, built as a
+/// string so a test can assert on it directly rather than capturing stdout.
+fn render_jobs_list(repo: &Repo, jobs: &[Job], now_epoch: i64) -> String {
+    let mut out = String::new();
     let rows: Vec<[String; 6]> = jobs
         .iter()
         .map(|job| {
@@ -71,31 +79,33 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
         out.trim_end().to_string()
     };
 
-    println!("{}", line(&headers.map(str::to_string)));
+    out.push_str(&line(&headers.map(str::to_string)));
+    out.push('\n');
     for row in &rows {
-        println!("{}", line(row));
+        out.push_str(&line(row));
+        out.push('\n');
     }
 
-    let enabled = jobs.iter().filter(|job| job.spec.enabled).count();
-    println!();
-    println!(
-        "{} job{}, {enabled} enabled.",
+    let active = jobs.iter().filter(|job| job.spec.enabled).count();
+    out.push('\n');
+    out.push_str(&format!(
+        "{} job{}, {active} active.\n",
         jobs.len(),
         if jobs.len() == 1 { "" } else { "s" }
-    );
+    ));
     let stores = [repo.user_jobs_file(), repo.jobs_file()];
     let labels: Vec<String> = stores.iter().map(|path| store_label(repo, path)).collect();
     let width = labels.iter().map(|label| label.len()).max().unwrap_or(0);
     for (path, label) in stores.iter().zip(&labels) {
         let count = jobs.iter().filter(|job| &job.source == path).count();
-        println!("  {label:<width$}   {count}");
+        out.push_str(&format!("  {label:<width$}   {count}\n"));
     }
     for note in jobs.iter().filter_map(Job::unknown_keys_note) {
-        println!();
-        println!("warning: {note}");
+        out.push('\n');
+        out.push_str(&format!("warning: {note}\n"));
     }
 
-    Ok(())
+    out
 }
 
 /// A sample `[jobs.<name>]` table, valid on its own — `sample_table_parses`
@@ -241,7 +251,7 @@ struct Row {
     /// Keys in the job's table that no job reads. Empty when it has none.
     unknown_keys: Vec<String>,
     source: String,
-    /// Local RFC 3339, or `null` when the job is paused, the expression will
+    /// Local RFC 3339, or `null` when the job is inactive, the expression will
     /// not parse, or it can never fire.
     next: Option<String>,
     /// Epoch seconds of the last firing, or `null`.
@@ -274,11 +284,12 @@ impl Row {
     }
 }
 
-/// The NEXT column: `paused` for a disabled job, else a relative "in 5h 48m"
-/// when soon, a weekday and time within the week, or a full date beyond it.
+/// The NEXT column: `inactive` for a disabled job, else a relative "in 5h
+/// 48m" when soon, a weekday and time within the week, or a full date beyond
+/// it.
 fn next_cell(job: &Job) -> String {
     if !job.spec.enabled {
-        return "paused".to_string();
+        return "inactive".to_string();
     }
     if crate::cron::Cron::parse(&job.spec.schedule).is_err() {
         return "bad expr".to_string();
@@ -613,19 +624,23 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
     )
 }
 
-/// `resume`/`pause` for the message the pause toggle prints on failure — the
+/// `activate`/`deactivate` for the message the toggle prints on failure — the
 /// spec passed to `write` already carries the target state.
-fn pause_verb(will_be_enabled: bool) -> &'static str {
-    if will_be_enabled { "resume" } else { "pause" }
+fn toggle_verb(will_be_enabled: bool) -> &'static str {
+    if will_be_enabled {
+        "activate"
+    } else {
+        "deactivate"
+    }
 }
 
-/// Pause `job` (`enabled` false) or resume it (`enabled` true), written
-/// back to the store its own `scope` names and nowhere else, so a job is
-/// never copied into the other store. The routines tab's pause job and
-/// resume job come here. The state wanted is passed rather than
-/// flipped, so a job paused by another hand since its menu opened is not
-/// resumed by a pick that said pause. `Err` is the popup that says why the
-/// store was not written.
+/// Deactivate `job` (`enabled` false) or activate it (`enabled` true),
+/// written back to the store its own `scope` names and nowhere else, so a job
+/// is never copied into the other store. The routines tab's deactivate job
+/// and activate job come here. The state wanted is passed rather than
+/// flipped, so a job deactivated by another hand since its menu opened is not
+/// activated by a pick that said deactivate. `Err` is the popup that says why
+/// the store was not written.
 pub(super) fn set_enabled(
     repo: &Repo,
     job: &Job,
@@ -633,7 +648,7 @@ pub(super) fn set_enabled(
 ) -> std::result::Result<(), Notice> {
     let mut spec = job.spec.clone();
     spec.enabled = enabled;
-    let verb = pause_verb(enabled);
+    let verb = toggle_verb(enabled);
     jobs::write(repo, job.scope, &job.name, &spec).map_err(|err| {
         Notice::new(
             verb,
@@ -697,10 +712,11 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         ));
     }
 
-    // A routine has at most one job, paused or not: two enabled jobs on one
-    // routine fire neither, and a paused one would clash once resumed. The
-    // second is refused here, whichever store holds the first. Targets are
-    // compared as resolved paths, so `nightly/` and `nightly` are one routine.
+    // A routine has at most one job, active or not: two enabled jobs on one
+    // routine fire neither, and an inactive one would clash once activated.
+    // The second is refused here, whichever store holds the first. Targets
+    // are compared as resolved paths, so `nightly/` and `nightly` are one
+    // routine.
     let wanted = repo.routines_dir().join(&draft.routine);
     if let Some(holder) = current.iter().find(|job| {
         draft.editing.as_deref() != Some(job.name.as_str())
@@ -788,7 +804,7 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
 /// The `Next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
-        return "paused".to_string();
+        return "inactive".to_string();
     }
     if crate::cron::Cron::parse(&job.spec.schedule).is_err() {
         return "will not parse".to_string();
@@ -1033,6 +1049,91 @@ mod tests {
             crate::jobs::JOB_KEYS.len()
         );
         assert!(json["cron_grammar"].as_str().unwrap().contains("0-59"));
+    }
+
+    /// The `enabled` key's text speaks of deactivating and activating a job,
+    /// the words the routines tab's menu uses, not of pausing one — `paused`
+    /// is a task's stage.
+    #[test]
+    fn the_enabled_key_says_deactivate_and_activating() {
+        let (repo, _root_guard) = fixture("jobs-contract-enabled-words");
+        let contract = build_jobs_contract(&repo);
+        let text = &contract
+            .keys
+            .iter()
+            .find(|key| key.name == "enabled")
+            .unwrap()
+            .text;
+        assert!(text.contains("to deactivate a job"), "{text}");
+        assert!(text.contains("activating it removes the key"), "{text}");
+        assert!(!text.contains("pause"), "{text}");
+        assert!(!text.contains("resum"), "{text}");
+    }
+
+    /// A disabled job reads `inactive` in NEXT, with the column widened to
+    /// hold it, and the summary counts the active ones.
+    #[test]
+    fn jobs_list_says_inactive_for_a_disabled_job() {
+        let (repo, _root_guard) = fixture("jobs-list-inactive");
+        jobs::write(
+            &repo,
+            Scope::Project,
+            "dependabot-review",
+            &JobSpec {
+                schedule: "0 */2 * * *".to_string(),
+                pipeline: "dependabot".to_string(),
+                routine: "dependabot".to_string(),
+                enabled: false,
+                ..JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        let jobs = jobs::load(&repo).unwrap();
+
+        let text = render_jobs_list(&repo, &jobs, Local::now().timestamp());
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[..4],
+            [
+                "NAME               SCOPE    SCHEDULE     PIPELINE    NEXT      LAST",
+                "dependabot-review  project  0 */2 * * *  dependabot  inactive  -",
+                "",
+                "1 job, 0 active.",
+            ],
+            "{text}"
+        );
+    }
+
+    /// A store that cannot be written turns the toggle into a popup that
+    /// names what was being done: deactivate on the way off, activate on
+    /// the way back on.
+    #[test]
+    fn set_enabled_names_activate_or_deactivate_when_the_store_will_not_write() {
+        let (repo, _root_guard) = fixture("jobs-set-enabled-fails");
+        let job = Job {
+            name: "nightly-audit".to_string(),
+            scope: Scope::User,
+            spec: JobSpec {
+                routine: "nightly".to_string(),
+                ..JobSpec::neutral()
+            },
+            source: repo.user_jobs_file(),
+            unknown_keys: Vec::new(),
+        };
+        // A directory where the store file goes, so the write cannot read it.
+        std::fs::create_dir_all(repo.user_jobs_file()).unwrap();
+
+        for (enabled, verb) in [(false, "deactivate"), (true, "activate")] {
+            let notice = set_enabled(&repo, &job, enabled).unwrap_err();
+            assert_eq!(notice.title, verb);
+            assert!(
+                notice
+                    .text
+                    .starts_with(&format!("Could not {verb} the job `nightly-audit`")),
+                "{}",
+                notice.text
+            );
+        }
     }
 
     #[test]

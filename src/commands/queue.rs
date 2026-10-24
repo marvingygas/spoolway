@@ -4832,8 +4832,8 @@ enum RowOption {
     /// Edit job on a job whose routine is not listed: the routine picker
     /// first, then the same popups as [`RowOption::EditJob`].
     PickRoutine(JobRef),
-    PauseJob(JobRef),
-    ResumeJob(JobRef),
+    DeactivateJob(JobRef),
+    ActivateJob(JobRef),
     /// `named` when the routine has more than one job, so the item has to
     /// say which of them it deletes.
     DeleteJob {
@@ -4861,8 +4861,8 @@ impl RowOption {
             RowOption::SaveRoutine => "save as routine".to_string(),
             RowOption::NewJob => "new job".to_string(),
             RowOption::EditJob(_) | RowOption::PickRoutine(_) => "edit job".to_string(),
-            RowOption::PauseJob(_) => "pause job".to_string(),
-            RowOption::ResumeJob(_) => "resume job".to_string(),
+            RowOption::DeactivateJob(_) => "deactivate job".to_string(),
+            RowOption::ActivateJob(_) => "activate job".to_string(),
             RowOption::DeleteJob { job, named: true } => format!("delete job {}", job.name),
             RowOption::DeleteJob { named: false, .. } => "delete job".to_string(),
             RowOption::Delete => "delete".to_string(),
@@ -7046,11 +7046,11 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 ///
 /// - No job: new job, only where [`super::jobs::NewJobWalk::for_routine`]
 ///   can point a job at the folder, the same check `n` made.
-/// - One job: edit job, then pause job for an enabled job or resume job for
-///   a paused one, then delete job.
+/// - One job: edit job, then deactivate job for an enabled job or activate
+///   job for an inactive one, then delete job.
 /// - Two or more: delete job with each job's name, sorted by name as the
 ///   details pane lists them. They clash, so deleting is the one thing
-///   worth offering; editing or resuming one would keep the clash.
+///   worth offering; editing or activating one would keep the clash.
 /// - Stores that will not load: nothing but delete routine, since which
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
@@ -7122,8 +7122,8 @@ fn routine_job_options(
         [job] => {
             let job = JobRef::of(job);
             let toggle = match on[0].spec.enabled {
-                true => RowOption::PauseJob(job.clone()),
-                false => RowOption::ResumeJob(job.clone()),
+                true => RowOption::DeactivateJob(job.clone()),
+                false => RowOption::ActivateJob(job.clone()),
             };
             vec![
                 RowOption::EditJob(job.clone()),
@@ -7186,8 +7186,8 @@ impl Picked<'_> {
                         .collect(),
                     cursor: 0,
                 },
-                RowOption::PauseJob(job) => set_job_enabled(self.repo, nav, &job, false),
-                RowOption::ResumeJob(job) => set_job_enabled(self.repo, nav, &job, true),
+                RowOption::DeactivateJob(job) => set_job_enabled(self.repo, nav, &job, false),
+                RowOption::ActivateJob(job) => set_job_enabled(self.repo, nav, &job, true),
                 RowOption::DeleteJob { job, .. } => Mode::DeleteJob {
                     nav: nav.clone(),
                     job,
@@ -7240,8 +7240,8 @@ impl Picked<'_> {
             RowOption::NewJob
             | RowOption::EditJob(_)
             | RowOption::PickRoutine(_)
-            | RowOption::PauseJob(_)
-            | RowOption::ResumeJob(_)
+            | RowOption::DeactivateJob(_)
+            | RowOption::ActivateJob(_)
             | RowOption::DeleteJob { .. }
             | RowOption::DeleteRoutine => closed,
         }
@@ -7279,7 +7279,7 @@ fn job_not_changed(nav: &RoutineNav, text: String) -> Mode {
     outcome_over(Some(nav), "job not changed", text)
 }
 
-/// Pause job or resume job off a routine's menu: [`find_job`], then
+/// Deactivate job or activate job off a routine's menu: [`find_job`], then
 /// [`super::jobs::set_enabled`], which writes the job back to its own
 /// store. Back on the routines pane, whose
 /// details show the new state as the stores are read again, or a popup over
@@ -8551,7 +8551,7 @@ fn routine_task_lines(
 /// - No job on the routine: `Schedule:` reads `none`.
 /// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
 ///   `Job:` rows, the values `spoolway jobs list` gives each.
-/// - Two or more jobs on it, paused or not: every one of them, listed by
+/// - Two or more jobs on it, active or not: every one of them, listed by
 ///   [`routine_jobs_lines`].
 /// - Stores that will not load: one `Jobs:` row naming the error.
 ///
@@ -8701,12 +8701,12 @@ fn highlighted_orphan<'a, 'b>(
 
 /// The `Jobs:` block for a routine two or more jobs run: a headline saying
 /// which of them fires, one row per job sorted by name with its scope and,
-/// when paused, `paused`, and the fix under them.
+/// when inactive, `inactive`, and the fix under them.
 ///
-/// Every job is listed, paused ones too. Two enabled jobs fire neither, by
+/// Every job is listed, inactive ones too. Two enabled jobs fire neither, by
 /// [`crate::jobs::Job::clashing_jobs`], the rule the dispatcher skips them
-/// by. A paused one fires nowhere, but resuming it beside an enabled one
-/// stops both, so it is a job to delete as much as a clashing one is.
+/// by. An inactive one fires nowhere, but activating it beside an enabled
+/// one stops both, so it is a job to delete as much as a clashing one is.
 fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let mut on = on.to_vec();
     on.sort_by(|a, b| a.name.cmp(&b.name));
@@ -8714,7 +8714,7 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let two = on.len() == 2;
     let (headline, fix) = match live.as_slice() {
         [] => (
-            format!("{} run this routine, all paused", on.len()),
+            format!("{} run this routine, all inactive", on.len()),
             if two {
                 "Delete one with o before resuming the other."
             } else {
@@ -8758,7 +8758,7 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
         let scope = if job.spec.enabled {
             job.scope.label().to_string()
         } else {
-            format!("{}, paused", job.scope.label())
+            format!("{}, inactive", job.scope.label())
         };
         let row = format!("{under}{:<name_width$}   {scope}", job.name);
         if row.chars().count() <= width {
@@ -22384,9 +22384,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A routine with one job offers edit job, pause job, delete job and
-    /// delete routine, and no new job; a paused job offers resume job in
-    /// place of pause job.
+    /// A routine with one job offers edit job, deactivate job, delete job and
+    /// delete routine, and no new job; an inactive job offers activate job in
+    /// place of deactivate job.
     #[test]
     fn a_routine_with_one_job_offers_its_job_items_then_delete_routine() {
         use crate::jobs::Scope;
@@ -22398,7 +22398,7 @@ mod tests {
         assert!(last.contains(&format!("{TOP_LEFT}─ nightly ")), "{last}");
         let items = [
             "│  > edit job  ",
-            "│    pause job  ",
+            "│    deactivate job  ",
             "│    delete job  ",
             "│    delete routine  ",
         ];
@@ -22408,19 +22408,19 @@ mod tests {
             .collect();
         assert!(at.is_sorted(), "in the mockup's order: {last}");
         assert!(!last.contains("new job"), "{last}");
-        assert!(!last.contains("resume job"), "{last}");
+        assert!(!last.contains("│    activate job"), "{last}");
 
         let mut spec = crate::jobs::load(&repo).unwrap()[0].spec.clone();
         spec.enabled = false;
         crate::jobs::write(&repo, Scope::Project, "nightly-audit", &spec).unwrap();
         let last = last_frame(&routines_screen(&repo, "jo")).to_string();
-        assert!(last.contains("│    resume job  "), "{last}");
-        assert!(!last.contains("pause job"), "{last}");
+        assert!(last.contains("│    activate job  "), "{last}");
+        assert!(!last.contains("deactivate job"), "{last}");
     }
 
     /// A routine two jobs run offers to delete either one by name, sorted
     /// as the details pane lists them, then delete routine — and nothing
-    /// that would edit or resume one of them into the clash.
+    /// that would edit or activate one of them into the clash.
     #[test]
     fn a_routine_with_two_jobs_offers_to_delete_either_by_name() {
         use crate::jobs::Scope;
@@ -22470,33 +22470,36 @@ mod tests {
         assert_eq!(menu.items, [RowOption::DeleteRoutine]);
     }
 
-    /// Pause job writes the job back paused, and resume job enabled, each
-    /// time to the store it came from alone, never copying it into the
-    /// other — and the menu closes back onto the routine list.
+    /// Deactivate job writes the job back disabled, and activate job
+    /// enabled, each time to the store it came from alone, never copying it
+    /// into the other — and the menu closes back onto the routine list.
     #[test]
-    fn pause_job_and_resume_job_write_the_job_back_to_its_own_store() {
+    fn deactivate_job_and_activate_job_write_the_job_back_to_its_own_store() {
         use crate::jobs::Scope;
-        let (repo, _root_guard) = fixture("routine-pause-job");
+        let (repo, _root_guard) = fixture("routine-deactivate-job");
         seed_two_routines(&repo);
         write_job(&repo, Scope::Project, "nightly-audit", "nightly");
 
         let last = last_frame(&routines_screen(&repo, "jo\x1b[B\r")).to_string();
         let jobs = crate::jobs::load(&repo).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert!(!jobs[0].spec.enabled, "paused");
+        assert!(!jobs[0].spec.enabled, "deactivated");
         assert_eq!(jobs[0].scope, Scope::Project);
         assert!(
             !repo.user_jobs_file().exists(),
             "never copied to the user store"
         );
         assert!(last.contains("─ routines ─"), "{last}");
-        assert!(!last.contains("pause job"), "the menu closed: {last}");
-        assert!(last.contains("paused"), "the details pane says so: {last}");
+        assert!(!last.contains("deactivate job"), "the menu closed: {last}");
+        assert!(
+            last.contains("Next:        inactive"),
+            "the details pane says so: {last}"
+        );
 
         routines_screen(&repo, "jo\x1b[B\r");
         let jobs = crate::jobs::load(&repo).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert!(jobs[0].spec.enabled, "resumed");
+        assert!(jobs[0].spec.enabled, "activated");
         assert_eq!(jobs[0].scope, Scope::Project);
         assert!(
             !repo.user_jobs_file().exists(),
@@ -22579,7 +22582,7 @@ mod tests {
     }
 
     /// A job gone from its store between `o` and the pick is not written
-    /// back: edit job and pause job both open a popup saying so, and the
+    /// back: edit job and deactivate job both open a popup saying so, and the
     /// store stays without it.
     #[test]
     fn a_job_item_whose_job_is_gone_changes_nothing_and_says_so() {
@@ -23033,7 +23036,7 @@ mod tests {
         let edit = last.find("│  > edit job  ").expect(&last);
         let delete = last.find("│    delete job  ").expect(&last);
         assert!(edit < delete, "{last}");
-        assert!(!last.contains("pause job"), "{last}");
+        assert!(!last.contains("deactivate job"), "{last}");
         assert!(!last.contains("delete routine"), "{last}");
     }
 
@@ -23195,11 +23198,12 @@ mod tests {
         );
     }
 
-    /// A paused job beside an enabled one on the same routine is listed with
-    /// it, marked paused: it fires nowhere, but resuming it stops both.
+    /// An inactive job beside an enabled one on the same routine is listed
+    /// with it, marked inactive: it fires nowhere, but activating it stops
+    /// both.
     #[test]
-    fn the_details_pane_lists_a_paused_job_beside_the_enabled_one() {
-        let (repo, _root_guard) = fixture("routines-details-paused");
+    fn the_details_pane_lists_an_inactive_job_beside_the_enabled_one() {
+        let (repo, _root_guard) = fixture("routines-details-inactive");
         write_dependabot_routine(&repo);
         crate::jobs::write(
             &repo,
@@ -23220,7 +23224,7 @@ mod tests {
             [
                 "",
                 "  Jobs:        2 run this routine; only b-live fires",
-                "                 a-paused   user, paused",
+                "                 a-paused   user, inactive",
                 "                 b-live     project",
                 "               Delete the paused one with o, or resuming it stops",
                 "               both.",
@@ -23276,7 +23280,7 @@ mod tests {
     /// scope on a line of its own rather than lose it off the pane's edge.
     #[test]
     fn a_job_row_too_wide_for_the_pane_puts_its_scope_under_its_name() {
-        let (repo, _root_guard) = fixture("routines-details-paused-narrow");
+        let (repo, _root_guard) = fixture("routines-details-inactive-narrow");
         write_dependabot_routine(&repo);
         for (scope, name) in [
             (crate::jobs::Scope::User, "dependabot-weekly"),
@@ -23297,15 +23301,16 @@ mod tests {
 
         let pane = details_at(&repo, 35);
         assert_eq!(
-            pane[..10],
+            pane[..11],
             [
                 "",
                 "  Jobs:",
-                "    2 run this routine, all paused",
+                "    2 run this routine, all",
+                "    inactive",
                 "      dependabot-review",
-                "        project, paused",
+                "        project, inactive",
                 "      dependabot-weekly",
-                "        user, paused",
+                "        user, inactive",
                 "    Delete one with o before",
                 "    resuming the other.",
                 "",

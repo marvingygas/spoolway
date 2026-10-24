@@ -12,10 +12,10 @@
 # into the checkout, that delete removes a routine with the jobs that point
 # into it, that new job saves a job for a routine to the user store, that
 # the details pane draws a routine's job above its tasks, that the
-# routine's options menu pauses, resumes, edits and deletes that job, and
-# that a job whose routine is gone gets a row of its own to delete it from. No
-# `new_forge`/`install_agents` needed for the same reason `trials.sh` needs
-# none.
+# routine's options menu deactivates, activates, edits and deletes that job,
+# and that a job whose routine is gone gets a row of its own to delete it
+# from. No `new_forge`/`install_agents` needed for the same reason
+# `trials.sh` needs none.
 #
 # No `covers:` tag of its own — see `commands.sh`'s own queue-screen block:
 # the map `coverage.sh` builds only enumerates `config.toml` keys and
@@ -286,13 +286,13 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /job saved/ { last = $0 } END { pr
 has "and says so in a popup" "release runs at 03:00, Monday to Friday, on bugfix." "$LAST"
 
 # A routine with a job offers no second one: its menu is the job's own,
-# edit job, pause job, delete job, then delete routine.
+# edit job, deactivate job, delete job, then delete routine.
 MENU="$LIVE/routine-one-job-menu.txt"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with a job offers edit job first" "> edit job" "$LAST"
-has "then pause job" "pause job" "$LAST"
+has "then deactivate job" "deactivate job" "$LAST"
 has "then delete job" "delete job" "$LAST"
 has "then delete routine" "delete routine" "$LAST"
 lacks "and no new job" "new job" "$LAST"
@@ -315,19 +315,22 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "a routine with a job draws the job's schedule" "Schedule:    0 3 * * 1-5" "$LAST"
 has "and names the job" "Job:         release" "$LAST"
 
-# Pause job (`o`, down, `enter`) writes the job back paused, to the user
-# store it lives in and nowhere else; the same keys again are resume job,
-# which drops the key.
-on_screen '\x1b[Cjjo\x1b[B\r' /dev/null
-has "pause job writes the job paused" "enabled = false" "$USER_STORE"
+# Deactivate job (`o`, down, `enter`) writes the job back disabled, to the
+# user store it lives in and nowhere else, and the details pane says it is
+# inactive; the same keys again are activate job, which drops the key.
+on_screen '\x1b[Cjjo\x1b[B\r' "$DETAILS"
+has "deactivate job writes the job disabled" "enabled = false" "$USER_STORE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "and the details pane says the job is inactive" "Next:        inactive" "$LAST"
 lacks "never into the project store" "[jobs.release]" "$PROJECT_STORE"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "a paused job offers resume job" "resume job" "$LAST"
-lacks "in place of pause job" "pause job" "$LAST"
+has "an inactive job offers activate job" "│    activate job" "$LAST"
+lacks "in place of deactivate job" "deactivate job" "$LAST"
 on_screen '\x1b[Cjjo\x1b[B\r' /dev/null
-lacks "resume job writes the job enabled again" "enabled" "$USER_STORE"
+lacks "activate job writes the job enabled again" "enabled" "$USER_STORE"
 has "and keeps it" "[jobs.release]" "$USER_STORE"
 
 # Edit job (`o`, `enter`) opens the schedule popup on the job's own

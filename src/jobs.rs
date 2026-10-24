@@ -82,7 +82,7 @@ pub struct JobSpec {
     /// A top-level folder under `.spoolway/routines/`, relative, queued as one
     /// batch. A task file or a nested folder is refused by [`Job::refusal`].
     pub routine: String,
-    /// A paused job is listed but never fired. Absent means enabled.
+    /// An inactive job is listed but never fired. Absent means enabled.
     #[serde(default = "enabled_default")]
     pub enabled: bool,
     /// The branch every task of the routine is cut from, unless the task
@@ -149,9 +149,9 @@ pub(crate) const JOB_KEYS: &[JobKey] = &[
     JobKey {
         name: "enabled",
         required: false,
-        text: "Absent means enabled. Write `enabled = false` to pause a job — it is still \
-               listed but never fires; resuming it removes the key rather than writing the \
-               default back.",
+        text: "Absent means enabled. Write `enabled = false` to deactivate a job — it is \
+               still listed but never fires; activating it removes the key rather than \
+               writing the default back.",
     },
     JobKey {
         name: "base",
@@ -182,7 +182,7 @@ pub struct Job {
     /// `doctor`'s messages.
     pub source: PathBuf,
     /// Keys in its table that [`JOB_KEYS`] does not name, sorted. A job that
-    /// carries one is never fired: `enable = false` is a paused job that
+    /// carries one is never fired: `enable = false` is an inactive job that
     /// would otherwise run, since an ignored key leaves `enabled` true.
     pub unknown_keys: Vec<String>,
 }
@@ -481,8 +481,8 @@ fn read_store_text(path: &Path) -> Result<Option<String>> {
 /// are kept — and leaving every other byte of the file where it was.
 ///
 /// `schedule`, `pipeline` and `routine` are set to `spec`'s values. `enabled`
-/// is written as `false` only for a paused job; a running one has no key,
-/// since absent means enabled (see [`JobSpec::enabled`]) — so resuming a job
+/// is written as `false` only for an inactive job; an active one has no key,
+/// since absent means enabled (see [`JobSpec::enabled`]) — so activating a job
 /// removes the key rather than writing the default.
 pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()> {
     let path = store_path(repo, scope);
@@ -1831,11 +1831,11 @@ mod tests {
     }
 
     #[test]
-    fn a_paused_job_writes_enabled_false_and_resuming_drops_the_key() {
-        let (repo, _root_guard) = fixture("jobs-write-paused");
-        let mut paused = spec("@daily");
-        paused.enabled = false;
-        write(&repo, Scope::User, "lint-sweep", &paused).unwrap();
+    fn an_inactive_job_writes_enabled_false_and_activating_drops_the_key() {
+        let (repo, _root_guard) = fixture("jobs-write-inactive");
+        let mut inactive = spec("@daily");
+        inactive.enabled = false;
+        write(&repo, Scope::User, "lint-sweep", &inactive).unwrap();
         assert!(
             std::fs::read_to_string(repo.user_jobs_file())
                 .unwrap()
@@ -1847,7 +1847,7 @@ mod tests {
             !std::fs::read_to_string(repo.user_jobs_file())
                 .unwrap()
                 .contains("enabled"),
-            "resuming removes the key rather than writing the default"
+            "activating removes the key rather than writing the default"
         );
     }
 
@@ -1865,20 +1865,20 @@ mod tests {
     }
 
     /// The dispatcher board's job ledger: every enabled job, ordered by next
-    /// firing, and a paused one left off entirely.
+    /// firing, and an inactive one left off entirely.
     #[test]
-    fn active_jobs_orders_by_next_firing_and_omits_a_paused_one() {
+    fn active_jobs_orders_by_next_firing_and_omits_an_inactive_one() {
         let (repo, _root_guard) = fixture("jobs-active");
         write_user_store(
             &repo,
             "[jobs.weekly]\nschedule = \"0 3 * * sun\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
              [jobs.nightly]\nschedule = \"0 3 * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
-             [jobs.paused]\nschedule = \"* * * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
+             [jobs.inactive]\nschedule = \"* * * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
              enabled = false\n",
         );
         let active = active_jobs(&repo);
         let names: Vec<&str> = active.iter().map(|j| j.name.as_str()).collect();
-        // `nightly` fires sooner than `weekly`, and `paused` never appears.
+        // `nightly` fires sooner than `weekly`, and `inactive` never appears.
         assert_eq!(names, vec!["nightly", "weekly"], "{active:#?}");
     }
 
@@ -2445,11 +2445,11 @@ mod tests {
         }
     }
 
-    /// A paused job fires nowhere, so it does not take its routine from the
-    /// job that is on.
+    /// An inactive job fires nowhere, so it does not take its routine from
+    /// the job that is on.
     #[test]
-    fn a_paused_job_does_not_clash_with_the_one_that_is_on() {
-        let (repo, _root_guard) = fixture("jobs-clash-paused");
+    fn an_inactive_job_does_not_clash_with_the_one_that_is_on() {
+        let (repo, _root_guard) = fixture("jobs-clash-inactive");
         settled_now();
         routine_file(&repo, "nightly/audit.md");
         write_user_store(
@@ -2457,7 +2457,7 @@ mod tests {
             &format!(
                 "{}{}enabled = false\n",
                 job_table("live", "nightly"),
-                job_table("paused", "nightly")
+                job_table("inactive", "nightly")
             ),
         );
 
@@ -2591,8 +2591,8 @@ mod tests {
     }
 
     #[test]
-    fn a_paused_job_never_fires() {
-        let (repo, _root_guard) = fixture("jobs-paused");
+    fn an_inactive_job_never_fires() {
+        let (repo, _root_guard) = fixture("jobs-inactive");
         let dir = repo.routines_dir().join("nightly");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -2615,7 +2615,7 @@ mod tests {
 
     /// A misspelt key in a job table is named, with the job's name, and the
     /// job is not fired while it carries one: `enable = false` must not
-    /// leave a job meant to be paused running.
+    /// leave a job meant to be inactive running.
     #[test]
     fn a_job_with_an_unknown_key_is_named_and_does_not_fire() {
         let (repo, _root_guard) = fixture("jobs-unknown-key");
