@@ -2228,9 +2228,8 @@ impl Config {
     }
 
     /// The config as it would be written from nothing: one reference table on
-    /// top, naming every key, its possible values, its default and one
-    /// sentence about it, followed by the serialised struct with no comment
-    /// above any key.
+    /// top, naming every key, its possible values and one sentence about it,
+    /// followed by the serialised struct with no comment above any key.
     ///
     /// What `init` writes, what a missing file is restored from, and — because
     /// `self` is by then the config loaded from the very file being replaced —
@@ -3028,8 +3027,8 @@ mod tests {
         assert!(rendered.contains("watch.dirs"), "{rendered}");
         assert!(
             rendered.contains(
-                "# Directories whose own sessions are counted beside the lanes. The project\n\
-                 # root is always watched; these are extra. Absolute, or ~-relative.\n\
+                "# Extra folders whose agent sessions count toward this project's cost. The\n\
+                 # project folder always counts.\n\
                  dirs = []"
             ),
             "the comment above `dirs` does not match the reference sentence:\n{rendered}"
@@ -3116,7 +3115,7 @@ mod tests {
             .expect("permission_mode is not in the rendered config");
 
         assert!(
-            table.contains("permission_mode") && table.contains("Which approval mode"),
+            table.contains("permission_mode") && table.contains("Which permission mode"),
             "the reference table does not explain permission_mode:\n{table}"
         );
         // The key itself carries no comment of its own any more — every

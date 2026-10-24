@@ -194,6 +194,12 @@ pub(crate) mod older {
     pub fn config_reference() -> &'static str {
         include_str!("../tests/fixtures/known-copies/older-config-reference.txt")
     }
+
+    /// The table that stood above a `config.toml` while it still had a Default
+    /// column.
+    pub fn config_reference_with_defaults() -> &'static str {
+        include_str!("../tests/fixtures/known-copies/config-reference-with-defaults.txt")
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +341,13 @@ mod tests {
         );
         assert_eq!(
             lookup(&Shipped::ConfigReference, older::config_reference()),
+            Known::Older
+        );
+        assert_eq!(
+            lookup(
+                &Shipped::ConfigReference,
+                older::config_reference_with_defaults()
+            ),
             Known::Older
         );
     }

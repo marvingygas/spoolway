@@ -3857,7 +3857,7 @@ mod tests {
         assert!(after.contains("auto_commit"));
         // The explanation is not a comment standing above the key any more —
         // it is one row of the reference table on top of the whole file.
-        assert!(after.contains("Whether spoolway commits"));
+        assert!(after.contains("Commit any work an agent left uncommitted"));
         assert!(
             outcome_lines(&outcomes)
                 .iter()
@@ -3890,6 +3890,34 @@ mod tests {
             after.starts_with(&crate::confkv::reference_table()),
             "{after}"
         );
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert!(refusals(&outcomes).is_empty());
+    }
+
+    /// The table that still had a Default column is an older copy too: a
+    /// config carrying it gets the three-column table and keeps its values.
+    #[test]
+    fn a_reference_table_with_a_default_column_is_replaced_and_the_values_kept() {
+        let (repo, _root_guard) = fixture("config-default-column-table");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n[dispatch]\nlane_quiet = \"45m\"\n",
+                crate::known_copies::older::config_reference_with_defaults()
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            after.starts_with(&crate::confkv::reference_table()),
+            "{after}"
+        );
+        assert!(!after.contains("Default"), "{after}");
         assert!(after.contains("lane_quiet = \"45m\""), "{after}");
         assert!(refusals(&outcomes).is_empty());
     }
@@ -4130,7 +4158,7 @@ mod tests {
 
         assert!(!after.contains(mine));
         // Still explained — just in the table, not standing above the key.
-        assert!(after.contains("How long a lane may say nothing"));
+        assert!(after.contains("How long an agent may stay silent"));
         assert!(
             after.contains("lane_quiet = \"10m\""),
             "the value is the one thing kept"
