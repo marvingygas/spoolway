@@ -117,16 +117,6 @@ pub enum Channel {
 }
 
 impl Channel {
-    /// The name a cache record carries for this channel, so one channel's
-    /// answer is never read as another's.
-    fn name(self) -> &'static str {
-        match self {
-            Channel::Npm => "npm",
-            Channel::Homebrew => "homebrew",
-            Channel::Other => "other",
-        }
-    }
-
     /// Where this binary lives, resolved once.
     ///
     /// Keyed off the path rather than off anything npm sets in the
@@ -188,45 +178,32 @@ impl Channel {
 
 /// What a cached lookup left behind.
 ///
-/// Hand-rolled rather than serde-derived: this file is written by one process
-/// and read by another, and keeping it to three flat fields means a partially
-/// written or hand-mangled file is a parse that returns `None` rather than a
-/// dependency between two spoolway versions' struct shapes.
+/// Read by hand rather than through a serde-derived struct: this file is
+/// written by one process and read by another, and a record of two flat fields
+/// means a partially written or hand-mangled file is a parse that returns
+/// `None` rather than a dependency between two spoolway versions' struct
+/// shapes.
 ///
 /// The file is the machine's, and an npm install and a Homebrew install can
-/// share it, for example while somebody moves from one to the other. The
-/// record therefore says which channel's lookup wrote it, so one install's
-/// answer, or its stamp for a failed lookup, cannot hide the other's.
+/// share it, for example while somebody moves from one to the other. It keeps
+/// one record per channel. npm's stays in the top-level `version` and
+/// `checked` fields, where every npm binary already released reads it, and
+/// Homebrew's sits in a nested `homebrew` object that those binaries never
+/// look at. A refresh rewrites only its own channel's record, so neither
+/// install overwrites, or has to refresh because of, the other's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
     pub version: String,
     /// Unix seconds at which the lookup was made.
     pub checked: u64,
-    /// [`Channel::name`] of the install that made the lookup. A file written
-    /// before this field existed has none, and only npm wrote those, so it
-    /// reads as `npm`.
-    pub channel: String,
 }
 
 impl Cached {
-    fn parse(text: &str) -> Option<Cached> {
-        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    fn from_value(value: &serde_json::Value) -> Option<Cached> {
         Some(Cached {
             version: value.get("version")?.as_str()?.trim().to_string(),
             checked: value.get("checked")?.as_u64()?,
-            channel: value
-                .get("channel")
-                .and_then(|c| c.as_str())
-                .unwrap_or(Channel::Npm.name())
-                .to_string(),
         })
-    }
-
-    fn render(&self) -> String {
-        format!(
-            "{{\"version\":\"{}\",\"checked\":{},\"channel\":\"{}\"}}\n",
-            self.version, self.checked, self.channel
-        )
     }
 
     fn stale(&self, now: u64) -> bool {
@@ -426,37 +403,64 @@ pub fn refresh() {
         let stamp = Cached {
             version: current().to_string(),
             checked: now(),
-            channel: channel.name().to_string(),
         };
-        write_cache(&path, &stamp);
+        write_cache(&path, channel, &stamp);
         return;
     };
     write_cache(
         &path,
+        channel,
         &Cached {
             version,
             checked: now(),
-            channel: channel.name().to_string(),
         },
     );
 }
 
-/// The record in `path`, when it parses and was written by `channel`'s own
-/// lookup. A record from another channel is no record: trusting it would let
-/// one install's answer, or its stamp for a failed lookup, silence the other.
+/// The key the Homebrew record sits under in the cache file. Every other
+/// channel's record is the top-level one; see [`Cached`].
+const BREW_RECORD: &str = "homebrew";
+
+/// `channel`'s own record in `path`, when it parses. The other channel's
+/// record is invisible here, so it can neither answer for this one nor hide
+/// that this one has never asked.
 fn read_cache(path: &Path, channel: Channel) -> Option<Cached> {
-    std::fs::read_to_string(path)
-        .ok()
-        .as_deref()
-        .and_then(Cached::parse)
-        .filter(|cached| cached.channel == channel.name())
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match channel {
+        Channel::Homebrew => Cached::from_value(value.get(BREW_RECORD)?),
+        _ => Cached::from_value(&value),
+    }
 }
 
-fn write_cache(path: &Path, cached: &Cached) {
+/// Put `cached` in `path` as `channel`'s record, leaving the other channel's
+/// record as it was. A file that is missing or does not parse starts over.
+///
+/// Two refresh children finishing together can each read the file before the
+/// other writes it, and one record is then lost. It costs that channel one
+/// extra lookup on its next reading and nothing else, so no lock is taken.
+fn write_cache(path: &Path, channel: Channel, cached: &Cached) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = crate::task::write_atomic(path, cached.render());
+    let mut file = match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    let record = serde_json::json!({"version": cached.version, "checked": cached.checked});
+    match channel {
+        Channel::Homebrew => {
+            file.insert(BREW_RECORD.to_string(), record);
+        }
+        _ => {
+            file.insert("version".to_string(), record["version"].clone());
+            file.insert("checked".to_string(), record["checked"].clone());
+        }
+    }
+    let _ = crate::task::write_atomic(path, format!("{}\n", serde_json::Value::Object(file)));
 }
 
 /// The latest version npm knows about, or `None` for anything at all going
@@ -1218,24 +1222,42 @@ mod tests {
         );
     }
 
-    /// A record written before the channel was recorded reads as npm's, and a
-    /// reader on another channel does not take it.
+    /// Each channel reads and rewrites only its own record, and npm's stays at
+    /// the top level where a binary released before Homebrew support reads it.
     #[test]
-    fn a_cache_record_belongs_to_the_channel_that_wrote_it() {
-        let old = Cached::parse("{\"version\":\"0.2.0\",\"checked\":5}").unwrap();
-        assert_eq!(old.channel, "npm");
-        let brew = Cached::parse("{\"version\":\"0.2.0\",\"checked\":5,\"channel\":\"homebrew\"}")
-            .unwrap();
-        assert_eq!(brew.channel, Channel::Homebrew.name());
-
+    fn each_channel_keeps_its_own_cache_record() {
+        let npm = Cached {
+            version: "0.2.0".into(),
+            checked: 5,
+        };
+        let brew = Cached {
+            version: "0.3.0".into(),
+            checked: 9,
+        };
         let dir = crate::scratch::root("release-cache-channel");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("latest.json");
-        write_cache(&path, &brew);
-        // The npm reader sees a record from another channel as no record, so
-        // `newer_at` refreshes it rather than trusting a stamp it did not make.
-        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew));
+
+        write_cache(&path, Channel::Homebrew, &brew);
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew.clone()));
         assert_eq!(read_cache(&path, Channel::Npm), None);
+
+        // npm's refresh leaves brew's record alone, and brew's leaves npm's.
+        write_cache(&path, Channel::Npm, &npm);
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew.clone()));
+        assert_eq!(read_cache(&path, Channel::Npm), Some(npm.clone()));
+        let newer_brew = Cached {
+            version: "0.4.0".into(),
+            checked: 11,
+        };
+        write_cache(&path, Channel::Homebrew, &newer_brew);
+        assert_eq!(read_cache(&path, Channel::Npm), Some(npm.clone()));
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(newer_brew));
+
+        // A binary released before this change reads only the top level.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let top: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(Cached::from_value(&top), Some(npm));
     }
 
     /// The formula spelling brew is asked for ends in the folder name the
@@ -1323,12 +1345,16 @@ mod tests {
         let cached = Cached {
             version: "0.2.0".into(),
             checked: 1_700_000_000,
-            channel: "homebrew".into(),
         };
-        assert_eq!(Cached::parse(&cached.render()), Some(cached));
+        let dir = crate::scratch::root("release-cache-round-trip");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("latest.json");
+        write_cache(&path, Channel::Npm, &cached);
+        assert_eq!(read_cache(&path, Channel::Npm), Some(cached));
 
         for text in ["", "{}", "not json", "{\"version\":\"0.2.0\"}", "[]"] {
-            assert_eq!(Cached::parse(text), None, "{text:?}");
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(read_cache(&path, Channel::Npm), None, "{text:?}");
         }
     }
 
@@ -1338,7 +1364,6 @@ mod tests {
         let cached = |checked| Cached {
             version: "0.2.0".into(),
             checked,
-            channel: "npm".into(),
         };
         assert!(!cached(1000).stale(1000));
         assert!(!cached(1000).stale(1000 + day - 1));
@@ -1532,10 +1557,10 @@ mod tests {
         let path = dir.join("latest.json");
         write_cache(
             &path,
+            Channel::Npm,
             &Cached {
                 version: newer_than_current(),
                 checked: now(),
-                channel: "npm".into(),
             },
         );
         assert_eq!(

@@ -68,6 +68,9 @@ impl Install {
             .arg("__version-check")
             .current_dir(&self.root)
             .env("PATH", path)
+            // Removed so the assertion on the variable means the binary set
+            // it, not that a CI image or a dotfile already exported it.
+            .env_remove("HOMEBREW_NO_AUTO_UPDATE")
             .env("HOME", &self.root)
             .env("XDG_STATE_HOME", self.root.join("state"))
             .output()
