@@ -7229,13 +7229,7 @@ impl Picked<'_> {
 /// or the job gone from its store since the menu opened — for
 /// [`job_not_changed`] to open.
 fn find_job(repo: &Repo, job: &JobRef) -> std::result::Result<crate::jobs::Job, String> {
-    let jobs = crate::jobs::load(repo).map_err(|err| {
-        format!(
-            "{err:#}\n\nthe job {} cannot be read until this store reads, so nothing was \
-             changed. `spoolway doctor` names what is wrong.",
-            job.name
-        )
-    })?;
+    let jobs = crate::jobs::load(repo).map_err(|err| store_unreadable(&err, &job.name))?;
     jobs.into_iter()
         .find(|found| found.name == job.name && found.scope == job.scope)
         .ok_or_else(|| {
@@ -7246,6 +7240,16 @@ fn find_job(repo: &Repo, job: &JobRef) -> std::result::Result<crate::jobs::Job, 
                 job.scope.label()
             )
         })
+}
+
+/// Why the job `name` was not changed when the stores will not load: the
+/// error, then what it means and where to look. [`find_job`] and
+/// [`activate_refusal`] both refuse with it, so the two say the same thing.
+fn store_unreadable(err: &anyhow::Error, name: &str) -> String {
+    format!(
+        "{err:#}\n\nthe job {name} cannot be read until this store reads, so nothing was \
+         changed. `spoolway doctor` names what is wrong."
+    )
 }
 
 /// The popup over the routines pane `nav` describes that [`find_job`]'s
@@ -7286,19 +7290,13 @@ fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -
 /// Why activating `job` is refused: the other active jobs on its routine,
 /// as the stores read now, named in a sentence that says what to do
 /// instead. `None` when there are none. A store that stopped loading since
-/// [`find_job`] read it refuses too, with [`find_job`]'s own words: which
+/// [`find_job`] read it refuses too, in [`store_unreadable`]'s words: which
 /// jobs are active could not be told, and letting the write through could
 /// make the clash this check exists to stop.
 fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
     let jobs = match crate::jobs::load(repo) {
         Ok(jobs) => jobs,
-        Err(err) => {
-            return Some(format!(
-                "{err:#}\n\nthe job {} cannot be read until this store reads, so nothing was \
-                 changed. `spoolway doctor` names what is wrong.",
-                job.name
-            ));
-        }
+        Err(err) => return Some(store_unreadable(&err, &job.name)),
     };
     // `clashing_jobs` counts nothing for a disabled job, and the job being
     // activated is disabled until this pick writes it: ask as if it were

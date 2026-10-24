@@ -12,9 +12,9 @@
 # into the checkout, that delete removes a routine with the jobs that point
 # into it, that new job saves a job for a routine to the user store, that
 # the details pane draws a routine's job above its tasks, that the
-# routine's options menu deactivates, activates, edits and deletes that job,
-# and that a job whose routine is gone gets a row of its own to delete it
-# from. No `new_forge`/`install_agents` needed for the same reason
+# routine's options menu deactivates, activates and edits that job, that
+# activating one beside an active job is refused, and that a job whose
+# routine is gone gets a row of its own to point it at a routine from. No `new_forge`/`install_agents` needed for the same reason
 # `trials.sh` needs none.
 #
 # No `covers:` tag of its own — see `commands.sh`'s own queue-screen block:

@@ -350,9 +350,8 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 
 // ---------------------------------------------------------------------------
 // The popups. The routines tab in `queue` opens them from a routine's options
-// menu: a cron field and a pipeline picker to write a job, and the popup
-// that asks before a job is deleted. The tab draws and keys them; what each
-// accepts and how a job is saved lives here.
+// menu: a cron field and a pipeline picker to write a job. The tab draws and
+// keys them; what each accepts and how a job is saved lives here.
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the schedule and pipeline popups.
