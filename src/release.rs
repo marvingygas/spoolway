@@ -16,13 +16,14 @@
 //! job, and hand-rolling a rename over a running executable is the one thing
 //! [`crate::config`]'s own documentation warns kills a dispatcher mid-pass.
 //!
-//! Only a global npm install does any of that. A Homebrew install
-//! ([`Channel::Homebrew`]) learns of a release from brew instead of npm, and
-//! never reaches npm. A binary anywhere else ([`Channel::Other`]) is
-//! standalone: it never starts npm or brew, never spawns the refresh child and
-//! never looks for a newer release. `spoolway update` on it prints
-//! [`INSTALL_LINE`] and stops. The channel is checked before any lookup, so
-//! there is no path on which a standalone binary reaches npm.
+//! Only a global npm install is upgraded through npm. A Homebrew install
+//! ([`Channel::Homebrew`]) learns of a release from brew instead, is upgraded
+//! by `brew upgrade`, and never reaches npm. A binary anywhere else
+//! ([`Channel::Other`]) is standalone: it never starts npm or brew, never
+//! spawns the refresh child and never looks for a newer release. `spoolway
+//! update` on it prints [`INSTALL_LINE`] and stops. The channel is checked
+//! before any lookup, so there is no path on which a standalone binary
+//! reaches npm.
 //!
 //! The passive check reads a **cache and only a cache**. A lookup older than
 //! [`MAX_AGE`] spawns a detached child that refreshes it for the *next* read;
@@ -31,8 +32,10 @@
 //! case is an answer a day stale rather than a command that hangs on a plane.
 //!
 //! [`upgrade`] is the one exception, because it is the one caller somebody
-//! ran specifically to get the newer binary: it asks npm directly, bounded by
-//! [`LOOKUP_DEADLINE`] rather than left to npm's own unbounded retries, and
+//! ran specifically to get the newer binary: it asks npm directly (or, on a
+//! Homebrew install, refreshes brew's tap and asks brew), bounded by
+//! [`LOOKUP_DEADLINE`] or [`BREW_LOOKUP_DEADLINE`] rather than left to the
+//! tool's own unbounded retries, and
 //! only falls back to the cache's (possibly stale) answer when that lookup
 //! itself fails or does not finish in time — saying so on the way. Answering
 //! `spoolway update` from a cache that has not caught up yet is the bug this
@@ -106,8 +109,8 @@ pub enum Channel {
     Npm,
     /// Installed by Homebrew: the executable sits under
     /// `<prefix>/Cellar/spoolway/<version>/bin/`. The daily check asks brew for
-    /// the formula's version instead of npm. `spoolway update` does not act on
-    /// it yet and treats it as standalone.
+    /// the formula's version instead of npm, and `spoolway update` runs
+    /// `brew upgrade` for it.
     Homebrew,
     /// Anything else — a release download, `cargo install`, a binary copied
     /// onto `PATH` by hand, a Nix store path, a build under `target/`. Standalone:
@@ -483,7 +486,7 @@ const BREW_FORMULA_NAME: &str = "spoolway";
 
 /// The formula this binary was installed from, as brew names it: the tap, then
 /// [`BREW_FORMULA_NAME`].
-const BREW_FORMULA: &str = "marvingygas/tap/spoolway";
+pub const BREW_FORMULA: &str = "marvingygas/tap/spoolway";
 
 /// The version brew's copy of the formula is at, or `None` for anything at all
 /// going wrong — no brew, a failed call, output that is not the JSON expected.
@@ -504,6 +507,33 @@ fn brew_published() -> Option<String> {
         return None;
     }
     parse_brew_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// [`brew_published`] after `brew update`, for the one caller that was asked to
+/// get the newer release: brew's copy of the tap can be days old, and the
+/// daily check's answer would then name the release the person already has.
+///
+/// The update's own result is not read. A failed update leaves the tap as it
+/// was, and `brew info` then answers from that, which is the best answer there
+/// is. Its output is dropped because the notice `update` prints is all the
+/// person needs while it runs.
+fn brew_published_after_update() -> Option<String> {
+    let _ = Command::new("brew")
+        .arg("update")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    brew_published()
+}
+
+/// Run `brew upgrade` for the formula with its output going straight to the
+/// terminal, so the person sees brew's own progress and, on failure, brew's own
+/// error. Capturing it the way [`npm`] does would hide both.
+pub fn brew_upgrade() -> std::io::Result<std::process::ExitStatus> {
+    Command::new("brew")
+        .args(["upgrade", BREW_FORMULA])
+        .status()
 }
 
 /// `formulae[0].versions.stable` out of `brew info --json=v2`, when it is a
@@ -539,8 +569,13 @@ pub enum Upgrade {
     Installed(String),
     /// A newer version exists and the npm install of it failed.
     Unmanaged(String),
-    /// This binary was not installed by npm, so nothing was looked up and
-    /// nothing can be installed from here.
+    /// A Homebrew install, a newer version exists and no dispatcher is
+    /// running. Nothing is installed yet: the caller runs [`brew_upgrade`]
+    /// itself, after telling the person what it is about to do, because brew's
+    /// progress is printed live rather than captured.
+    Homebrew(String),
+    /// This binary was installed by neither npm nor Homebrew, so nothing was
+    /// looked up and nothing can be installed from here.
     Standalone,
     /// A dispatcher is running, so the binary it is executing is not being
     /// rewritten under it.
@@ -549,9 +584,9 @@ pub enum Upgrade {
 
 /// Take the newer release, when there is one and it is safe to.
 ///
-/// Asks npm directly rather than trusting [`newer`]'s cache — see the module
-/// doc for why this is the one caller that does. A binary npm did not install,
-/// a Homebrew one included for now, asks nothing and answers
+/// Asks npm, or brew on a Homebrew install, directly rather than trusting
+/// [`newer`]'s cache — see the module doc for why this is the one caller that
+/// does. A binary neither of them installed asks nothing and answers
 /// [`Upgrade::Standalone`].
 ///
 /// `lock_file` is the project's own dispatch lock —
@@ -565,7 +600,12 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     if std::env::var_os(ENV_UPGRADED).is_some() {
         return Upgrade::Current;
     }
-    decide_upgrade(Channel::detect(), lock_file, published, newer, |target| {
+    let channel = Channel::detect();
+    let live = match channel {
+        Channel::Homebrew => brew_published_after_update,
+        _ => published,
+    };
+    decide_upgrade(channel, lock_file, live, newer, |target| {
         npm(&["install", "-g", target, "--ignore-scripts"])
     })
 }
@@ -581,6 +621,11 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
 /// for a real answer and short enough that the retries of an unreachable
 /// registry never finish inside it.
 const LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
+
+/// [`LOOKUP_DEADLINE`] for a Homebrew install, whose lookup starts with `brew
+/// update`. That fetches the tap over the network and takes seconds on a good
+/// connection, so npm's three would give up on nearly every run.
+const BREW_LOOKUP_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Run `live` on its own thread and stop waiting on it after `deadline`.
 ///
@@ -618,9 +663,11 @@ fn bounded(
 /// cache file, standing up a fake `npm` on `PATH`, or touching the process
 /// environment at all. A test binary sits under `target/`, which is
 /// [`Channel::Other`], so the channel is an argument for the same reason.
-/// `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
-/// thread, so a stub that never answers proves the bound rather than hanging
-/// the test.
+/// `live` runs bounded by [`LOOKUP_DEADLINE`] (or [`BREW_LOOKUP_DEADLINE`] on a
+/// Homebrew install), on its own thread, so a stub that never answers proves
+/// the bound rather than hanging the test. `install` is only called on the npm
+/// channel: a Homebrew install answers [`Upgrade::Homebrew`] and leaves the
+/// upgrade to the caller.
 fn decide_upgrade(
     channel: Channel,
     lock_file: &Path,
@@ -629,27 +676,29 @@ fn decide_upgrade(
     install: impl FnOnce(&str) -> Option<String>,
 ) -> Upgrade {
     // Before the notice and before `live`: a standalone binary must not so
-    // much as announce an npm lookup, and a check placed after `bounded`
-    // would already have started npm.
-    // Not `== Other`: a Homebrew binary must not reach `npm install -g`, which
-    // would put a second copy beside the one brew owns.
-    if channel != Channel::Npm {
-        return Upgrade::Standalone;
-    }
-    println!("Checking npm for a newer spoolway...");
+    // much as announce a lookup, and a check placed after `bounded` would
+    // already have started npm or brew. A Homebrew binary gets its own lookup
+    // and must never reach `npm install -g`, which would put a second copy
+    // beside the one brew owns.
+    let (tool, deadline) = match channel {
+        Channel::Npm => ("npm", LOOKUP_DEADLINE),
+        Channel::Homebrew => ("Homebrew", BREW_LOOKUP_DEADLINE),
+        Channel::Other => return Upgrade::Standalone,
+    };
+    println!("Checking {tool} for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
     // get the newer binary — a cache the passive check would happily wait a
     // day on is exactly what left `update` installing nothing on the run
     // that mattered. `live()` returning `None` is "npm could not answer"
-    // (offline, not installed, npm itself erroring, or the deadline above
+    // (offline, not installed, npm itself erroring, or the deadline
     // passing) rather than "nothing newer", so that and only that falls back
     // to the cache's own answer; npm actually answering settles it either
     // way, cache or no cache.
-    let version = match bounded(live, LOOKUP_DEADLINE) {
+    let version = match bounded(live, deadline) {
         Some(latest) if is_newer(&latest, current()) => Some(latest),
         Some(_) => None,
         None => {
-            println!("No answer from npm, carrying on with the version already known.");
+            println!("No answer from {tool}, carrying on with the version already known.");
             println!();
             cached()
         }
@@ -658,10 +707,13 @@ fn decide_upgrade(
         return Upgrade::Current;
     };
     // Refuse rather than rely on a remembered release rule: a running dispatcher
-    // is executing the file npm is about to replace, and a half-written binary is
-    // a dispatcher that dies mid-pass.
+    // is executing the file the upgrade is about to replace, and a half-written
+    // binary is a dispatcher that dies mid-pass.
     if let Ok(Some(pid)) = crate::lock::Lock::holder(lock_file) {
         return Upgrade::Dispatching(version, pid);
+    }
+    if channel == Channel::Homebrew {
+        return Upgrade::Homebrew(version);
     }
 
     // `--ignore-scripts` costs nothing here and takes lifecycle scripts out of
@@ -1285,17 +1337,52 @@ mod tests {
         }
     }
 
-    /// A Homebrew binary never reaches the npm install, whatever the lookup says.
+    /// A Homebrew binary never reaches the npm install, and a newer release is
+    /// left for the caller to run `brew upgrade` on.
     #[test]
-    fn a_homebrew_binary_is_never_upgraded_through_npm() {
+    fn a_homebrew_binary_is_upgraded_through_brew_and_never_npm() {
+        let answered = newer_than_current();
         let outcome = decide_upgrade(
             Channel::Homebrew,
             Path::new("/nonexistent/lock"),
-            || panic!("looked up"),
+            {
+                let answered = answered.clone();
+                move || Some(answered)
+            },
             || panic!("read the cache"),
             |_| panic!("ran npm"),
         );
-        assert_eq!(outcome, Upgrade::Standalone);
+        assert_eq!(outcome, Upgrade::Homebrew(answered));
+    }
+
+    /// A Homebrew lookup that fails falls back to the cache, like npm's, and
+    /// brew saying nothing is newer ends it without the cache.
+    #[test]
+    fn a_homebrew_lookup_falls_back_to_the_cache_only_when_it_fails() {
+        let outcome = decide_upgrade(
+            Channel::Homebrew,
+            Path::new("/nonexistent/lock"),
+            || None,
+            || Some("0.4.0".to_string()),
+            |_| panic!("ran npm"),
+        );
+        assert_eq!(outcome, Upgrade::Homebrew("0.4.0".to_string()));
+
+        let outcome = decide_upgrade(
+            Channel::Homebrew,
+            Path::new("/nonexistent/lock"),
+            || Some(current().to_string()),
+            || panic!("the cache must not get a second vote once brew has answered"),
+            |_| panic!("ran npm"),
+        );
+        assert_eq!(outcome, Upgrade::Current);
+    }
+
+    /// `brew update` fetches the tap, so the bound is long enough for that.
+    #[test]
+    fn the_homebrew_lookup_gets_longer_than_npms() {
+        assert_eq!(BREW_LOOKUP_DEADLINE, Duration::from_secs(30));
+        assert!(BREW_LOOKUP_DEADLINE > LOOKUP_DEADLINE);
     }
 
     #[test]
