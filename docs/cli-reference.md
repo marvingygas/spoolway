@@ -1898,19 +1898,29 @@ marker](installation.md#the-retired-version-marker).
 ### `spoolway update`
 
 Install the latest release. Runs from any directory, project or not, and writes no project
-file. After an npm self-update at a terminal, it prints the release notes. A successful
+file. After a self-update at a terminal, it prints the release notes. A successful
 install ends with one line telling you to run `spoolway sync` in each project.
 
 ```
 spoolway update
 ```
 
-The binary is only updated where npm installed it. A running dispatcher stops the install.
-On an npm install, `update` asks npm which release is out each time it runs. The wait is
-bounded. If npm does not answer in time, `update` uses the last known version and carries on.
+The binary is only updated where npm or Homebrew installed it. A running dispatcher stops the
+install and `update` says so. `update` asks the tool that installed the binary which release is
+out each time it runs:
 
-On a binary npm did not install, `update` starts no process. It prints its own version and the
-install line `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh`,
+| Installed by | Lookup | Wait | Upgrade command |
+|---|---|---|---|
+| npm | `npm view` | 3 seconds | `npm install -g spoolway@<version> --ignore-scripts` |
+| Homebrew | `brew update`, then `brew info --json=v2 marvingygas/tap/spoolway` | 30 seconds | `brew upgrade marvingygas/tap/spoolway` |
+
+If the tool does not answer in time, `update` uses the last known version and carries on. The
+output of `brew upgrade` goes straight to the terminal. When it fails, `update` exits with brew's
+exit code. See [Keeping spoolway current](installation.md#keeping-spoolway-current).
+
+On a binary that neither npm nor Homebrew installed, `update` starts no process. It prints its
+own version and the install line
+`curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh`,
 then exits 0.
 
 ### `spoolway sync`
