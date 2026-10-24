@@ -85,12 +85,12 @@ impl Install {
         std::fs::create_dir_all(&cellar_bin).unwrap();
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let git = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&project)
-            .status()
-            .unwrap();
-        assert!(git.success(), "git init failed");
+        let git = output_of(
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(&project),
+        );
+        assert!(git.status.success(), "git init failed");
 
         let upgrade = match upgrade {
             Upgrade::Fails => {
@@ -376,7 +376,12 @@ fn ctrl_c_during_the_lookup_stops_brew_update_too() {
 
 /// A process started with Ctrl-C ignored, as a background job or `nohup` has
 /// it, is left alone by it: `spoolway` does not stop `brew update`, and does
-/// not end, on a signal it was started to ignore.
+/// not treat the lookup as unanswered, on a signal it was started to ignore.
+///
+/// After the signal, only the fetch is ended, so the fake `brew update` finishes
+/// by itself. If `spoolway` had caught the signal it would have stopped brew
+/// first and fallen back to the cache, printing the "No answer" line and never
+/// asking `brew info`, whatever the machine's speed.
 #[test]
 fn an_ignored_ctrl_c_does_not_stop_the_lookup() {
     use std::os::unix::process::CommandExt;
@@ -386,7 +391,7 @@ fn an_ignored_ctrl_c_does_not_stop_the_lookup() {
     let mut command = install.command(&[], &["update"]);
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // SAFETY: `signal` is async-signal-safe, and runs between fork and exec.
     // An ignored disposition survives the exec.
@@ -396,7 +401,8 @@ fn an_ignored_ctrl_c_does_not_stop_the_lookup() {
             Ok(())
         });
     }
-    let mut update = launch(&mut command);
+    let update = launch(&mut command);
+    let update_pid = update.id() as libc::pid_t;
     let fetch_pid_file = install.root.join("update-fetch.pid");
     assert!(
         within(20, || fetch_pid_file.exists()),
@@ -409,16 +415,22 @@ fn an_ignored_ctrl_c_does_not_stop_the_lookup() {
         .unwrap();
 
     // SAFETY: `kill` has no memory-safety preconditions.
-    unsafe { libc::kill(update.id() as libc::pid_t, libc::SIGINT) };
-    std::thread::sleep(std::time::Duration::from_millis(1000));
-    let still_running = matches!(update.try_wait(), Ok(None));
-    // SAFETY: as above; the test cleans up what it started.
     unsafe {
-        libc::kill(update.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(update_pid, libc::SIGINT);
         libc::kill(fetch, libc::SIGKILL);
     }
-    let _ = update.wait();
-    assert!(still_running, "an ignored Ctrl-C ended spoolway update");
+    let output = update.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.status);
+    assert!(
+        !stdout(&output).contains("No answer from Homebrew"),
+        "stdout: {}",
+        stdout(&output)
+    );
+    assert_eq!(
+        install.brew_calls(),
+        format!("update\n{BREW_INFO}\nupgrade marvingygas/tap/spoolway\n")
+    );
 }
 
 /// Whether `done` holds within `seconds`, asking every 20 ms.
