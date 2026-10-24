@@ -518,12 +518,15 @@ fn brew_published() -> Option<String> {
 /// is. Its output is dropped because the notice `update` prints is all the
 /// person needs while it runs.
 ///
-/// `deadline` is the same bound [`bounded`] waits for, and the update is
-/// killed when it passes. [`bounded`] abandons the thread this runs on but
-/// cannot stop a child, and a `brew update` left fetching would be working on
-/// the taps while the caller, falling back to the cache, starts `brew upgrade`
-/// on them. A killed update answers `None`, so the caller falls back to the
-/// cache as it does for any lookup that did not finish.
+/// `deadline` is when the update is stopped, together with everything it
+/// started. [`bounded`] abandons the thread this runs on but cannot stop a
+/// child, and a `brew update` left fetching would hold brew's update lock while
+/// the caller, falling back to the cache, starts `brew upgrade`, whose own
+/// refresh then skips the tap with a complaint nobody sees. A stopped update
+/// answers `None`, so the caller falls back to the cache as it does for any
+/// lookup that did not finish. The caller passes a deadline [`BREW_STOP_MARGIN`]
+/// short of [`bounded`]'s, so the stop has finished before [`bounded`] gives up
+/// and the caller goes on.
 fn brew_published_after_update(deadline: Duration) -> Option<String> {
     let mut update = Command::new("brew");
     update
@@ -535,10 +538,66 @@ fn brew_published_after_update(deadline: Duration) -> Option<String> {
     brew_published()
 }
 
-/// Run `command` and wait for it for at most `deadline`. Past that the child is
-/// killed and reaped, and the answer is `None`, the same as for a command that
-/// could not be started.
+/// How long [`stop`] gives a process group to leave after `SIGTERM` before it
+/// is sent `SIGKILL`. Long enough for git to remove its own `.lock` files,
+/// which `SIGKILL` would leave behind.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// How much earlier than [`BREW_LOOKUP_DEADLINE`] the update is stopped. The
+/// stop takes up to [`STOP_GRACE`] and then a poll, and it has to be over
+/// before [`bounded`] stops waiting, so that no brew process is still running
+/// when `update` decides what to do next.
+const BREW_STOP_MARGIN: Duration = Duration::from_secs(5);
+
+/// Start `command` as the leader of a process group of its own, so [`stop`] can
+/// reach what it starts. `brew update` fetches each tap in a background
+/// subshell, and those outlive a kill of brew alone.
+#[cfg(unix)]
+fn own_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_group(_command: &mut Command) {}
+
+/// Stop `child` and everything in its process group: `SIGTERM`, a wait of up to
+/// [`STOP_GRACE`] for the whole group to go, then `SIGKILL`. The child is reaped
+/// either way.
+#[cfg(unix)]
+fn stop(child: &mut std::process::Child) {
+    let group = -(child.id() as libc::pid_t);
+    // SAFETY: `kill` on a process group has no memory-safety preconditions;
+    // the group id is the child's pid because it was started with
+    // `process_group(0)`, and the worst a stale one earns is ESRCH.
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    let end = std::time::Instant::now() + STOP_GRACE;
+    let mut reaped = false;
+    while std::time::Instant::now() < end {
+        reaped = reaped || !matches!(child.try_wait(), Ok(None));
+        // Signal 0 only asks whether any member of the group is left.
+        // SAFETY: as above.
+        if reaped && unsafe { libc::kill(group, 0) } != 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above.
+    unsafe { libc::kill(group, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn stop(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run `command` and wait for it for at most `deadline`. Past that the child
+/// and everything it started are stopped, and the answer is `None`, the same as
+/// for a command that could not be started.
 fn status_within(command: &mut Command, deadline: Duration) -> Option<std::process::ExitStatus> {
+    own_group(command);
     let mut child = command.spawn().ok()?;
     let end = std::time::Instant::now() + deadline;
     loop {
@@ -548,8 +607,7 @@ fn status_within(command: &mut Command, deadline: Duration) -> Option<std::proce
                 std::thread::sleep(Duration::from_millis(25));
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child);
                 return None;
             }
         }
@@ -631,7 +689,7 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     }
     let channel = Channel::detect();
     let live = move || match channel {
-        Channel::Homebrew => brew_published_after_update(BREW_LOOKUP_DEADLINE),
+        Channel::Homebrew => brew_published_after_update(BREW_LOOKUP_DEADLINE - BREW_STOP_MARGIN),
         _ => published(),
     };
     decide_upgrade(channel, lock_file, live, newer, |target| {
@@ -1128,12 +1186,16 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
         Some(line) => anyhow::bail!(
             "the `spoolway` on PATH resolves to `{}`, which reports `{line}` rather than the \
              installed {expect_version}, so it is a different install from the one just \
-             upgraded (this one ran from `{}`); put the upgraded spoolway's folder first on \
-             PATH, or remove the other copy (an npm, `npx` or project-local one), then run \
-             spoolway update again",
+             upgraded; put {} first on PATH, or remove the other copy (an npm, `npx` or \
+             project-local one), then run spoolway update again",
             program.display(),
-            std::env::current_exe()
-                .map_or_else(|_| "an unknown path".into(), |p| p.display().to_string())
+            match std::env::current_exe()
+                .ok()
+                .and_then(|exe| linked_bin_dir(&exe))
+            {
+                Some(dir) => format!("`{}`", dir.display()),
+                None => "the folder the upgraded spoolway was installed into".to_string(),
+            }
         ),
         None => anyhow::bail!(
             "the `spoolway` on PATH (`{}`) did not report a version — cannot confirm the \
@@ -1143,6 +1205,31 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
     }
 
     Ok(upgraded_command(&program, args).status()?)
+}
+
+/// The folder an npm or Homebrew install links its `spoolway` into, worked out
+/// from where the binary sits: `<prefix>/bin` for the part of the path before
+/// `Cellar/spoolway/` or `lib/node_modules/`, and the `npm` folder itself under
+/// the Windows prefix. `None` for any other path.
+///
+/// The running executable is no use as the answer itself after an upgrade:
+/// brew has removed its `Cellar/spoolway/<old version>/` folder by then.
+fn linked_bin_dir(exe: &Path) -> Option<PathBuf> {
+    let parts: Vec<_> = exe.components().collect();
+    let name = |i: usize| parts.get(i).map(|part| part.as_os_str());
+    let before = |end: usize| parts[..end].iter().collect::<PathBuf>();
+    (1..parts.len()).find_map(|i| {
+        let here = name(i)?;
+        if here == "Cellar" && name(i + 1)? == BREW_FORMULA_NAME {
+            Some(before(i).join("bin"))
+        } else if here == "node_modules" && name(i - 1)? == "lib" {
+            Some(before(i - 1).join("bin"))
+        } else if here == "node_modules" && name(i - 1)? == "npm" {
+            Some(before(i))
+        } else {
+            None
+        }
+    })
 }
 
 fn upgraded_command(program: &Path, args: &[String]) -> Command {
@@ -1436,6 +1523,77 @@ mod tests {
             Some(("npm", Duration::from_secs(3)))
         );
         assert_eq!(lookup_for(Channel::Other), None);
+    }
+
+    /// The folder a refusal tells the person to put first on `PATH` is the one
+    /// the install links into, whatever the old executable's name now is.
+    #[test]
+    fn the_linked_bin_dir_is_found_from_each_installs_layout() {
+        for (exe, dir) in [
+            (
+                "/opt/homebrew/Cellar/spoolway/0.14.1/bin/spoolway",
+                "/opt/homebrew/bin",
+            ),
+            (
+                "/home/linuxbrew/.linuxbrew/Cellar/spoolway/0.14.1/bin/spoolway (deleted)",
+                "/home/linuxbrew/.linuxbrew/bin",
+            ),
+            (
+                "/home/x/.nvm/versions/node/v20/lib/node_modules/@spoolway/linux-x64/bin/spoolway",
+                "/home/x/.nvm/versions/node/v20/bin",
+            ),
+            (
+                "/home/x/AppData/Roaming/npm/node_modules/@spoolway/win/bin/spoolway.exe",
+                "/home/x/AppData/Roaming/npm",
+            ),
+        ] {
+            assert_eq!(
+                linked_bin_dir(Path::new(exe)),
+                Some(PathBuf::from(dir)),
+                "{exe}"
+            );
+        }
+        assert_eq!(
+            linked_bin_dir(Path::new("/work/target/debug/spoolway")),
+            None
+        );
+    }
+
+    /// The group is stopped, not just its leader: a shell that starts a
+    /// background `sleep` and waits on it, as `brew update` does for each tap,
+    /// leaves nothing behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_command_takes_what_it_started_with_it() {
+        let dir = crate::scratch::root("release-stop-group");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let mut shell = Command::new("sh");
+        shell.arg("-c").arg(format!(
+            "sleep 30 & echo $! > '{}'; wait",
+            pid_file.display()
+        ));
+        assert_eq!(status_within(&mut shell, Duration::from_millis(500)), None);
+
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // A process nobody has reaped yet still answers signal 0, so it counts
+        // as gone once it is a zombie.
+        let gone = || {
+            // SAFETY: signal 0 only checks that the process exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains(") Z"));
+            !alive || zombie
+        };
+        assert!(
+            within_two_seconds(gone),
+            "the grandchild `sleep` outlived the stop"
+        );
     }
 
     /// A child still running at the deadline is killed rather than left to
