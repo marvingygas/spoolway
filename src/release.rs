@@ -504,7 +504,8 @@ fn bounded(
 /// outright, and only reached on a failed lookup — without seeding a real
 /// cache file, standing up a fake `npm` on `PATH`, or touching the process
 /// environment at all. A test binary sits under `target/`, which is
-/// [`Channel::Other`], so the channel is an argument for the same reason. `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
+/// [`Channel::Other`], so the channel is an argument for the same reason.
+/// `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
 /// thread, so a stub that never answers proves the bound rather than hanging
 /// the test.
 fn decide_upgrade(
