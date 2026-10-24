@@ -426,7 +426,7 @@ pub fn report(
 pub struct Routed {
     /// The step the task now sits on.
     pub destination: String,
-    /// Whether a gate — the step's own `gate: true` or the task's own
+    /// Whether a gate — the step's own `gate:` or the task's own
     /// `gate_at` — is what parked this at `paused` rather than the ordinary
     /// graph. See [`gate_hold`].
     pub gated: bool,
@@ -2012,15 +2012,15 @@ pub fn command_pass_handed_back(task: &Task, step: &crate::pipeline::Step, gated
 /// `blocked` itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caught {
-    /// A plain pass, whatever gated it — a step's own `gate: true` or a
+    /// A plain pass, whatever gated it — a step's own `gate:` or a
     /// schedule that happened to catch one. Resuming takes the gated step's
     /// own `on_pass`. The exception is a schedule on `blocked`: it has no
     /// `on_pass`, so [`held_unblocker_pass`] sends the pass down
     /// [`cleared_block_target`] to the `on_pass` of the step the task stopped
     /// at.
     Pass,
-    /// A fail a schedule caught before it could go round the loop the
-    /// pipeline drew. Resuming takes the step's `on_fail`, the route the
+    /// A fail a step's own `gate: on_fail` or `always`, or a schedule, caught
+    /// before it could go round the loop the pipeline drew. Resuming takes the step's `on_fail`, the route the
     /// failure chose, whether an agent reported it or a command's exit code
     /// did; a person who wants it waved through names the `on_pass` step.
     Fail,
@@ -7933,7 +7933,7 @@ mod tests {
         );
     }
 
-    /// `gate:` only turns a *pass* into `paused` — a `--block` from a gated
+    /// `gate: on_pass` only turns a *pass* into `paused` — a `--block` from a gated
     /// step is still an ordinary block, and unattended it resumes like any
     /// other: there is nobody to park in front of.
     #[test]

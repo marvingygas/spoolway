@@ -2652,7 +2652,8 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 }
 
 /// The private layer's pipeline patches, renamed the same way [`pipelines`]
-/// renames the checkout's files.
+/// renames the checkout's files. A patch's `gate: true` is rewritten to
+/// `gate: on_pass` too; its `gate: false` stays — see [`rewrite_gate`].
 ///
 /// A patch is `spoolway`'s own file and outside the checkout, but a
 /// `headless:` in it is refused just as the tracked one is: the override is
@@ -2683,7 +2684,8 @@ fn override_pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<A
 }
 
 /// The private layer's own pipelines under `local/pipelines/`, renamed the
-/// same way [`pipelines`] renames the tracked ones.
+/// same way [`pipelines`] renames the tracked ones, and with `gate:` brought
+/// to its named spelling as they are.
 ///
 /// A private pipeline is read by the same loader as a tracked one, so a
 /// `headless:` in it fails the whole load with the advice to run `sync`.
@@ -2728,8 +2730,10 @@ fn private_pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Ac
     }
 }
 
-/// Rename `headless:` in one file the checkout does not track — a patch or a
-/// private pipeline — and plan its write.
+/// Rename `headless:` and bring `gate:` to its named spelling in one file the
+/// checkout does not track — a patch or a private pipeline — and plan its
+/// write. [`rewrite_gate`] rewrites `gate: true` to `gate: on_pass` in either,
+/// and deletes `gate: false` from a private pipeline but not from a patch.
 ///
 /// `consequence` is what the file does while it still names `headless:`, for
 /// the refusal. A file whose rename leaves a `headless:` behind on a line
@@ -6039,7 +6043,7 @@ mod tests {
         );
         assert_eq!(
             said("parks.yml"),
-            "will not load: step `a` has on_pass: blocked — use gate: true to stop for a person"
+            "will not load: step `a` has on_pass: blocked — use gate: on_pass to stop for a person"
         );
     }
 
@@ -6574,6 +6578,64 @@ mod tests {
             private_pipelines(&repo, &args(), &mut again).unwrap();
             let (wrote, _) = dedup_paths(&again);
             assert!(wrote.is_empty(), "{:?}", outcome_lines(&again));
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A private pipeline has `gate: true` rewritten and `gate: false`
+    /// deleted, and an override patch has `gate: true` rewritten while its
+    /// `gate: false` stays, since there it switches off a tracked gate.
+    #[test]
+    fn gate_is_rewritten_in_private_pipelines_and_patches() {
+        let (repo, _root_guard) = fixture("private-gate");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-private-gate-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        crate::platform::test_home::with_home(&home, || {
+            let dir = crate::local::pipelines_dir(&crate::local::dir_for(&repo.root).unwrap());
+            std::fs::create_dir_all(&dir).unwrap();
+            let private = dir.join("mine.yml");
+            std::fs::write(
+                &private,
+                "steps:\n  - id: a\n    agent: x\n    gate: true\n    on_pass: b\n  \
+                 - id: b\n    agent: x\n    gate: false\n    on_pass: done\n",
+            )
+            .unwrap();
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            let patch = crate::overrides::pipeline_patch_path(&overrides, "mine");
+            std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+            std::fs::write(
+                &patch,
+                "steps:\n  c:\n    gate: false\n  d:\n    gate: true\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            private_pipelines(&repo, &args(), &mut outcomes).unwrap();
+            override_pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(&private).unwrap(),
+                "steps:\n  - id: a\n    agent: x\n    gate: on_pass\n    on_pass: b\n  \
+                 - id: b\n    agent: x\n    on_pass: done\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&patch).unwrap(),
+                "steps:\n  c:\n    gate: false\n  d:\n    gate: on_pass\n"
+            );
+            let notes = format!("{:?}", migration_notes(&outcomes));
+            assert!(
+                notes.contains("step `a`: gate: true → gate: on_pass"),
+                "{notes}"
+            );
+            assert!(notes.contains("step `b`: gate: false → removed"), "{notes}");
+            assert!(
+                notes.contains("step `d`: gate: true → gate: on_pass"),
+                "{notes}"
+            );
+            assert!(!notes.contains("step `c`"), "{notes}");
         });
 
         std::fs::remove_dir_all(&home).ok();

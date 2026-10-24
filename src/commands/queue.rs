@@ -14719,7 +14719,7 @@ mod tests {
     /// `gate_at` is a task's to set, read by `commands::report` the same
     /// way whoever wrote it by hand or the board's pause panel would have —
     /// though unlike `step.gate`, it catches whatever that step reports, not
-    /// only its pass.
+    /// only the outcome a `gate:` names.
     #[test]
     fn gate_at_is_read_from_a_task() {
         let text = task_text("demo", "group: demo\ngate_at: handover\n", BODY);

@@ -2180,7 +2180,7 @@ impl<'a> Dispatcher<'a> {
                     // A gate holds a command step's exit the way it holds an
                     // agent's report: a task's own `gate_at` (the board's pause
                     // panel) catches either outcome, and the step's own
-                    // `gate: true` a pass. Only `report` ever asked, so a command that
+                    // `gate:` the outcome it names. Only `report` ever asked, so a command that
                     // finished simply moved on. The `last_report` filed here
                     // is what `spoolway resume` reads to send a held fail
                     // down `on_fail` rather than `on_pass`.

@@ -841,8 +841,8 @@ fn render_forms(forms: &[(&str, &str)]) -> String {
 /// One line closes the whole contract when `step` would hold a pass here —
 /// see [`crate::commands::gate_hold`], read against a hypothetical pass,
 /// since no real outcome exists yet while a prompt is being composed. Which
-/// gate answers picks the sentence: a step's own `gate: true` catches a pass
-/// and nothing else, so it reads *a pass is held here*; a task's own
+/// gate answers picks the sentence: a step's own `gate:` is asked only about
+/// that hypothetical pass, so it reads *a pass is held here*; a task's own
 /// `gate_at` catches whatever is reported, so it reads *this report is held
 /// here, whatever it is*.
 pub(crate) fn report_contract(

@@ -340,7 +340,7 @@ pub(crate) enum Reported {
 /// field the task file already carries — see `classify` in the parent module.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Cause {
-    /// The step's own `gate: true` held its pass.
+    /// The step's own `gate:` held its outcome.
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,

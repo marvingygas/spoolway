@@ -626,7 +626,7 @@ fn template() -> String {
          \x20\x20\x20\x20# effort: high             `medium` or `high`; the kind must carry a level\n\
          \x20\x20\x20\x20# skills: a, b             invoked at the top of this step's opening prompt\n\
          \x20\x20\x20\x20# slot: false              run without consuming one of the profile's lanes\n\
-         \x20\x20\x20\x20# gate: on_pass           or on_fail, always: that outcome parks on `paused` for `spoolway resume`\n\
+         \x20\x20\x20\x20# gate: on_pass            or on_fail, always: that outcome parks on `paused` for `spoolway resume`\n\
          \x20\x20\x20\x20on_pass: review\n\
          \x20\x20\x20\x20on_fail: fix\n\
          \n\

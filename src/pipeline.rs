@@ -1241,18 +1241,18 @@ fn end_message(step_id: &str) -> String {
     format!("step `{step_id}` sets end: true, which is gone — use on_pass: done")
 }
 
-/// A step routing its pass to `blocked`. `blocked` is a stage a task is
-/// parked on, and an unattended run staffs it with a lane instead of a
-/// person, so a pass written to land there strands the task. `gate: true`
-/// holds the same pass for a person and keeps where it was headed.
 /// A `gate:` that names none of the three outcomes. Shared with
 /// `pipeline override --set`, which refuses it before writing a patch.
 pub(crate) fn unknown_gate_message(step_id: &str, raw: &str) -> String {
     format!("step `{step_id}` declares `gate: {raw}` — `gate:` is `on_pass`, `on_fail` or `always`")
 }
 
+/// A step routing its pass to `blocked`. `blocked` is a stage a task is
+/// parked on, and an unattended run staffs it with a lane instead of a
+/// person, so a pass written to land there strands the task. `gate: on_pass`
+/// holds the same pass for a person and keeps where it was headed.
 fn on_pass_blocked_message(step_id: &str) -> String {
-    format!("step `{step_id}` has on_pass: blocked — use gate: true to stop for a person")
+    format!("step `{step_id}` has on_pass: blocked — use gate: on_pass to stop for a person")
 }
 
 /// A background command step declaring `on_fail`. 0.10.0 routed a late
@@ -4642,7 +4642,7 @@ mod tests {
         let err = parse(blocked).unwrap_err().to_string();
         assert_eq!(
             err,
-            "step `a` has on_pass: blocked — use gate: true to stop for a person"
+            "step `a` has on_pass: blocked — use gate: on_pass to stop for a person"
         );
 
         for raw in [end, blocked] {
