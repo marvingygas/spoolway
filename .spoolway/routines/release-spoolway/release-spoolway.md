@@ -11,8 +11,8 @@ pipeline: release
 
 ## Context
 
-- A release is a `v*` tag; the release workflow publishes five platform binaries, six npm packages,
-  and a GitHub release with archives and checksums.
+- A release is a `v*` tag; the release workflow publishes six platform binaries, seven npm packages,
+  and a GitHub release with four bare download files and checksums.
 - `Cargo.toml` is the only version source; generated npm manifests must never be edited by hand.
 - `CHANGELOG.md` is the single release record. One approved section per version is committed beside
   the version bump, compiled into every binary built from the tag by `include_str!`, and used by the
@@ -55,10 +55,10 @@ commands, provenance, and contributing pull requests clear.
   `spoolway whats-new` before the rehearsal
 - the rehearsal ran on the release pull request's head, with the release commit last; Linux checks, nightly end-to-end tests,
   and advisories all pass without the daily skip policy
-- the rehearsal validates the approved changelog section, assembles five platforms, dry-runs six
+- the rehearsal validates the approved changelog section, assembles six platforms, dry-runs seven
   packages, and reports correct provenance without publishing to npm or GitHub
 - the tag names the release commit landed from that rehearsed head, and publication requires the full gate again
-- the approved tag publishes six packages and five archives plus `SHA256SUMS`
+- the approved tag publishes seven packages and four bare files plus `SHA256SUMS`
 - the GitHub release body is created by the workflow from the tagged changelog section and reads back
   byte-for-byte identical to the approved notes
 - a fresh public npm install selects one platform package and reports the approved version

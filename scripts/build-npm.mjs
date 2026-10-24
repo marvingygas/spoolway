@@ -27,6 +27,7 @@ const version = cargoVersion();
 const repository = gitRepository();
 
 checkShimTableMatches();
+checkDownloadNames();
 
 fs.rmSync(distDir, { recursive: true, force: true });
 
@@ -116,6 +117,28 @@ function checkShimTableMatches() {
   }
 }
 
+/// Every target must say what it is downloaded as, or say null, because the
+/// release's `assets` job and scripts/fetch-or-build.sh both read `download`
+/// and a target that left it out would silently ship nothing. Two targets
+/// sharing a name would have one overwrite the other on the release page.
+function checkDownloadNames() {
+  const named = [];
+  for (const t of targets) {
+    if (!("download" in t) || (t.download !== null && typeof t.download !== "string")) {
+      throw new Error(
+        `npm/targets.json target ${t.triple} needs a "download" key: the release file name, or null for npm only`,
+      );
+    }
+    if (t.download !== null) named.push(t.download);
+  }
+  const dupes = named.filter((n, i) => named.indexOf(n) !== i);
+  if (dupes.length) {
+    throw new Error(
+      `npm/targets.json names the same download file twice: ${[...new Set(dupes)].join(", ")}`,
+    );
+  }
+}
+
 /// What cargo named the binary, and what the package has to publish it as.
 ///
 /// Windows will not run an extension-less file, so the `.exe` is not cosmetic:
@@ -137,7 +160,7 @@ function buildPlatformPackage(target, binary) {
     license: "MIT",
     author: "Marvin Gygas",
     // npm installs only the package matching the host, which is what keeps the
-    // download to one 3 MB binary instead of five.
+    // download to one 3 MB binary instead of one per platform.
     os: [target.os],
     cpu: [target.cpu],
     files: ["bin"],

@@ -4,7 +4,7 @@
 # hand as `scripts/release-verify.sh <version>`.
 #
 # A workflow's exit code is not the registry's own state, so this reads the
-# public record directly: the tag, the packages, the archives, the published
+# public record directly: the tag, the packages, the download files, the published
 # body and a real install.
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
@@ -77,13 +77,15 @@ for pkg in "${pkgs[@]}"; do
 done
 npm_wait spoolway
 
-# 4. The GitHub release carries one archive per platform, plus the checksums.
+# 4. The GitHub release carries one bare file per target that names a
+#    `download`, plus the checksums.
 assets="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
   || die "no GitHub release for $tag"
 count="$(printf '%s\n' "$assets" | grep -c . || true)"
-expected=$(( ${#pkgs[@]} + 1 ))
+downloads="$(git show "$tag:npm/targets.json" | jq -r '[.targets[] | select(.download != null)] | length')"
+expected=$(( downloads + 1 ))
 [ "$count" -eq "$expected" ] \
-  || die "$tag has $count release assets, expected $expected (one per platform plus SHA256SUMS)"
+  || die "$tag has $count release assets, expected $expected (one per download file plus SHA256SUMS)"
 printf '%s\n' "$assets" | grep -qxF SHA256SUMS || die "$tag has no SHA256SUMS asset"
 
 # 5. The published body is the tagged changelog section, byte for byte. The

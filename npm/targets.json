@@ -7,7 +7,8 @@
       "os": "linux",
       "cpu": "x64",
       "libc": "glibc",
-      "runner": "ubuntu-latest"
+      "runner": "ubuntu-latest",
+      "download": null
     },
     {
       "triple": "aarch64-unknown-linux-gnu",
@@ -15,7 +16,8 @@
       "os": "linux",
       "cpu": "arm64",
       "libc": "glibc",
-      "runner": "ubuntu-24.04-arm"
+      "runner": "ubuntu-24.04-arm",
+      "download": null
     },
     {
       "triple": "x86_64-unknown-linux-musl",
@@ -23,7 +25,17 @@
       "os": "linux",
       "cpu": "x64",
       "libc": "musl",
-      "runner": "ubuntu-latest"
+      "runner": "ubuntu-latest",
+      "download": "spoolway-linux-x64"
+    },
+    {
+      "triple": "aarch64-unknown-linux-musl",
+      "pkg": "linux-arm64-musl",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "musl",
+      "runner": "ubuntu-24.04-arm",
+      "download": "spoolway-linux-arm64"
     },
     {
       "triple": "aarch64-apple-darwin",
@@ -31,7 +43,8 @@
       "os": "darwin",
       "cpu": "arm64",
       "libc": null,
-      "runner": "macos-latest"
+      "runner": "macos-latest",
+      "download": "spoolway-macos-arm64"
     },
     {
       "triple": "x86_64-apple-darwin",
@@ -39,7 +52,8 @@
       "os": "darwin",
       "cpu": "x64",
       "libc": null,
-      "runner": "macos-latest"
+      "runner": "macos-latest",
+      "download": "spoolway-macos-x64"
     }
   ]
 }

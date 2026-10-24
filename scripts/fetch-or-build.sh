@@ -1,10 +1,10 @@
 #!/bin/sh
 # fetch-or-build.sh — herdr [[build]] step for the spoolway plugin.
 #
-# Fast path: map `uname` onto one of npm/targets.json's triples, download the
-# matching release's spoolway-<triple>.tar.gz, verify it against that
-# release's SHA256SUMS, and unpack it to ./bin/spoolway (relative to the
-# plugin root — herdr runs this with the plugin directory as $PWD and
+# Fast path: map `uname` onto the npm/targets.json entry that names a release
+# download for this OS and CPU, download that bare file from the matching
+# release, verify it against that release's SHA256SUMS, and install it as
+# ./bin/spoolway (relative to the plugin root — herdr runs this with the plugin directory as $PWD and
 # HERDR_PLUGIN_ROOT pointing at it; see herdr-plugin.toml). `herdr plugin
 # uninstall` deletes the plugin directory and nothing else, so nothing here
 # may write outside it — no ~/.local/bin, no ~/.cargo/bin.
@@ -12,8 +12,8 @@
 # The release tag is read from herdr-plugin.toml's own `version`, which
 # verify.yml's `test` job keeps equal to Cargo.toml's.
 #
-# Fallback: on ANY miss — no triple for this host, no such tag, no asset for
-# the triple, a missing SHA256SUMS line, or a checksum mismatch — build from
+# Fallback: on ANY miss — no download for this host, no such tag, no asset for
+# the host, a missing SHA256SUMS line, or a checksum mismatch — build from
 # source with `cargo build --release` and copy the result into place, so
 # installing the plugin never gets harder than a plain build.
 #
@@ -76,7 +76,7 @@ sha256_of() { # prints the hex digest of file $1
   fi
 }
 
-# --- resolve the target triple from npm/targets.json ----------------------
+# --- resolve the release download from npm/targets.json ----------------------
 [ -f "$targets_json" ] || fallback "missing $targets_json"
 
 os=$(uname -s 2>/dev/null || echo unknown)
@@ -94,75 +94,63 @@ case "$arch" in
   *) fallback "unsupported architecture $arch" ;;
 esac
 
-# Only linux distinguishes libc; getconf reporting a glibc version is the
-# cheapest sign of glibc, and its absence (as on a musl-only system such as
-# Alpine) is treated as musl.
-host_libc=""
-if [ "$host_os" = linux ]; then
-  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-    host_libc=glibc
-  else
-    host_libc=musl
-  fi
-fi
+# libc is deliberately not consulted. Both Linux downloads are static musl
+# builds that start on glibc and musl hosts alike, so the OS and CPU alone
+# pick the file.
 
 # npm/targets.json is pretty-printed one field per line inside `{ ... }`
 # blocks, so a small state machine collects one target per block rather than
 # parsing full JSON — this script has to run with nothing beyond a POSIX
 # shell, sh's own builtins and awk.
-triple=$(awk '
-  /"triple":/ { t = $0; sub(/.*: *"/, "", t); sub(/".*/, "", t) }
+asset=$(awk '
+  /"download":/ {
+    if ($0 ~ /null/) { d = "" }
+    else { d = $0; sub(/.*: *"/, "", d); sub(/".*/, "", d) }
+  }
   /"os":/     { o = $0; sub(/.*: *"/, "", o); sub(/".*/, "", o) }
   /"cpu":/    { c = $0; sub(/.*: *"/, "", c); sub(/".*/, "", c) }
-  /"libc":/   {
-    if ($0 ~ /null/) { l = "" }
-    else { l = $0; sub(/.*: *"/, "", l); sub(/".*/, "", l) }
-  }
   /}/ {
-    if (t != "") print t "|" o "|" c "|" l
-    t = ""
+    if (d != "") print d "|" o "|" c
+    d = ""
   }
-' "$targets_json" | while IFS='|' read -r t o c l; do
-  if [ "$o" = "$host_os" ] && [ "$c" = "$host_cpu" ] && [ "$l" = "$host_libc" ]; then
-    echo "$t"
+' "$targets_json" | while IFS='|' read -r d o c; do
+  if [ "$o" = "$host_os" ] && [ "$c" = "$host_cpu" ]; then
+    echo "$d"
     break
   fi
 done)
 
-[ -n "$triple" ] || fallback "no entry in $targets_json for $host_os/$host_cpu${host_libc:+/$host_libc}"
+[ -n "$asset" ] || fallback "no release download in $targets_json for $host_os/$host_cpu"
 
 # --- read the version this manifest declares -------------------------------
 version=$(awk -F'"' '/^version *= *"/{print $2; exit}' "$manifest" 2>/dev/null)
 [ -n "$version" ] || fallback "could not read version from $manifest"
 
-asset="spoolway-$triple.tar.gz"
-
 tmpdir=$(mktemp -d 2>/dev/null) || fallback "could not create a temp dir"
 trap 'rm -rf "$tmpdir"' EXIT
 
-archive_url="$base_url/v$version/$asset"
+file_url="$base_url/v$version/$asset"
 sums_url="$base_url/v$version/SHA256SUMS"
-tmparchive="$tmpdir/$asset"
+tmpfile="$tmpdir/$asset"
 tmpsums="$tmpdir/SHA256SUMS"
 
-download "$archive_url" "$tmparchive" || fallback "release asset not available for v$version ($asset)"
+download "$file_url" "$tmpfile" || fallback "release asset not available for v$version ($asset)"
 download "$sums_url" "$tmpsums" || fallback "SHA256SUMS not available for v$version"
 
 # coreutils' `sha256sum` emits `<hash>  <name>` (two spaces); accept a single
 # space or `*` too so a binary-mode line still verifies. release.yml's own
 # `assets` job runs `sha256sum ./*`, so every name in this repo's own
 # SHA256SUMS carries a `./` prefix — matched as optional so a SHA256SUMS
-# without it (e.g. from a plain `sha256sum spoolway-*.tar.gz`) still verifies.
+# without it (e.g. from a plain `sha256sum spoolway-*`) still verifies.
 expected=$(grep -E "^[0-9a-f]{64} [ *](\./)?$asset\$" "$tmpsums" 2>/dev/null | awk '{print $1}' | head -n 1)
 [ -n "$expected" ] || fallback "no checksum listed for $asset"
 
-actual=$(sha256_of "$tmparchive") || fallback "no sha-256 tool (sha256sum/shasum) available"
+actual=$(sha256_of "$tmpfile") || fallback "no sha-256 tool (sha256sum/shasum) available"
 if [ "$actual" != "$expected" ]; then
   fallback "checksum mismatch for $asset (expected $expected, got $actual)"
 fi
 
 mkdir -p "$(dirname "$out")"
-tar -xzf "$tmparchive" -C "$tmpdir" spoolway || fallback "could not unpack $asset"
-mv -f "$tmpdir/spoolway" "$out" || fallback "could not install the verified binary to $out"
+mv -f "$tmpfile" "$out" || fallback "could not install the verified binary to $out"
 chmod +x "$out"
-echo "spoolway: installed prebuilt v$version ($triple), verified SHA-256, -> $out"
+echo "spoolway: installed prebuilt v$version ($asset), verified SHA-256, -> $out"
