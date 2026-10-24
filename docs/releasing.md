@@ -30,8 +30,10 @@ already happened.
 ## What ships
 
 - Six platform binaries, packed into six npm platform packages plus the `spoolway` wrapper.
-- A GitHub release with four executable files and `SHA256SUMS`. The files have no version in
-  their names and no archive around them.
+- A GitHub release with four executable files, `SHA256SUMS` and `install.sh`. The files have no
+  version in their names and no archive around them. `install.sh` carries the release's version
+  and downloads only from that release. `SHA256SUMS` lists all five. `scripts/release-verify.sh`
+  checks that all six are attached.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
 
 | Release file | Built from |
