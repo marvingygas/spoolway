@@ -188,8 +188,7 @@ dependabot-review also runs dependabot and is active. Deactivate it first, then 
 ```
 
 With two or more such jobs active, the popup names them all and reads `… also run <routine> and
-are active. Deactivate them first, …`. The check reads both stores again at the pick, so a job
-another hand activated after the menu opened still counts.
+are active. Deactivate them first, …`.
 
 ### The two choices
 
