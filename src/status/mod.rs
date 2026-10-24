@@ -1492,8 +1492,8 @@ impl Board {
 /// an `Err`, so a person picking open task would see nothing at all. Among
 /// the refusals are a terminal editor on a backend with no pane to open one
 /// in — headless, which refuses the way `Mux::open_command`'s default does
-/// — an `editor.toml` that does not parse, an editor program that is not on
-/// `PATH`, and a path `wslpath` cannot convert. The task file it would have
+/// — an editor program that is not on `PATH`, and a path `wslpath` cannot
+/// convert. The task file it would have
 /// opened is left exactly as it was.
 fn open_task(repo: &Repo, id: &str) -> Option<crate::screen::Notice> {
     let task = repo.task(id).ok()?;
@@ -11742,7 +11742,7 @@ mod tests {
     #[test]
     fn the_cursor_reaches_a_done_row_and_its_menu_opens_its_task() {
         let (repo, _root_guard) = fixture("cursor-reaches-done-row");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
@@ -14874,7 +14874,7 @@ mod tests {
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
         let (repo, _root_guard) = fixture("open-key-headless");
-        let _home = crate::editor::pin_terminal_editor();
+        let _editor = crate::editor::pin_editor("/bin/sh");
         crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -14905,7 +14905,7 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    /// Picking `open task` with an `editor.toml` naming a program that is not on
+    /// Picking `open task` with `$VISUAL` naming a program that is not on
     /// `PATH` shows the refusal in an `open task` popup, remedy and all,
     /// rather than dropping it. The board keeps drawing under it, every key
     /// but `enter` leaves it open, and `enter` closes it onto the board.
@@ -14914,14 +14914,7 @@ mod tests {
         use crate::screen::Key;
 
         let (repo, _root_guard) = fixture("open-key-missing-program");
-        let home = crate::scratch::root("editor-home");
-        std::fs::create_dir_all(home.join(".spoolway")).unwrap();
-        std::fs::write(
-            home.join(".spoolway/editor.toml"),
-            "[editor]\ncommand = \"notepd.exe\"\n",
-        )
-        .unwrap();
-        crate::platform::test_home::pin(&home);
+        let _editor = crate::editor::pin_editor("notepd.exe");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let watching = Phase::Watching {
@@ -14943,8 +14936,8 @@ mod tests {
         assert_eq!(notice.title, "open task");
         assert_eq!(
             notice.text,
-            "o: `notepd.exe` is not on PATH — fix command in ~/.spoolway/editor.toml, or \
-             delete the file to use $VISUAL, $EDITOR or vim"
+            "o: `notepd.exe` is not on PATH — set $VISUAL or $EDITOR to an editor on PATH, \
+             or unset both to use vim"
         );
         assert!(!board.at_rest(), "the popup reads every key");
         let drawn = strip_ansi(&board.frame(&repo, &pipelines, watching).unwrap());

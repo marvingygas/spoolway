@@ -325,7 +325,8 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   still matches the task id. `usage.jsonl` lines for a routine copy gain a `routine` key.
 - Expect the board's `open` to read `~/.spoolway/editor.toml` before `$VISUAL` and `$EDITOR`, and
   to run `vim`, not `vi`, when none of them is set. `spoolway config edit` and
-  `spoolway config override` are unchanged. See [Editor](dispatcher.md#editor).
+  `spoolway config override` open the same editor, with the same `vim` fallback. See
+  [Editor](dispatcher.md#editor).
 
 ## 0.9.0 to 0.10.0
 

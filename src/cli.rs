@@ -1843,7 +1843,8 @@ pub enum ConfigCommand {
     /// Write one value, e.g. `models.claude-opus-5.input 5.0`.
     Set { key: String, value: String },
 
-    /// Open the config file in `$EDITOR`, and re-validate it on save.
+    /// Open the config file in `$VISUAL`, else `$EDITOR`, else `vim`, and
+    /// re-validate it on save.
     ///
     /// The file is the interface — its comments carry every explanation — so
     /// editing it directly is the supported way to change several things at

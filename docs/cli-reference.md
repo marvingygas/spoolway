@@ -1622,7 +1622,7 @@ spoolway config edit
 | `path` | Print every place this project's setup lives: the setup folder, the plans folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","plans","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as a negative `unattended.max_cost_usd`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
-| `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vi`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
+| `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vim`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 The `plans:` line follows `setup:`. In repo mode it names `plans/` in the project's home. In home
 mode it names the workspace's `plans/`, the same folder for every clone. The planning skills
@@ -1637,7 +1637,7 @@ See [Configuration](configuration.md).
 
 ### `spoolway config override`
 
-Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vi`, creating it if needed. See the [overrides
+Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vim`, creating it if needed. See the [overrides
 layer](configuration.md#the-overrides-layer).
 
 Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
@@ -2099,7 +2099,7 @@ Under `-v`, one `editor` row names the editor the TUI's `open task` runs. A sett
 prints a note with the fix and is never a failure. See [Editor](dispatcher.md#editor).
 
 ```
-  ok    editor — notepad.exe, from ~/.spoolway/editor.toml — own window, Windows paths
+  ok    editor — notepad.exe, from $VISUAL — own window, Windows paths
 ```
 
 A note names each `pipeline · step` that runs the deprecated stack command. See [Checking the setup](installation.md#checking-the-setup).

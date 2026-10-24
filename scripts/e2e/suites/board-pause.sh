@@ -453,6 +453,10 @@ echo 4000 > "$CTL/transcript"
 # `plan:` names a page that is never written: the menu lists `open plan`
 # without looking for the file.
 queue_hang mid-turn "plan: $LIVE/mid-turn-plan.html"
+# The board reads `$VISUAL` in its own environment, so the missing editor the
+# case below needs is named before this board starts. Unset again after that
+# case, so no later board inherits it.
+export VISUAL=notepd.exe
 board_start
 LANE_PID=$(lane_pid "mid-turn · implement" 30)
 if [ -n "$LANE_PID" ]; then ok "the lane is really mid-turn"
@@ -475,18 +479,16 @@ press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"
 
 # -------------------------------------- open task with a missing editor
-# An `editor.toml` naming a program that is not on `PATH` refuses the open,
-# and the board shows the refusal, remedy and all, in a popup closed with
-# `enter` alone. Under `$HOME`, which fixture.sh points at a scratch folder.
-mkdir -p "$HOME/.spoolway"
-printf '[editor]\ncommand = "notepd.exe"\n' > "$HOME/.spoolway/editor.toml"
+# A `$VISUAL` naming a program that is not on `PATH` refuses the open, and
+# the board shows the refusal, remedy and all, in a popup closed with `enter`
+# alone. `$VISUAL` was exported before this board started.
 OPEN_MARK=$(wc -l < "$BOARD_LOG")
 pick_item "open task"
 draws_since_waited "a refused open shows a popup titled open task" \
   "╭─ open task ─" "$OPEN_MARK"
 draws_since "naming the program that is not on PATH" \
   "\`notepd.exe\` is not on PATH" "$OPEN_MARK"
-draws_since "and how to fix it" "~/.spoolway/editor.toml" "$OPEN_MARK"
+draws_since "and how to fix it" "set \$VISUAL" "$OPEN_MARK"
 # The key row is read only off the frame on screen with the popup up. The
 # options menu `pick_item` opened after OPEN_MARK draws `[enter] confirm
 # [esc] close` itself, so a check reaching back that far would pass for a
@@ -509,7 +511,7 @@ else bad "and the lane runs on under it"; fi
 press $'\r'
 stops_drawing "enter closes the popup" "╭─ open task ─"
 stage_stays "and the task is where it was" mid-turn implement
-rm "$HOME/.spoolway/editor.toml"
+unset VISUAL
 
 pick_item pause
 
