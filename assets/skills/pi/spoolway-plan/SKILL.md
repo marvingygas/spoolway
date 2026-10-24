@@ -65,8 +65,8 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
-| **Context** | The outcome this plan means to produce, in one sentence a person can approve or reject, then what is true today and the pressure on it, in two or three sentences — the page's lead, with nothing above it but the name, the tagline and the path. |
-| **Decisions** | One record per decision, each led by a figure, then one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
+| **Context** | One block of at most three sentences: the outcome this plan means to produce, in a sentence a person can approve or reject, then what is true today and the pressure on it. Below it, a list of every path the plan touches. It is the page's lead, with nothing above it but the name, the tagline and the path. |
+| **Decisions** | One record per decision: a heading, one paragraph of at most four sentences on why this is a choice and what to look at in the figure, one figure, then one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
 **The page ends at the Mockup.** The breakdown is not on it: a task is written into
 the pending directory at step 7, and the page argues the shape those tasks were cut from.
@@ -76,14 +76,14 @@ Same headings, order and words on every plan.
 "Ownership moves to the run, not the task" is. The markup mechanics of a record live in
 `assets/page.md`, not here.
 
-## Draw first, then write the caption
+## Draw first, then write the paragraph
 
 **The reader is an architect, not a compiler**, approving a shape rather than reviewing a
 patch, with no source in their head — argue in drawings and the artifacts a person opens, never
 in prose about functions and line edits.
 
-- **Every record has a figure, explained only after it**: forces, figure, what it doesn't show —
-  nothing after re-explains it in words. Show code freely as supporting material
+- **Every record has a figure, and one paragraph before it**: the paragraph says why this is a
+  choice and what to look at, and nothing after the figure re-explains it in words. Show code freely as supporting material
   under it, never first, never alone.
 - **A decision that changes how the system behaves today is drawn before and after**:
   today's artifact in the `was` panel, the proposed one under it. A new feature has no before,
@@ -91,7 +91,8 @@ in prose about functions and line edits.
 - **A figure is drawn from the vocabulary in `assets/page.md`**, which names every class and the
   three grounds — themed, lit, and `.raw` for a figure that is somebody else's product screen.
   A screen goes in `.raw` and paints its own colours; a diagram never does.
-- **Four sentences per record before the change line.**
+- **One paragraph per record, before the figure.** It says why this is a choice and what to look
+  at in the figure, in at most four sentences. The figure has no caption, and no paragraph follows it.
 - **Every record ends on one highlighted sentence stating the change that will now happen** —
   what is different once it lands, never a restatement of the choice.
 - **The mockup section carries headings and figures, nothing else** — a two-or-three-word `h3`
@@ -113,7 +114,7 @@ in prose about functions and line edits.
 
 **Write in plain English.** One thing per sentence, in the shortest words that carry it.
 No story, no build-up, no buzzwords, and no reaching verbs — "reads", "writes", "moves", never
-"orchestrates", "leverages", "unlocks". A caption a tired reader gets on one pass.
+"orchestrates", "leverages", "unlocks". A paragraph a tired reader gets on one pass.
 
 Catch the paragraph that defends a decision instead of stating it ("this matters because…") in
 your own draft, and draw the mechanism rather than narrating it. Verbosity's home is the
@@ -121,7 +122,7 @@ task written later, not this page: terse here, complete in the task.
 
 **Reference, never restate.** A paragraph explaining how the system works today is stale the
 day it changes; a path stays true. Name the file that already holds the ground needed, in the
-`refs` list on context and on each record.
+path list under Context. Every path the plan touches is listed there once, and no record has a list of its own.
 
 ## Procedure
 

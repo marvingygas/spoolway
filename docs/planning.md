@@ -104,9 +104,9 @@ The binary never reads it. It lives outside the checkout, in the `plans:` folder
 `<plans>/<YYYY-MM-DD>-<slug>.html`, where `<plans>` is that `plans:` line. In home mode the folder
 is the workspace's own `plans/`, shared by every clone of the workspace.
 
-Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
-the one sentence a person can approve or reject, then two or three sentences on what is true
-today. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
+Every page has three sections in this order: Context, Decisions and Mockup. Context is one block of
+at most three sentences. It opens on the outcome a person can approve or reject, then says what is
+true today. A list of every path the plan touches follows it. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
 
 The page rail shows the plan name. A small copy icon sits right after it. Clicking the icon
 copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds. Beside the `Switch theme` button, a `Reload`

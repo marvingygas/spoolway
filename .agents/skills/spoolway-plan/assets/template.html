@@ -239,10 +239,6 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
   letter-spacing: -0.01em; text-wrap: balance; margin: 0; max-width: var(--measure);
 }
 .dec > p { max-width: var(--measure); }
-.dec .forces {
-  color: var(--ink-soft); font-size: 0.94rem;
-  border-left: 2px solid var(--rule); padding-left: 0.9rem;
-}
 .dec .change {
   max-width: var(--measure); margin: 0; padding: 0.7rem 1rem;
   border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
@@ -339,10 +335,8 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
     <h2 id="context">Context</h2>
 
-    <p class="standfirst">[[The outcome this plan means to produce, in one sentence a person
-    can approve or reject.]]</p>
-
-    <p>[[What is true today, and the pressure on it, in two or three sentences.]]</p>
+    <p class="standfirst">[[The outcome this plan means to produce, in a sentence a person can
+    approve or reject; then what is true today and the pressure on it. At most three sentences.]]</p>
 
     <ul class="refs">
       <li><code>[[path]]</code> — [[what it already explains, so the page need not]]</li>
@@ -354,7 +348,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <!-- dec -->
     <section class="dec" id="d-[[decision-slug]]">
       <h3>[[The decision, stated as the decision — what is chosen, not what is discussed]]</h3>
-      <p class="forces">[[What pushes each way, in one or two sentences.]]</p>
+      <p>[[Why this is a choice, and what to look at in the figure, in at most four sentences.]]</p>
 
       <figure>
         <div class="frame">
@@ -362,15 +356,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
             [[the drawing]]
           </svg>
         </div>
-        <figcaption>[[What the reader should take from it.]]</figcaption>
       </figure>
-
-      <p>[[What the figure does not show: the name, the default, the thing that would
-      otherwise be got wrong.]]</p>
-
-      <ul class="refs">
-        <li><code>[[path]]</code> — [[what it already explains]]</li>
-      </ul>
 
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
@@ -379,7 +365,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <!-- dec -->
     <section class="dec" id="d-[[decision-slug]]">
       <h3>[[The decision]]</h3>
-      <p class="forces">[[What pushes each way.]]</p>
+      <p>[[Why this is a choice, and what to look at in the figure.]]</p>
 
       <figure>
         <div class="mocks">
@@ -392,8 +378,6 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 <pre>[[the same lines as they will be, with what arrives marked <span class="new">like this</span>]]</pre>
           </div>
         </div>
-        <figcaption>[[What to check in it: the names, the defaults, what a person still has
-        to type themselves.]]</figcaption>
       </figure>
 
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
