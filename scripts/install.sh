@@ -11,7 +11,8 @@
 # into the install directory. It needs only sh, uname, curl or wget, and
 # sha256sum or shasum. It never builds from source (a host with no file is
 # refused), never writes outside the install directory and one temporary
-# directory it removes on exit, and never edits a shell profile: when the directory is not on PATH it prints the line to add.
+# directory it removes on exit, and never edits a shell profile: when the
+# directory is not on PATH it prints the line to add.
 #
 # The release job replaces the version placeholder below with the release's own
 # version, so the files come from `releases/download/v<version>/` and never

@@ -343,6 +343,51 @@ fn a_trailing_slash_is_dropped_from_the_install_directory() {
     assert!(!stdout.contains("PATH"), "{stdout}");
 }
 
+/// An unset `HOME` does not matter when the install directory is given: the
+/// default is only built from `HOME` if it is needed.
+#[test]
+fn no_home_is_fine_when_the_install_directory_is_set() {
+    let rig = Rig::new("nohome-dir");
+    rig.fake_uname("Linux", "x86_64");
+    rig.release("spoolway-linux-x64", "0.16.0", None);
+    let out = rig
+        .command(&[])
+        .env_remove("HOME")
+        .env("SPOOLWAY_INSTALL_DIR", &rig.install_dir)
+        .output()
+        .unwrap();
+    let (_, stderr) = text(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(rig.installed().is_file());
+}
+
+/// A backslash in the install directory prints unchanged. This guards the
+/// `printf` calls against a return to `echo`, which expands `\n` on a host
+/// whose `/bin/sh` is dash and so only fails there.
+#[test]
+fn a_backslash_in_the_install_directory_prints_unchanged() {
+    let mut rig = Rig::new("backslash");
+    rig.install_dir = rig.root.join("a\\nb");
+    rig.fake_uname("Linux", "x86_64");
+    rig.release("spoolway-linux-x64", "0.16.0", None);
+    let out = rig.run(&[]);
+    let (stdout, stderr) = text(&out);
+    let dir = rig.install_dir.display();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stdout.contains(&format!("installed v0.16.0 -> {dir}/spoolway\n")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{dir} is not on your PATH.")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with(&format!("  export PATH=\"{dir}:$PATH\"\n")),
+        "{stdout}"
+    );
+}
+
 /// A directory where the file should go is refused, not filled.
 #[test]
 fn a_directory_at_the_target_is_refused_and_left_alone() {
