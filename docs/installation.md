@@ -428,9 +428,10 @@ Two things stop the binary update:
 | npm did not install this binary | `update` prints the install line and installs nothing. |
 | A dispatcher is running | The binary is left alone until the run ends. |
 
-On an npm install, the dispatcher header shows a newer published release in yellow, beside its
-own version. A binary that npm did not install shows only its own version. No other command and
-no popup announces a release. Turn the header's version off with
+On an npm install or a Homebrew install, the dispatcher header shows a newer published release
+in yellow, beside its own version. An npm install asks npm. A Homebrew install asks
+`brew info` and never runs `brew update`. Any other binary shows only its own version. No other
+command and no popup announces a release. Turn the header's version off with
 `housekeeping.update_check = false` in the config, or with `SPOOLWAY_SKIP_VERSION_CHECK=1` for
 one machine.
 

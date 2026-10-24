@@ -6621,13 +6621,13 @@ fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
 /// leaves the label off. `published` is [`published_newer`]'s answer, already
 /// filtered the same way and already gated on the check being wanted. Both are
 /// taken as arguments rather than read here so the wording is checked without
-/// a test standing up an executable on `PATH` or an npm cache.
+/// a test standing up an executable on `PATH` or a version cache.
 ///
-/// The restart nudge wins over the published version whatever npm says: a
-/// newer binary on `PATH` is one restart from running, and naming a release
-/// beside it would read as a second thing to do. The published version is
-/// named with no command beside it. Only an npm install ever sees one, since a
-/// binary npm did not install never looks for a release.
+/// The restart nudge wins over the published version whatever npm or brew
+/// says: a newer binary on `PATH` is one restart from running, and naming a
+/// release beside it would read as a second thing to do. The published version
+/// is named with no command beside it. Only an npm or Homebrew install ever
+/// sees one, since any other binary never looks for a release.
 fn version_label(installed: Option<&str>, published: Option<&str>) -> String {
     let running = format!("v{}", crate::release::current());
     if installed.is_some() {
