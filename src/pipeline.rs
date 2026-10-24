@@ -466,6 +466,10 @@ pub struct Step {
     /// design, and nobody staffing the run is a reason to wait longer for
     /// them, not a reason to let the pass through. See `unattended.enabled`.
     ///
+    /// Only an agent step can carry one: a command has no lane to tell the
+    /// person what it did, so `validate` refuses `gate:` on a `run:` step and
+    /// the check its result needs goes on the agent step after it.
+    ///
     /// The gate belongs to the step, whoever does its work: an unblocker's
     /// `--pass` from `blocked` is held here exactly the same way, at the gate
     /// of the step named by the task's own `blocked_from` rather than of
@@ -1241,6 +1245,14 @@ fn end_message(step_id: &str) -> String {
     format!("step `{step_id}` sets end: true, which is gone — use on_pass: done")
 }
 
+/// A `gate:` on a step that runs a command. Shared with `pipeline check`.
+pub(crate) fn command_gate_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` runs a command but declares `gate:` — only an agent step can be held \
+         for a person. Delete `gate:`, or put it on the agent step after `{step_id}`."
+    )
+}
+
 /// A `gate:` that names none of the three outcomes. Shared with
 /// `pipeline override --set`, which refuses it before writing a patch.
 pub(crate) fn unknown_gate_message(step_id: &str, raw: &str) -> String {
@@ -1600,16 +1612,12 @@ impl Pipeline {
                     if step.background && step.on_fail.is_some() {
                         bail!(background_on_fail_message(&step.id));
                     }
-                    // A background step passes the moment it starts, so a
-                    // gate there would hold the start, not the exit the docs
-                    // promise.
-                    if step.background && step.gate.is_some() {
-                        bail!(
-                            "step `{}` runs in the background but declares `gate` — its pass \
-                             comes when the command starts, so there is no exit to hold; delete \
-                             `gate:` or `background:`",
-                            step.id
-                        );
+                    // A command has no lane to tell the person what it did,
+                    // so a held exit would hand them an exit code and nothing
+                    // else. The check its result needs belongs on the agent
+                    // step after it.
+                    if step.gate.is_some() {
+                        bail!(command_gate_message(&step.id));
                     }
                 }
             }
@@ -1803,6 +1811,9 @@ impl Pipeline {
             if step.background && step.on_fail.is_some() {
                 problems.push(background_on_fail_message(&step.id));
             }
+            if step.kind() == StepKind::Command && step.gate.is_some() {
+                problems.push(command_gate_message(&step.id));
+            }
             if step.headless.is_some() {
                 problems.push(headless_message(&step.id));
             }
@@ -1811,8 +1822,7 @@ impl Pipeline {
     }
 
     /// Steps that gate but declare no `on_fail`, so a `spoolway report
-    /// --fail` at that step, or a command step's failing exit, has nowhere
-    /// named to go but `blocked`.
+    /// --fail` at that step has nowhere named to go but `blocked`.
     ///
     /// Not one of `validate`'s own refusals: a gated step with no `on_fail`
     /// is a legal shape — [`Step::destination`] already falls back to
@@ -1825,14 +1835,9 @@ impl Pipeline {
             .iter()
             .filter(|step| step.gate.is_some() && step.on_fail.is_none())
             .map(|step| {
-                // A command step reports nothing; its exit code is the outcome.
-                let failure = match step.kind() {
-                    StepKind::Command => "a failing exit",
-                    _ => "`spoolway report --fail`",
-                };
                 format!(
-                    "{}: `{}` gates but declares no `on_fail`, so {failure} there parks the \
-                     task on `{BLOCKED}`.",
+                    "{}: `{}` gates but declares no `on_fail`, so `spoolway report --fail` \
+                     there parks the task on `{BLOCKED}`.",
                     self.name, step.id
                 )
             })
@@ -4066,37 +4071,23 @@ mod tests {
         assert!(routed.is_ok(), "{routed:?}");
     }
 
-    /// `gate:` is not a lane's key: a command step's exit is its report, so
-    /// `gate: true` loads there and the dispatcher holds a passing exit. A
-    /// background step has no exit to wait for, so it still refuses it.
+    /// `gate:` holds an agent's report, so a step that runs a command is
+    /// refused it, background or not, and both ways out are named.
     #[test]
-    fn gate_loads_on_a_command_step_and_is_refused_on_a_background_one() {
-        let pipeline = parse(
-            "steps:\n  - id: a\n    run: make\n    gate: true\n    on_pass: z\n  \
-             - id: z\n    run: x\n    on_pass: done\n",
-        )
-        .expect("a gated command step loads");
-        assert!(pipeline.step("a").unwrap().gate.is_some());
-
-        // A background step passes when it starts, so there is no exit for
-        // the gate to hold.
-        let err = parse(
-            "steps:\n  - id: a\n    run: make\n    background: true\n    gate: true\n    \
-             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("step `a` runs in the background"), "{err}");
-        assert!(err.contains("delete `gate:` or `background:`"), "{err}");
-
-        // With no `on_fail`, the warning names what parks it: the exit, since
-        // a command step has no report to send.
-        let warnings = pipeline.gate_warnings();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains("a failing exit there parks"),
-            "{warnings:?}"
-        );
+    fn gate_is_refused_on_a_command_step_with_both_fixes_named() {
+        for background in ["", "    background: true\n"] {
+            let err = parse(&format!(
+                "steps:\n  - id: publish\n    run: make\n{background}    gate: true\n    \
+                 on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                err,
+                "step `publish` runs a command but declares `gate:` — only an agent step can be \
+                 held for a person. Delete `gate:`, or put it on the agent step after `publish`.",
+            );
+        }
     }
 
     /// A background run is a sidecar, so a route on its exit is refused, and

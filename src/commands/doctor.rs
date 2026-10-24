@@ -6683,6 +6683,36 @@ mod tests {
         );
     }
 
+    /// A queued task whose `gate_at:` names a command step is a failed row
+    /// naming the step, the same as one naming no step. Fails without
+    /// `command_gate_at` in `stale_gate_at`: no row is raised.
+    #[test]
+    fn a_gate_at_a_command_step_has_is_a_failed_row() {
+        let pipelines = Pipelines::builtin();
+        let tasks: Vec<Task> = [("stale", "handover"), ("fine", "blocked")]
+            .into_iter()
+            .map(|(id, gate)| {
+                Task::parse(
+                    std::path::PathBuf::from(format!("{id}.md")),
+                    &format!(
+                        "---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"
+                    ),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let findings = stale_gate_checks(&tasks, &pipelines);
+        assert_eq!(findings.len(), 1);
+        match &findings[0] {
+            Finding::Check(label, Err(why)) => {
+                assert_eq!(label, "gate of task `stale`");
+                assert!(format!("{why}").contains("runs a command"), "{why}");
+            }
+            _ => panic!("expected one failed check"),
+        }
+    }
+
     /// A queued task whose `gate_at:` names a step its pipeline lacks is a
     /// failed row, and so a warning before a run; a gate that names a step is
     /// not, and neither is a task already at `done`. Fails without

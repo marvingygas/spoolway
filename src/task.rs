@@ -223,11 +223,6 @@ pub struct Frontmatter {
     /// step's verdict, and a silent death recorded as a pass is worse than no
     /// record at all.
     ///
-    /// The dispatcher also writes it for a command step whose exit a gate
-    /// held, so `caught_at` can tell a held pass from a held fail on resume.
-    /// That is safe for the banking, which only reads a report whose step
-    /// matches the lane's own step, and a command step has no lane.
-    ///
     /// One slot is enough because of the order a pass runs in: finished lanes
     /// are finished and banked *before* any new lane is started, so the next step
     /// cannot report until this one has been read. Reversing those two would

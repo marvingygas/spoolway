@@ -1663,7 +1663,7 @@ pub fn missing_step_park_note(task: &Task, pipeline: &Pipeline, missing: &str) -
 /// pipeline edit left behind afterwards, and is what a trial arm is judged by.
 /// A task already at `done` is past every gate, and one still in the queue
 /// directory for its `done` hook is not reported.
-pub fn stale_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
+pub fn missing_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
     if task.stage() == crate::pipeline::DONE {
         return None;
     }
@@ -1671,6 +1671,43 @@ pub fn stale_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str>
         .gate_at
         .as_deref()
         .filter(|gate_at| pipeline.step(gate_at).is_none())
+}
+
+/// The `gate_at:` of `task` when it names a step of `pipeline` that runs a
+/// command.
+///
+/// Only an agent step can be held for a person: a command has no lane to say
+/// what it did, so the dispatcher never holds its exit and the checkpoint
+/// would be passed over without a word. `queue add` refuses such a name; this
+/// finds the one a pipeline edit made, or a hand edit of a queued task file,
+/// left behind. Past `done` it is not reported, as for [`missing_gate_at`].
+pub fn command_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
+    if task.stage() == crate::pipeline::DONE {
+        return None;
+    }
+    task.front.gate_at.as_deref().filter(|gate_at| {
+        pipeline
+            .step(gate_at)
+            .is_some_and(|step| step.kind() == crate::pipeline::StepKind::Command)
+    })
+}
+
+/// The `gate_at:` of `task` that no hold will ever honour: one naming no step
+/// of `pipeline` ([`missing_gate_at`]) or a step that runs a command
+/// ([`command_gate_at`]). What `pipeline check`, `doctor`, the board and the
+/// dispatcher report, in the words of [`stale_gate_note`].
+pub fn stale_gate_at<'a>(task: &'a Task, pipeline: &Pipeline) -> Option<&'a str> {
+    missing_gate_at(task, pipeline).or_else(|| command_gate_at(task, pipeline))
+}
+
+/// The wording shared by every refusal of a `gate_at:` naming a command step:
+/// the plan's panel, `queue add`'s refusal and [`stale_gate_note`] open the
+/// same way, so a person meets one sentence wherever it is caught.
+pub fn command_gate_at_reason(task_id: &str, gate_at: &str, pipeline: &str) -> String {
+    format!(
+        "task `{task_id}` has `gate_at: {gate_at}`, which runs a command in pipeline \
+         `{pipeline}` — only an agent step can be held for a person."
+    )
 }
 
 /// The note for a task whose `gate_at:` is [`stale_gate_at`]: the sentence
@@ -1684,6 +1721,13 @@ pub fn stale_gate_note(task: &Task, pipeline: &Pipeline, gate_at: &str) -> Strin
     } else {
         "live"
     };
+    if command_gate_at(task, pipeline) == Some(gate_at) {
+        let reason = command_gate_at_reason(&task.front.id, gate_at, &pipeline.name);
+        return format!(
+            "{kind} {reason} Its exit is not held.{PARK_NOTE_BREAK}Change `gate_at:` in the \
+             task to an agent step, or delete it."
+        );
+    }
     format!(
         "{kind} task `{}` has `gate_at: {gate_at}`, which pipeline `{pipeline}` does not \
          define.{PARK_NOTE_BREAK}Change `gate_at:` in the task to a step `{pipeline}` has.",
@@ -1724,8 +1768,7 @@ impl Gate {
 }
 
 /// Whether `step` holds this task for `outcome`/`destination` — the two
-/// roads [`report`] parks a report in front of a person for, and the
-/// dispatcher parks a command step's exit for, carrying
+/// roads [`report`] parks a report in front of a person for, carrying
 /// both clauses a hand copy of this once dropped: a step's own `gate:`
 /// only ever catches the outcome it names (`on_pass`, `on_fail` or `always`)
 /// and only one whose destination is not already `blocked`, where a task's
@@ -1985,28 +2028,6 @@ pub fn held_unblocker_pass(task: &Task, gated: &str) -> bool {
             .is_some_and(|report| matches!(report.outcome.parse::<Outcome>(), Ok(Outcome::Pass)))
 }
 
-/// Whether `gated`, a command step, holds a pass its own command never gave.
-///
-/// A command step's pause is filed by the dispatcher with `last_report` from
-/// that step, after its exit code chose the route. A pause filed from any
-/// other step is an unblocker's `--pass` from `blocked`, which an earlier
-/// release held at the origin's gate whatever kind of step the origin was.
-/// Nothing ran at the step after that pass, so letting it past down `on_pass`
-/// would send on a command that never exited 0; such a task is handed back to
-/// the step instead, to run again, which is where a pass from `blocked` takes
-/// it now.
-/// [`resume_road`] and the board's `(next)` row both ask this, so the road
-/// and the row name the same step.
-pub fn command_pass_handed_back(task: &Task, step: &crate::pipeline::Step, gated: &str) -> bool {
-    step.kind() == crate::pipeline::StepKind::Command
-        && task
-            .front
-            .last_report
-            .as_ref()
-            .is_some_and(|report| report.step != gated)
-        && caught_at(task, gated).is_some()
-}
-
 /// What a pause is holding, once it is known to be a catch at all — see
 /// [`caught_at`], which is what tells a catch apart from a pause raised from
 /// `blocked` itself.
@@ -2020,9 +2041,9 @@ pub enum Caught {
     /// at.
     Pass,
     /// A fail a step's own `gate: on_fail` or `always`, or a schedule, caught
-    /// before it could go round the loop the pipeline drew. Resuming takes the step's `on_fail`, the route the
-    /// failure chose, whether an agent reported it or a command's exit code
-    /// did; a person who wants it waved through names the `on_pass` step.
+    /// before it could go round the loop the pipeline drew. Resuming takes
+    /// the step's `on_fail`, the route the failure chose; a person who wants
+    /// it waved through names the `on_pass` step.
     Fail,
     /// A destination that was already `blocked` before the gate stepped in —
     /// a `--block`, a step's own `on_fail: blocked`, or a spent loop's own
@@ -2038,12 +2059,10 @@ pub enum Caught {
 /// road's own report was filed *from* `blocked`, not from `gated`, and never
 /// sets `paused_by` — see [`crate::task::Frontmatter::paused_by`], the key
 /// that now records the road outright and is what decides the Some/None
-/// answer once it is set. The dispatcher's own hold files `last_report` from
+/// answer once it is set. `report`'s own hold files `last_report` from
 /// `gated` in the same save. The exception is the hold on an unblocker's
 /// pass from `blocked` at a gated step: it sets `paused_by` with
-/// `last_report` from `blocked`. `route` still makes it for a gated agent
-/// step, and an earlier release made it for a command step too, which
-/// [`command_pass_handed_back`] tells apart. A task already sitting on
+/// `last_report` from `blocked`. A task already sitting on
 /// `paused` from before `paused_by` existed carries none, so the fallback
 /// this was built on outright — `last_report.step == gated`, filed only by a
 /// road that actually caught something — still answers for it.
@@ -2123,9 +2142,7 @@ pub enum ResumeRoad {
         /// What the pause caught — see [`caught_at`].
         caught: Option<Caught>,
         /// A pause raised from `blocked` itself rather than a catch at
-        /// `gated`, which resumes through [`cleared_block_target`], or a
-        /// gated command step held on an unblocker's pass, which
-        /// [`command_pass_handed_back`] sends straight back onto `gated`.
+        /// `gated`, which resumes through [`cleared_block_target`].
         cleared_block: bool,
         destination: String,
     },
@@ -2215,19 +2232,9 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
         // it here has to reach exactly there too, rather than the plain
         // `on_pass` below, which is what an ordinary gate means and is not what
         // a person clearing this one is answering.
-        //
-        // `handed_back` is the same answer for a task an earlier release held
-        // at a gated command step on an unblocker's pass: it carries a catch,
-        // but one `blocked` filed rather than the command, so it too goes
-        // back onto the step to run, not down the `on_pass` of a command that
-        // never exited 0. The block it clears is the same one, so it is
-        // reported as a cleared block.
-        let handed_back = command_pass_handed_back(task, step, &gated);
-        let cleared_block = handed_back
-            || (caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str()));
-        let destination = if handed_back {
-            gated.clone()
-        } else if cleared_block {
+        let cleared_block =
+            caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str());
+        let destination = if cleared_block {
             cleared_block_target(task, pipeline, false)
         } else if held_unblocker_pass(task, &gated) {
             // `gate_at: blocked` held the unblocker's own pass. `blocked` has
@@ -6105,42 +6112,6 @@ mod tests {
         );
     }
 
-    /// A `run:` step has no agent work for an unblocker to stand in for, so a
-    /// `--pass` from `blocked` hands it straight back to itself, gated or not.
-    /// A gated command that failed and blocked is therefore run again, not
-    /// held on `paused` as though it had exited 0, and a later `spoolway
-    /// resume` has no `on_pass` of it to take.
-    #[test]
-    fn a_pass_from_blocked_runs_a_gated_command_step_again() {
-        let (repo, _root_guard) = unattended_fixture("blocked-pass-gated-command");
-        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
-        git(&["config", "user.email", "t@example.com"]);
-        git(&["config", "user.name", "t"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
-        add(&repo, "tab-shell", &[]);
-        let pipelines = gated_deploy_pipelines();
-
-        let mut task = queued(&repo, "tab-shell");
-        task.bank_launch(crate::pipeline::QUEUED, "deploy");
-        task.set_stage(crate::pipeline::BLOCKED, None);
-        task.front.blocked_from = Some("deploy".into());
-        task.save().unwrap();
-
-        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Pass);
-
-        let task = queued(&repo, "tab-shell");
-        assert_eq!(
-            task.stage(),
-            "deploy",
-            "the command never exited 0, so the unblocker's pass hands it back to itself"
-        );
-        assert_eq!(
-            task.front.paused_by, None,
-            "no gate holds a pass nobody gave"
-        );
-        assert_eq!(task.front.paused_at, None);
-    }
-
     /// A task whose own `gate_at` names `blocked` is held after its unblocker
     /// passes, and resuming it carries it where that pass would have gone
     /// unheld: the `on_pass` of the step it stopped at, not back onto
@@ -6337,74 +6308,6 @@ mod tests {
         assert_eq!(
             resume_road(&task, &pipelines).unwrap().destination(),
             crate::pipeline::BLOCKED,
-        );
-    }
-
-    /// A pipeline whose `deploy` is a gated `run:` step that goes on to `done`
-    /// on a pass, with `blocked` staffed.
-    fn gated_deploy_pipelines() -> Pipelines {
-        let yaml = "steps:\n  \
-                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n  \
-                     - id: blocked\n    agent: pi\n    session: true\n";
-        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
-        let mut pipelines = Pipelines::builtin();
-        pipelines.pipelines.insert("default".into(), pipeline);
-        pipelines
-    }
-
-    /// A task paused at `deploy`'s gate with `last_report` filed from
-    /// `reported_from`: the dispatcher's own hold files it from `deploy`, and
-    /// a release that held an unblocker's pass filed it from `blocked`.
-    fn held_at_deploy(repo: &Repo, reported_from: &str) -> Task {
-        add(repo, "tab-shell", &[]);
-        let mut task = queued(repo, "tab-shell");
-        task.set_stage(crate::pipeline::PAUSED, None);
-        task.front.paused_at = Some("deploy".into());
-        task.front.paused_by = Some(Gate::Step.as_str().to_string());
-        task.front.last_report = Some(crate::task::LastReport {
-            step: reported_from.into(),
-            ..crate::task::LastReport::neutral()
-        });
-        task.save().unwrap();
-        task
-    }
-
-    /// A task an earlier release left held at a gated command step, from an
-    /// unblocker's pass, is resumed back onto the step rather than down its
-    /// `on_pass`: the command never exited 0. `resume_road`, which `queue
-    /// route` and the board's `(next)` row read, names the step too. Fails
-    /// without the `command_pass_handed_back` branch of `resume_road`, which
-    /// sends it to `done`.
-    #[test]
-    fn a_gated_command_pass_an_unblocker_gave_is_resumed_onto_the_step() {
-        let (repo, _root_guard) = unattended_fixture("held-unblocker-command-pass");
-        let pipelines = gated_deploy_pipelines();
-        let task = held_at_deploy(&repo, crate::pipeline::BLOCKED);
-
-        assert_eq!(
-            resume_road(&task, &pipelines).unwrap().destination(),
-            "deploy"
-        );
-
-        resume(&repo, &pipelines, &resume_args("tab-shell", None), None).unwrap();
-        let task = queued(&repo, "tab-shell");
-        assert_eq!(task.stage(), "deploy");
-        assert_eq!(task.front.paused_at, None);
-        assert_eq!(task.front.paused_by, None);
-    }
-
-    /// The dispatcher parking a gated command after its own exit 0 files the
-    /// report from the command step itself, and that pass still takes
-    /// `on_pass` on resume.
-    #[test]
-    fn a_gated_command_pass_the_command_gave_still_takes_on_pass() {
-        let (repo, _root_guard) = unattended_fixture("held-command-own-pass");
-        let pipelines = gated_deploy_pipelines();
-        let task = held_at_deploy(&repo, "deploy");
-
-        assert_eq!(
-            resume_road(&task, &pipelines).unwrap().destination(),
-            "done"
         );
     }
 

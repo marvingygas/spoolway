@@ -2886,6 +2886,44 @@ mod tests {
         assert!(live_task_problems(&[finished], &pipelines, false).is_empty());
     }
 
+    /// A queued task whose `gate_at:` names a command step is named by the
+    /// check with the step's kind and the fix, and `blocked` is not. Fails
+    /// without `command_gate_at` in `stale_gate_at`: nothing is listed.
+    #[test]
+    fn live_task_problems_name_a_gate_at_a_command_step_has() {
+        let (repo, _root_guard) = repo_for("live-task-command-gate");
+        let pipelines = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+        let task = |id: &str, gate: &str| {
+            crate::task::Task::parse(
+                std::path::PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"),
+            )
+            .unwrap()
+        };
+        let mut pipelines = pipelines;
+        let yaml = "steps:\n  \
+                     - id: publish\n    run: make\n    on_pass: announce\n  \
+                     - id: announce\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let command = "publish";
+        let tasks = vec![task("stale", command), task("fine", "blocked")];
+
+        let problems = live_task_problems(&tasks, &pipelines, false);
+
+        assert_eq!(
+            problems,
+            [format!(
+                "queued task `stale` has `gate_at: {command}`, which runs a command in pipeline \
+                 `default` — only an agent step can be held for a person. Its exit is not \
+                 held.\n    Change `gate_at:` in the task to an agent step, or delete it."
+            )]
+        );
+    }
+
     // -----------------------------------------------------------------
     // `pipeline copy`, `prompt copy` and `pipeline promote`.
     // -----------------------------------------------------------------

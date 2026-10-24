@@ -1106,10 +1106,10 @@ fi
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
 rm -f .spoolway/pipelines/gate-hold.yml
 
-# The same pass off a gated *command* step is not held. A command has no work
-# for the unblocker to stand in for, so the pass hands it back to itself and
-# `deploy` runs again; holding it would let `resume` read the pause as a caught
-# pass and send a command that never exited 0 down its `on_pass`.
+# A command step cannot be gated: it has no lane to tell the person what it
+# did, so a pipeline that declares `gate:` on a `run:` step is refused with
+# both ways out named. The file is removed straight after, so no later check
+# in this suite reads a pipeline that fails to load.
 cat > .spoolway/pipelines/gate-command.yml <<'YML'
 steps:
   - id: deploy
@@ -1123,35 +1123,11 @@ steps:
     model: fake-local
     on_pass: done
 YML
-
-CMD_TASK="tab-deploy"
-{
-  echo "---"
-  echo "id: $CMD_TASK"
-  echo "title: a gated command failed, blocked by hand"
-  echo "stage: blocked"
-  echo "blocked_from: deploy"
-  echo "pipeline: gate-command"
-  echo "group: live"
-  echo
-  echo "---"
-  cat "$BODY"
-} > "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
-
-CMD_OUT=$("$SPOOLWAY" report "$CMD_TASK" --pass -m "fixed the deploy" 2>&1)
-CMD_STATUS=$?
-if [ "$CMD_STATUS" -eq 0 ] && [ "$(stage_of "$CMD_TASK")" = deploy ]; then
-  ok "an unblocker's pass off a gated command step hands it back to run again"
-else
-  bad "an unblocker's pass off a gated command step hands it back to run again \
-(exit $CMD_STATUS, at \`$(stage_of "$CMD_TASK")\`)"
-  sed 's/^/        /' <<<"$CMD_OUT"
-fi
-lacks "and no gate pause is left that resume could read as a caught pass" \
-  "paused_by:" "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
-
-rm -f "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
+refuses "a gate on a command step is refused, with both fixes named" \
+  "Delete \`gate:\`, or put it on the agent step after \`deploy\`" \
+  "$SPOOLWAY" pipeline check
 rm -f .spoolway/pipelines/gate-command.yml
+works "and the project loads again once it is gone" "$SPOOLWAY" pipeline check
 
 # ------------------------------------------------------------- the queue screen
 # The one thing no unit test can reach: bare `spoolway`'s queue tab reading

@@ -1678,15 +1678,25 @@ fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<(
     );
 }
 
-/// Refuse a task whose `gate_at:` names no step of its pipeline.
+/// Refuse a task whose `gate_at:` names no step of its pipeline, or a step
+/// that runs a command.
 ///
 /// `gate_at:` pauses a task when it reports from the step it names. A name
 /// that is no step of this pipeline — a typo, or `done`, which is not a step —
 /// is never matched, so the checkpoint is dropped and the task runs straight
-/// through. Refused where the task can still be corrected, rather than left to
-/// fail silently at run time. `queue add` uses this; a trial's arms use
-/// [`unmatched_gate_at`] and word the refusal for the picker instead.
+/// through. A command step is never held either: it has no lane to say what it
+/// did, so only an agent step can be held for a person. Refused where the task
+/// can still be corrected, rather than left to fail silently at run time.
+/// `queue add` uses this; a trial's arms use [`unmatched_gate_at`] and
+/// [`crate::commands::command_gate_at`] and word the refusal for the picker
+/// instead.
 fn check_gate_at(task: &Task, pipeline: &crate::pipeline::Pipeline) -> Result<()> {
+    if let Some(gate_at) = crate::commands::command_gate_at(task, pipeline) {
+        bail!(
+            "{} Change `gate_at:` to an agent step, or delete it.",
+            crate::commands::command_gate_at_reason(&task.front.id, gate_at, &pipeline.name)
+        );
+    }
     if let Some(gate_at) = unmatched_gate_at(task, pipeline) {
         bail!(
             "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
@@ -1802,7 +1812,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
 /// The `gate_at:` of `task` when `pipeline` has no step of that name, which
 /// is what [`check_gate_at`] and a trial arm both refuse.
 fn unmatched_gate_at<'a>(task: &'a Task, pipeline: &crate::pipeline::Pipeline) -> Option<&'a str> {
-    crate::commands::stale_gate_at(task, pipeline)
+    crate::commands::missing_gate_at(task, pipeline)
 }
 
 /// Whether `task` has opted out of `open` entirely: it sets `tracking: off`
@@ -7647,8 +7657,9 @@ fn doc_pipeline_name(doc: &str) -> Option<String> {
 }
 
 /// The steps the gate picker offers `task`, read from `doc`, its text:
-/// every step of `pipeline` that the task will run once it is queued.
+/// every agent step of `pipeline` that the task will run once it is queued.
 ///
+/// A command step is left out: only an agent step can be held for a person.
 /// A `gate_at` on a step the task walks past never holds, since the task is
 /// never written onto that step, so offering one would let a person set a
 /// gate that silently does nothing. Each step is judged by
@@ -7667,6 +7678,7 @@ fn gate_steps<'a>(
     pipeline
         .steps
         .iter()
+        .filter(|step| step.kind() == crate::pipeline::StepKind::Agent)
         .filter(|step| {
             parsed
                 .as_ref()
@@ -10327,6 +10339,15 @@ fn build_trial_arm(
     // names the source task, not the arm: the arm's minted id exists nowhere
     // yet. Its remedy is the trial's own — the same `gate_at:` has to suit
     // every ticked pipeline, so editing it to fit this one would break another.
+    if let Some(gate_at) = crate::commands::command_gate_at(&arm, pipeline) {
+        bail!(
+            "{name} has `gate_at: {gate_at}`, which runs a command in pipeline `{}` — only an \
+             agent step can be held for a person. Untick `{}` in the trial, or change or drop \
+             `gate_at:` in {name} so it names an agent step every ticked pipeline has.",
+            pipeline.name,
+            pipeline.name
+        );
+    }
     if let Some(gate_at) = unmatched_gate_at(&arm, pipeline) {
         bail!(
             "{name} has `gate_at: {gate_at}`, which is no step of pipeline `{}`. \
@@ -14414,6 +14435,39 @@ mod tests {
         .expect("a real step is accepted");
     }
 
+    /// A `gate_at:` naming a step that runs a command is refused with the
+    /// task, the step, its pipeline and the two ways out, while `blocked` —
+    /// the unblocker, an agent step — is still accepted. Fails without
+    /// `command_gate_at` in `check_gate_at`: the command step is accepted.
+    #[test]
+    fn validate_batch_refuses_a_gate_at_that_names_a_command_step() {
+        let (repo, _root_guard) = fixture("gate-at-command-step");
+        let text = task_text("demo", "group: demo\ngate_at: handover\n", BODY);
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("mine.md".into(), text)],
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "task `demo` has `gate_at: handover`, which runs a command in pipeline `default` — \
+             only an agent step can be held for a person. Change `gate_at:` to an agent step, \
+             or delete it."
+        );
+
+        let text = task_text("demo", "group: demo\ngate_at: blocked\n", BODY);
+        validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("mine.md".into(), text)],
+        )
+        .expect("`blocked` is an agent step");
+    }
+
     /// A `gate_at:` naming a step the task walks past never fires, so it is
     /// refused naming the task, the step and why — here a `last:` step with a
     /// dependent in the same batch — and the steps that do run. The same
@@ -14423,8 +14477,8 @@ mod tests {
     fn validate_batch_refuses_a_gate_at_on_a_step_the_task_walks_past() {
         let (repo, _root_guard) = fixture("gate-at-walked-past");
         let yaml = "steps:\n  \
-             - id: build\n    run: true\n    on_pass: suite\n  \
-             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+             - id: build\n    agent: pi\n    on_pass: suite\n  \
+             - id: suite\n    agent: pi\n    last: true\n    on_pass: done\n";
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
             "default".into(),
@@ -14490,8 +14544,8 @@ mod tests {
     fn validate_batch_refuses_a_dependent_that_strands_a_queued_gate_at() {
         let (repo, _root_guard) = fixture("gate-at-queued-stranded");
         let yaml = "steps:\n  \
-             - id: build\n    run: true\n    on_pass: suite\n  \
-             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+             - id: build\n    agent: pi\n    on_pass: suite\n  \
+             - id: suite\n    agent: pi\n    last: true\n    on_pass: done\n";
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
             "default".into(),
@@ -14525,7 +14579,7 @@ mod tests {
 
     /// A queued gate is refused only when the batch is what strands it. A
     /// queued task on its gate step is left alone once that step has started,
-    /// by a command run or a lane, since a step already working is not walked
+    /// by its lane, since a step already working is not walked
     /// past and its report fires the gate. One only sitting on the step, with
     /// nothing started, is still walked past, so it is refused. A gate an open
     /// task above it already stranded is left alone too: that is not this
@@ -14533,8 +14587,8 @@ mod tests {
     #[test]
     fn validate_batch_leaves_a_queued_gate_at_the_batch_did_not_strand() {
         let yaml = "steps:\n  \
-             - id: build\n    run: true\n    on_pass: suite\n  \
-             - id: suite\n    run: true\n    last: true\n    on_pass: done\n";
+             - id: build\n    agent: pi\n    on_pass: suite\n  \
+             - id: suite\n    agent: pi\n    last: true\n    on_pass: done\n";
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
             "default".into(),
@@ -14574,16 +14628,8 @@ mod tests {
         let err = add_top(&repo, "low").unwrap_err().to_string();
         assert!(err.contains("task `low`, already queued"), "{err}");
 
-        // On the gate step with its command run started: the gate fires on
-        // that run's report.
-        let (repo, _root_guard) = fixture("gate-at-queued-running");
-        let low = low_on_suite(&repo);
-        std::fs::create_dir_all(repo.commands_dir()).unwrap();
-        let key = crate::command_step::Runs::key("suite", low.id());
-        std::fs::write(repo.commands_dir().join(format!("{key}.pid")), "1").unwrap();
-        add_top(&repo, "low").expect("`low`'s `suite` run has started, so its gate still fires");
-
-        // On the gate step with a lane started for it: the same.
+        // On the gate step with its lane started: the gate fires on that
+        // lane's report.
         let (repo, _root_guard) = fixture("gate-at-queued-lane");
         let low = low_on_suite(&repo);
         let lane = crate::mux::lane_name("suite", &low);
@@ -28359,7 +28405,7 @@ body\n";
         let yaml = format!(
             "steps:\n  \
              - id: build\n    agent: pi\n    gate: true\n    on_pass: check\n    on_fail: check\n  \
-             - id: check\n    run: 'true'\n    {extra}\n    on_pass: announce\n  \
+             - id: check\n    agent: pi\n    {extra}\n    on_pass: announce\n  \
              - id: announce\n    agent: pi\n    on_pass: done\n  \
              - id: blocked\n    agent: pi\n    session: true\n"
         );
@@ -28638,6 +28684,22 @@ body\n";
             .unwrap()
             .join("\n");
         assert!(panel.contains("  check"), "{panel}");
+    }
+
+    /// The picker offers an agent step only: a command step cannot be held, so
+    /// `gate_at:` could never be set on one from here.
+    #[test]
+    fn gate_picker_leaves_out_a_command_step() {
+        let (repo, _root_guard) = fixture("gate-picker-command");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let state = on_pending_task(&groups, "wire");
+        let panel = gate_panel(&groups, &pipelines, &state, (0, 0))
+            .unwrap()
+            .join("\n");
+        assert!(panel.contains("implement"), "{panel}");
+        assert!(!panel.contains("handover"), "{panel}");
     }
 
     /// The same pending task, with nothing in place that hides `check`:

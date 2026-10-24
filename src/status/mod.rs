@@ -1141,12 +1141,13 @@ impl Board {
             // The second answer, `pause when <step> finishes`: leave every
             // named abort running and write `gate_at` onto its task instead
             // — whatever that step reports, whenever it reports it, is what
-            // parks it now. An agent step's report parks it through
-            // `commands::report`, and a command step's exit through the
-            // dispatcher's command arm; neither is limited to the pass a
-            // pipeline's own `gate: true` catches. On a row that already
-            // carried a schedule for its step when the panel opened, the same
-            // answer reads `cancel the scheduled pause` and clears it instead.
+            // parks it now. The agent step's report parks it through
+            // `commands::report`, and is not limited to the pass a pipeline's
+            // own `gate:` catches. A command step is never offered this
+            // answer, so only an agent step's name lands here. On a row that
+            // already carried a schedule for its step when the panel opened,
+            // the same answer reads `cancel the scheduled pause` and clears
+            // it instead.
             //
             // It does what its label said, not the opposite of what `gate_at`
             // reads now: the step can report while the panel is open, and
@@ -1792,7 +1793,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
         ),
         (
             "pause, command step",
-            pause_confirm_panel("login", &abort(AbortKind::Command), true, 0),
+            pause_confirm_panel("login", &abort(AbortKind::Command), false, 0),
         ),
         ("restart", restart_confirm_panel(&restart)),
         (
@@ -2084,13 +2085,6 @@ fn picker_header(
         );
     }
     if task.front.paused_at.is_some() {
-        // A gated command step held on an unblocker's pass reads as a caught
-        // pass to `caught_at`, but the command never exited 0 — the (next)
-        // row hands it back to the step, so the header says its block was
-        // cleared.
-        let handed_back = pipeline
-            .step(step)
-            .is_some_and(|s| crate::commands::command_pass_handed_back(task, s, step));
         // `gate_at: blocked` holds an unblocker's pass with `paused_at` on
         // `blocked` and `blocked_from` still naming the step the task stopped
         // at. `caught_at` reads that step as a caught block, but the
@@ -2101,7 +2095,7 @@ fn picker_header(
             .as_deref()
             .is_some_and(|gated| crate::commands::held_unblocker_pass(task, gated));
         let caught = match crate::commands::caught_at(task, step) {
-            _ if handed_back || held_unblocker => " — its block was cleared",
+            _ if held_unblocker => " — its block was cleared",
             Some(crate::commands::Caught::Pass) => " — it passed",
             Some(crate::commands::Caught::Fail) => " — it failed",
             Some(crate::commands::Caught::Blocked) => " — it blocked",
@@ -4425,8 +4419,7 @@ fn closed_dependency_note(repo: &Repo, task: &crate::task::Task) -> Option<Strin
 /// A `gate_at` naming this step is the pause panel's schedule, still live: the
 /// step it names is where it is headed regardless of what the pipeline's own
 /// `on_pass` would otherwise carry it to, since the task is about to be
-/// parked there the moment this step finishes — `commands::report` for an
-/// agent step's report, the dispatcher for a command step's exit — whatever
+/// parked there the moment this step reports — `commands::report` — whatever
 /// the outcome, not only a pass.
 ///
 /// Every step named here is the one the move lands on, past any step the
@@ -4438,7 +4431,12 @@ fn onward(
     step_id: &str,
     dependents: usize,
 ) -> String {
-    if task.front.gate_at.as_deref() == Some(step_id) {
+    // A `gate_at` naming a command step is not honoured (the row's own line
+    // reports it as stale), so no pause is promised for one.
+    let holds = pipeline
+        .step(step_id)
+        .is_some_and(|step| step.kind() == crate::pipeline::StepKind::Agent);
+    if holds && task.front.gate_at.as_deref() == Some(step_id) {
         format!("→ paused after {step_id}")
     } else if step_id == crate::pipeline::BLOCKED {
         // `blocked` names no `on_pass` of its own, and its resumability is a
@@ -4597,9 +4595,6 @@ fn paused_next(
         let step = pipeline.step(gated)?;
         let caught = crate::commands::caught_at(task, gated);
         let target = match caught {
-            // A pass an unblocker gave in place of a command that never exited 0:
-            // handed back to the step itself — see `resume_road`.
-            _ if crate::commands::command_pass_handed_back(task, step, gated) => gated.to_string(),
             None if task.front.blocked_from.as_deref() == Some(gated) => {
                 crate::commands::cleared_block_target(task, pipeline, false)
             }
@@ -12918,7 +12913,10 @@ mod tests {
         );
         assert!(frame.contains("Resuming restarts the command."), "{frame}");
         assert!(frame.contains("> pause now"), "{frame}");
-        assert!(frame.contains("  pause when handover finishes"), "{frame}");
+        assert!(
+            !frame.contains("pause when"),
+            "a command step is never offered a scheduled pause: {frame}"
+        );
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
 
         board
@@ -12933,6 +12931,35 @@ mod tests {
         assert_eq!(repo.task("other").unwrap().stage(), "implement");
 
         runs.stop(&key);
+    }
+
+    /// Only an agent step is offered `pause when <step> finishes`, or its
+    /// `cancel the scheduled pause` form; a command step's exit is never held,
+    /// so it has `pause now` alone. Fails without the kind check in
+    /// `pause_answers`: a command gets both.
+    #[test]
+    fn only_an_agent_step_is_offered_a_scheduled_pause() {
+        let abort = |kind| Abort {
+            task: "login".into(),
+            lane: String::new(),
+            step: "implement".into(),
+            kind,
+            elapsed: None,
+        };
+        assert_eq!(
+            pause_answers(&abort(AbortKind::Agent), false),
+            ["pause now", "pause when implement finishes"]
+        );
+        assert_eq!(
+            pause_answers(&abort(AbortKind::Agent), true),
+            ["pause now", "cancel the scheduled pause"]
+        );
+        for scheduled in [false, true] {
+            assert_eq!(
+                pause_answers(&abort(AbortKind::Command), scheduled),
+                ["pause now"]
+            );
+        }
     }
 
     /// The stop popup's `interrupt them now` interrupts a live agent lane
@@ -14571,33 +14598,6 @@ mod tests {
         assert_eq!(paused_next(&task, agent, 0).as_deref(), Some("rebase"));
     }
 
-    /// A gated command step held for a pass its command never gave — an
-    /// unblocker's, filed from `blocked` — is shown going back onto the step,
-    /// the way `resume_road` sends it. The command's own held pass, filed from
-    /// the step, still shows `on_pass`.
-    #[test]
-    fn the_next_column_names_a_gated_command_step_an_unblocker_passed() {
-        let (repo, _root_guard) = fixture("next-unblocker-command-pass");
-        let yaml = "steps:\n  \
-                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n";
-        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
-        add(&repo, "login", &[], Some("deploy"));
-        let mut task = repo.task("login").unwrap();
-        task.front.paused_at = Some("deploy".into());
-        task.front.paused_by = Some("gate".into());
-        task.front.last_report = Some(crate::task::LastReport {
-            step: "blocked".into(),
-            at: 1,
-            outcome: "pass".into(),
-            ..crate::task::LastReport::neutral()
-        });
-
-        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("deploy"));
-
-        task.front.last_report.as_mut().unwrap().step = "deploy".into();
-        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("done"));
-    }
-
     /// A `gate_at: blocked` hold on an unblocker's pass shows the step the
     /// pass would have reached unheld, not `blocked` again, which has no
     /// `on_pass` for the row to read.
@@ -14659,38 +14659,6 @@ mod tests {
         assert_eq!(
             picker_header(&task, &pipeline, Some("implement")),
             format!("{} at implement — it blocked", task.stage())
-        );
-    }
-
-    /// The picker's header for the same task says the block was cleared, not
-    /// that the command passed: it never exited 0. The command's own held
-    /// pass, filed from the step, still reads as a pass.
-    #[test]
-    fn the_picker_header_does_not_say_an_unblockers_pass_was_the_commands() {
-        let (repo, _root_guard) = fixture("picker-unblocker-command-pass");
-        let yaml = "steps:\n  \
-                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n";
-        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
-        add(&repo, "login", &[], Some("deploy"));
-        let mut task = repo.task("login").unwrap();
-        task.front.paused_at = Some("deploy".into());
-        task.front.paused_by = Some("gate".into());
-        task.front.last_report = Some(crate::task::LastReport {
-            step: "blocked".into(),
-            at: 1,
-            outcome: "pass".into(),
-            ..crate::task::LastReport::neutral()
-        });
-
-        assert_eq!(
-            picker_header(&task, &pipeline, Some("deploy")),
-            format!("{} at deploy — its block was cleared", task.stage())
-        );
-
-        task.front.last_report.as_mut().unwrap().step = "deploy".into();
-        assert_eq!(
-            picker_header(&task, &pipeline, Some("deploy")),
-            format!("{} at deploy — it passed", task.stage())
         );
     }
 

@@ -300,11 +300,12 @@ struct ContractOutput {
 }
 
 /// One pipeline's own slice of the contract: its longest agent step, the
-/// steps a `gate_at` may name, which of them are `last-of-chain` and
+/// agent steps a `gate_at` may name, which of them are `last-of-chain` and
 /// `first-of-chain`, this pipeline's own `description:`, and the body a task
 /// on it is written from.
 ///
-/// The `gate_at` list is every step of the pipeline, not what any one task may
+/// The `gate_at` list is every agent step of the pipeline (a command step
+/// cannot be held for a person), not what any one task may
 /// name: `queue add` refuses a step the task walks past, so a task with another
 /// task above it in its group whose pipeline has a `last-of-chain` step may not
 /// name its own, and a task that depends on another may not name its
@@ -434,7 +435,12 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> 
                 name.clone(),
                 PipelineContract {
                     longest_agent_step: longest.to_string(),
-                    gate_at: pipeline.steps.iter().map(|s| s.id.clone()).collect(),
+                    gate_at: pipeline
+                        .steps
+                        .iter()
+                        .filter(|s| s.kind() == crate::pipeline::StepKind::Agent)
+                        .map(|s| s.id.clone())
+                        .collect(),
                     last_of_chain,
                     first_of_chain,
                     description: pipeline.description.clone(),
@@ -1016,6 +1022,26 @@ mod tests {
                 "`title` should name the `{kind}` commit type: {title}"
             );
         }
+    }
+
+    /// `gate_at` lists agent steps only: a command step cannot be held for a
+    /// person, so the contract does not offer one. Fails without the filter:
+    /// the default pipeline's `handover` command is listed.
+    #[test]
+    fn pipeline_contract_lists_only_agent_steps_for_gate_at() {
+        let pipelines = Pipelines::builtin();
+        let (repo, _root_guard) = fixture("contract-gate-at-agents");
+        let contract = build_contract(&repo, &pipelines, &repo.root);
+
+        let gate_at = &contract.pipelines["default"].gate_at;
+        assert!(
+            gate_at.iter().any(|step| step == "implement"),
+            "{gate_at:?}"
+        );
+        assert!(
+            !gate_at.iter().any(|step| step == "handover"),
+            "{gate_at:?}"
+        );
     }
 
     /// Every pipeline carries its own `description:` and `last_of_chain` —
