@@ -552,14 +552,18 @@ const BREW_STOP_MARGIN: Duration = Duration::from_secs(5);
 /// Start `command` as the leader of a process group of its own, so [`stop`] can
 /// reach what it starts. `brew update` fetches each tap in a background
 /// subshell, and those outlive a kill of brew alone.
-#[cfg(unix)]
-fn own_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
+///
+/// A group of its own is also outside the terminal's foreground group, so a
+/// Ctrl-C no longer reaches it. [`status_within`] passes one on through
+/// [`Interrupts`].
+fn start_in_own_group(command: &mut Command) -> Option<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().ok()
 }
-
-#[cfg(not(unix))]
-fn own_group(_command: &mut Command) {}
 
 /// Stop `child` and everything in its process group: `SIGTERM`, a wait of up to
 /// [`STOP_GRACE`] for the whole group to go, then `SIGKILL`. The child is reaped
@@ -593,14 +597,117 @@ fn stop(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// The signals that end `spoolway` from the terminal: Ctrl-C, a plain `kill`,
+/// and the terminal closing.
+#[cfg(unix)]
+const ENDING_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+/// The last of [`ENDING_SIGNALS`] caught while an [`Interrupts`] was held, or 0.
+#[cfg(unix)]
+static CAUGHT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_ending(signal: libc::c_int) {
+    CAUGHT.store(signal, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Catches [`ENDING_SIGNALS`] for as long as it is held, so [`status_within`]
+/// can stop its child's group before this process goes. Without it, a Ctrl-C
+/// ends `spoolway` and leaves `brew update` and its tap fetches running in
+/// their own group, holding brew's update lock.
+///
+/// [`Interrupts::end`] puts back what was there before and raises the signal
+/// again, so the process ends as the signal would have ended it. Dropping it
+/// unraised only puts back what was there.
+struct Interrupts {
+    #[cfg(unix)]
+    previous: [libc::sigaction; 3],
+}
+
+impl Interrupts {
+    #[cfg(unix)]
+    fn catch() -> Interrupts {
+        CAUGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: `action` and `previous` are plain-old-data structs this
+        // function owns; `sigemptyset` and `sigaction` only read and write
+        // them. The handler only stores to an atomic, which is
+        // async-signal-safe.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = record_ending as *const () as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = libc::SA_RESTART;
+            let mut previous: [libc::sigaction; 3] = std::mem::zeroed();
+            for (signal, previous) in ENDING_SIGNALS.iter().zip(previous.iter_mut()) {
+                libc::sigaction(*signal, &action, previous);
+            }
+            Interrupts { previous }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn catch() -> Interrupts {
+        Interrupts {}
+    }
+
+    /// The signal caught since [`Interrupts::catch`], if any.
+    fn caught(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            match CAUGHT.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => None,
+                signal => Some(signal),
+            }
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Put back what was there before and raise `signal` again.
+    fn end(self, signal: i32) {
+        drop(self);
+        #[cfg(unix)]
+        // SAFETY: `raise` has no memory-safety preconditions.
+        unsafe {
+            libc::raise(signal);
+        }
+        #[cfg(not(unix))]
+        let _ = signal;
+    }
+}
+
+impl Drop for Interrupts {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (signal, previous) in ENDING_SIGNALS.iter().zip(self.previous.iter()) {
+            // SAFETY: restoring exactly what `catch` read off `sigaction`,
+            // on the same signal, unmodified.
+            unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+        }
+    }
+}
+
 /// Run `command` and wait for it for at most `deadline`. Past that the child
 /// and everything it started are stopped, and the answer is `None`, the same as
 /// for a command that could not be started.
+///
+/// A Ctrl-C, `kill` or hang-up meanwhile stops the child's group the same way,
+/// and then ends this process as that signal would have.
 fn status_within(command: &mut Command, deadline: Duration) -> Option<std::process::ExitStatus> {
-    own_group(command);
-    let mut child = command.spawn().ok()?;
+    let interrupts = Interrupts::catch();
+    let Some(mut child) = start_in_own_group(command) else {
+        if let Some(signal) = interrupts.caught() {
+            interrupts.end(signal);
+        }
+        return None;
+    };
     let end = std::time::Instant::now() + deadline;
     loop {
+        if let Some(signal) = interrupts.caught() {
+            stop(&mut child);
+            interrupts.end(signal);
+            return None;
+        }
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
             Ok(None) if std::time::Instant::now() < end => {
@@ -1191,7 +1298,7 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
             program.display(),
             match std::env::current_exe()
                 .ok()
-                .and_then(|exe| linked_bin_dir(&exe))
+                .and_then(|exe| linked_bin_dir_of(&exe))
             {
                 Some(dir) => format!("`{}`", dir.display()),
                 None => "the folder the upgraded spoolway was installed into".to_string(),
@@ -1230,6 +1337,15 @@ fn linked_bin_dir(exe: &Path) -> Option<PathBuf> {
             None
         }
     })
+}
+
+/// [`linked_bin_dir`] for the running executable, with symlinks resolved
+/// first: on macOS `current_exe` is usually the `<prefix>/bin/spoolway` link
+/// brew makes, which has no `Cellar` in it. When the resolution fails, as for
+/// a Linux path brew has removed that ends ` (deleted)`, the raw path is used,
+/// as [`Channel::detect`] does.
+fn linked_bin_dir_of(exe: &Path) -> Option<PathBuf> {
+    linked_bin_dir(&std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf()))
 }
 
 fn upgraded_command(program: &Path, args: &[String]) -> Command {
@@ -1559,9 +1675,36 @@ mod tests {
         );
     }
 
+    /// A binary started through brew's `<prefix>/bin/spoolway` link, as macOS
+    /// reports it, still names `<prefix>/bin`.
+    #[cfg(unix)]
+    #[test]
+    fn the_linked_bin_dir_is_found_through_brews_link() {
+        let root = crate::scratch::root("release-linked-bin");
+        let _ = std::fs::remove_dir_all(&root);
+        let cellar = root.join("Cellar/spoolway/0.14.1/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(cellar.join("spoolway"), "").unwrap();
+        let link = root.join("bin/spoolway");
+        std::os::unix::fs::symlink("../Cellar/spoolway/0.14.1/bin/spoolway", &link).unwrap();
+
+        assert_eq!(linked_bin_dir(&link), None);
+        assert_eq!(
+            linked_bin_dir_of(&link),
+            Some(std::fs::canonicalize(&root).unwrap().join("bin"))
+        );
+        // A path that no longer exists is judged as it is.
+        assert_eq!(
+            linked_bin_dir_of(&root.join("gone/Cellar/spoolway/0.1.0/bin/spoolway (deleted)")),
+            Some(root.join("gone/bin"))
+        );
+    }
+
     /// The group is stopped, not just its leader: a shell that starts a
     /// background `sleep` and waits on it, as `brew update` does for each tap,
-    /// leaves nothing behind.
+    /// leaves nothing behind. The stop comes only once the shell has written
+    /// the `sleep`'s pid, so a slow start cannot skip the grandchild.
     #[cfg(unix)]
     #[test]
     fn a_stopped_command_takes_what_it_started_with_it() {
@@ -1571,16 +1714,24 @@ mod tests {
         let pid_file = dir.join("grandchild.pid");
         let mut shell = Command::new("sh");
         shell.arg("-c").arg(format!(
-            "sleep 30 & echo $! > '{}'; wait",
+            "sleep 30 & echo $! > '{}.tmp'; mv '{0}.tmp' '{0}'; wait",
             pid_file.display()
         ));
-        assert_eq!(status_within(&mut shell, Duration::from_millis(500)), None);
-
+        let mut child = start_in_own_group(&mut shell).unwrap();
+        let started = (0..1000).any(|_| {
+            pid_file.exists() || {
+                std::thread::sleep(Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(started, "the shell never started its `sleep`");
         let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
+        stop(&mut child);
+
         // A process nobody has reaped yet still answers signal 0, so it counts
         // as gone once it is a zombie.
         let gone = || {
@@ -1598,6 +1749,11 @@ mod tests {
 
     /// A child still running at the deadline is killed rather than left to
     /// fetch while the caller moves on.
+    ///
+    /// The only test that calls [`status_within`], which swaps this process's
+    /// signal handlers while it waits: two at once could put them back in the
+    /// wrong order. Ctrl-C reaching the group is covered end to end in
+    /// `tests/homebrew_update.rs`.
     #[test]
     fn a_command_past_its_deadline_is_killed_and_gives_no_answer() {
         let started = std::time::Instant::now();
