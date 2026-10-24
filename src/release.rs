@@ -7,7 +7,8 @@
 //! here is told so rather than handed a command that refuses — the bug pi
 //! carries (earendil-works/pi#5607, where a Nix install is told to run
 //! `pi update` and gets "cannot self-update this installation"). The header
-//! names the version and no command for that reason.
+//! names the version, and only on an npm install, with no command for that
+//! reason.
 //!
 //! Nothing here opens a socket. spoolway ships no HTTP client and gains none:
 //! an npm install asks npm what the latest version is and npm is what installs
@@ -278,10 +279,16 @@ pub fn newer() -> Option<String> {
 /// [`newer`] for a given channel, so a test can pick one without the real
 /// executable's path.
 fn newer_on(channel: Channel) -> Option<String> {
+    newer_at(channel, cache_path())
+}
+
+/// [`newer_on`] against a cache file handed in, so a test can seed one without
+/// setting the process-global state directory other tests read.
+fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
     if channel == Channel::Other {
         return None;
     }
-    let path = cache_path()?;
+    let path = path?;
     let cached = std::fs::read_to_string(&path)
         .ok()
         .as_deref()
@@ -1333,25 +1340,26 @@ mod tests {
         assert_eq!(result, Upgrade::Standalone);
     }
 
-    /// A standalone binary answers before touching the cache file or spawning
-    /// the refresh child. The state directory here is empty, which reads as a
-    /// stale cache and would spawn `spoolway __version-check`, and that child
-    /// stamps a cache file into it.
+    /// A standalone binary ignores a fresh cache that names a newer release,
+    /// which an npm binary reports from the same file. Without the channel
+    /// check in [`newer_at`] the `Other` answer would be the cached version.
     #[test]
-    fn a_standalone_binary_leaves_the_cache_alone() {
+    fn a_standalone_binary_ignores_a_cache_an_npm_binary_reads() {
         let dir = crate::scratch::root("release-standalone-cache");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let previous = std::env::var_os("XDG_STATE_HOME");
-        crate::platform::set_test_env("XDG_STATE_HOME", &dir);
-        assert_eq!(newer_on(Channel::Other), None);
-        std::thread::sleep(Duration::from_millis(300));
-        let touched = cache_path().is_some_and(|path| path.exists());
-        match previous {
-            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
-            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
-        }
-        assert!(!touched, "the standalone check wrote a cache");
+        let path = dir.join("latest.json");
+        write_cache(
+            &path,
+            &Cached {
+                version: newer_than_current(),
+                checked: now(),
+            },
+        );
+        assert_eq!(
+            newer_at(Channel::Npm, Some(path.clone())),
+            Some(newer_than_current())
+        );
+        assert_eq!(newer_at(Channel::Other, Some(path)), None);
     }
 
     /// The state file is the machine's, not the project's: every checkout runs
