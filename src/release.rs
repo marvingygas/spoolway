@@ -189,8 +189,9 @@ impl Channel {
 /// one record per channel. npm's stays in the top-level `version` and
 /// `checked` fields, where every npm binary already released reads it, and
 /// Homebrew's sits in a nested `homebrew` object that those binaries never
-/// look at. A refresh rewrites only its own channel's record, so neither
-/// install overwrites, or has to refresh because of, the other's.
+/// look at. A refresh from this version on rewrites only its own channel's
+/// record. An npm binary released before it rewrites the whole file and drops
+/// Homebrew's, which costs the Homebrew install one extra lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
     pub version: String,
