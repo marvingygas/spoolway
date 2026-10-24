@@ -100,7 +100,10 @@ the page that buys nothing.
   match what the page actually has, each `href`/`id` pair using the same slug. The index
   scrolls on its own once it outgrows the viewport, so a long one costs the reader nothing
   and is never a reason to trim the page down to fit.
-- `<h1>` — the branch's own name for this, not a title you invent.
+- `<h1>` — when step 1 read a tracker item, the item's ref and then its title, both from
+  `spoolway issue show`, such as `KAN-15 Standalone download`. A ref that is a bare number is
+  written `#<n>`, such as `#57 Standalone download`. A plan with no tracker item keeps its slug
+  as the heading.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
   question for the person.
