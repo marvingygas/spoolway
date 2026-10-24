@@ -2031,7 +2031,7 @@ mod tests {
             match glob {
                 Some(glob) => assert!(
                     text.contains(&format!(
-                        "# Unset means no limit. Uncomment a row to choose one.\n\
+                        "# Remove the # from a line below to turn it on.\n\
                          # [models.\"{glob}\"]\n# prompt_cache_ttl = \"1h\"\n"
                     )),
                     "{text}"

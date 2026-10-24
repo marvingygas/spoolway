@@ -768,10 +768,11 @@ pub struct UnattendedConfig {
     /// in it is not a reason to take that decision unattended — it is a reason
     /// to wait longer for the person who will.
     ///
-    /// **The brake is `max_output_tokens`, and on an ungated pipeline it is
-    /// the only one.** With no block able to park a task, a pipeline that
-    /// cannot converge will spend until something says stop, and in an
-    /// unattended run nobody is watching to say it.
+    /// **The brakes are `max_output_tokens` and `max_cost_usd`.** A task that
+    /// cannot go on lands on `blocked` and the unblocker answers it, which
+    /// parks nothing, so a pipeline that cannot converge will spend until one
+    /// of the two says stop, and in an unattended run nobody is watching to
+    /// say it.
     ///
     /// Off by default, and a per-run decision as much as a per-project one:
     /// `spoolway dispatch --unattended` is the overnight run, `--attended` the
@@ -1016,8 +1017,8 @@ impl<'de> Deserialize<'de> for VisibleLanes {
 /// never idle. `any` drops that tier, so every ready candidate is weighed on
 /// steps left, `group_open` and `dependents` alone. `reserve` is for a group
 /// that has started to keep one slot away from groups that have never run until
-/// its last task is archived. The config accepts it, but the dispatcher still
-/// ranks candidates under `reserve` exactly as it does under `group`.
+/// its last task is archived. Candidates are ranked under `reserve` exactly as
+/// under `group`; the hold itself is `slot_holds` in the dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Priority {
@@ -1189,9 +1190,10 @@ pub struct AgentProfile {
     /// rather than one already settled.
     ///
     /// A person may turn the agent's own compaction off and let this be the
-    /// brake instead: a lane stopped here lands its task on `blocked` rather
-    /// than compacting away the `spoolway report` contract, or degrading
-    /// quietly as its window fills.
+    /// brake instead: a lane stopped here lands its task on `paused` in an
+    /// attended run, and on `blocked` in an unattended one, rather than
+    /// compacting away the `spoolway report` contract, or degrading quietly as
+    /// its window fills.
     ///
     /// **The reading exists only at turn boundaries, so the ceiling can be
     /// overshot.** A lane at 79% can end its next turn well past 100% before
@@ -2508,7 +2510,13 @@ fn annotate_watch_dirs(rendered: &str) -> Result<String> {
 
 /// The two lines that open the cache-lifetime example, and so how
 /// [`settle_cache_hint`] recognises one already in a file.
-const CACHE_HINT_HEADER: &str = "# How long a session's prompt cache is trusted to stay warm.\n\
+const CACHE_HINT_HEADER: &str = "# Start a fresh conversation when the last reply is older than this.\n\
+     # Remove the # from a line below to turn it on.\n";
+
+/// The two lines earlier releases opened the example with. A file written by
+/// one still carries them, and [`find_cache_hint`] must find that example too,
+/// or `config set` would leave it beside the new one.
+const LEGACY_CACHE_HINT_HEADER: &str = "# How long a session's prompt cache is trusted to stay warm.\n\
      # Unset means no limit. Uncomment a row to choose one.\n";
 
 /// The cache-lifetime example for `globs`: the header, then a commented row
@@ -2525,8 +2533,10 @@ fn cache_hint(globs: &[&str]) -> String {
 
 /// Where the cache-lifetime example stands in `text`, as a byte range.
 fn find_cache_hint(text: &str) -> Option<std::ops::Range<usize>> {
-    let start = text.find(CACHE_HINT_HEADER)?;
-    let after = start + CACHE_HINT_HEADER.len();
+    let (start, header) = [CACHE_HINT_HEADER, LEGACY_CACHE_HINT_HEADER]
+        .into_iter()
+        .find_map(|header| text.find(header).map(|start| (start, header)))?;
+    let after = start + header.len();
     let rows: usize = text[after..]
         .split_inclusive('\n')
         .take_while(|line| {
@@ -4668,6 +4678,20 @@ mod tests {
         assert_eq!(settled.matches(CACHE_HINT_HEADER).count(), 1);
         assert_eq!(settle_cache_hint(&settled, &rendered).unwrap(), settled);
         assert_eq!(settle_cache_hint("[a]\n", &rendered).unwrap(), "[a]\n");
+    }
+
+    /// A file written by an earlier release opens its example with the old
+    /// header; `config set` swaps it for the current one rather than leaving
+    /// both.
+    #[test]
+    fn an_example_under_the_old_header_is_replaced_not_duplicated() {
+        let rendered = cache_hint(&["gpt-*"]);
+        let rendered = format!("[dispatch]\n\n{rendered}\n[models.\"zz\"]\nlocal = true\n");
+        let text = rendered.replace(CACHE_HINT_HEADER, LEGACY_CACHE_HINT_HEADER);
+        assert!(!text.contains(CACHE_HINT_HEADER), "{text}");
+        let settled = settle_cache_hint(&text, &rendered).unwrap();
+        assert_eq!(settled, rendered);
+        assert_eq!(settled.matches("# [models.\"gpt-*\"]").count(), 1);
     }
 
     /// A comment of a person's own above the first `[models]` row survives
