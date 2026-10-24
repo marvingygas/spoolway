@@ -7285,11 +7285,21 @@ fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -
 
 /// Why activating `job` is refused: the other active jobs on its routine,
 /// as the stores read now, named in a sentence that says what to do
-/// instead. `None` when there are none, or when the stores no longer load —
-/// [`find_job`] has just read them, so that is a race the write itself
-/// reports.
+/// instead. `None` when there are none. A store that stopped loading since
+/// [`find_job`] read it refuses too, with [`find_job`]'s own words: which
+/// jobs are active could not be told, and letting the write through could
+/// make the clash this check exists to stop.
 fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
-    let jobs = crate::jobs::load(repo).ok()?;
+    let jobs = match crate::jobs::load(repo) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            return Some(format!(
+                "{err:#}\n\nthe job {} cannot be read until this store reads, so nothing was \
+                 changed. `spoolway doctor` names what is wrong.",
+                job.name
+            ));
+        }
+    };
     // `clashing_jobs` counts nothing for a disabled job, and the job being
     // activated is disabled until this pick writes it: ask as if it were
     // already on.
@@ -22703,6 +22713,22 @@ mod tests {
                 .any(|job| job.name == "nightly-a" && !job.spec.enabled),
             "still inactive"
         );
+    }
+
+    /// A store that stops loading between [`find_job`]'s read and the clash
+    /// check refuses the activate, since which jobs are active cannot be
+    /// told.
+    #[test]
+    fn activate_job_is_refused_when_the_stores_stop_loading() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-activate-bad-store");
+        seed_two_routines(&repo);
+        write_inactive_job(&repo, Scope::User, "nightly-a", "nightly");
+        let found = crate::jobs::load(&repo).unwrap().remove(0);
+        std::fs::write(repo.jobs_file(), "not = [valid").unwrap();
+
+        let text = activate_refusal(&repo, &found).expect("refused");
+        assert!(text.contains("nothing was changed"), "{text}");
     }
 
     /// A job gone from its store between `o` and the pick is not written
