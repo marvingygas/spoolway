@@ -272,6 +272,79 @@ mod tests {
     }
 }
 
+/// Handlers for some signals, for as long as it is held, and the dispositions
+/// that were there before put back when it is dropped.
+///
+/// It is a `sigaction` rather than `signal`, because the flags are the
+/// caller's choice: glibc's `signal` always installs with `SA_RESTART`, which
+/// restarts a blocked `read` instead of failing it with `EINTR`, and the sync
+/// panel's one blocking read needs exactly that failure. Pass `SA_RESTART`
+/// where a restarted call is what is wanted.
+///
+/// A signal the process started with ignored is left ignored. A program run
+/// under `nohup`, or as a background job from a shell without job control,
+/// has said it does not want that signal, and a temporary handler must not
+/// override that for as long as it is held.
+///
+/// The saved dispositions are per signal, not per guard, so two guards held at
+/// once over the same signal restore the earlier one's handler only if they
+/// are dropped in the opposite order they were made.
+#[cfg(unix)]
+pub(crate) struct SignalGuard {
+    saved: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+#[cfg(unix)]
+impl SignalGuard {
+    /// Install `handler` for each of `signals` that is not ignored, with
+    /// `flags` as its `sa_flags`.
+    pub(crate) fn catch(
+        signals: &[libc::c_int],
+        flags: libc::c_int,
+        handler: extern "C" fn(libc::c_int),
+    ) -> SignalGuard {
+        let mut saved = Vec::new();
+        for &signal in signals {
+            // SAFETY: `action` and `previous` are plain-old-data structs this
+            // function owns; `sigemptyset` and `sigaction` only read and write
+            // them for the length of the call.
+            unsafe {
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(signal, std::ptr::null(), &mut previous);
+                if previous.sa_sigaction == libc::SIG_IGN {
+                    continue;
+                }
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler as *const () as libc::sighandler_t;
+                libc::sigemptyset(&mut action.sa_mask);
+                action.sa_flags = flags;
+                libc::sigaction(signal, &action, std::ptr::null_mut());
+                saved.push((signal, previous));
+            }
+        }
+        SignalGuard { saved }
+    }
+
+    /// A guard that installs and restores nothing. Test-only: a test must
+    /// never touch the real process's signal dispositions, parallel tests
+    /// included.
+    #[cfg(test)]
+    pub(crate) fn inert() -> SignalGuard {
+        SignalGuard { saved: Vec::new() }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        for (signal, previous) in self.saved.iter().rev() {
+            // SAFETY: restoring exactly what `catch` read off `sigaction`, on
+            // the same signal, unmodified.
+            unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+        }
+    }
+}
+
 /// Whether the person has asked this process to stop.
 ///
 /// A dispatcher spends nearly all its life asleep between passes, so the run
@@ -440,6 +513,53 @@ impl TermGuard {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod signal_guard_tests {
+    use super::SignalGuard;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static SEEN: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn note(signal: libc::c_int) {
+        SEEN.store(signal, Ordering::SeqCst);
+    }
+
+    fn disposition(signal: libc::c_int) -> libc::sighandler_t {
+        // SAFETY: reading the current action into a buffer this owns.
+        unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(signal, std::ptr::null(), &mut current);
+            current.sa_sigaction
+        }
+    }
+
+    /// Both cases share `SIGUSR2`, which nothing else in the test binary uses,
+    /// and one test body, so no other test can see it change.
+    #[test]
+    fn a_caught_signal_is_handled_and_an_ignored_one_stays_ignored() {
+        let signal = libc::SIGUSR2;
+
+        // SAFETY: `signal` and `raise` against a signal only this test uses.
+        unsafe { libc::signal(signal, libc::SIG_IGN) };
+        let guard = SignalGuard::catch(&[signal], 0, note);
+        assert_eq!(disposition(signal), libc::SIG_IGN, "ignored stays ignored");
+        // SAFETY: as above; the signal is ignored, so nothing happens.
+        unsafe { libc::raise(signal) };
+        assert_eq!(SEEN.load(Ordering::SeqCst), 0, "the handler ran");
+        drop(guard);
+        assert_eq!(disposition(signal), libc::SIG_IGN);
+
+        // SAFETY: as above.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+        let guard = SignalGuard::catch(&[signal], 0, note);
+        // SAFETY: as above; the handler only stores to an atomic.
+        unsafe { libc::raise(signal) };
+        assert_eq!(SEEN.load(Ordering::SeqCst), signal);
+        drop(guard);
+        assert_eq!(disposition(signal), libc::SIG_DFL, "restored on drop");
     }
 }
 
