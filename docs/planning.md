@@ -109,7 +109,8 @@ the one sentence a person can approve or reject, then two or three sentences on 
 today. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
 
 The page rail shows the plan name. A small copy icon sits right after it. Clicking the icon
-copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds.
+copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds. Beside the `Switch theme` button, a `Reload`
+button reads the page from disk again. The page ends at the Mockup, with no Next step box.
 
 The page also carries a machine copy of its own words, in a `<script type="text/markdown"
 id="plan">` block at the foot of the page that a browser never shows. `/spoolway-plan` writes
