@@ -4,7 +4,7 @@
 # hand as `scripts/release-verify.sh <version>`.
 #
 # A workflow's exit code is not the registry's own state, so this reads the
-# public record directly: the tag, the packages, the archives, the published
+# public record directly: the tag, the packages, the download files, the published
 # body and a real install.
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
@@ -77,14 +77,28 @@ for pkg in "${pkgs[@]}"; do
 done
 npm_wait spoolway
 
-# 4. The GitHub release carries one archive per platform, plus the checksums.
+# 4. The GitHub release carries one bare file per target that names a
+#    `download`, plus the checksums, plus `install.sh` when the tagged tree has
+#    scripts/install.sh. Releases tagged before targets.json gained that key
+#    shipped one archive per platform instead, so a tagged tree where no
+#    target has the key is counted by the old rule.
 assets="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
   || die "no GitHub release for $tag"
 count="$(printf '%s\n' "$assets" | grep -c . || true)"
-expected=$(( ${#pkgs[@]} + 1 ))
+downloads="$(git show "$tag:npm/targets.json" \
+  | jq -r 'if any(.targets[]; has("download")) then [.targets[] | select(.download != null)] | length else (.targets | length) end')"
+expected=$(( downloads + 1 ))
+has_installer=0
+if git cat-file -e "$tag:scripts/install.sh" 2>/dev/null; then
+  has_installer=1
+  expected=$(( expected + 1 ))
+fi
 [ "$count" -eq "$expected" ] \
-  || die "$tag has $count release assets, expected $expected (one per platform plus SHA256SUMS)"
+  || die "$tag has $count release assets, expected $expected (one per download file, or per platform archive on older tags, plus SHA256SUMS, plus install.sh when the tag has scripts/install.sh)"
 printf '%s\n' "$assets" | grep -qxF SHA256SUMS || die "$tag has no SHA256SUMS asset"
+if [ "$has_installer" = 1 ]; then
+  printf '%s\n' "$assets" | grep -qxF install.sh || die "$tag has no install.sh asset"
+fi
 
 # 5. The published body is the tagged changelog section, byte for byte. The
 #    workflow creates it with --notes-file from the tagged tree, so any

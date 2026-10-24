@@ -25,6 +25,7 @@
     "@spoolway/linux-x64": "0.1.0",
     "@spoolway/linux-arm64": "0.1.0",
     "@spoolway/linux-x64-musl": "0.1.0",
+    "@spoolway/linux-arm64-musl": "0.1.0",
     "@spoolway/darwin-arm64": "0.1.0",
     "@spoolway/darwin-x64": "0.1.0"
   }

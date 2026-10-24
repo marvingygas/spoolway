@@ -25,6 +25,7 @@ const PLATFORMS = {
   "linux-x64-glibc": "linux-x64",
   "linux-x64-musl": "linux-x64-musl",
   "linux-arm64-glibc": "linux-arm64",
+  "linux-arm64-musl": "linux-arm64-musl",
   "darwin-arm64": "darwin-arm64",
   "darwin-x64": "darwin-x64",
 };

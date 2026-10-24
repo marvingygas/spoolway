@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh", "src/memory.rs"]
+covers: ["src/install.rs", "src/known_copies.rs", "assets/known-copies.txt", "tests/fixtures/known-copies/**", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh", "scripts/install.sh", "src/memory.rs"]
 ---
 
 # Installation and setup
@@ -21,6 +21,7 @@ program runs underneath.
 | Linux x64 | `@spoolway/linux-x64` | Supported |
 | Linux x64 (musl) | `@spoolway/linux-x64-musl` | Supported |
 | Linux arm64 | `@spoolway/linux-arm64` | Supported |
+| Linux arm64 (musl) | `@spoolway/linux-arm64-musl` | Supported |
 | macOS Apple Silicon | `@spoolway/darwin-arm64` | Supported |
 | macOS Intel | `@spoolway/darwin-x64` | Supported |
 
@@ -29,9 +30,6 @@ From source, in a clone of this repository:
 ```
 cargo install --path .
 ```
-
-By hand: every GitHub release has one archive per platform and a `SHA256SUMS` file. Unpack the
-archive and put the binary on your `PATH`.
 
 As a herdr plugin:
 
@@ -42,12 +40,12 @@ herdr plugin install marvingygas/spoolway
 `herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
 version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
 command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
-`scripts/fetch-or-build.sh`, which maps the host's platform onto one of the triples in
-[`npm/targets.json`](../npm/targets.json), downloads that platform's release archive and its
-`SHA256SUMS`, verifies the checksum, and unpacks the binary to `./bin/spoolway` inside the
-plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
+`scripts/fetch-or-build.sh`, which finds the entry in [`npm/targets.json`](../npm/targets.json)
+for the host's operating system and CPU, downloads the release file that entry names and the
+release's `SHA256SUMS`, verifies the checksum, and installs the file as `./bin/spoolway` inside
+the plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
 writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
-no matching triple, no release matches the manifest's version, or the checksum fails to verify,
+no release file, no release matches the manifest's version, or the checksum fails to verify,
 the script falls back to `cargo build --release` and copies the result into place instead of
 failing the install.
 
@@ -57,6 +55,48 @@ in herdr's marketplace.
 
 `herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
 the two disagree. See [Testing](testing.md).
+
+## Standalone download
+
+One file, nothing else to install. It never updates itself: run the install line again to get the
+latest release.
+
+```
+curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
+```
+
+It downloads the file for your platform from the same release as the script and checks it against
+`SHA256SUMS`. It then writes `~/.local/bin/spoolway`. Set `SPOOLWAY_INSTALL_DIR` to put it somewhere
+else. When the directory is not on your `PATH`, the script prints the line to add to your shell
+profile. It does not edit the profile.
+
+When it replaces an older copy, it prints `Run spoolway sync in each project to apply the update.`
+
+The script refuses and exits 1, leaving the install directory unchanged, when the checksum does not
+match, when the platform has no release file, or when a directory already sits at the target path.
+It needs `sh`, `uname`, `curl` or `wget`, and `sha256sum` or `shasum`.
+
+By hand: download your platform's file from the latest release, then make it executable.
+
+| Platform | File |
+|---|---|
+| Linux x64 (any) | `spoolway-linux-x64` |
+| Linux arm64 (any) | `spoolway-linux-arm64` |
+| macOS Apple Silicon | `spoolway-macos-arm64` |
+| macOS Intel | `spoolway-macos-x64` |
+
+```
+chmod +x spoolway-linux-x64
+```
+
+On macOS, a file downloaded in a browser is blocked with "the developer cannot be verified". Clear
+the block once:
+
+```
+xattr -d com.apple.quarantine spoolway-macos-arm64
+```
+
+Windows has no build. Run spoolway inside WSL with the Linux file.
 
 ## What spoolway needs
 
@@ -356,8 +396,19 @@ directory, project or not, and writes no project file. After a successful instal
 line tells you to run `spoolway sync` in each project. A run that installs nothing does not
 print it.
 
-`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
-not answer in time, `update` says so and uses the last known version.
+On an npm install, `update` asks npm which release is out each time it runs. The wait is
+bounded. If npm does not answer in time, `update` says so and uses the last known version.
+
+A binary that npm did not install never starts npm. This covers a downloaded release file, a
+`cargo install` build, a Nix build, a copied file and a build under `target/`. `update` on such a
+binary prints its own version and the install line, starts no process and exits 0:
+
+```
+This spoolway (0.15.0) was not installed by npm, so it does not
+update itself. To get the latest release, run the install line again:
+
+  curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
+```
 
 The release notes are compiled into the binary:
 
@@ -374,11 +425,12 @@ Two things stop the binary update:
 
 | What stops it | What happens |
 |---|---|
-| npm did not install this binary | You are told which release is out. Upgrade the way you installed. |
+| npm did not install this binary | `update` prints the install line and installs nothing. |
 | A dispatcher is running | The binary is left alone until the run ends. |
 
-The dispatcher header shows a newer published release in yellow, beside its own version. No
-other command and no popup announces one. Turn the header's version off with
+On an npm install, the dispatcher header shows a newer published release in yellow, beside its
+own version. A binary that npm did not install shows only its own version. No other command and
+no popup announces a release. Turn the header's version off with
 `housekeeping.update_check = false` in the config, or with `SPOOLWAY_SKIP_VERSION_CHECK=1` for
 one machine.
 

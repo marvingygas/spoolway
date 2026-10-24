@@ -6626,8 +6626,8 @@ fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
 /// The restart nudge wins over the published version whatever npm says: a
 /// newer binary on `PATH` is one restart from running, and naming a release
 /// beside it would read as a second thing to do. The published version is
-/// named with no command beside it, because the command to take it depends on
-/// how this binary was installed and the header is the same for every install.
+/// named with no command beside it. Only an npm install ever sees one, since a
+/// binary npm did not install never looks for a release.
 fn version_label(installed: Option<&str>, published: Option<&str>) -> String {
     let running = format!("v{}", crate::release::current());
     if installed.is_some() {

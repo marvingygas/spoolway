@@ -80,6 +80,15 @@ musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer relea
 `spoolway sync` in each project to list the files the new release rewrites and apply them when
 you confirm. `spoolway whats-new` prints the release notes offline.
 
+Or download one file that needs nothing else and never updates itself:
+
+```
+curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
+```
+
+It installs to `~/.local/bin`. Run the same line again to update. See
+[Standalone download](docs/installation.md#standalone-download) for the file per platform.
+
 From source instead, in a clone of this repository:
 
 ```
