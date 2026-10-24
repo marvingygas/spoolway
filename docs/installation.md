@@ -31,6 +31,31 @@ From source, in a clone of this repository:
 cargo install --path .
 ```
 
+As a herdr plugin:
+
+```
+herdr plugin install marvingygas/spoolway
+```
+
+`herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
+version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
+command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
+`scripts/fetch-or-build.sh`, which finds the entry in [`npm/targets.json`](../npm/targets.json)
+for the host's operating system and CPU, downloads the release file that entry names and the
+release's `SHA256SUMS`, verifies the checksum, and installs the file as `./bin/spoolway` inside
+the plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
+writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
+no release file, no release matches the manifest's version, or the checksum fails to verify,
+the script falls back to `cargo build --release` and copies the result into place instead of
+failing the install.
+
+See [The herdr plugin](herdr-plugin.md) for the manifest's panes and actions, what
+`spoolway herdr bind`/`unbind` write, and the rehearsal run before the repository is listed
+in herdr's marketplace.
+
+`herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
+the two disagree. See [Testing](testing.md).
+
 ## Standalone download
 
 One file, nothing else to install. It never updates itself: run the install line again to get the
@@ -63,31 +88,6 @@ xattr -d com.apple.quarantine spoolway-macos-arm64
 ```
 
 Windows has no build. Run spoolway inside WSL with the Linux file.
-
-As a herdr plugin:
-
-```
-herdr plugin install marvingygas/spoolway
-```
-
-`herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
-version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
-command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
-`scripts/fetch-or-build.sh`, which finds the entry in [`npm/targets.json`](../npm/targets.json)
-for the host's operating system and CPU, downloads the release file that entry names and the
-release's `SHA256SUMS`, verifies the checksum, and installs the file as `./bin/spoolway` inside
-the plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
-writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
-no release file, no release matches the manifest's version, or the checksum fails to verify,
-the script falls back to `cargo build --release` and copies the result into place instead of
-failing the install.
-
-See [The herdr plugin](herdr-plugin.md) for the manifest's panes and actions, what
-`spoolway herdr bind`/`unbind` write, and the rehearsal run before the repository is listed
-in herdr's marketplace.
-
-`herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
-the two disagree. See [Testing](testing.md).
 
 ## What spoolway needs
 

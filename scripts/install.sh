@@ -147,6 +147,7 @@ main() {
   # Read the old version before the rename replaces the file. A copy that
   # cannot report one still counts as replaced.
   replaced=
+  old=
   if [ -e "$target" ]; then
     old=$("$target" --version 2>/dev/null | awk '{print $2; exit}')
     replaced="${old:+v$old}"
@@ -166,7 +167,11 @@ main() {
 
   if [ -n "$replaced" ]; then
     echo "spoolway: replaced $replaced with v$version -> $target"
-    echo "Run spoolway sync in each project to apply the update."
+    # A rerun over the same version changed nothing for a project to apply.
+    if [ "$old" != "$version" ]; then
+      echo
+      echo "Run spoolway sync in each project to apply the update."
+    fi
   else
     echo "spoolway: installed v$version -> $target"
   fi
@@ -176,8 +181,10 @@ main() {
     *)
       line="$dir"
       [ "$dir" = "$default_dir" ] && line='$HOME/.local/bin'
+      echo
       echo "spoolway: $dir is not on your PATH. Add this line to your"
       echo "shell profile, then open a new terminal:"
+      echo
       echo "  export PATH=\"$line:\$PATH\""
       ;;
   esac

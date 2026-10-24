@@ -112,8 +112,10 @@ fn a_first_install_writes_the_file_and_hints_the_path() {
             "spoolway: downloading spoolway-linux-x64 (v0.16.0)\n\
              spoolway: checksum verified\n\
              spoolway: installed v0.16.0 -> {dir}/spoolway\n\
+             \n\
              spoolway: {dir} is not on your PATH. Add this line to your\n\
              shell profile, then open a new terminal:\n\
+             \n\
              \x20 export PATH=\"{dir}:$PATH\"\n"
         )
     );
@@ -145,10 +147,28 @@ fn a_replace_names_both_versions_and_prints_the_sync_line() {
             "spoolway: downloading spoolway-macos-arm64 (v0.16.0)\n\
              spoolway: checksum verified\n\
              spoolway: replaced v0.15.0 with v0.16.0 -> {}/spoolway\n\
+             \n\
              Run spoolway sync in each project to apply the update.\n",
             rig.install_dir.display()
         )
     );
+}
+
+/// A rerun over a copy of the same version replaces it but prints no sync
+/// line, because no project has anything new to apply.
+#[test]
+fn a_same_version_rerun_prints_no_sync_line() {
+    let rig = Rig::new("same");
+    rig.fake_uname("Linux", "x86_64");
+    rig.release("spoolway-linux-x64", "0.16.0", None);
+    std::fs::create_dir_all(&rig.install_dir).unwrap();
+    std::fs::write(rig.installed(), "#!/bin/sh\necho 'spoolway 0.16.0'\n").unwrap();
+    std::fs::set_permissions(rig.installed(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = rig.run(&[&rig.install_dir]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stdout.contains("replaced v0.16.0 with v0.16.0"), "{stdout}");
+    assert!(!stdout.contains("spoolway sync"), "{stdout}");
 }
 
 /// A bad checksum refuses with exit 1 and leaves the old file and directory
