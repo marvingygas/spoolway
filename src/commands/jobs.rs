@@ -4,8 +4,9 @@
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
 //! onto a renamed pipeline. Its new job and edit job walk the cron expression
 //! and the pipeline, then save through [`crate::jobs::write`] — see
-//! [`NewJobWalk`]. Deactivate, activate and delete are [`set_enabled`] and
-//! [`delete_job`]. No `jobs add`, no config key. A job only schedules:
+//! [`NewJobWalk`]. Deactivate and activate are [`set_enabled`]; no popup
+//! here deletes a job, which leaves only with the routine the routines tab's
+//! delete routine removes. No `jobs add`, no config key. A job only schedules:
 //! nothing here queues its routine, which fires when the dispatcher's clock
 //! crosses the schedule — running a routine now is the routines tab's
 //! `enter`.
@@ -662,21 +663,6 @@ pub(super) fn set_enabled(
     })
 }
 
-/// Delete the job `name` from the store `scope` names, and from no other —
-/// the routines tab's delete job comes here once its popup is answered.
-/// `Err` is the popup that says why it was not.
-pub(super) fn delete_job(repo: &Repo, name: &str, scope: Scope) -> std::result::Result<(), Notice> {
-    jobs::delete_in(repo, scope, name).map_err(|err| {
-        Notice::new(
-            "delete this job",
-            format!(
-                "Could not delete the job `{name}`: {err:#}. Its store may be read-only; fix \
-                 that and try again."
-            ),
-        )
-    })
-}
-
 /// Write the draft to the store its `scope` names. `Ok(name)` is the saved
 /// job's name; `Err(message)` is a full-sentence refusal for the routines
 /// tab to show in a popup.
@@ -887,21 +873,6 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     )
 }
 
-/// The options menu's delete job, as a popup over job `name`: what deleting
-/// it removes, and its one answer.
-pub(super) fn delete_panel(name: &str) -> Vec<String> {
-    crate::screen::ask(
-        "delete this job",
-        &[
-            String::new(),
-            clip(&format!("  {name}")),
-            "  its schedule is removed from the store.".to_string(),
-        ],
-        &["delete".to_string()],
-        0,
-    )
-}
-
 /// The pipeline picker's overlay: every pipeline the repo defines, narrowed by
 /// the typed query, as answers — the highlighted one showing the first line
 /// of its own description under its name, and a blank row under that.
@@ -943,13 +914,10 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 /// project; see `crate::screen`'s own tests.
 #[cfg(test)]
 pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
-    vec![
-        ("delete job", delete_panel("nightly-audit")),
-        (
-            "jobs pipeline picker",
-            pipeline_panel(&Pipelines::builtin(), "", 0),
-        ),
-    ]
+    vec![(
+        "jobs pipeline picker",
+        pipeline_panel(&Pipelines::builtin(), "", 0),
+    )]
 }
 
 #[cfg(test)]

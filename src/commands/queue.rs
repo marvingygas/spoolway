@@ -4721,16 +4721,6 @@ enum Mode {
     /// the file and what to fix. Unlike [`Mode::Outcome`] it is closed by
     /// `esc` and nothing else, which its own key row says.
     PlanNotDeleted(Notice),
-    /// The options menu's delete job popup over the routines pane `nav`
-    /// describes: [`super::jobs::delete_panel`].
-    /// `enter` on its one answer, `delete`, removes `job` from its own
-    /// store through [`super::jobs::delete_job`], and leaves the routine
-    /// and every other job alone. `esc` keeps it. Every other key does
-    /// nothing, so a stray keystroke can neither delete nor dismiss it.
-    DeleteJob {
-        nav: RoutineNav,
-        job: JobRef,
-    },
     /// The options menu's new job or edit job schedule and pipeline popups
     /// over the routines pane `nav` describes: new job writing a job for
     /// the routine highlighted when it was picked, edit job rewriting that
@@ -4832,19 +4822,21 @@ enum RowOption {
     /// Edit job on a job whose routine is not listed: the routine picker
     /// first, then the same popups as [`RowOption::EditJob`].
     PickRoutine(JobRef),
-    DeactivateJob(JobRef),
-    ActivateJob(JobRef),
     /// `named` when the routine has more than one job, so the item has to
-    /// say which of them it deletes.
-    DeleteJob {
+    /// say which of them it switches.
+    DeactivateJob {
+        job: JobRef,
+        named: bool,
+    },
+    ActivateJob {
         job: JobRef,
         named: bool,
     },
     /// Delete on the pending screen, whose menu names a task, a group or a
     /// plan.
     Delete,
-    /// Delete on a routine, worded apart from delete job so it cannot be
-    /// mistaken for it.
+    /// Delete on a routine, worded apart from the pending screen's delete
+    /// so the menu says what it removes.
     DeleteRoutine,
 }
 
@@ -4861,10 +4853,12 @@ impl RowOption {
             RowOption::SaveRoutine => "save as routine".to_string(),
             RowOption::NewJob => "new job".to_string(),
             RowOption::EditJob(_) | RowOption::PickRoutine(_) => "edit job".to_string(),
-            RowOption::DeactivateJob(_) => "deactivate job".to_string(),
-            RowOption::ActivateJob(_) => "activate job".to_string(),
-            RowOption::DeleteJob { job, named: true } => format!("delete job {}", job.name),
-            RowOption::DeleteJob { named: false, .. } => "delete job".to_string(),
+            RowOption::DeactivateJob { job, named: true } => {
+                format!("deactivate job {}", job.name)
+            }
+            RowOption::DeactivateJob { named: false, .. } => "deactivate job".to_string(),
+            RowOption::ActivateJob { job, named: true } => format!("activate job {}", job.name),
+            RowOption::ActivateJob { named: false, .. } => "activate job".to_string(),
             RowOption::Delete => "delete".to_string(),
             RowOption::DeleteRoutine => "delete routine".to_string(),
         }
@@ -6377,22 +6371,6 @@ fn run_screen_from(
                     state.mode = state.after_popup(closed);
                 }
             }
-            Mode::DeleteJob { nav, job } => match key {
-                Key::Enter => {
-                    let nav = nav.clone();
-                    state.mode = match super::jobs::delete_job(repo, &job.name, job.scope) {
-                        Ok(()) => Mode::Routines(nav),
-                        Err(notice) => Mode::Outcome {
-                            notice,
-                            routines: Some(nav),
-                        },
-                    };
-                }
-                Key::Esc => state.mode = Mode::Routines(nav.clone()),
-                // Every other key leaves the popup open, so a stray
-                // keystroke can neither delete nor dismiss it.
-                _ => {}
-            },
             Mode::DeleteRoutine { nav, target } => match key {
                 Key::Enter => {
                     let (nav, target) = (nav.clone(), target.clone());
@@ -7047,16 +7025,20 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 /// - No job: new job, only where [`super::jobs::NewJobWalk::for_routine`]
 ///   can point a job at the folder, the same check `n` made.
 /// - One job: edit job, then deactivate job for an enabled job or activate
-///   job for an inactive one, then delete job.
-/// - Two or more: delete job with each job's name, sorted by name as the
-///   details pane lists them. They clash, so deleting is the one thing
-///   worth offering; editing or activating one would keep the clash.
+///   job for an inactive one.
+/// - Two or more: deactivate job or activate job with each job's name,
+///   sorted by name as the details pane lists them. They clash, and
+///   deactivating all but one settles it; editing one would keep the
+///   clash, and activating one beside an active one is refused — see
+///   [`set_job_enabled`].
 /// - Stores that will not load: nothing but delete routine, since which
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
 ///
-/// A job's row under the routines, an [`Orphan`], offers edit job, through
-/// the routine picker, and delete job, titled with the row's name.
+/// A job's row under the routines, an [`Orphan`], offers edit job alone,
+/// through the routine picker, titled with the row's name. No menu deletes
+/// a job: deactivating keeps its schedule, and delete routine removes the
+/// jobs on the routine it deletes.
 ///
 /// A routine's task offers open task, and never open plan. `None`, and no
 /// menu, with no row or no task under the focused pane's cursor.
@@ -7075,10 +7057,7 @@ fn routine_options(
                 return Some(OptionsMenu {
                     title: orphan.name().to_string(),
                     row: format!("{} in {}", orphan.job.name, orphan.job.source.display()),
-                    items: vec![
-                        RowOption::PickRoutine(job.clone()),
-                        RowOption::DeleteJob { job, named: false },
-                    ],
+                    items: vec![RowOption::PickRoutine(job)],
                     cursor: 0,
                     routines: Some(nav.clone()),
                 });
@@ -7119,25 +7098,24 @@ fn routine_job_options(
             .map(|_| RowOption::NewJob)
             .into_iter()
             .collect(),
-        [job] => {
-            let job = JobRef::of(job);
-            let toggle = match on[0].spec.enabled {
-                true => RowOption::DeactivateJob(job.clone()),
-                false => RowOption::ActivateJob(job.clone()),
-            };
-            vec![
-                RowOption::EditJob(job.clone()),
-                toggle,
-                RowOption::DeleteJob { job, named: false },
-            ]
-        }
-        several => several
-            .iter()
-            .map(|job| RowOption::DeleteJob {
-                job: JobRef::of(job),
-                named: true,
-            })
-            .collect(),
+        [job] => vec![RowOption::EditJob(JobRef::of(job)), toggle(job, false)],
+        several => several.iter().map(|job| toggle(job, true)).collect(),
+    }
+}
+
+/// Deactivate job for an enabled `job`, activate job for an inactive one,
+/// `named` when the menu lists several jobs and must say which.
+fn toggle(job: &crate::jobs::Job, named: bool) -> RowOption {
+    let job_ref = JobRef::of(job);
+    match job.spec.enabled {
+        true => RowOption::DeactivateJob {
+            job: job_ref,
+            named,
+        },
+        false => RowOption::ActivateJob {
+            job: job_ref,
+            named,
+        },
     }
 }
 
@@ -7186,12 +7164,10 @@ impl Picked<'_> {
                         .collect(),
                     cursor: 0,
                 },
-                RowOption::DeactivateJob(job) => set_job_enabled(self.repo, nav, &job, false),
-                RowOption::ActivateJob(job) => set_job_enabled(self.repo, nav, &job, true),
-                RowOption::DeleteJob { job, .. } => Mode::DeleteJob {
-                    nav: nav.clone(),
-                    job,
-                },
+                RowOption::DeactivateJob { job, .. } => {
+                    set_job_enabled(self.repo, nav, &job, false)
+                }
+                RowOption::ActivateJob { job, .. } => set_job_enabled(self.repo, nav, &job, true),
                 RowOption::NewJob => highlighted_routine_folder(routines, nav)
                     .and_then(|folder| {
                         super::jobs::NewJobWalk::for_routine(
@@ -7240,9 +7216,8 @@ impl Picked<'_> {
             RowOption::NewJob
             | RowOption::EditJob(_)
             | RowOption::PickRoutine(_)
-            | RowOption::DeactivateJob(_)
-            | RowOption::ActivateJob(_)
-            | RowOption::DeleteJob { .. }
+            | RowOption::DeactivateJob { .. }
+            | RowOption::ActivateJob { .. }
             | RowOption::DeleteRoutine => closed,
         }
     }
@@ -7284,11 +7259,21 @@ fn job_not_changed(nav: &RoutineNav, text: String) -> Mode {
 /// store. Back on the routines pane, whose
 /// details show the new state as the stores are read again, or a popup over
 /// it saying why the store was not written.
+///
+/// Activate job is refused, with nothing written, while another job on the
+/// same routine is active: two active jobs on one routine fire neither, and
+/// with no way to delete a job from the tab, the toggle must not be a way
+/// into that. The check reads the stores again here rather than trusting
+/// the jobs the menu was built from, so a job another hand activated since
+/// then still counts.
 fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -> Mode {
     let found = match find_job(repo, job) {
         Ok(found) => found,
         Err(text) => return job_not_changed(nav, text),
     };
+    if enabled && let Some(text) = activate_refusal(repo, &found) {
+        return outcome_over(Some(nav), "activate job", text);
+    }
     match super::jobs::set_enabled(repo, &found, enabled) {
         Ok(()) => Mode::Routines(nav.clone()),
         Err(notice) => Mode::Outcome {
@@ -7296,6 +7281,50 @@ fn set_job_enabled(repo: &Repo, nav: &RoutineNav, job: &JobRef, enabled: bool) -
             routines: Some(nav.clone()),
         },
     }
+}
+
+/// Why activating `job` is refused: the other active jobs on its routine,
+/// as the stores read now, named in a sentence that says what to do
+/// instead. `None` when there are none, or when the stores no longer load —
+/// [`find_job`] has just read them, so that is a race the write itself
+/// reports.
+fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
+    let jobs = crate::jobs::load(repo).ok()?;
+    // `clashing_jobs` counts nothing for a disabled job, and the job being
+    // activated is disabled until this pick writes it: ask as if it were
+    // already on.
+    let wanted = crate::jobs::Job {
+        name: job.name.clone(),
+        scope: job.scope,
+        spec: crate::jobs::JobSpec {
+            enabled: true,
+            ..job.spec.clone()
+        },
+        source: job.source.clone(),
+        unknown_keys: job.unknown_keys.clone(),
+    };
+    let mut others: Vec<&str> = wanted
+        .clashing_jobs(repo, &jobs)
+        .iter()
+        .map(|other| other.name.as_str())
+        .collect();
+    if others.is_empty() {
+        return None;
+    }
+    // By name, the order the menu and the details pane list them in.
+    others.sort_unstable();
+    let routine = job
+        .relative_target(repo)
+        .unwrap_or_else(|| job.spec.routine.clone());
+    let (run, are, them) = match others.len() {
+        1 => ("runs", "is", "it"),
+        _ => ("run", "are", "them"),
+    };
+    Some(format!(
+        "{} also {run} {routine} and {are} active. Deactivate {them} first, then activate this \
+         one.",
+        others.join(", "),
+    ))
 }
 
 /// One key while browsing: moving, focus, selection and opening the options
@@ -8609,9 +8638,9 @@ fn jobs_on<'a>(
 /// A job whose `routine` is not one of the routines the tab lists: missing,
 /// a task file, a folder inside a routine, or nothing a routine can be. It
 /// fires nowhere, and with no routine row to hang it on it gets a row of
-/// its own under the routines, where its menu can point it at a routine or
-/// delete it. Without that row it could be removed only by editing a store
-/// by hand.
+/// its own under the routines, where its menu's edit job can point it at a
+/// routine. Without that row it could be mended only by editing a store by
+/// hand.
 struct Orphan<'a> {
     job: &'a crate::jobs::Job,
     /// Whether the `routine` names nothing on disk, rather than something
@@ -9020,9 +9049,8 @@ fn two_pane_frame(
 /// group's actions from the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeleteJob`],
-/// [`Mode::DeletePending`], [`Mode::DeletePlan`], [`Mode::NewJob`],
-/// [`Mode::PickRoutine`] — none
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
+/// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`] — none
 /// of the ordinary line's keys is read, so this draws the picker's own key
 /// row instead, the same keys its popup names. A notice is different: it
 /// reads only `enter` to close it, or only `esc` for
@@ -9051,7 +9079,6 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
         Mode::DeleteRoutine { .. }
-        | Mode::DeleteJob { .. }
         | Mode::PickRoutine { .. }
         | Mode::DeletePending { .. }
         | Mode::DeletePlan { .. }
@@ -9188,10 +9215,10 @@ fn fit_keys(row: String, width: usize) -> String {
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
 /// notice opened from it, the options menu opened on it, delete routine's
-/// and delete job's popups, the routine picker, new job's and edit job's
-/// popups and the notice they end on, or the tool-requirements gate or the
-/// issue question a routine submit stopped at. `None` for everything drawn
-/// over the pending screen.
+/// popup, the routine picker, new job's and edit job's popups and the
+/// notice they end on, or the tool-requirements gate or the issue question
+/// a routine submit stopped at. `None` for everything drawn over the
+/// pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
         Mode::Routines(nav)
@@ -9216,7 +9243,6 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             ..
         })
         | Mode::DeleteRoutine { nav, .. }
-        | Mode::DeleteJob { nav, .. }
         | Mode::PickRoutine { nav, .. }
         | Mode::NewJob { nav, .. }
         | Mode::JobSaved { nav, .. } => Some(nav),
@@ -9301,7 +9327,6 @@ fn popup(
         ),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
-        Mode::DeleteJob { job, .. } => Some(super::jobs::delete_panel(&job.name)),
         Mode::PickRoutine {
             job,
             folders,
@@ -22384,9 +22409,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A routine with one job offers edit job, deactivate job, delete job and
-    /// delete routine, and no new job; an inactive job offers activate job in
-    /// place of deactivate job.
+    /// A routine with one job offers edit job, deactivate job and delete
+    /// routine, and neither new job nor delete job; an inactive job offers
+    /// activate job in place of deactivate job.
     #[test]
     fn a_routine_with_one_job_offers_its_job_items_then_delete_routine() {
         use crate::jobs::Scope;
@@ -22399,7 +22424,6 @@ mod tests {
         let items = [
             "│  > edit job  ",
             "│    deactivate job  ",
-            "│    delete job  ",
             "│    delete routine  ",
         ];
         let at: Vec<usize> = items
@@ -22408,6 +22432,7 @@ mod tests {
             .collect();
         assert!(at.is_sorted(), "in the mockup's order: {last}");
         assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("│    activate job"), "{last}");
 
         let mut spec = crate::jobs::load(&repo).unwrap()[0].spec.clone();
@@ -22418,16 +22443,17 @@ mod tests {
         assert!(!last.contains("deactivate job"), "{last}");
     }
 
-    /// A routine two jobs run offers to delete either one by name, sorted
-    /// as the details pane lists them, then delete routine — and nothing
-    /// that would edit or activate one of them into the clash.
+    /// A routine two jobs run offers to switch either one by name —
+    /// activate job for the inactive one, deactivate job for the active
+    /// one — sorted as the details pane lists them, then delete routine,
+    /// and neither edit job nor delete job.
     #[test]
-    fn a_routine_with_two_jobs_offers_to_delete_either_by_name() {
+    fn a_routine_with_two_jobs_offers_to_switch_either_by_name() {
         use crate::jobs::Scope;
         let (repo, _root_guard) = fixture("routine-options-two-jobs");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-b", "nightly");
-        write_job(&repo, Scope::Project, "nightly-a", "nightly");
+        write_inactive_job(&repo, Scope::Project, "nightly-a", "nightly");
         let routines = super::super::routines::list_routines(&repo).unwrap();
         let mut nav = RoutineNav::new();
         nav.folder_cursor = 1;
@@ -22438,16 +22464,34 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "delete job nightly-a",
-                "delete job nightly-b",
+                "activate job nightly-a",
+                "deactivate job nightly-b",
                 "delete routine"
             ]
         );
 
         let last = last_frame(&routines_screen(&repo, "jo")).to_string();
-        assert!(last.contains("│  > delete job nightly-a  "), "{last}");
-        assert!(last.contains("│    delete job nightly-b  "), "{last}");
+        assert!(last.contains("│  > activate job nightly-a  "), "{last}");
+        assert!(last.contains("│    deactivate job nightly-b  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
+        assert!(!last.contains("edit job"), "{last}");
+        assert!(!last.contains("delete job"), "{last}");
+    }
+
+    /// [`write_job`]'s job, written inactive.
+    fn write_inactive_job(repo: &Repo, scope: crate::jobs::Scope, name: &str, routine: &str) {
+        crate::jobs::write(
+            repo,
+            scope,
+            name,
+            &crate::jobs::JobSpec {
+                pipeline: "bugfix".to_string(),
+                routine: routine.to_string(),
+                enabled: false,
+                ..crate::jobs::JobSpec::neutral()
+            },
+        )
+        .unwrap();
     }
 
     /// Stores that will not load hide which jobs the routine has, so its
@@ -22549,36 +22593,116 @@ mod tests {
         );
     }
 
-    /// Delete job asks first: `esc` keeps the job, and every other key
-    /// leaves the popup open. `enter` deletes the job alone, from its own
-    /// store, leaving the routine and every other job.
+    /// Activate job beside an active job on the same routine writes
+    /// nothing and opens a popup naming the active job and what to do
+    /// instead. `enter` closes it onto the routine list.
     #[test]
-    fn delete_job_asks_first_and_deletes_only_the_job() {
+    fn activate_job_beside_an_active_job_is_refused_and_writes_nothing() {
         use crate::jobs::Scope;
-        let (repo, _root_guard) = fixture("routine-delete-job");
+        let (repo, _root_guard) = fixture("routine-activate-clash");
         seed_two_routines(&repo);
-        write_job(&repo, Scope::Project, "nightly-audit", "nightly");
-        write_job(&repo, Scope::User, "weekly-prune", "maintenance");
-
-        let held = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\rynq ")).to_string();
-        assert!(held.contains("─ delete this job "), "{held}");
-        assert!(held.contains("nightly-audit"), "{held}");
-        assert!(held.contains("> delete"), "{held}");
-        assert_eq!(job_names(&repo).len(), 2, "both jobs kept");
-
-        let kept = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\r\x1b")).to_string();
-        assert!(!kept.contains("delete this job"), "{kept}");
-        assert!(kept.contains("─ routines ─"), "{kept}");
-        assert_eq!(job_names(&repo).len(), 2, "both jobs kept");
-
-        let last = last_frame(&routines_screen(&repo, "jo\x1b[B\x1b[B\r\r")).to_string();
-        assert_eq!(job_names(&repo), ["weekly-prune"]);
-        assert!(
-            repo.routines_dir().join("nightly").is_dir(),
-            "the routine stays"
+        write_inactive_job(&repo, Scope::User, "nightly-a", "nightly");
+        write_job(&repo, Scope::Project, "nightly-b", "nightly");
+        let before = (
+            std::fs::read_to_string(repo.user_jobs_file()).unwrap(),
+            std::fs::read_to_string(repo.jobs_file()).unwrap(),
         );
-        assert!(last.contains("─ routines ─"), "{last}");
-        assert!(last.contains("Schedule:    none"), "{last}");
+
+        let last = last_frame(&routines_screen(&repo, "jo\r")).to_string();
+        assert!(last.contains("─ activate job "), "{last}");
+        assert!(
+            last.contains("nightly-b also runs nightly and is active."),
+            "{last}"
+        );
+        assert!(last.contains("Deactivate it first,"), "{last}");
+        assert!(last.contains("then activate this one."), "{last}");
+        let after = (
+            std::fs::read_to_string(repo.user_jobs_file()).unwrap(),
+            std::fs::read_to_string(repo.jobs_file()).unwrap(),
+        );
+        assert_eq!(before, after, "nothing written");
+
+        let closed = last_frame(&routines_screen(&repo, "jo\r\r")).to_string();
+        assert!(!closed.contains("─ activate job "), "{closed}");
+        assert!(closed.contains("─ routines ─"), "{closed}");
+    }
+
+    /// With two other jobs active on the routine, the refusal names both
+    /// and speaks of them in the plural.
+    #[test]
+    fn activate_job_beside_two_active_jobs_names_them_all() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-activate-clash-two");
+        seed_two_routines(&repo);
+        write_inactive_job(&repo, Scope::User, "nightly-a", "nightly");
+        write_job(&repo, Scope::Project, "nightly-c", "nightly");
+        write_job(&repo, Scope::User, "nightly-b", "nightly");
+
+        let job = JobRef {
+            name: "nightly-a".to_string(),
+            scope: Scope::User,
+        };
+        let mode = set_job_enabled(&repo, &RoutineNav::new(), &job, true);
+        let Mode::Outcome { notice, .. } = mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "activate job");
+        assert_eq!(
+            notice.text,
+            "nightly-b, nightly-c also run nightly and are active. Deactivate them first, \
+             then activate this one."
+        );
+        let enabled: Vec<bool> = crate::jobs::load(&repo)
+            .unwrap()
+            .iter()
+            .filter(|job| job.name == "nightly-a")
+            .map(|job| job.spec.enabled)
+            .collect();
+        assert_eq!(enabled, [false], "still inactive");
+    }
+
+    /// The clash check reads the stores again at the pick: a menu opened
+    /// while the other job was inactive still refuses once another hand
+    /// has activated it.
+    #[test]
+    fn activate_job_checks_the_stores_as_they_are_at_the_pick() {
+        use crate::jobs::Scope;
+        let (repo, _root_guard) = fixture("routine-activate-clash-late");
+        seed_two_routines(&repo);
+        write_inactive_job(&repo, Scope::User, "nightly-a", "nightly");
+        write_inactive_job(&repo, Scope::Project, "nightly-b", "nightly");
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut nav = RoutineNav::new();
+        nav.folder_cursor = 1;
+        let jobs = crate::jobs::load(&repo).map_err(|err| format!("{err:#}"));
+        let menu = routine_options(&repo, &pipelines, &routines, &jobs, &nav).unwrap();
+        write_job(&repo, Scope::Project, "nightly-b", "nightly");
+
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+        let mode = picked.run(
+            &[],
+            &routines,
+            &ScreenState::new(),
+            &menu,
+            menu.items[0].clone(),
+        );
+        let Mode::Outcome { notice, .. } = mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "activate job");
+        assert!(
+            crate::jobs::load(&repo)
+                .unwrap()
+                .iter()
+                .any(|job| job.name == "nightly-a" && !job.spec.enabled),
+            "still inactive"
+        );
     }
 
     /// A job gone from its store between `o` and the pick is not written
@@ -22620,18 +22744,31 @@ mod tests {
         assert!(job_names(&repo).is_empty(), "nothing written back");
     }
 
-    /// On a routine two jobs run, each delete job item deletes the job it
-    /// names and leaves the other.
+    /// On a routine two active jobs run, each deactivate job item
+    /// deactivates the job it names, leaves the other active, and deletes
+    /// neither.
     #[test]
-    fn delete_job_by_name_deletes_the_job_it_names() {
+    fn deactivate_job_by_name_deactivates_the_job_it_names() {
         use crate::jobs::Scope;
-        let (repo, _root_guard) = fixture("routine-delete-named-job");
+        let (repo, _root_guard) = fixture("routine-deactivate-named-job");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-b", "nightly");
         write_job(&repo, Scope::Project, "nightly-a", "nightly");
 
-        routines_screen(&repo, "jo\x1b[B\r\r");
-        assert_eq!(job_names(&repo), ["nightly-a"]);
+        routines_screen(&repo, "jo\x1b[B\r");
+        let mut jobs: Vec<(String, bool)> = crate::jobs::load(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|job| (job.name, job.spec.enabled))
+            .collect();
+        jobs.sort();
+        assert_eq!(
+            jobs,
+            [
+                ("nightly-a".to_string(), true),
+                ("nightly-b".to_string(), false)
+            ]
+        );
         assert!(repo.routines_dir().join("nightly").is_dir());
     }
 
@@ -23021,10 +23158,9 @@ mod tests {
         assert!(!last.contains("[x] nightly-old"), "{last}");
     }
 
-    /// `o` on a job row offers edit job and delete job, titled with the
-    /// row's name.
+    /// `o` on a job row offers edit job alone, titled with the row's name.
     #[test]
-    fn o_on_a_job_row_offers_edit_job_and_delete_job() {
+    fn o_on_a_job_row_offers_edit_job_alone() {
         let (repo, _root_guard) = fixture("routines-orphan-menu");
         seed_orphans(&repo);
 
@@ -23033,9 +23169,8 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ nightly-old ")),
             "{last}"
         );
-        let edit = last.find("│  > edit job  ").expect(&last);
-        let delete = last.find("│    delete job  ").expect(&last);
-        assert!(edit < delete, "{last}");
+        assert!(last.contains("│  > edit job  "), "{last}");
+        assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("deactivate job"), "{last}");
         assert!(!last.contains("delete routine"), "{last}");
     }
@@ -23082,19 +23217,6 @@ mod tests {
         assert_eq!(moved.spec.routine, "nightly");
         assert_eq!(moved.spec.schedule, "0 3 * * 1-5");
         assert_eq!(moved.scope, Scope::User);
-    }
-
-    /// Delete job on a job row asks first, then deletes the job, and its row
-    /// goes with it: the cursor moves up onto the row above.
-    #[test]
-    fn delete_job_on_a_job_row_removes_the_job_and_its_row() {
-        let (repo, _root_guard) = fixture("routines-orphan-delete");
-        seed_orphans(&repo);
-
-        let last = last_frame(&routines_screen(&repo, "jjjo\x1b[B\r\r")).to_string();
-        assert_eq!(job_names(&repo), ["nightly-old"]);
-        assert!(!last.contains("nightl…"), "{last}");
-        assert!(last.contains("> nightly-old"), "{last}");
     }
 
     /// A routine with one job draws that job's config, then `tasks` with the
