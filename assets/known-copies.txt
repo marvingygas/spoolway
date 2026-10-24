@@ -367,9 +367,11 @@ skill claude/spoolway-plan/SKILL.md 01767ec2
 skill codex/spoolway-plan/SKILL.md bd9b1bfd
 skill pi/spoolway-plan/SKILL.md 30be166f
 skill claude/spoolway-plan/assets/template.html 3e25629d
+skill claude/spoolway-plan/assets/template.html fd5241e2
 skill claude/spoolway-plan/assets/page.md a1e942fe
 skill claude/spoolway-plan/assets/page.md b0f952fd
 skill claude/spoolway-plan/assets/page.md 1c317f6c
+skill claude/spoolway-plan/assets/page.md b32bdfb5
 skill claude/spoolway-tasks/SKILL.md 3057c9dc
 skill codex/spoolway-tasks/SKILL.md 12131156
 skill pi/spoolway-tasks/SKILL.md c49d25fd
@@ -393,6 +395,7 @@ skill claude/spoolway-tasks/SKILL.md ca106147
 skill claude/spoolway-tasks/SKILL.md 7b337733
 skill claude/spoolway-tasks/SKILL.md ccd173ff
 skill claude/spoolway-tasks/SKILL.md c3eba417
+skill claude/spoolway-tasks/SKILL.md 309df1df
 skill codex/spoolway-tasks/SKILL.md 78ad8022
 skill codex/spoolway-tasks/SKILL.md 2bdc759e
 skill codex/spoolway-tasks/SKILL.md 8517f1b0
@@ -403,6 +406,7 @@ skill codex/spoolway-tasks/SKILL.md 7eaee952
 skill codex/spoolway-tasks/SKILL.md 3a4bebee
 skill codex/spoolway-tasks/SKILL.md a47f5137
 skill codex/spoolway-tasks/SKILL.md dd7ea406
+skill codex/spoolway-tasks/SKILL.md c5456ebd
 skill pi/spoolway-tasks/SKILL.md 015571d1
 skill pi/spoolway-tasks/SKILL.md 1e5d7381
 skill pi/spoolway-tasks/SKILL.md 6e0fe747
@@ -411,12 +415,16 @@ skill pi/spoolway-tasks/SKILL.md 6704ee01
 skill pi/spoolway-tasks/SKILL.md b8ad9314
 skill pi/spoolway-tasks/SKILL.md 811e6261
 skill pi/spoolway-tasks/SKILL.md 72c73604
+skill pi/spoolway-tasks/SKILL.md dfdb6672
 skill claude/spoolway-plan/SKILL.md bd6fa45e
 skill claude/spoolway-plan/SKILL.md 95d566c6
 skill claude/spoolway-plan/SKILL.md b4b66867
+skill claude/spoolway-plan/SKILL.md 3d928b02
 skill codex/spoolway-plan/SKILL.md 56e423eb
 skill codex/spoolway-plan/SKILL.md c988c730
 skill codex/spoolway-plan/SKILL.md 42d7a192
+skill codex/spoolway-plan/SKILL.md d4ea7213
 skill pi/spoolway-plan/SKILL.md b19277cf
 skill pi/spoolway-plan/SKILL.md 0dae9e81
 skill pi/spoolway-plan/SKILL.md 26fb5b03
+skill pi/spoolway-plan/SKILL.md 2f36eb02
