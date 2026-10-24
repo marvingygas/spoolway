@@ -1,10 +1,7 @@
 {
   "name": "spoolway",
-  "version": "0.14.1",
-  "os": [
-    "linux",
-    "darwin"
-  ],
+  "version": "0.1.0",
+  "os": ["linux", "darwin"],
   "description": "spoolway is a descriptive agent workflow builder run by a minimal command line state machine",
   "keywords": [
     "agent",
@@ -25,15 +22,11 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@spoolway/linux-x64": "0.14.1",
-    "@spoolway/linux-arm64": "0.14.1",
-    "@spoolway/linux-x64-musl": "0.14.1",
-    "@spoolway/linux-arm64-musl": "0.14.1",
-    "@spoolway/darwin-arm64": "0.14.1",
-    "@spoolway/darwin-x64": "0.14.1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/marvingygas/spoolway.git"
+    "@spoolway/linux-x64": "0.1.0",
+    "@spoolway/linux-arm64": "0.1.0",
+    "@spoolway/linux-x64-musl": "0.1.0",
+    "@spoolway/linux-arm64-musl": "0.1.0",
+    "@spoolway/darwin-arm64": "0.1.0",
+    "@spoolway/darwin-x64": "0.1.0"
   }
 }
