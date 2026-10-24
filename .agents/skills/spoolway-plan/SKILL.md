@@ -165,10 +165,11 @@ day it changes; a path stays true. Name the file that already holds the ground n
    already been cut from the shape being revised. Rewrite the plan block too, the same pass, per
    "The machine copy". A new plan's first copy skips all of this.
 
-6. **Open it, say one line, and ask.** Use `open` on macOS, `wslview` on WSL, and
-   `xdg-open` on other Linux. You are on WSL when `/proc/sys/kernel/osrelease` contains
-   `microsoft`. Do not take the first of them that exists. On Debian and Ubuntu, `open` is
-   `openvt`. Then the path and nothing else: `Plan is ready: /abs/path/to/page`.
+6. **Open it, say one line, and ask.** After a new plan's first fill, open the page. Use
+   `open` on macOS, `wslview` on WSL, and `xdg-open` on other Linux. You are on WSL when
+   `/proc/sys/kernel/osrelease` contains `microsoft`. Do not take the first of them that
+   exists. On Debian and Ubuntu, `open` is `openvt`. Then the path and nothing else:
+   `Plan is ready: /abs/path/to/page`.
 
    **Then put the approval to them, with request_user_input, in the same turn** — never skipped,
    never replaced by an inviting sentence: a session that publishes and stops has handed
@@ -176,7 +177,9 @@ day it changes; a path stays true. Name the file that already holds the ground n
    tasks for this plan?* — three answers: **Cut them now** (step 7, this session), **Revise it
    first** (step 5, question returns once landed), or **Leave it for now** (nothing cut).
 
-   **Only the first time for the line** — a revision repeats the line and the question.
+   **A revision opens nothing.** Every open command makes a new browser tab. Say
+   `Plan is revised, reload its tab: /abs/path/to/page` instead, and ask the same question
+   in the same turn. If they say the tab is closed, or ask to see the page, open it again.
 
 7. **Cut the tasks — only once approved**, step 6's question coming back *cut them now*, or
    step 3's answer skipping the page — never assumed from the page simply existing.
