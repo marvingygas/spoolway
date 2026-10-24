@@ -1906,8 +1906,12 @@ spoolway update
 ```
 
 The binary is only updated where npm installed it. A running dispatcher stops the install.
-`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
-not answer in time, `update` uses the last known version and carries on.
+On an npm install, `update` asks npm which release is out each time it runs. The wait is
+bounded. If npm does not answer in time, `update` uses the last known version and carries on.
+
+On a binary npm did not install, `update` starts no process. It prints its own version and the
+install line `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh`,
+then exits 0.
 
 ### `spoolway sync`
 
