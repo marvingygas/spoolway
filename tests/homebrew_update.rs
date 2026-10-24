@@ -24,7 +24,35 @@ const CHECKING: &str = "Checking Homebrew for a newer spoolway...\n";
 
 const INSTALLING: &str = "Installing spoolway 99.1.2\n  brew upgrade marvingygas/tap/spoolway\n\n";
 
+/// Held while an executable is being written and while a process is being
+/// started. A process forked in one test thread while another is writing an
+/// executable inherits that file's open descriptor until it execs, and the
+/// writer's own exec of the file then fails with "Text file busy".
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Start `command` under [`SPAWN`].
+fn launch(command: &mut Command) -> Child {
+    let _guard = spawn_guard();
+    command.spawn().unwrap()
+}
+
+/// Run `command` to the end with stdout and stderr captured.
+fn output_of(command: &mut Command) -> Output {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    launch(command).wait_with_output().unwrap()
+}
+
 fn fake(path: &Path, body: &str) {
+    let _guard = spawn_guard();
     std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -96,7 +124,10 @@ impl Install {
             ),
         );
         let cellar_exe = cellar_bin.join("spoolway");
-        std::fs::copy(env!("CARGO_BIN_EXE_spoolway"), &cellar_exe).unwrap();
+        {
+            let _guard = spawn_guard();
+            std::fs::copy(env!("CARGO_BIN_EXE_spoolway"), &cellar_exe).unwrap();
+        }
         Install {
             root,
             project,
@@ -105,7 +136,7 @@ impl Install {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command(&[], args).output().unwrap()
+        output_of(&mut self.command(&[], args))
     }
 
     /// The Cellar binary with `args`, with `first` and then `<root>/bin` ahead
@@ -194,11 +225,7 @@ fn update_on_a_homebrew_binary_upgrades_through_brew_and_hands_over() {
 #[test]
 fn update_on_a_homebrew_binary_refuses_while_a_dispatcher_runs() {
     let install = Install::new("homebrew-refused", Upgrade::Works);
-    let mut holder: Child = Command::new("sleep")
-        .arg("60")
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut holder: Child = launch(Command::new("sleep").arg("60").stdin(Stdio::null()));
     install.hold_dispatch_lock(holder.id());
     let output = install.run(&["update"]);
     let _ = holder.kill();
@@ -265,10 +292,7 @@ fn update_on_a_homebrew_binary_refuses_a_stale_spoolway_first_on_path() {
             install.root.join("stale-handed-over").display()
         ),
     );
-    let output = install
-        .command(std::slice::from_ref(&stale), &["update"])
-        .output()
-        .unwrap();
+    let output = output_of(&mut install.command(std::slice::from_ref(&stale), &["update"]));
 
     assert_eq!(output.status.code(), Some(1), "stdout: {}", stdout(&output));
     let stderr = stderr(&output);
@@ -305,13 +329,13 @@ fn ctrl_c_during_the_lookup_stops_brew_update_too() {
 
     let install = Install::new("homebrew-interrupted", Upgrade::Works);
     std::fs::write(install.root.join("update-hangs"), "").unwrap();
-    let mut update = install
-        .command(&[], &["update"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut update = launch(
+        install
+            .command(&[], &["update"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let fetch_pid_file = install.root.join("update-fetch.pid");
     assert!(
         within(20, || fetch_pid_file.exists()),
@@ -348,6 +372,53 @@ fn ctrl_c_during_the_lookup_stops_brew_update_too() {
     }
     assert!(left, "brew update's fetch outlived spoolway's Ctrl-C");
     assert_eq!(install.brew_calls(), "update\n");
+}
+
+/// A process started with Ctrl-C ignored, as a background job or `nohup` has
+/// it, is left alone by it: `spoolway` does not stop `brew update`, and does
+/// not end, on a signal it was started to ignore.
+#[test]
+fn an_ignored_ctrl_c_does_not_stop_the_lookup() {
+    use std::os::unix::process::CommandExt;
+
+    let install = Install::new("homebrew-ignored-interrupt", Upgrade::Works);
+    std::fs::write(install.root.join("update-hangs"), "").unwrap();
+    let mut command = install.command(&[], &["update"]);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: `signal` is async-signal-safe, and runs between fork and exec.
+    // An ignored disposition survives the exec.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let mut update = launch(&mut command);
+    let fetch_pid_file = install.root.join("update-fetch.pid");
+    assert!(
+        within(20, || fetch_pid_file.exists()),
+        "brew update never started its fetch"
+    );
+    let fetch: libc::pid_t = std::fs::read_to_string(&fetch_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // SAFETY: `kill` has no memory-safety preconditions.
+    unsafe { libc::kill(update.id() as libc::pid_t, libc::SIGINT) };
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let still_running = matches!(update.try_wait(), Ok(None));
+    // SAFETY: as above; the test cleans up what it started.
+    unsafe {
+        libc::kill(update.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(fetch, libc::SIGKILL);
+    }
+    let _ = update.wait();
+    assert!(still_running, "an ignored Ctrl-C ended spoolway update");
 }
 
 /// Whether `done` holds within `seconds`, asking every 20 ms.

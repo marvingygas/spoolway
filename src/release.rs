@@ -616,32 +616,26 @@ extern "C" fn record_ending(signal: libc::c_int) {
 /// ends `spoolway` and leaves `brew update` and its tap fetches running in
 /// their own group, holding brew's update lock.
 ///
-/// [`Interrupts::end`] puts back what was there before and raises the signal
-/// again, so the process ends as the signal would have ended it. Dropping it
-/// unraised only puts back what was there.
+/// A signal the process started with ignored stays ignored, see
+/// [`crate::platform::SignalGuard`], so it never reaches [`Interrupts::caught`].
+/// `SA_RESTART` is set because nothing here wants a blocked call failed: the
+/// loop in [`status_within`] polls.
 struct Interrupts {
     #[cfg(unix)]
-    previous: [libc::sigaction; 3],
+    /// Held for its `Drop`, which puts the old handlers back.
+    _restores: crate::platform::SignalGuard,
 }
 
 impl Interrupts {
     #[cfg(unix)]
     fn catch() -> Interrupts {
         CAUGHT.store(0, std::sync::atomic::Ordering::SeqCst);
-        // SAFETY: `action` and `previous` are plain-old-data structs this
-        // function owns; `sigemptyset` and `sigaction` only read and write
-        // them. The handler only stores to an atomic, which is
-        // async-signal-safe.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record_ending as *const () as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            action.sa_flags = libc::SA_RESTART;
-            let mut previous: [libc::sigaction; 3] = std::mem::zeroed();
-            for (signal, previous) in ENDING_SIGNALS.iter().zip(previous.iter_mut()) {
-                libc::sigaction(*signal, &action, previous);
-            }
-            Interrupts { previous }
+        Interrupts {
+            _restores: crate::platform::SignalGuard::catch(
+                &ENDING_SIGNALS,
+                libc::SA_RESTART,
+                record_ending,
+            ),
         }
     }
 
@@ -663,27 +657,29 @@ impl Interrupts {
         None
     }
 
-    /// Put back what was there before and raise `signal` again.
-    fn end(self, signal: i32) {
-        drop(self);
+    /// Put back what was there before, and if a signal was caught at any point
+    /// until then, raise it again so the process ends as it would have. `true`
+    /// when one was caught.
+    ///
+    /// The handlers go back first and the check comes after, so a signal that
+    /// lands in between is either seen here or goes to the old handler
+    /// itself. A check made before putting them back could miss one that
+    /// arrives just after it, and the person's Ctrl-C would be lost.
+    fn end(self) -> bool {
         #[cfg(unix)]
-        // SAFETY: `raise` has no memory-safety preconditions.
-        unsafe {
-            libc::raise(signal);
+        {
+            drop(self);
+            match CAUGHT.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => false,
+                signal => {
+                    // SAFETY: `raise` has no memory-safety preconditions.
+                    unsafe { libc::raise(signal) };
+                    true
+                }
+            }
         }
         #[cfg(not(unix))]
-        let _ = signal;
-    }
-}
-
-impl Drop for Interrupts {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        for (signal, previous) in ENDING_SIGNALS.iter().zip(self.previous.iter()) {
-            // SAFETY: restoring exactly what `catch` read off `sigaction`,
-            // on the same signal, unmodified.
-            unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
-        }
+        false
     }
 }
 
@@ -696,28 +692,32 @@ impl Drop for Interrupts {
 fn status_within(command: &mut Command, deadline: Duration) -> Option<std::process::ExitStatus> {
     let interrupts = Interrupts::catch();
     let Some(mut child) = start_in_own_group(command) else {
-        if let Some(signal) = interrupts.caught() {
-            interrupts.end(signal);
-        }
+        interrupts.end();
         return None;
     };
     let end = std::time::Instant::now() + deadline;
-    loop {
-        if let Some(signal) = interrupts.caught() {
+    let status = loop {
+        if interrupts.caught().is_some() {
             stop(&mut child);
-            interrupts.end(signal);
-            return None;
+            break None;
         }
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => break Some(status),
             Ok(None) if std::time::Instant::now() < end => {
                 std::thread::sleep(Duration::from_millis(25));
             }
             _ => {
                 stop(&mut child);
-                return None;
+                break None;
             }
         }
+    };
+    // Checked on every way out, so a signal that lands just as the child
+    // finishes is not lost either. If the old handler returns, the run
+    // counts as interrupted and answers `None`.
+    match interrupts.end() {
+        true => None,
+        false => status,
     }
 }
 
