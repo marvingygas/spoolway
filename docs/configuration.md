@@ -12,7 +12,7 @@ uses is written in the pipeline file. See [Pipelines](pipelines.md).
 ## Editing it
 
 ```
-spoolway config contract       # every setting, its values and its default
+spoolway config contract       # every setting, its values and one sentence
 spoolway config edit           # open the file in $VISUAL, $EDITOR or vim, checked on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`
@@ -21,7 +21,7 @@ spoolway config get agents.pi.kind
 spoolway config set models.claude-opus-5.input 5.0
 ```
 
-The top of the file holds a table of every key, its values and its default. `config set`
+The top of the file holds a table of every key, its values and one sentence. `config set`
 changes one key and leaves every other byte alone. A file with CRLF line endings keeps them, so
 one `config set` changes one line. A comment after the value stays. Setting a key to the value it
 already holds changes no byte. A key of a `[models]` row written as an inline table, such as
