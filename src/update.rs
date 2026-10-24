@@ -3,8 +3,8 @@
 //! This used to also bring a project's own files forward: `config.toml`,
 //! pipeline key references, skills. That half moved to [`crate::sync`], and
 //! what is left here is a fact about this machine rather than about any
-//! project — which release npm has, whether this install can take it, and
-//! whether a dispatcher is running the file this would replace. None of that
+//! project — which release npm has, whether npm installed this binary at all,
+//! and whether a dispatcher is running the file this would replace. None of that
 //! needs a `.spoolway/` directory anywhere above the current one, so this
 //! runs from any directory, project or not — the one command besides
 //! `spoolway init` that does.
@@ -123,9 +123,21 @@ where
             Ok(Some(hand_over(&relaunch(cwd), &version)?))
         }
 
-        // The whole reason a channel is resolved before anything is said: an
-        // install npm cannot reach is told how it is upgraded instead of being
-        // handed a command that would refuse.
+        // The whole reason a channel is resolved before anything is said: a
+        // binary npm did not install is told the install line instead of being
+        // handed an npm command that would not replace it. Nothing has been
+        // installed, so no sync reminder follows.
+        Upgrade::Standalone => {
+            println!(
+                "This spoolway ({}) was not installed by npm, so it does not",
+                crate::release::current()
+            );
+            println!("update itself. To get the latest release, run the install line again:");
+            println!();
+            println!("  {}", crate::release::INSTALL_LINE);
+            Ok(None)
+        }
+
         Upgrade::Unmanaged(version) => {
             println!(
                 "spoolway {version} is out. This binary was not installed by npm, so upgrade it"
@@ -188,6 +200,11 @@ mod tests {
         let cwd = crate::scratch::root("update-upgrade-outcomes");
         assert!(
             install_upgrade(&cwd, Upgrade::Current, |_, _| panic!("no handover"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            install_upgrade(&cwd, Upgrade::Standalone, |_, _| panic!("no handover"))
                 .unwrap()
                 .is_none()
         );
