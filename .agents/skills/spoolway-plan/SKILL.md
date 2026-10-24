@@ -58,8 +58,8 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
-| **Context** | The outcome this plan means to produce, in one sentence a person can approve or reject, then what is true today and the pressure on it, in two or three sentences — the page's lead, with nothing above it but the name, the tagline and the path. |
-| **Decisions** | One record per decision, each led by a figure, then one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
+| **Context** | One block of at most three sentences. It opens on the outcome this plan means to produce, in a sentence a person can approve or reject. Then it says what is true today and the pressure on it. Below it, a list of every path the plan touches. It is the page's lead, with nothing above it but the name, the tagline and the path. |
+| **Decisions** | One record per decision: a heading, one paragraph, one figure and a change line. The paragraph says why this is a choice and what to look at in the figure, in at most four sentences. The change line is one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
 **The page ends at the Mockup.** The breakdown is not on it: a task is written into
 the pending directory at step 7, and the page argues the shape those tasks were cut from.
@@ -69,22 +69,23 @@ Same headings, order and words on every plan.
 "Ownership moves to the run, not the task" is. The markup mechanics of a record live in
 `assets/page.md`, not here.
 
-## Draw first, then write the caption
+## Draw first, then write the paragraph
 
 **The reader is an architect, not a compiler**, approving a shape rather than reviewing a
 patch, with no source in their head — argue in drawings and the artifacts a person opens, never
 in prose about functions and line edits.
 
-- **Every record has a figure, explained only after it**: forces, figure, what it doesn't show —
-  nothing after re-explains it in words. Show code freely as supporting material
-  under it, never first, never alone.
+- **Every record has a figure.** Show code freely as supporting material under it, never first,
+  never alone.
 - **A decision that changes how the system behaves today is drawn before and after**:
   today's artifact in the `was` panel, the proposed one under it. A new feature has no before,
   so it takes the after panel or a drawing alone — never an invented before.
 - **A figure is drawn from the vocabulary in `assets/page.md`**, which names every class and the
   three grounds — themed, lit, and `.raw` for a figure that is somebody else's product screen.
   A screen goes in `.raw` and paints its own colours; a diagram never does.
-- **Four sentences per record before the change line.**
+- **One paragraph per record, before the figure.** It says why this is a choice and what to look
+  at in the figure, in at most four sentences. The figure has no caption, and no paragraph follows
+  it.
 - **Every record ends on one highlighted sentence stating the change that will now happen** —
   what is different once it lands, never a restatement of the choice.
 - **The mockup section carries headings and figures, nothing else** — a two-or-three-word `h3`
@@ -106,7 +107,7 @@ in prose about functions and line edits.
 
 **Write in plain English.** One thing per sentence, in the shortest words that carry it.
 No story, no build-up, no buzzwords, and no reaching verbs — "reads", "writes", "moves", never
-"orchestrates", "leverages", "unlocks". A caption a tired reader gets on one pass.
+"orchestrates", "leverages", "unlocks". A paragraph a tired reader gets on one pass.
 
 Catch the paragraph that defends a decision instead of stating it ("this matters because…") in
 your own draft, and draw the mechanism rather than narrating it. Verbosity's home is the
@@ -114,7 +115,8 @@ task written later, not this page: terse here, complete in the task.
 
 **Reference, never restate.** A paragraph explaining how the system works today is stale the
 day it changes; a path stays true. Name the file that already holds the ground needed, in the
-`refs` list on context and on each record.
+path list under Context. Every path the plan touches is listed there once. No record has a
+list of its own.
 
 ## Procedure
 
@@ -165,10 +167,11 @@ day it changes; a path stays true. Name the file that already holds the ground n
    already been cut from the shape being revised. Rewrite the plan block too, the same pass, per
    "The machine copy". A new plan's first copy skips all of this.
 
-6. **Open it, say one line, and ask.** Use `open` on macOS, `wslview` on WSL, and
-   `xdg-open` on other Linux. You are on WSL when `/proc/sys/kernel/osrelease` contains
-   `microsoft`. Do not take the first of them that exists. On Debian and Ubuntu, `open` is
-   `openvt`. Then the path and nothing else: `Plan is ready: /abs/path/to/page`.
+6. **Open it, say one line, and ask.** After a new plan's first fill, open the page. Use
+   `open` on macOS, `wslview` on WSL, and `xdg-open` on other Linux. You are on WSL when
+   `/proc/sys/kernel/osrelease` contains `microsoft`. Do not take the first of them that
+   exists. On Debian and Ubuntu, `open` is `openvt`. Then the path and nothing else:
+   `Plan is ready: /abs/path/to/page`.
 
    **Then put the approval to them, with request_user_input, in the same turn** — never skipped,
    never replaced by an inviting sentence: a session that publishes and stops has handed
@@ -176,7 +179,9 @@ day it changes; a path stays true. Name the file that already holds the ground n
    tasks for this plan?* — three answers: **Cut them now** (step 7, this session), **Revise it
    first** (step 5, question returns once landed), or **Leave it for now** (nothing cut).
 
-   **Only the first time for the line** — a revision repeats the line and the question.
+   **A revision opens nothing.** Every open command makes a new browser tab. Say
+   `Plan is revised, reload its tab: /abs/path/to/page` instead, and ask the same question
+   in the same turn. If they say the tab is closed, or ask to see the page, open it again.
 
 7. **Cut the tasks — only once approved**, step 6's question coming back *cut them now*, or
    step 3's answer skipping the page — never assumed from the page simply existing.
