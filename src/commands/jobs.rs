@@ -614,10 +614,17 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Some(at) => at.format("%a %-d %b %H:%M").to_string(),
         None => "never".to_string(),
     };
+    // Edit job keeps an inactive job inactive, and its routine's menu then
+    // offers activate job, not deactivate job, so the notice names that.
+    let toggle = if draft.enabled {
+        "deactivate"
+    } else {
+        "activate"
+    };
     Notice::new(
         "job saved",
         format!(
-            "{} runs {when}, on {}.\nNext: {next}.\nEdit or deactivate it with o on its routine.",
+            "{} runs {when}, on {}.\nNext: {next}.\nEdit or {toggle} it with o on its routine.",
             draft.name(),
             draft.pipeline,
         ),
@@ -1205,6 +1212,23 @@ mod tests {
         let text = saved_notice(&draft).text;
         assert!(
             text.starts_with("audit runs at midnight, on bugfix.\n"),
+            "{text}"
+        );
+    }
+
+    /// An inactive job saved through edit job stays inactive, so "job
+    /// saved" points at activate job, the item its routine's menu offers.
+    #[test]
+    fn saved_notice_names_activate_for_an_inactive_job() {
+        let mut draft = Draft::new(&Pipelines::builtin());
+        draft.routine = "nightly".to_string();
+        draft.pipeline = "bugfix".to_string();
+        draft.schedule = "0 3 * * *".to_string();
+        draft.enabled = false;
+
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.ends_with("\nEdit or activate it with o on its routine."),
             "{text}"
         );
     }
