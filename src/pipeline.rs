@@ -1245,6 +1245,12 @@ fn end_message(step_id: &str) -> String {
 /// parked on, and an unattended run staffs it with a lane instead of a
 /// person, so a pass written to land there strands the task. `gate: true`
 /// holds the same pass for a person and keeps where it was headed.
+/// A `gate:` that names none of the three outcomes. Shared with
+/// `pipeline override --set`, which refuses it before writing a patch.
+pub(crate) fn unknown_gate_message(step_id: &str, raw: &str) -> String {
+    format!("step `{step_id}` declares `gate: {raw}` — `gate:` is `on_pass`, `on_fail` or `always`")
+}
+
 fn on_pass_blocked_message(step_id: &str) -> String {
     format!("step `{step_id}` has on_pass: blocked — use gate: true to stop for a person")
 }
@@ -1441,11 +1447,7 @@ impl Pipeline {
 
         for step in &self.steps {
             match &step.gate {
-                Some(GateOn::Other(raw)) => bail!(
-                    "step `{}` declares `gate: {raw}` — `gate:` is `on_pass`, `on_fail` or \
-                     `always`",
-                    step.id
-                ),
+                Some(GateOn::Other(raw)) => bail!(unknown_gate_message(&step.id, raw)),
                 // A fail that goes where a block goes is never offered to the
                 // lane (see `compose::report_contract`), so nothing could ever
                 // reach this gate.

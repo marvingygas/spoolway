@@ -1376,6 +1376,14 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     let mut probe = step.clone();
     crate::overrides::apply_step_patch(&mut probe, &fields)
         .with_context(|| format!("`{key}` on step `{step_id}` of pipeline `{name}`"))?;
+    // `apply_step_patch` keeps an unknown `gate:` so that load can refuse it
+    // naming the step; refused here too, so it is never written.
+    if let Some(crate::pipeline::GateOn::Other(raw)) = &probe.gate {
+        bail!(
+            "{} (pipeline `{name}`)",
+            crate::pipeline::unknown_gate_message(step_id, raw)
+        );
+    }
 
     // `session: false` on `blocked` cannot be told apart from the key being
     // left out, so load fills it back in from `[unattended]`. Written anyway,
@@ -5968,6 +5976,34 @@ mod tests {
                     .is_none(),
                 "nothing should be written on a refusal"
             );
+        });
+    }
+
+    /// A `gate:` value load would refuse is refused before the patch is
+    /// written, naming the step and the three values.
+    #[test]
+    fn pipeline_override_refuses_a_gate_load_would_refuse() {
+        with_repo_and_pipeline("bad-gate", "demo", DEMO_PIPELINE, |repo| {
+            let step = Pipelines::load_tracked(&repo.checkout, &repo.config)
+                .unwrap()
+                .pipelines["demo"]
+                .steps[0]
+                .id
+                .clone();
+            let err = pipeline_override(repo, "demo", &format!("{step}.gate=nope")).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&format!("step `{step}` declares `gate: nope`"))
+                    && msg.contains("`on_pass`, `on_fail` or `always`"),
+                "{msg}"
+            );
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "nothing should be written on a refusal"
+            );
+            pipeline_override(repo, "demo", &format!("{step}.gate=always")).unwrap();
         });
     }
 
