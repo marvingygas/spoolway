@@ -1,7 +1,6 @@
 # Full reference: docs/configuration.md
 #
 # Key                                     Values               Default                                                 Meaning
-# dispatch.backend                        herdr, headless      herdr                                                   Where lanes run: a real pane you can watch. `headless` is spoolway's own test backend, refused unless SPOOLWAY_TEST_BACKEND is set.
 # dispatch.lane_quiet                     <duration>           15m                                                     How long a lane may say nothing before the dispatcher reminds it to report. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets.
 # dispatch.auto_commit                    true, false          true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                       group, any, reserve  group                                                   Whether a free slot is filled from every ready task, from the group already landing first, or kept for a started group until it is done.
@@ -43,7 +42,6 @@
 # models.<glob>.local                     true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` silences doctor's note that it should probably say so.
 
 [dispatch]
-backend = "herdr"
 lane_quiet = "15m"
 auto_commit = true
 priority = "group"
