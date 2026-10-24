@@ -1820,8 +1820,8 @@ pub struct PromptContractArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Print the config format: every setting, its values, its default and
-    /// one sentence — rendered from the same register `config.toml`'s own
+    /// Print the config format: every setting, its values and one
+    /// sentence — rendered from the same register `config.toml`'s own
     /// header table writes, so a setting is documented once.
     Contract,
 
