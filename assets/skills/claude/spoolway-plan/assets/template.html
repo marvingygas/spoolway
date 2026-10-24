@@ -137,6 +137,7 @@ body {
   border-radius: 3px; padding: 0.3rem 0.6rem; cursor: pointer;
 }
 .theme:hover { color: var(--accent); border-color: var(--accent); }
+.tools { display: flex; gap: 0.5rem; }
 
 .doc { display: flex; flex-direction: column; gap: 2rem; min-width: 0; }
 .doc > p, .doc > h1, .doc > h2 { max-width: var(--measure); }
@@ -268,12 +269,6 @@ th, td { text-align: left; padding: 0.6rem 1rem 0.6rem 0; border-bottom: 1px sol
 th { font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
 td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
-.close {
-  border-left: 2px solid var(--accent); padding: 0.85rem 1.1rem;
-  background: var(--surface); border-radius: 0 4px 4px 0;
-  max-width: var(--measure); display: flex; flex-direction: column; gap: 0.3rem;
-}
-
 .key { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; font-size: 0.8rem; color: var(--ink-soft); }
 .key span { display: inline-flex; align-items: center; gap: 0.45rem; }
 .key i { width: 1.5rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
@@ -298,7 +293,10 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
          src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFHUlEQVR4nO3ZQQ6cMBAAQRPx/y+TP8RRz1quuiMGrxfU8loAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACstdYzPQAAXOrbvN43HDjSn+kBAACAewgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AWuubHuByz/QAAADcwwkIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAAJl3eoC11rN5/Xf4/Xftzn+66fXfdfr+23X6/p1ef+u35/T1mzb9/Z12+vPf/v+7/fcbnd8JCAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZd3qAH/BtXv8M3/900+t/u+n1m/79p++/a3r+6fvvOn1+2DG9f/3/LuYEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AD3g2r//+yxT3On39d+cH4N/svv9vf39Pfz+5mBMQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADLv9AA/4Nu8/hm+/+1213/X9P7ZNb3/pp8fmDP9/px+/+2aXr9d0+t/+/4Z5QQEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgMwzPcBa65se4HLTe+D03//09Zue/3TT+/f03+/29Tv9+W9//5z+/NP7b9f0+k07ev85AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAg80wPAGz5Nq/3DgCA8xz9/XcCAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEDmnR4AAABi3/QAm57pAXY4AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA2F86xDFKC/+bxQAAAABJRU5ErkJggg==">
     <img class="brand on-dark" alt="spoolway"
          src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFvUlEQVR4nO3ZQY6kMBAAQVjx/y+zf5gaZY1FxB1RbdyglO/3fS8AAIDCv+0BAACA7xAgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZZ3sAAPiod3j9/StTAMScgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQebYHuK7r3R7g4+7tAQAA+A4nIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABknu0Bruu6h9e/h99/ajr/6bbXf+r0/Td1+v7dXn/rN3P6+m3b/v5uO/33f/3/9/Xntzq/ExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMs/2AH/AO7z+Xr7/6bbX/+u212/7+W/ff2p7/u37T50+P0xs71//vw9zAgIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABA5tke4A+4h9e/vzLFd52+/tP5AfiZ6fv/6+/v7e8nH+YEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMsz3AH/AOr7+X7/910/Wf2t4/U9v7b/v3A3u235/b77+p7fWb2l7/r++fVU5AAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMg82wNc1/VuDzC0Pf/0/vevTPFz2+s3tb1+U6fPPzX9/dv7d/v5Wb9dp7//T7//6ft3e/7Tbe/fo5+fExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMvf7vtszAD83/QPfvzIFAFA6+vvvBAQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAzLM9AAAAxN7tAYbu7QEmnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkHm2BwBG7u0BAOBAvp+LnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkPkP8XI3z5HYan4AAAAASUVORK5CYII=">
-    <button class="theme" type="button" data-theme-toggle>Switch theme</button>
+    <div class="tools">
+      <button class="theme" type="button" data-theme-toggle>Switch theme</button>
+      <button class="theme" type="button" data-reload>Reload</button>
+    </div>
     <div>
       <p class="eyebrow">Plan</p>
       <div class="name">
@@ -449,13 +447,6 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
     </div>
 
-
-    <div class="close">
-      <p class="eyebrow">Next step</p>
-      <p>Once this is approved, say so to cut the tasks. They are written as tasks
-      beside this page, and the board is what sends them.</p>
-    </div>
-
   </main>
 </div>
 
@@ -465,9 +456,10 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 </script>
 
 <script>
-// The only script in the file, with two jobs for someone reading it off disk,
+// The only script in the file, with three jobs for someone reading it off disk,
 // where there is no host application to ask. The theme switch falls back to the
-// OS preference. The copy button puts the plan's name on the clipboard.
+// OS preference. The reload button reads the file from disk again. The copy
+// button puts the plan's name on the clipboard.
 (function () {
   var root = document.documentElement;
   try {
@@ -486,6 +478,9 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('spoolway-plan-theme', next); } catch (e) {}
   });
+
+  var reload = document.querySelector('[data-reload]');
+  if (reload) reload.addEventListener('click', function () { location.reload(); });
 
   var copy = document.querySelector('[data-copy-name]');
   var slug = document.querySelector('.rail .slug');
