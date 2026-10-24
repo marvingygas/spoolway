@@ -273,16 +273,11 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
 /// A binary npm did not install answers `None` before it reads anything, so
 /// the refresh child, and the `npm view` behind it, never start for it.
 pub fn newer() -> Option<String> {
-    newer_on(Channel::detect())
+    newer_at(Channel::detect(), cache_path())
 }
 
-/// [`newer`] for a given channel, so a test can pick one without the real
-/// executable's path.
-fn newer_on(channel: Channel) -> Option<String> {
-    newer_at(channel, cache_path())
-}
-
-/// [`newer_on`] against a cache file handed in, so a test can seed one without
+/// [`newer`] for a given channel and cache file, so a test can pick the
+/// channel without the real executable's path and seed a cache without
 /// setting the process-global state directory other tests read.
 fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
     if channel == Channel::Other {
