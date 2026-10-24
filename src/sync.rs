@@ -3947,6 +3947,34 @@ mod tests {
         assert!(refusals(&outcomes).is_empty());
     }
 
+    /// A config written before the cache-lifetime example was reworded opens
+    /// it with the old two lines. `sync` leaves one example, under the new
+    /// header, rather than the old one beside a new one.
+    #[test]
+    fn a_config_with_the_old_cache_example_header_ends_with_one_example() {
+        let (repo, _root_guard) = fixture("config-old-cache-header");
+        let path = crate::config::Config::path_in(&repo.root);
+        let shipped_0_14_0 = include_str!("../scripts/e2e/fixtures/0.14.0/.spoolway/config.toml");
+        let old = "# How long a session's prompt cache is trusted to stay warm.\n\
+                   # Unset means no limit. Uncomment a row to choose one.\n";
+        assert!(shipped_0_14_0.contains(old));
+        std::fs::write(&path, shipped_0_14_0).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        let new = "# Start a fresh conversation when the last reply is older than this.\n\
+                   # Remove the # from a line below to turn it on.\n";
+        assert_eq!(after.matches(new).count(), 1, "{after}");
+        assert!(!after.contains(old), "{after}");
+        assert_eq!(
+            after.matches("# [models.\"claude-*\"]").count(),
+            1,
+            "{after}"
+        );
+    }
+
     /// A table that is none of the shipped ones was written by a newer
     /// spoolway or edited by hand. The file is left byte for byte as it is,
     /// values and unknown keys included, and refused with the remedy.

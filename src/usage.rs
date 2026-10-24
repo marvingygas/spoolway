@@ -564,9 +564,8 @@ pub struct ModelPrice {
     /// only effects are two `spoolway doctor` notes: one for a model that sets
     /// `slots` without it, and one for a model with no `prompt_cache_ttl`,
     /// which a `local` model is spared. spoolway never infers it: a model
-    /// carrying
-    /// `slots` is describing the same kind of hardware, but so is a local
-    /// model nobody has sized, and a mistyped hosted model name reads as
+    /// carrying `slots` is describing the same kind of hardware, but so is a
+    /// local model nobody has sized, and a mistyped hosted model name reads as
     /// unpriced the way a free local one does — so `spoolway doctor` notes a
     /// `slots` model that has not set this rather than assuming either way.
     #[serde(skip_serializing_if = "not_local")]
