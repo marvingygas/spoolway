@@ -269,9 +269,11 @@ The wordmark's spool turns once a second while a dispatcher is running, even whe
 The header names the running dispatcher's version, next to its pid. If a
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
-Otherwise, if npm has published a newer release, the header adds `(<version> available)` in
-yellow, for example `v0.9.0 (0.10.0 available)`. Only a binary that npm installed shows this
-notice. Any other binary shows `v<version>` alone, or the restart label. The check is off when `housekeeping.update_check` is `false` or `SPOOLWAY_SKIP_VERSION_CHECK` is set.
+Otherwise, if a newer release is out, the header adds `(<version> available)` in
+yellow, for example `v0.9.0 (0.10.0 available)`. The notice comes from npm for an npm install and
+from Homebrew for a Homebrew install, which asks `brew info` and never runs `brew update`. Only a
+binary that npm or Homebrew installed shows this notice. Any other binary shows `v<version>`
+alone, or the restart label. The check is off when `housekeeping.update_check` is `false` or `SPOOLWAY_SKIP_VERSION_CHECK` is set.
 
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
 dispatch` child the tab starts on `enter` and stops with the next `enter` — the tab runs no
