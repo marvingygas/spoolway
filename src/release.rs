@@ -7,8 +7,8 @@
 //! here is told so rather than handed a command that refuses — the bug pi
 //! carries (earendil-works/pi#5607, where a Nix install is told to run
 //! `pi update` and gets "cannot self-update this installation"). The header
-//! names the version, and only on an npm install, with no command for that
-//! reason.
+//! names the version, and only on an npm or Homebrew install, with no command
+//! for that reason.
 //!
 //! Nothing here opens a socket. spoolway ships no HTTP client and gains none:
 //! an npm install asks npm what the latest version is and npm is what installs
@@ -16,11 +16,14 @@
 //! job, and hand-rolling a rename over a running executable is the one thing
 //! [`crate::config`]'s own documentation warns kills a dispatcher mid-pass.
 //!
-//! Only a global npm install does any of that. A binary anywhere else
-//! ([`Channel::Other`]) is standalone: it never starts npm, never spawns the
-//! refresh child and never looks for a newer release. `spoolway update` on it
-//! prints [`INSTALL_LINE`] and stops. The channel is checked before any lookup,
-//! so there is no path on which a standalone binary reaches npm.
+//! Only a global npm install is upgraded through npm. A Homebrew install
+//! ([`Channel::Homebrew`]) learns of a release from brew instead, is upgraded
+//! by `brew upgrade`, and never reaches npm. A binary anywhere else
+//! ([`Channel::Other`]) is standalone: it never starts npm or brew, never
+//! spawns the refresh child and never looks for a newer release. `spoolway
+//! update` on it prints [`INSTALL_LINE`] and stops. The channel is checked
+//! before any lookup, so there is no path on which a standalone binary
+//! reaches npm.
 //!
 //! The passive check reads a **cache and only a cache**. A lookup older than
 //! [`MAX_AGE`] spawns a detached child that refreshes it for the *next* read;
@@ -29,8 +32,10 @@
 //! case is an answer a day stale rather than a command that hangs on a plane.
 //!
 //! [`upgrade`] is the one exception, because it is the one caller somebody
-//! ran specifically to get the newer binary: it asks npm directly, bounded by
-//! [`LOOKUP_DEADLINE`] rather than left to npm's own unbounded retries, and
+//! ran specifically to get the newer binary: it asks npm directly (or, on a
+//! Homebrew install, refreshes brew's tap and asks brew), bounded by
+//! [`LOOKUP_DEADLINE`] or [`BREW_LOOKUP_DEADLINE`] rather than left to the
+//! tool's own unbounded retries, and
 //! only falls back to the cache's (possibly stale) answer when that lookup
 //! itself fails or does not finish in time — saying so on the way. Answering
 //! `spoolway update` from a cache that has not caught up yet is the bug this
@@ -102,6 +107,11 @@ pub enum Channel {
     /// executable sits under `node_modules/@spoolway/<platform>/bin/`. This is
     /// the one channel spoolway can upgrade, because npm does the work.
     Npm,
+    /// Installed by Homebrew: the executable sits under
+    /// `<prefix>/Cellar/spoolway/<version>/bin/`. The daily check asks brew for
+    /// the formula's version instead of npm, and `spoolway update` runs
+    /// `brew upgrade` for it.
+    Homebrew,
     /// Anything else — a release download, `cargo install`, a binary copied
     /// onto `PATH` by hand, a Nix store path, a build under `target/`. Standalone:
     /// it never looks for updates and never starts npm, and `spoolway update`
@@ -116,9 +126,16 @@ impl Channel {
     /// environment, because a lane's `spoolway report` is launched by the
     /// dispatcher and inherits none of an install's environment — the path is
     /// the only signal that survives.
+    ///
+    /// Symlinks are resolved first: on macOS `current_exe` can return the
+    /// `<prefix>/bin/spoolway` link brew makes rather than the Cellar path it
+    /// points at, and the link alone looks like a hand-placed binary. When the
+    /// resolution fails the raw path is judged instead. Only this decision
+    /// resolves symlinks; the folder lanes get on `PATH` is still the one
+    /// `current_exe` names.
     pub fn detect() -> Channel {
         match std::env::current_exe() {
-            Ok(exe) => Channel::of(&exe),
+            Ok(exe) => Channel::of(&std::fs::canonicalize(&exe).unwrap_or(exe)),
             Err(_) => Channel::Other,
         }
     }
@@ -138,6 +155,11 @@ impl Channel {
     /// `npm`. A project directory happening to be named exactly `lib` or `npm`
     /// is the one false positive, and it is a fine one: such a checkout really
     /// is one `npm install -g` can stand in for.
+    ///
+    /// `Homebrew` is a `Cellar` component followed by `spoolway`, which is the
+    /// layout under `/opt/homebrew`, `/usr/local` and
+    /// `/home/linuxbrew/.linuxbrew` alike. The npm test runs first, so every
+    /// path that was `Npm` stays `Npm`.
     pub fn of(exe: &Path) -> Channel {
         let parts: Vec<String> = exe
             .components()
@@ -146,19 +168,33 @@ impl Channel {
         let global = parts
             .windows(2)
             .any(|pair| pair[1] == "node_modules" && (pair[0] == "lib" || pair[0] == "npm"));
-        match global {
-            true => Channel::Npm,
-            false => Channel::Other,
+        let cellar = parts
+            .windows(2)
+            .any(|pair| pair[0] == "Cellar" && pair[1] == BREW_FORMULA_NAME);
+        match (global, cellar) {
+            (true, _) => Channel::Npm,
+            (false, true) => Channel::Homebrew,
+            (false, false) => Channel::Other,
         }
     }
 }
 
 /// What a cached lookup left behind.
 ///
-/// Hand-rolled rather than serde-derived: this file is written by one process
-/// and read by another, and keeping it to two flat fields means a partially
-/// written or hand-mangled file is a parse that returns `None` rather than a
-/// dependency between two spoolway versions' struct shapes.
+/// Read by hand rather than through a serde-derived struct: this file is
+/// written by one process and read by another, and a record of two flat fields
+/// means a partially written or hand-mangled file is a parse that returns
+/// `None` rather than a dependency between two spoolway versions' struct
+/// shapes.
+///
+/// The file is the machine's, and an npm install and a Homebrew install can
+/// share it, for example while somebody moves from one to the other. It keeps
+/// one record per channel. npm's stays in the top-level `version` and
+/// `checked` fields, where every npm binary already released reads it, and
+/// Homebrew's sits in a nested `homebrew` object that those binaries never
+/// look at. A refresh from this version on rewrites only its own channel's
+/// record. An npm binary released before it rewrites the whole file and drops
+/// Homebrew's, which costs the Homebrew install one extra lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
     pub version: String,
@@ -167,19 +203,11 @@ pub struct Cached {
 }
 
 impl Cached {
-    fn parse(text: &str) -> Option<Cached> {
-        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    fn from_value(value: &serde_json::Value) -> Option<Cached> {
         Some(Cached {
             version: value.get("version")?.as_str()?.trim().to_string(),
             checked: value.get("checked")?.as_u64()?,
         })
-    }
-
-    fn render(&self) -> String {
-        format!(
-            "{{\"version\":\"{}\",\"checked\":{}}}\n",
-            self.version, self.checked
-        )
     }
 
     fn stale(&self, now: u64) -> bool {
@@ -270,8 +298,9 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
 /// Reads one file. Everything that can go wrong — no home directory, no cache,
 /// a corrupt cache, a clock that moved — comes back `None`.
 ///
-/// A binary npm did not install answers `None` before it reads anything, so
-/// the refresh child, and the `npm view` behind it, never start for it.
+/// A binary neither npm nor Homebrew installed answers `None` before it reads
+/// anything, so the refresh child, and the lookup behind it, never start for
+/// it.
 pub fn newer() -> Option<String> {
     newer_at(Channel::detect(), cache_path())
 }
@@ -284,10 +313,7 @@ fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
         return None;
     }
     let path = path?;
-    let cached = std::fs::read_to_string(&path)
-        .ok()
-        .as_deref()
-        .and_then(Cached::parse);
+    let cached = read_cache(&path, channel);
 
     // Spawned whether or not the cache had a usable answer, and before the
     // answer is returned: a machine that has never checked is exactly the one
@@ -307,8 +333,9 @@ fn newer_at(channel: Channel, path: Option<PathBuf>) -> Option<String> {
 ///
 /// The child is spoolway itself, on a hidden subcommand — the same trick npm's
 /// own update-notifier uses: it needs a process that outlives this command,
-/// runs `npm view`, and writes a file, which this binary already knows how to
-/// do without shelling out to a script of its own.
+/// runs the channel's lookup (`npm view`, or `brew info` on a Homebrew
+/// install), and writes a file, which this binary already knows how to do
+/// without shelling out to a script of its own.
 ///
 /// Through `libc::setsid()`, called in the child between fork and exec, for
 /// the reason [`crate::headless`] detaches lanes the same way: a child that
@@ -361,14 +388,19 @@ const ENV_REFRESHING: &str = "SPOOLWAY_VERSION_REFRESH";
 /// type.
 pub const REFRESH_COMMAND: &str = "__version-check";
 
-/// Ask npm what the latest published version is, and write it to the cache.
+/// Ask npm, or brew on a Homebrew install, what the latest published version
+/// is, and write it to the cache.
 ///
 /// The whole body of the hidden subcommand. Runs in a process nobody is
-/// waiting on, so it may block on the network for as long as npm takes.
+/// waiting on, so it may block on the network for as long as the lookup takes.
 pub fn refresh() {
     let Some(path) = cache_path() else { return };
-    let Some(version) = published() else {
-        // Nothing published, no npm, no network. The cache is still stamped,
+    let channel = Channel::detect();
+    let Some(version) = (match channel {
+        Channel::Homebrew => brew_published(),
+        _ => published(),
+    }) else {
+        // Nothing published, no npm or brew, no network. The cache is still stamped,
         // so a machine that cannot answer is asked once a day rather than on
         // every reading — which is the difference between a quiet failure and
         // a fork on every board refresh.
@@ -376,11 +408,12 @@ pub fn refresh() {
             version: current().to_string(),
             checked: now(),
         };
-        write_cache(&path, &stamp);
+        write_cache(&path, channel, &stamp);
         return;
     };
     write_cache(
         &path,
+        channel,
         &Cached {
             version,
             checked: now(),
@@ -388,11 +421,50 @@ pub fn refresh() {
     );
 }
 
-fn write_cache(path: &Path, cached: &Cached) {
+/// The key the Homebrew record sits under in the cache file. Every other
+/// channel's record is the top-level one; see [`Cached`].
+const BREW_RECORD: &str = "homebrew";
+
+/// `channel`'s own record in `path`, when it parses. The other channel's
+/// record is invisible here, so it can neither answer for this one nor hide
+/// that this one has never asked.
+fn read_cache(path: &Path, channel: Channel) -> Option<Cached> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match channel {
+        Channel::Homebrew => Cached::from_value(value.get(BREW_RECORD)?),
+        _ => Cached::from_value(&value),
+    }
+}
+
+/// Put `cached` in `path` as `channel`'s record, leaving the other channel's
+/// record as it was. A file that is missing or does not parse starts over.
+///
+/// Two refresh children finishing together can each read the file before the
+/// other writes it, and one record is then lost. It costs that channel one
+/// extra lookup on its next reading and nothing else, so no lock is taken.
+fn write_cache(path: &Path, channel: Channel, cached: &Cached) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = crate::task::write_atomic(path, cached.render());
+    let mut file = match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    let record = serde_json::json!({"version": cached.version, "checked": cached.checked});
+    match channel {
+        Channel::Homebrew => {
+            file.insert(BREW_RECORD.to_string(), record);
+        }
+        _ => {
+            file.insert("version".to_string(), record["version"].clone());
+            file.insert("checked".to_string(), record["checked"].clone());
+        }
+    }
+    let _ = crate::task::write_atomic(path, format!("{}\n", serde_json::Value::Object(file)));
 }
 
 /// The latest version npm knows about, or `None` for anything at all going
@@ -401,6 +473,268 @@ fn write_cache(path: &Path, cached: &Cached) {
 fn published() -> Option<String> {
     let out = npm(&["view", PACKAGE, "version"])?;
     let version = out.trim();
+    match version.is_empty() {
+        true => None,
+        false => Some(version.to_string()),
+    }
+}
+
+/// The formula's own name, which is also the folder it gets under `Cellar`.
+/// Kept apart from [`PACKAGE`], the npm package name, so renaming one does not
+/// quietly turn every install of the other into [`Channel::Other`].
+const BREW_FORMULA_NAME: &str = "spoolway";
+
+/// The formula this binary was installed from, as brew names it: the tap, then
+/// [`BREW_FORMULA_NAME`].
+pub const BREW_FORMULA: &str = "marvingygas/tap/spoolway";
+
+/// The version brew's copy of the formula is at, or `None` for anything at all
+/// going wrong — no brew, a failed call, output that is not the JSON expected.
+///
+/// Reads what brew already knows and never runs `brew update`, which would
+/// refresh every tap on the person's machine behind their back. A tap that
+/// has not been fetched lately therefore reports an older version, which
+/// costs a late notice and nothing else. `HOMEBREW_NO_AUTO_UPDATE` is set
+/// because brew otherwise runs that update itself before some commands.
+fn brew_published() -> Option<String> {
+    let out = Command::new("brew")
+        .args(["info", "--json=v2", BREW_FORMULA])
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_brew_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// [`brew_published`] after `brew update`, for the one caller that was asked to
+/// get the newer release: brew's copy of the tap can be days old, and the
+/// daily check's answer would then name the release the person already has.
+///
+/// The update's own result is not read. A failed update leaves the tap as it
+/// was, and `brew info` then answers from that, which is the best answer there
+/// is. Its output is dropped because the notice `update` prints is all the
+/// person needs while it runs.
+///
+/// `deadline` is when the update is stopped, together with everything it
+/// started. [`bounded`] abandons the thread this runs on but cannot stop a
+/// child, and a `brew update` left fetching would hold brew's update lock while
+/// the caller, falling back to the cache, starts `brew upgrade`, whose own
+/// refresh then skips the tap with a complaint nobody sees. A stopped update
+/// answers `None`, so the caller falls back to the cache as it does for any
+/// lookup that did not finish. The caller passes a deadline [`BREW_STOP_MARGIN`]
+/// short of [`bounded`]'s, so the stop has finished before [`bounded`] gives up
+/// and the caller goes on.
+fn brew_published_after_update(deadline: Duration) -> Option<String> {
+    let mut update = Command::new("brew");
+    update
+        .arg("update")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    status_within(&mut update, deadline)?;
+    brew_published()
+}
+
+/// How long [`stop`] gives a process group to leave after `SIGTERM` before it
+/// is sent `SIGKILL`. Long enough for git to remove its own `.lock` files,
+/// which `SIGKILL` would leave behind.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// How much earlier than [`BREW_LOOKUP_DEADLINE`] the update is stopped. The
+/// stop takes up to [`STOP_GRACE`] and then a poll, and it has to be over
+/// before [`bounded`] stops waiting, so that no brew process is still running
+/// when `update` decides what to do next.
+const BREW_STOP_MARGIN: Duration = Duration::from_secs(5);
+
+/// Start `command` as the leader of a process group of its own, so [`stop`] can
+/// reach what it starts. `brew update` fetches each tap in a background
+/// subshell, and those outlive a kill of brew alone.
+///
+/// A group of its own is also outside the terminal's foreground group, so a
+/// Ctrl-C no longer reaches it. [`status_within`] passes one on through
+/// [`Interrupts`].
+fn start_in_own_group(command: &mut Command) -> Option<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().ok()
+}
+
+/// Stop `child` and everything in its process group: `SIGTERM`, a wait of up to
+/// [`STOP_GRACE`] for the whole group to go, then `SIGKILL`. The child is reaped
+/// either way.
+#[cfg(unix)]
+fn stop(child: &mut std::process::Child) {
+    let group = -(child.id() as libc::pid_t);
+    // SAFETY: `kill` on a process group has no memory-safety preconditions;
+    // the group id is the child's pid because it was started with
+    // `process_group(0)`, and the worst a stale one earns is ESRCH.
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    let end = std::time::Instant::now() + STOP_GRACE;
+    let mut reaped = false;
+    while std::time::Instant::now() < end {
+        reaped = reaped || !matches!(child.try_wait(), Ok(None));
+        // Signal 0 only asks whether any member of the group is left.
+        // SAFETY: as above.
+        if reaped && unsafe { libc::kill(group, 0) } != 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above.
+    unsafe { libc::kill(group, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn stop(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The signals that end `spoolway` from the terminal: Ctrl-C, a plain `kill`,
+/// and the terminal closing.
+#[cfg(unix)]
+const ENDING_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+/// The last of [`ENDING_SIGNALS`] caught while an [`Interrupts`] was held, or 0.
+#[cfg(unix)]
+static CAUGHT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_ending(signal: libc::c_int) {
+    CAUGHT.store(signal, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Catches [`ENDING_SIGNALS`] for as long as it is held, so [`status_within`]
+/// can stop its child's group before this process goes. Without it, a Ctrl-C
+/// ends `spoolway` and leaves `brew update` and its tap fetches running in
+/// their own group, holding brew's update lock.
+///
+/// A signal the process started with ignored stays ignored, see
+/// [`crate::platform::SignalGuard`], so it never reaches [`Interrupts::caught`].
+/// `SA_RESTART` is set because nothing here wants a blocked call failed: the
+/// loop in [`status_within`] polls.
+struct Interrupts {
+    #[cfg(unix)]
+    /// Held for its `Drop`, which puts the old handlers back.
+    _restores: crate::platform::SignalGuard,
+}
+
+impl Interrupts {
+    #[cfg(unix)]
+    fn catch() -> Interrupts {
+        CAUGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        Interrupts {
+            _restores: crate::platform::SignalGuard::catch(
+                &ENDING_SIGNALS,
+                libc::SA_RESTART,
+                record_ending,
+            ),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn catch() -> Interrupts {
+        Interrupts {}
+    }
+
+    /// The signal caught since [`Interrupts::catch`], if any.
+    fn caught(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            match CAUGHT.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => None,
+                signal => Some(signal),
+            }
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Put back what was there before, and if a signal was caught at any point
+    /// until then, raise it again so the process ends as it would have. `true`
+    /// when one was caught.
+    ///
+    /// The handlers go back first and the check comes after, so a signal that
+    /// lands in between is either seen here or goes to the old handler
+    /// itself. A check made before putting them back could miss one that
+    /// arrives just after it, and the person's Ctrl-C would be lost.
+    fn end(self) -> bool {
+        #[cfg(unix)]
+        {
+            drop(self);
+            match CAUGHT.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => false,
+                signal => {
+                    // SAFETY: `raise` has no memory-safety preconditions.
+                    unsafe { libc::raise(signal) };
+                    true
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        false
+    }
+}
+
+/// Run `command` and wait for it for at most `deadline`. Past that the child
+/// and everything it started are stopped, and the answer is `None`, the same as
+/// for a command that could not be started.
+///
+/// A Ctrl-C, `kill` or hang-up meanwhile stops the child's group the same way,
+/// and then ends this process as that signal would have.
+fn status_within(command: &mut Command, deadline: Duration) -> Option<std::process::ExitStatus> {
+    let interrupts = Interrupts::catch();
+    let Some(mut child) = start_in_own_group(command) else {
+        interrupts.end();
+        return None;
+    };
+    let end = std::time::Instant::now() + deadline;
+    let status = loop {
+        if interrupts.caught().is_some() {
+            stop(&mut child);
+            break None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                stop(&mut child);
+                break None;
+            }
+        }
+    };
+    // Checked on every way out, so a signal that lands just as the child
+    // finishes is not lost either. If the old handler returns, the run
+    // counts as interrupted and answers `None`.
+    match interrupts.end() {
+        true => None,
+        false => status,
+    }
+}
+
+/// Run `brew upgrade` for the formula with its output going straight to the
+/// terminal, so the person sees brew's own progress and, on failure, brew's own
+/// error. Capturing it the way [`npm`] does would hide both.
+pub fn brew_upgrade() -> std::io::Result<std::process::ExitStatus> {
+    Command::new("brew")
+        .args(["upgrade", BREW_FORMULA])
+        .status()
+}
+
+/// `formulae[0].versions.stable` out of `brew info --json=v2`, when it is a
+/// non-empty string.
+fn parse_brew_version(json: &str) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_str(json).ok()?;
+    let version = doc.pointer("/formulae/0/versions/stable")?.as_str()?.trim();
     match version.is_empty() {
         true => None,
         false => Some(version.to_string()),
@@ -429,8 +763,13 @@ pub enum Upgrade {
     Installed(String),
     /// A newer version exists and the npm install of it failed.
     Unmanaged(String),
-    /// This binary was not installed by npm, so nothing was looked up and
-    /// nothing can be installed from here.
+    /// A Homebrew install, a newer version exists and no dispatcher is
+    /// running. Nothing is installed yet: the caller runs [`brew_upgrade`]
+    /// itself, after telling the person what it is about to do, because brew's
+    /// progress is printed live rather than captured.
+    Homebrew(String),
+    /// This binary was installed by neither npm nor Homebrew, so nothing was
+    /// looked up and nothing can be installed from here.
     Standalone,
     /// A dispatcher is running, so the binary it is executing is not being
     /// rewritten under it.
@@ -439,9 +778,10 @@ pub enum Upgrade {
 
 /// Take the newer release, when there is one and it is safe to.
 ///
-/// Asks npm directly rather than trusting [`newer`]'s cache — see the module
-/// doc for why this is the one caller that does. A binary npm did not install
-/// asks nothing and answers [`Upgrade::Standalone`].
+/// Asks npm, or brew on a Homebrew install, directly rather than trusting
+/// [`newer`]'s cache — see the module doc for why this is the one caller that
+/// does. A binary neither of them installed asks nothing and answers
+/// [`Upgrade::Standalone`].
 ///
 /// `lock_file` is the project's own dispatch lock —
 /// [`crate::repo::Repo::lock_file`] for every real caller.
@@ -454,7 +794,12 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     if std::env::var_os(ENV_UPGRADED).is_some() {
         return Upgrade::Current;
     }
-    decide_upgrade(Channel::detect(), lock_file, published, newer, |target| {
+    let channel = Channel::detect();
+    let live = move || match channel {
+        Channel::Homebrew => brew_published_after_update(BREW_LOOKUP_DEADLINE - BREW_STOP_MARGIN),
+        _ => published(),
+    };
+    decide_upgrade(channel, lock_file, live, newer, |target| {
         npm(&["install", "-g", target, "--ignore-scripts"])
     })
 }
@@ -471,12 +816,30 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
 /// registry never finish inside it.
 const LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
 
+/// [`LOOKUP_DEADLINE`] for a Homebrew install, whose lookup starts with `brew
+/// update`. That fetches the tap over the network and takes seconds on a good
+/// connection, so npm's three would give up on nearly every run.
+const BREW_LOOKUP_DEADLINE: Duration = Duration::from_secs(30);
+
+/// What `update` asks, and how long it waits, on `channel`: the tool's name as
+/// the notice says it, and the lookup's bound. `None` for a binary that asks
+/// nothing.
+fn lookup_for(channel: Channel) -> Option<(&'static str, Duration)> {
+    match channel {
+        Channel::Npm => Some(("npm", LOOKUP_DEADLINE)),
+        Channel::Homebrew => Some(("Homebrew", BREW_LOOKUP_DEADLINE)),
+        Channel::Other => None,
+    }
+}
+
 /// Run `live` on its own thread and stop waiting on it after `deadline`.
 ///
 /// The thread is never joined: a `live` that is still blocked in npm's own
-/// retries when the deadline passes is left to finish (or not) on its own,
-/// the same way [`spawn_refresh`]'s detached child is never waited on. Its
-/// eventual answer, if any, is simply never read.
+/// retries, or in `brew update`, when the deadline passes is left to finish (or
+/// not) on its own, the same way [`spawn_refresh`]'s detached child is never
+/// waited on. Its eventual answer, if any, is simply never read. What `live`
+/// starts is not stopped from here, so a `live` that runs a child must bound it
+/// itself, as [`brew_published_after_update`] does.
 fn bounded(
     live: impl FnOnce() -> Option<String> + Send + 'static,
     deadline: Duration,
@@ -507,9 +870,11 @@ fn bounded(
 /// cache file, standing up a fake `npm` on `PATH`, or touching the process
 /// environment at all. A test binary sits under `target/`, which is
 /// [`Channel::Other`], so the channel is an argument for the same reason.
-/// `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
-/// thread, so a stub that never answers proves the bound rather than hanging
-/// the test.
+/// `live` runs bounded by [`LOOKUP_DEADLINE`] (or [`BREW_LOOKUP_DEADLINE`] on a
+/// Homebrew install), on its own thread, so a stub that never answers proves
+/// the bound rather than hanging the test. `install` is only called on the npm
+/// channel: a Homebrew install answers [`Upgrade::Homebrew`] and leaves the
+/// upgrade to the caller.
 fn decide_upgrade(
     channel: Channel,
     lock_file: &Path,
@@ -518,25 +883,27 @@ fn decide_upgrade(
     install: impl FnOnce(&str) -> Option<String>,
 ) -> Upgrade {
     // Before the notice and before `live`: a standalone binary must not so
-    // much as announce an npm lookup, and a check placed after `bounded`
-    // would already have started npm.
-    if channel == Channel::Other {
+    // much as announce a lookup, and a check placed after `bounded` would
+    // already have started npm or brew. A Homebrew binary gets its own lookup
+    // and must never reach `npm install -g`, which would put a second copy
+    // beside the one brew owns.
+    let Some((tool, deadline)) = lookup_for(channel) else {
         return Upgrade::Standalone;
-    }
-    println!("Checking npm for a newer spoolway...");
+    };
+    println!("Checking {tool} for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
     // get the newer binary — a cache the passive check would happily wait a
     // day on is exactly what left `update` installing nothing on the run
-    // that mattered. `live()` returning `None` is "npm could not answer"
-    // (offline, not installed, npm itself erroring, or the deadline above
+    // that mattered. `live()` returning `None` is "the tool could not answer"
+    // (offline, npm or brew not installed or erroring, or the deadline
     // passing) rather than "nothing newer", so that and only that falls back
-    // to the cache's own answer; npm actually answering settles it either
-    // way, cache or no cache.
-    let version = match bounded(live, LOOKUP_DEADLINE) {
+    // to the cache's own answer; npm or brew actually answering settles it
+    // either way, cache or no cache.
+    let version = match bounded(live, deadline) {
         Some(latest) if is_newer(&latest, current()) => Some(latest),
         Some(_) => None,
         None => {
-            println!("No answer from npm, carrying on with the version already known.");
+            println!("No answer from {tool}, carrying on with the version already known.");
             println!();
             cached()
         }
@@ -545,10 +912,13 @@ fn decide_upgrade(
         return Upgrade::Current;
     };
     // Refuse rather than rely on a remembered release rule: a running dispatcher
-    // is executing the file npm is about to replace, and a half-written binary is
-    // a dispatcher that dies mid-pass.
+    // is executing the file the upgrade is about to replace, and a half-written
+    // binary is a dispatcher that dies mid-pass.
     if let Ok(Some(pid)) = crate::lock::Lock::holder(lock_file) {
         return Upgrade::Dispatching(version, pid);
+    }
+    if channel == Channel::Homebrew {
+        return Upgrade::Homebrew(version);
     }
 
     // `--ignore-scripts` costs nothing here and takes lifecycle scripts out of
@@ -653,8 +1023,8 @@ fn published_version_cell() -> &'static Mutex<Reading> {
 /// runs once a second, so the reading is taken on a background thread once
 /// per [`PUBLISHED_CHECK_INTERVAL`] and every call in between answers from
 /// what it left. The first call of a run therefore says `None`, the same as
-/// [`installed_newer`]'s. A binary npm did not install says `None` without
-/// starting that thread.
+/// [`installed_newer`]'s. A binary neither npm nor Homebrew installed says
+/// `None` without starting that thread.
 ///
 /// Gates nothing itself: whether the header wants it at all —
 /// `housekeeping.update_check` and [`ENV_SKIP`] — is the caller's to decide,
@@ -893,9 +1263,10 @@ fn reported_version(output: &str) -> Option<String> {
 /// installs 0.2.0 and carries on rather than handing over would report 0.2.0
 /// as current while still reading 0.1.0's compiled-in notes.
 ///
-/// Resolved through `PATH` rather than through `current_exe`, because
-/// `current_exe` on Unix is the *inode* this process is executing and npm has
-/// just written a different file at the name.
+/// Resolved through `PATH` rather than through `current_exe`. After an npm
+/// install, `current_exe` on Unix is the *inode* this process is executing and
+/// npm has just written a different file at the name. After a Homebrew
+/// upgrade, it names `Cellar/spoolway/<old version>/`, which brew has removed.
 ///
 /// `expect_version` is what the install just put down. `PATH` is not proof that
 /// the name now resolves to it — under `npx` or `node_modules/.bin` the first
@@ -921,9 +1292,17 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
         Some(line) if line.split_whitespace().any(|word| word == expect_version) => {}
         Some(line) => anyhow::bail!(
             "the `spoolway` on PATH resolves to `{}`, which reports `{line}` rather than the \
-             installed {expect_version} — a different install (an `npx` or project-local \
-             copy); install spoolway {expect_version} the way this one was installed",
-            program.display()
+             installed {expect_version}, so it is a different install from the one just \
+             upgraded; put {} first on PATH, or remove the other copy (an npm, `npx` or \
+             project-local one), then run spoolway update again",
+            program.display(),
+            match std::env::current_exe()
+                .ok()
+                .and_then(|exe| linked_bin_dir_of(&exe))
+            {
+                Some(dir) => format!("`{}`", dir.display()),
+                None => "the folder the upgraded spoolway was installed into".to_string(),
+            }
         ),
         None => anyhow::bail!(
             "the `spoolway` on PATH (`{}`) did not report a version — cannot confirm the \
@@ -933,6 +1312,40 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
     }
 
     Ok(upgraded_command(&program, args).status()?)
+}
+
+/// The folder an npm or Homebrew install links its `spoolway` into, worked out
+/// from where the binary sits: `<prefix>/bin` for the part of the path before
+/// `Cellar/spoolway/` or `lib/node_modules/`, and the `npm` folder itself under
+/// the Windows prefix. `None` for any other path.
+///
+/// The running executable is no use as the answer itself after an upgrade:
+/// brew has removed its `Cellar/spoolway/<old version>/` folder by then.
+fn linked_bin_dir(exe: &Path) -> Option<PathBuf> {
+    let parts: Vec<_> = exe.components().collect();
+    let name = |i: usize| parts.get(i).map(|part| part.as_os_str());
+    let before = |end: usize| parts[..end].iter().collect::<PathBuf>();
+    (1..parts.len()).find_map(|i| {
+        let here = name(i)?;
+        if here == "Cellar" && name(i + 1)? == BREW_FORMULA_NAME {
+            Some(before(i).join("bin"))
+        } else if here == "node_modules" && name(i - 1)? == "lib" {
+            Some(before(i - 1).join("bin"))
+        } else if here == "node_modules" && name(i - 1)? == "npm" {
+            Some(before(i))
+        } else {
+            None
+        }
+    })
+}
+
+/// [`linked_bin_dir`] for the running executable, with symlinks resolved
+/// first: on macOS `current_exe` is usually the `<prefix>/bin/spoolway` link
+/// brew makes, which has no `Cellar` in it. When the resolution fails, as for
+/// a Linux path brew has removed that ends ` (deleted)`, the raw path is used,
+/// as [`Channel::detect`] does.
+fn linked_bin_dir_of(exe: &Path) -> Option<PathBuf> {
+    linked_bin_dir(&std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf()))
 }
 
 fn upgraded_command(program: &Path, args: &[String]) -> Command {
@@ -1090,6 +1503,280 @@ mod tests {
         assert_eq!(Channel::of(npx), Channel::Other);
     }
 
+    /// A Cellar layout under any of brew's three prefixes is Homebrew, and a
+    /// path that only resembles one is not.
+    #[test]
+    fn a_cellar_path_is_on_the_homebrew_channel() {
+        for prefix in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
+            let exe = format!("{prefix}/Cellar/spoolway/0.15.0/bin/spoolway");
+            assert_eq!(Channel::of(Path::new(&exe)), Channel::Homebrew, "{exe}");
+        }
+        // The link brew makes is not the Cellar path, so it is not Homebrew
+        // until `detect` has resolved it.
+        assert_eq!(
+            Channel::of(Path::new("/opt/homebrew/bin/spoolway")),
+            Channel::Other
+        );
+        assert_eq!(
+            Channel::of(Path::new("/opt/homebrew/Cellar/other/1.0/bin/spoolway")),
+            Channel::Other
+        );
+    }
+
+    /// Each channel reads and rewrites only its own record, and npm's stays at
+    /// the top level where a binary released before Homebrew support reads it.
+    #[test]
+    fn each_channel_keeps_its_own_cache_record() {
+        let npm = Cached {
+            version: "0.2.0".into(),
+            checked: 5,
+        };
+        let brew = Cached {
+            version: "0.3.0".into(),
+            checked: 9,
+        };
+        let dir = crate::scratch::root("release-cache-channel");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("latest.json");
+
+        write_cache(&path, Channel::Homebrew, &brew);
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew.clone()));
+        assert_eq!(read_cache(&path, Channel::Npm), None);
+
+        // npm's refresh leaves brew's record alone, and brew's leaves npm's.
+        write_cache(&path, Channel::Npm, &npm);
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(brew.clone()));
+        assert_eq!(read_cache(&path, Channel::Npm), Some(npm.clone()));
+        let newer_brew = Cached {
+            version: "0.4.0".into(),
+            checked: 11,
+        };
+        write_cache(&path, Channel::Homebrew, &newer_brew);
+        assert_eq!(read_cache(&path, Channel::Npm), Some(npm.clone()));
+        assert_eq!(read_cache(&path, Channel::Homebrew), Some(newer_brew));
+
+        // A binary released before this change reads only the top level.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let top: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(Cached::from_value(&top), Some(npm));
+    }
+
+    /// The formula spelling brew is asked for ends in the folder name the
+    /// channel is keyed off.
+    #[test]
+    fn the_brew_formula_ends_in_the_cellar_folder_name() {
+        assert!(BREW_FORMULA.ends_with(&format!("/{BREW_FORMULA_NAME}")));
+    }
+
+    /// Only a non-empty `formulae[0].versions.stable` is an answer.
+    #[test]
+    fn brew_output_that_does_not_name_a_version_is_no_answer() {
+        let ok = r#"{"formulae":[{"versions":{"stable":"0.15.0"}}]}"#;
+        assert_eq!(parse_brew_version(ok), Some("0.15.0".to_string()));
+        for bad in [
+            "",
+            "not json",
+            "{}",
+            r#"{"formulae":[]}"#,
+            r#"{"formulae":[{"versions":{"stable":null}}]}"#,
+            r#"{"formulae":[{"versions":{"stable":""}}]}"#,
+        ] {
+            assert_eq!(parse_brew_version(bad), None, "{bad}");
+        }
+    }
+
+    /// A Homebrew binary never reaches the npm install, and a newer release is
+    /// left for the caller to run `brew upgrade` on.
+    #[test]
+    fn a_homebrew_binary_is_upgraded_through_brew_and_never_npm() {
+        let answered = newer_than_current();
+        let outcome = decide_upgrade(
+            Channel::Homebrew,
+            Path::new("/nonexistent/lock"),
+            {
+                let answered = answered.clone();
+                move || Some(answered)
+            },
+            || panic!("read the cache"),
+            |_| panic!("ran npm"),
+        );
+        assert_eq!(outcome, Upgrade::Homebrew(answered));
+    }
+
+    /// A Homebrew lookup that fails falls back to the cache, like npm's, and
+    /// brew saying nothing is newer ends it without the cache.
+    #[test]
+    fn a_homebrew_lookup_falls_back_to_the_cache_only_when_it_fails() {
+        let outcome = decide_upgrade(
+            Channel::Homebrew,
+            Path::new("/nonexistent/lock"),
+            || None,
+            || Some("0.4.0".to_string()),
+            |_| panic!("ran npm"),
+        );
+        assert_eq!(outcome, Upgrade::Homebrew("0.4.0".to_string()));
+
+        let outcome = decide_upgrade(
+            Channel::Homebrew,
+            Path::new("/nonexistent/lock"),
+            || Some(current().to_string()),
+            || panic!("the cache must not get a second vote once brew has answered"),
+            |_| panic!("ran npm"),
+        );
+        assert_eq!(outcome, Upgrade::Current);
+    }
+
+    /// `brew update` fetches the tap, so the Homebrew lookup is given thirty
+    /// seconds where npm gets three, and a standalone binary is given none.
+    #[test]
+    fn each_channel_is_given_its_own_lookup_bound() {
+        assert_eq!(
+            lookup_for(Channel::Homebrew),
+            Some(("Homebrew", Duration::from_secs(30)))
+        );
+        assert_eq!(
+            lookup_for(Channel::Npm),
+            Some(("npm", Duration::from_secs(3)))
+        );
+        assert_eq!(lookup_for(Channel::Other), None);
+    }
+
+    /// The folder a refusal tells the person to put first on `PATH` is the one
+    /// the install links into, whatever the old executable's name now is.
+    #[test]
+    fn the_linked_bin_dir_is_found_from_each_installs_layout() {
+        for (exe, dir) in [
+            (
+                "/opt/homebrew/Cellar/spoolway/0.14.1/bin/spoolway",
+                "/opt/homebrew/bin",
+            ),
+            (
+                "/home/linuxbrew/.linuxbrew/Cellar/spoolway/0.14.1/bin/spoolway (deleted)",
+                "/home/linuxbrew/.linuxbrew/bin",
+            ),
+            (
+                "/home/x/.nvm/versions/node/v20/lib/node_modules/@spoolway/linux-x64/bin/spoolway",
+                "/home/x/.nvm/versions/node/v20/bin",
+            ),
+            (
+                "/home/x/AppData/Roaming/npm/node_modules/@spoolway/win/bin/spoolway.exe",
+                "/home/x/AppData/Roaming/npm",
+            ),
+        ] {
+            assert_eq!(
+                linked_bin_dir(Path::new(exe)),
+                Some(PathBuf::from(dir)),
+                "{exe}"
+            );
+        }
+        assert_eq!(
+            linked_bin_dir(Path::new("/work/target/debug/spoolway")),
+            None
+        );
+    }
+
+    /// A binary started through brew's `<prefix>/bin/spoolway` link, as macOS
+    /// reports it, still names `<prefix>/bin`.
+    #[cfg(unix)]
+    #[test]
+    fn the_linked_bin_dir_is_found_through_brews_link() {
+        let root = crate::scratch::root("release-linked-bin");
+        let _ = std::fs::remove_dir_all(&root);
+        let cellar = root.join("Cellar/spoolway/0.14.1/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(cellar.join("spoolway"), "").unwrap();
+        let link = root.join("bin/spoolway");
+        std::os::unix::fs::symlink("../Cellar/spoolway/0.14.1/bin/spoolway", &link).unwrap();
+
+        assert_eq!(linked_bin_dir(&link), None);
+        assert_eq!(
+            linked_bin_dir_of(&link),
+            Some(std::fs::canonicalize(&root).unwrap().join("bin"))
+        );
+        // A path that no longer exists is judged as it is.
+        assert_eq!(
+            linked_bin_dir_of(&root.join("gone/Cellar/spoolway/0.1.0/bin/spoolway (deleted)")),
+            Some(root.join("gone/bin"))
+        );
+    }
+
+    /// The group is stopped, not just its leader: a shell that starts a
+    /// background `sleep` and waits on it, as `brew update` does for each tap,
+    /// leaves nothing behind. The stop comes only once the shell has written
+    /// the `sleep`'s pid, so a slow start cannot skip the grandchild.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_command_takes_what_it_started_with_it() {
+        let dir = crate::scratch::root("release-stop-group");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let mut shell = Command::new("sh");
+        shell.arg("-c").arg(format!(
+            "sleep 30 & echo $! > '{}.tmp'; mv '{0}.tmp' '{0}'; wait",
+            pid_file.display()
+        ));
+        let mut child = start_in_own_group(&mut shell).unwrap();
+        let started = (0..1000).any(|_| {
+            pid_file.exists() || {
+                std::thread::sleep(Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(started, "the shell never started its `sleep`");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        stop(&mut child);
+
+        // A process nobody has reaped yet still answers signal 0, so it counts
+        // as gone once it is a zombie.
+        let gone = || {
+            // SAFETY: signal 0 only checks that the process exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains(") Z"));
+            !alive || zombie
+        };
+        assert!(
+            within_two_seconds(gone),
+            "the grandchild `sleep` outlived the stop"
+        );
+    }
+
+    /// A child still running at the deadline is killed rather than left to
+    /// fetch while the caller moves on.
+    ///
+    /// The only test that calls [`status_within`], which swaps this process's
+    /// signal handlers while it waits: two at once could put them back in the
+    /// wrong order. Ctrl-C reaching the group is covered end to end in
+    /// `tests/homebrew_update.rs`.
+    #[test]
+    fn a_command_past_its_deadline_is_killed_and_gives_no_answer() {
+        let started = std::time::Instant::now();
+        let mut sleeper = Command::new("sleep");
+        sleeper.arg("30");
+        assert_eq!(
+            status_within(&mut sleeper, Duration::from_millis(200)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let mut quick = Command::new("true");
+        let status = status_within(&mut quick, Duration::from_secs(10));
+        assert!(status.is_some_and(|status| status.success()));
+        assert_eq!(
+            status_within(
+                &mut Command::new("/no/such/program"),
+                Duration::from_secs(1)
+            ),
+            None
+        );
+    }
+
     #[test]
     fn a_newer_version_is_one_that_sorts_after_this_one() {
         assert!(is_newer("0.2.0", "0.1.0"));
@@ -1139,10 +1826,15 @@ mod tests {
             version: "0.2.0".into(),
             checked: 1_700_000_000,
         };
-        assert_eq!(Cached::parse(&cached.render()), Some(cached));
+        let dir = crate::scratch::root("release-cache-round-trip");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("latest.json");
+        write_cache(&path, Channel::Npm, &cached);
+        assert_eq!(read_cache(&path, Channel::Npm), Some(cached));
 
         for text in ["", "{}", "not json", "{\"version\":\"0.2.0\"}", "[]"] {
-            assert_eq!(Cached::parse(text), None, "{text:?}");
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(read_cache(&path, Channel::Npm), None, "{text:?}");
         }
     }
 
@@ -1345,6 +2037,7 @@ mod tests {
         let path = dir.join("latest.json");
         write_cache(
             &path,
+            Channel::Npm,
             &Cached {
                 version: newer_than_current(),
                 checked: now(),

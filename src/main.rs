@@ -143,8 +143,8 @@ fn run() -> Result<()> {
 
     // Before anything else, and before a repo is looked for: this is the
     // detached child a stale cache spawned, not a command anybody ran. It has
-    // no project, wants no notice of its own, and its whole job is one npm
-    // lookup written to a file.
+    // no project, wants no notice of its own, and its whole job is one
+    // lookup, npm's or brew's, written to a file.
     if matches!(cli.command, Command::VersionCheck) {
         release::refresh();
         return Ok(());

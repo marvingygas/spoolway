@@ -3,16 +3,16 @@
 //! This used to also bring a project's own files forward: `config.toml`,
 //! pipeline key references, skills. That half moved to [`crate::sync`], and
 //! what is left here is a fact about this machine rather than about any
-//! project — which release npm has, whether npm installed this binary at all,
-//! and whether a dispatcher is running the file this would replace. None of that
-//! needs a `.spoolway/` directory anywhere above the current one, so this
-//! runs from any directory, project or not — the one command besides
+//! project — which release npm or Homebrew has, which of them installed this
+//! binary, and whether a dispatcher is running the file this would replace.
+//! None of that needs a `.spoolway/` directory anywhere above the current one,
+//! so this runs from any directory, project or not — the one command besides
 //! `spoolway init` that does.
 //!
 //! The split is why this and [`crate::sync`] read almost the same, on
-//! purpose: installing a binary is done the moment npm says so and the
-//! hand-over lands; bringing a checkout's files forward needs a checkout to
-//! land them in, and stays exactly where it always was.
+//! purpose: installing a binary is done the moment npm or brew says so and
+//! the hand-over lands; bringing a checkout's files forward needs a checkout
+//! to land them in, and stays exactly where it always was.
 
 use std::path::{Path, PathBuf};
 
@@ -67,9 +67,9 @@ fn closing_line(upgraded: Option<&str>) -> Option<&'static str> {
 }
 
 /// Whether this invocation is the successful far side of a person-facing npm
-/// handover. The terminal gate keeps stdout stable for scripts and pipes; a
-/// forged or stale environment value cannot otherwise make a piped run print
-/// a digest meant for a person at a terminal.
+/// or brew handover. The terminal gate keeps stdout stable for scripts and
+/// pipes; a forged or stale environment value cannot otherwise make a piped
+/// run print a digest meant for a person at a terminal.
 fn digest_previous(upgraded: Option<&str>, terminal: bool) -> Option<&str> {
     terminal.then_some(upgraded).flatten()
 }
@@ -82,7 +82,12 @@ fn digest_previous(upgraded: Option<&str>, terminal: bool) -> Option<&str> {
 /// have its binary rewritten under it.
 fn install(cwd: &Path) -> Result<Option<std::process::ExitStatus>> {
     let upgrade = crate::release::upgrade(&dispatcher_lock_file(cwd));
-    install_upgrade(cwd, upgrade, crate::release::hand_over)
+    install_upgrade(
+        cwd,
+        upgrade,
+        crate::release::brew_upgrade,
+        crate::release::hand_over,
+    )
 }
 
 /// The project dispatcher's own lock, if `cwd` sits inside a project — a
@@ -97,15 +102,18 @@ fn dispatcher_lock_file(cwd: &Path) -> PathBuf {
 }
 
 /// Turn the release layer's exhaustive outcome into update behaviour. Keeping
-/// the handover call injectable makes the success edge testable without
-/// replacing the running binary or invoking npm; the production caller passes
+/// the brew and handover calls injectable makes the success and failure edges
+/// testable without replacing the running binary or invoking brew or npm; the
+/// production caller passes [`crate::release::brew_upgrade`] and
 /// [`crate::release::hand_over`] unchanged.
-fn install_upgrade<F>(
+fn install_upgrade<B, F>(
     cwd: &Path,
     upgrade: crate::release::Upgrade,
+    brew_upgrade: B,
     hand_over: F,
 ) -> Result<Option<std::process::ExitStatus>>
 where
+    B: FnOnce() -> std::io::Result<std::process::ExitStatus>,
     F: FnOnce(&[String], &str) -> Result<std::process::ExitStatus>,
 {
     use crate::release::Upgrade;
@@ -123,10 +131,42 @@ where
             Ok(Some(hand_over(&relaunch(cwd), &version)?))
         }
 
+        // Said before brew runs, unlike npm's lines above, because brew's own
+        // progress follows on the terminal and the person should know what
+        // it is.
+        Upgrade::Homebrew(version) => {
+            let command = format!("brew upgrade {}", crate::release::BREW_FORMULA);
+            println!("Installing spoolway {version}");
+            println!("  {command}");
+            println!();
+            let status = brew_upgrade().map_err(|err| {
+                anyhow::anyhow!(
+                    "could not start brew ({err}), so spoolway {} is still installed; \
+                     run `{command}` yourself once brew works",
+                    crate::release::current()
+                )
+            })?;
+            if !status.success() {
+                // brew has already printed its own error. Its exit status is
+                // handed back so `update` exits with it rather than 0.
+                println!();
+                println!(
+                    "brew upgrade did not finish, so spoolway {} is still installed.",
+                    crate::release::current()
+                );
+                println!("Run it yourself to see the whole error:");
+                println!();
+                println!("  {command}");
+                return Ok(Some(status));
+            }
+            println!();
+            Ok(Some(hand_over(&relaunch(cwd), &version)?))
+        }
+
         // The whole reason a channel is resolved before anything is said: a
-        // binary npm did not install is told the install line instead of being
-        // handed an npm command that would not replace it. Nothing has been
-        // installed, so no sync reminder follows.
+        // binary neither npm nor Homebrew installed is told the install line
+        // instead of being handed a command that would not replace it. Nothing
+        // has been installed, so no sync reminder follows.
         Upgrade::Standalone => {
             println!(
                 "This spoolway ({}) was not installed by npm, so it does not",
@@ -150,6 +190,7 @@ where
         Upgrade::Dispatching(version, pid) => {
             println!("spoolway {version} is out, and a dispatcher is running (pid {pid}), so the");
             println!("binary was left alone — replacing it would kill the run mid-pass.");
+            println!("Stop the dispatcher, then run spoolway update again.");
             println!();
             Ok(None)
         }
@@ -199,17 +240,14 @@ mod tests {
 
         let cwd = crate::scratch::root("update-upgrade-outcomes");
         assert!(
-            install_upgrade(&cwd, Upgrade::Current, |_, _| panic!("no handover"))
-                .unwrap()
-                .is_none()
+            install_upgrade(&cwd, Upgrade::Current, no_brew, |_, _| panic!(
+                "no handover"
+            ))
+            .unwrap()
+            .is_none()
         );
         assert!(
-            install_upgrade(&cwd, Upgrade::Standalone, |_, _| panic!("no handover"))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            install_upgrade(&cwd, Upgrade::Unmanaged("0.2.0".into()), |_, _| panic!(
+            install_upgrade(&cwd, Upgrade::Standalone, no_brew, |_, _| panic!(
                 "no handover"
             ))
             .unwrap()
@@ -218,21 +256,86 @@ mod tests {
         assert!(
             install_upgrade(
                 &cwd,
+                Upgrade::Unmanaged("0.2.0".into()),
+                no_brew,
+                |_, _| panic!("no handover")
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            install_upgrade(
+                &cwd,
                 Upgrade::Dispatching("0.2.0".into(), 42),
+                no_brew,
                 |_, _| panic!("no handover")
             )
             .unwrap()
             .is_none()
         );
 
-        let status = install_upgrade(&cwd, Upgrade::Installed("0.2.0".into()), |args, version| {
-            assert_eq!(args, relaunch(&cwd));
-            assert_eq!(version, "0.2.0");
-            Ok(successful_status())
-        })
+        let status = install_upgrade(
+            &cwd,
+            Upgrade::Installed("0.2.0".into()),
+            no_brew,
+            |args, version| {
+                assert_eq!(args, relaunch(&cwd));
+                assert_eq!(version, "0.2.0");
+                Ok(successful_status())
+            },
+        )
         .unwrap()
         .expect("an installed release hands over");
         assert!(status.success());
+    }
+
+    fn no_brew() -> std::io::Result<std::process::ExitStatus> {
+        panic!("no brew upgrade")
+    }
+
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    /// A finished `brew upgrade` hands over to the new binary; one that fails
+    /// does not, and its own exit status is what `update` exits with.
+    #[test]
+    fn a_homebrew_upgrade_hands_over_and_a_failed_one_does_not() {
+        use crate::release::Upgrade;
+
+        let cwd = crate::scratch::root("update-homebrew-outcomes");
+        let status = install_upgrade(
+            &cwd,
+            Upgrade::Homebrew("0.2.0".into()),
+            || Ok(successful_status()),
+            |args, version| {
+                assert_eq!(args, relaunch(&cwd));
+                assert_eq!(version, "0.2.0");
+                Ok(successful_status())
+            },
+        )
+        .unwrap()
+        .expect("an upgraded release hands over");
+        assert!(status.success());
+
+        let status = install_upgrade(
+            &cwd,
+            Upgrade::Homebrew("0.2.0".into()),
+            || Ok(exit_status(3)),
+            |_, _| panic!("no handover after a failed brew upgrade"),
+        )
+        .unwrap()
+        .expect("a failed brew upgrade still ends the command");
+        assert_eq!(status.code(), Some(3));
+
+        let missing = install_upgrade(
+            &cwd,
+            Upgrade::Homebrew("0.2.0".into()),
+            || Err(std::io::Error::other("not found")),
+            |_, _| panic!("no handover without brew"),
+        );
+        assert!(missing.is_err());
     }
 
     /// `-C <dir> update` has to still target that directory after the

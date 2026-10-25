@@ -453,13 +453,11 @@ fn panel_body(
 /// flag itself is [`crate::platform::stop`]'s own shared one. Installed and
 /// restored to whatever was there before around the one blocking read alone,
 /// so ctrl-c means exactly what it always has in whatever this process runs
-/// next.
+/// next. The installing and restoring is [`crate::platform::SignalGuard`]'s,
+/// which `spoolway update` uses too.
 pub(crate) struct SigintGuard {
-    previous: libc::sigaction,
-    /// An inert guard installs and restores nothing — test-only, the same
-    /// reason `TermGuard::inert` exists: a test must never touch the real
-    /// process's signal disposition, parallel tests included.
-    inert: bool,
+    /// Held for its `Drop`, which puts the old handler back.
+    _restores: crate::platform::SignalGuard,
 }
 
 extern "C" fn record_interrupt(_: libc::c_int) {
@@ -468,45 +466,18 @@ extern "C" fn record_interrupt(_: libc::c_int) {
 
 impl SigintGuard {
     pub(crate) fn new() -> SigintGuard {
-        // SAFETY: `action` and `previous` are plain-old-data structs;
-        // `sigemptyset` and `sigaction` are ordinary syscalls against a
-        // buffer this function owns for the call's duration.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record_interrupt as *const () as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            // No `SA_RESTART`: this handler exists so the blocking `read`
-            // underneath `screen::read_key` fails with `EINTR` and returns,
-            // not so it silently resumes as if ctrl-c had never happened.
-            action.sa_flags = 0;
-            let mut previous: libc::sigaction = std::mem::zeroed();
-            libc::sigaction(libc::SIGINT, &action, &mut previous);
-            SigintGuard {
-                previous,
-                inert: false,
-            }
+        // No `SA_RESTART`: this handler exists so the blocking `read`
+        // underneath `screen::read_key` fails with `EINTR` and returns, not
+        // so it silently resumes as if ctrl-c had never happened.
+        SigintGuard {
+            _restores: crate::platform::SignalGuard::catch(&[libc::SIGINT], 0, record_interrupt),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn inert() -> SigintGuard {
         SigintGuard {
-            // SAFETY: never installed and never restored — see `inert`.
-            previous: unsafe { std::mem::zeroed() },
-            inert: true,
-        }
-    }
-}
-
-impl Drop for SigintGuard {
-    fn drop(&mut self) {
-        if self.inert {
-            return;
-        }
-        // SAFETY: restoring exactly what `new` read off `sigaction` a
-        // moment ago, on the same signal, unmodified.
-        unsafe {
-            libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut());
+            _restores: crate::platform::SignalGuard::inert(),
         }
     }
 }

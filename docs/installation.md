@@ -56,6 +56,19 @@ in herdr's marketplace.
 `herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
 the two disagree. See [Testing](testing.md).
 
+## Homebrew
+
+On macOS or Linux (x64, arm64), install from the project's tap:
+
+```
+brew install marvingygas/tap/spoolway
+```
+
+The first install adds the tap `marvingygas/tap`. Every release updates its formula, and
+`spoolway update` upgrades the copy through `brew upgrade`. See
+[Keeping spoolway current](#keeping-spoolway-current). The formula has no musl build, so a musl
+Linux system installs through npm or the standalone download instead.
+
 ## Standalone download
 
 One file, nothing else to install. It never updates itself: run the install line again to get the
@@ -388,20 +401,52 @@ project's stamped home cannot be resolved, reporting that as one failed check. F
 spoolway update
 ```
 
-If npm installed this binary and a newer release is out, `update` runs
-`npm install -g spoolway@<version> --ignore-scripts` and then hands over to the new binary. At
-a terminal it then prints the old and new versions, the highlights, every migration that
-applies, and links to the full notes. `update` installs the binary only. It runs from any
-directory, project or not, and writes no project file. After a successful install its last
-line tells you to run `spoolway sync` in each project. A run that installs nothing does not
-print it.
+If npm or Homebrew installed this binary and a newer release is out, `update` upgrades it and
+hands over to the new binary. At a terminal it then prints the old and new versions, the
+highlights, every migration that applies, and links to the full notes. `update` installs the
+binary only. It runs from any directory, project or not, and writes no project file. After a
+successful install its last line tells you to run `spoolway sync` in each project. A run that
+installs nothing does not print it.
 
-On an npm install, `update` asks npm which release is out each time it runs. The wait is
-bounded. If npm does not answer in time, `update` says so and uses the last known version.
+| Installed by | Newer release found by | Upgrade command |
+|---|---|---|
+| npm | `npm view` | `npm install -g spoolway@<version> --ignore-scripts` |
+| Homebrew | `brew update`, then `brew info --json=v2 marvingygas/tap/spoolway` | `brew upgrade marvingygas/tap/spoolway` |
 
-A binary that npm did not install never starts npm. This covers a downloaded release file, a
-`cargo install` build, a Nix build, a copied file and a build under `target/`. `update` on such a
-binary prints its own version and the install line, starts no process and exits 0:
+`update` asks the tool each time it runs. The wait is bounded: 3 seconds for npm and 30 seconds
+for Homebrew. If the tool does not answer in time, `update` says so and uses the last known
+version. A Homebrew install stops `brew update` and its fetches shortly before the 30 seconds
+end. Ctrl-C during the wait stops them too.
+
+On a Homebrew install, `brew upgrade` writes straight to the terminal:
+
+```
+Checking Homebrew for a newer spoolway...
+Installing spoolway 0.15.0
+  brew upgrade marvingygas/tap/spoolway
+
+==> Upgrading marvingygas/tap/spoolway
+```
+
+When `brew upgrade` fails, `update` prints brew's error and then these lines. It exits with
+brew's own exit code.
+
+```
+brew upgrade did not finish, so spoolway 0.14.1 is still installed.
+Run it yourself to see the whole error:
+
+  brew upgrade marvingygas/tap/spoolway
+```
+
+After the upgrade, `update` runs the `spoolway` first on `PATH` and checks that it reports the
+new version. If it reports another version, such as an npm copy that comes before the Homebrew
+folder on `PATH`, `update` runs nothing and exits non-zero. It names that copy and the folder to
+put first on `PATH`.
+
+A binary that neither npm nor Homebrew installed never starts either tool. This covers a
+downloaded release file, a `cargo install` build, a Nix build, a copied file and a build under
+`target/`. `update` on such a binary prints its own version and the install line, starts no
+process and exits 0:
 
 ```
 This spoolway (0.15.0) was not installed by npm, so it does not
@@ -425,12 +470,19 @@ Two things stop the binary update:
 
 | What stops it | What happens |
 |---|---|
-| npm did not install this binary | `update` prints the install line and installs nothing. |
-| A dispatcher is running | The binary is left alone until the run ends. |
+| Neither npm nor Homebrew installed this binary | `update` prints the install line and installs nothing. |
+| A dispatcher is running | The binary is left alone until the run ends. `update` prints the refusal below. |
 
-On an npm install, the dispatcher header shows a newer published release in yellow, beside its
-own version. A binary that npm did not install shows only its own version. No other command and
-no popup announces a release. Turn the header's version off with
+```
+spoolway 0.15.0 is out, and a dispatcher is running (pid 4242), so the
+binary was left alone — replacing it would kill the run mid-pass.
+Stop the dispatcher, then run spoolway update again.
+```
+
+On an npm install or a Homebrew install, the dispatcher header shows a newer published release
+in yellow, beside its own version. An npm install asks npm. The header of a Homebrew install
+asks `brew info` and never runs `brew update`. Any other binary shows only its own version. No other
+command and no popup announces a release. Turn the header's version off with
 `housekeeping.update_check = false` in the config, or with `SPOOLWAY_SKIP_VERSION_CHECK=1` for
 one machine.
 

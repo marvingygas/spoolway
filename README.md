@@ -77,6 +77,7 @@ spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 |---|---|---|
 | herdr plugin | `herdr plugin install marvingygas/spoolway` | See [The herdr plugin](docs/herdr-plugin.md). |
 | npm | `npm install -g spoolway` | |
+| Homebrew | `brew install marvingygas/tap/spoolway` | macOS and Linux (x64, arm64). `spoolway update` runs `brew upgrade`. |
 | Standalone | `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh \| sh` | Installs to `~/.local/bin`. Updated manually. See [Standalone download](docs/installation.md#standalone-download) for the file per platform. |
 | Source | `cargo install --path .` | In a clone of this repository. |
 
@@ -84,7 +85,7 @@ spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 
 | Command | What it does |
 |---|---|
-| `spoolway update` | Installs a newer release. A standalone binary never updates itself: run the install line again. |
+| `spoolway update` | Installs a newer release, through brew for a Homebrew install. A standalone binary never updates itself: run the install line again. |
 | `spoolway sync` | Run in each project after an update. Lists the files the new release rewrites and applies them when you confirm. |
 | `spoolway whats-new` | Prints the release notes offline. |
 

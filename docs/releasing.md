@@ -34,6 +34,12 @@ already happened.
   version in their names and no archive around them. `install.sh` carries the release's version
   and downloads only from that release. `SHA256SUMS` lists all five. `scripts/release-verify.sh`
   checks that all six are attached.
+- A formula, `Formula/spoolway.rb`, pushed to the `marvingygas/homebrew-tap` repository by the
+  workflow's `homebrew` job. It points at the release's files and their checksums.
+  `scripts/release-verify.sh` installs it with `brew` when `brew` is on the machine. It then
+  removes the formula, the tap and the trust entry Homebrew 5.1.15 and later write for it, unless
+  each was there before. A copy installed before is upgraded and left in place. The tap holds only
+  the newest formula, so the check passes only for the latest release.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
 
 | Release file | Built from |
@@ -51,6 +57,18 @@ when a Linux release file is not statically linked.
 contract is written at the top of the file. Changes without a version yet collect in a
 `## Unreleased` section, which the binary skips. The release commit renames it to `## <version>`
 and fits it to the contract.
+
+## Homebrew tap setup
+
+Done once, before the first release that ships a formula.
+
+1. Create the public repository `marvingygas/homebrew-tap`, with a README. Git cannot hold an
+   empty folder, so the first release creates `Formula/spoolway.rb` itself.
+2. Create a fine-grained token with "Contents: read and write" on that repository only.
+3. Save it in this repository's Actions secrets as `HOMEBREW_TAP_TOKEN`.
+
+The release workflow's `homebrew` job writes `Formula/spoolway.rb` on every release. It fails
+with a pointer to this section when the secret is missing.
 
 ## Version rule
 
