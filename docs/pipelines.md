@@ -88,7 +88,7 @@ steps:
 | `skills` | none | Skills the lane invokes before the task briefing, each as its own message. Comma separated, names only. See [Skills](agents.md#skills). |
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
-| `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
+| `gate` | none | `on_pass` holds the step's pass, `on_fail` holds its fail and `always` holds either, on `paused` until `spoolway resume`. Agent steps only. Absent holds nothing. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Required on every step except `blocked`: `spoolway pipeline check` refuses an agent or command step without it, because a task reaching it would never leave. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
 | `loop` | unbounded | The most times a task may arrive at this step by a lane's report, a command step's exit, a walk-past or a failed launch. The next such arrival parks on `blocked`. A resume that walks past no other step is not checked against it. A written value is 1 or more. |
@@ -105,7 +105,7 @@ It refuses a block that matches no shipped copy, and `spoolway sync --replace <f
 this spoolway's block. A file without the markers is never written to.
 
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs
-a command, and its exit code is the outcome. A step finishes the task with `on_pass: done`. A step stops the task for a person with `gate: true`.
+a command, and its exit code is the outcome. A step finishes the task with `on_pass: done`. An agent step stops the task for a person with `gate: on_pass`.
 
 Steps further down the file are scheduled first. A task on `document` gets a slot before a
 task on `implement`.
@@ -120,7 +120,7 @@ Every pipeline may route to `done` and `blocked` without declaring them.
 | `queued` | Where every task starts. It waits for its dependencies and a free slot. |
 | `done` | The task finished. Its worktree is removed and its file is archived. |
 | `blocked` | The task needs help. Attended, `spoolway resume <task>` resumes it. Unattended, a lane is started on it. See [Staffing `blocked`](#staffing-blocked). |
-| `paused` | The task passed a `gate:` step and waits for `spoolway resume <task>`. See [Gates](#gates). |
+| `paused` | A `gate:` step reported the outcome its gate holds and the task waits for `spoolway resume <task>`. See [Gates](#gates). |
 | `hook_failed` | An `[issue_tracking]` hook failed on `queued`, `started` or `done`. `spoolway resume <task>` runs the hook again. `spoolway resume <task> --skip-hook`, or `k` on the board, carries the task on without it. |
 
 `started` is not one of these five. It is an `[issue_tracking]` hook event, fired the moment a
@@ -283,8 +283,8 @@ lane without a session, set `blocked_session = false` in the config.
   and back to itself for a command step. The fourth pass in a row onto the same command step
   parks the task on `paused`. See [Loops](#loops). `--pass --stage <step>` sends it to `<step>`
   instead, bounded by the steps this task has already run.
-- If the step this task blocked on is a `gate: true` agent step, a plain `--pass` lands on
-  `paused` at that step's own gate, as if that step's own lane had reported the pass. A gated
+- If the step this task blocked on has `gate: on_pass` or `gate: always` and is an agent step, a plain `--pass` lands on
+  `paused` at that step's own gate, as if that step's own lane had reported the pass. A
   command step is handed back to itself and runs again, because its command never exited 0.
   `--stage` may not name a step past a gate this task's pass has not yet answered for. Naming the
   gate step itself, or a step before it, still works. A step is past the gate when the `on_pass`
@@ -370,9 +370,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - A `run:` means one thing by each exit code. A command that answers the same code for two
   different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
 - `prompt`, `model`, `effort` and `session` are refused. The step takes no slot.
-- `gate: true` holds a passing exit on `paused`. See [Gates](#gates). A `background: true` step
-  passes when it starts, so it has no exit to hold, and `gate` is refused there. So is
-  `on_fail`, because a background run is a sidecar and its exit never moves the task.
+- `gate:` is refused. A command has no lane to say what it did, so only an agent step can be held
+  for a person. See [Gates](#gates). A `background: true` step passes when it starts, and
+  `on_fail` is refused there too, because a background run is a sidecar and its exit never moves
+  the task.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
 - Every arrival at a command step runs the command in full. The move onto the step stops any old
@@ -569,20 +570,40 @@ The queue screen's `trial` menu item writes it for the steps you tick to skip in
 
 ## Gates
 
-`gate: true` on a step holds its pass for a person. Do not name a step `gate`. A task's own `gate_at:` field gates one step for that task alone. See [Tasks](tasks.md).
+`gate:` on a step holds an outcome of the step for a person. Do not name a step `gate`. A task's own `gate_at:` field gates one step for that task alone. See [Tasks](tasks.md).
 
-The lane runs and reports as usual. On its pass the task lands on `paused` and its pane stays
-open. A command step has no lane to report: `gate: true` holds its passing exit the same way,
-and a task's `gate_at:` holds a command step's exit whatever it was. A `background: true` step
-passes as soon as it starts, so `gate: true` is refused there.
+| `gate:` | Holds |
+|---|---|
+| `on_pass` | A pass. |
+| `on_fail` | A fail. The step must declare an `on_fail:` other than `blocked`, because a fail that goes where a block goes is never offered to the lane. `spoolway pipeline check` refuses it otherwise. |
+| `always` | A pass or a fail. |
+| absent | Nothing. |
+
+Any other value is refused when the pipeline loads, naming the step and the three values.
+
+Only an agent step can be gated. A `gate:` on a step with `run:` is refused when the pipeline
+loads and by `spoolway pipeline check`:
+
+```
+step `publish` runs a command but declares `gate:` — only an agent step can be held for a person. Delete `gate:`, or put it on the agent step after `publish`.
+```
+
+The lane runs and reports as usual. On the outcome the gate holds, the task lands on `paused` and
+its pane stays open. A command step's exit is never held, and neither is a command step named by a
+task's `gate_at:`.
+
+The lane is told which of its reports are held, and that a held report needs at least one
+`--handoff` for the person who opens the pane. `spoolway report` refuses a held report with none.
+The handoffs are written into `## Handoff` and printed under the held line, which is the last
+thing the pane shows. See [`spoolway report`](cli-reference.md#spoolway-report-task).
 
 On the board, press `r` on the paused row. After a caught pass, the picker preselects the
 `on_pass` route, so `enter` lets the task past. Pick another step to send the task there
 instead.
 
 - A plain resume takes `on_pass` after a caught pass, whatever `on_fail` a step declares or does
-  not. After a task's `gate_at:` caught a `--fail` or a failing command exit, a plain resume
-  takes the step's `on_fail`, the route the failure chose.
+  not. After a gate or a task's `gate_at:` caught a `--fail`, a plain resume takes the step's
+  `on_fail`, the route the failure chose.
 - Picking another step in the picker reroutes the task to that step, whatever the gate would
   otherwise have done.
 - A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
@@ -590,10 +611,10 @@ instead.
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing
   where the fail goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
-- A gate holds an unblocker's `--pass` from `blocked` too when the blocked step is a gated agent
-  step. The task waits at that step's own gate, not at `blocked`, and `spoolway resume` takes
-  that step's `on_pass`. A gated command step is not held: the pass sends the task back to the
-  command, which runs again. `--pass --stage <step>` off `blocked` may not name a step past a
+- A gate with `on_pass` or `always` holds an unblocker's `--pass` from `blocked` too when the
+  blocked step is a gated agent step. A gate with `on_fail` does not. The task waits at that
+  step's own gate, not at `blocked`, and `spoolway resume` takes that step's `on_pass`. A pass at
+  a command step sends the task back to the command, which runs again. `--pass --stage <step>` off `blocked` may not name a step past a
   gate it has not answered for. Naming the gate step itself, or a step before it, still works.
   See [Staffing `blocked`](#staffing-blocked).
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
@@ -601,7 +622,7 @@ instead.
 
 ### Holding only when something goes wrong
 
-Put the check in a command step. Put the gate on the step its `on_fail` sends the task to. A
+Put the check in a command step. Put the gate on the agent step its `on_fail` sends the task to. A
 clean exit never reaches the gate.
 
 ```yaml
@@ -613,7 +634,7 @@ clean exit never reaches the gate.
   - id: resolve-conflicts
     agent: claude
     model: claude-sonnet-5-5
-    gate: true
+    gate: on_pass
     on_pass: create-pr
 ```
 
@@ -731,8 +752,8 @@ The `spoolway-config` skill writes and edits pipelines with you, starting from t
 | A stage where somebody uses judgement | An agent step: a `prompt:` on a `model:` |
 | A stage that is a command with an exit code | A `run:` step |
 | "If that fails, go back and fix it" | `on_fail` pointing back, plus a `loop` |
-| "Check with me before this one" | `gate: true`, then `spoolway resume` |
-| "Check with me only if it goes wrong" | A `run:` step whose `on_fail` points at a `gate: true` step |
+| "Check with me before this one" | `gate: on_pass` on an agent step, then `spoolway resume` |
+| "Check with me only if it goes wrong" | A `run:` step whose `on_fail` points at an agent step with `gate: on_pass` |
 | A handoff that only tells a person the last stage finished | Nothing. Delete it. |
 
 There is no nesting. A stage with three parts is three steps, or one step whose prompt

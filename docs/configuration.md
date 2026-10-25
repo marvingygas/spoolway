@@ -12,7 +12,7 @@ uses is written in the pipeline file. See [Pipelines](pipelines.md).
 ## Editing it
 
 ```
-spoolway config contract       # every setting, its values and its default
+spoolway config contract       # every setting, its values and one sentence
 spoolway config edit           # open the file in $VISUAL, $EDITOR or vim, checked on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`
@@ -21,7 +21,7 @@ spoolway config get agents.pi.kind
 spoolway config set models.claude-opus-5.input 5.0
 ```
 
-The top of the file holds a table of every key, its values and its default. `config set`
+The top of the file holds a table of every key, its values and one sentence. `config set`
 changes one key and leaves every other byte alone. A file with CRLF line endings keeps them, so
 one `config set` changes one line. A comment after the value stays. Setting a key to the value it
 already holds changes no byte. A key of a `[models]` row written as an inline table, such as
@@ -455,7 +455,7 @@ dirs = ["~/notes"]
 
 | Key | Default | Meaning |
 |---|---|---|
-| `dirs` | `[]` | Directories, beside the project root, whose own agent sessions count as this project's spend |
+| `dirs` | `[]` | Directories, beside the project root, whose own agent sessions count as this project's spend. Absolute, or `~`-relative. |
 
 The ledger holds one line per settled lane, plus one line per command step run. A person also runs agent sessions by hand, and this
 project pays for those too. This list names the directories those sessions run in. See
@@ -913,7 +913,7 @@ left as it is.
 | `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
 | `prompt_cache_ttl` | none | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Unset, or `""`, means no limit, and `"0"` says so outright. `init` and `sync` write a commented example for `claude-*` and `gpt-*`. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
-| `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it. |
+| `local` | `false` | The model runs on your own hardware. `spoolway doctor` reads it: setting it on a model that carries `slots` silences doctor's note that the model should probably say so. |
 | `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them, unless that is `0`. `spoolway doctor` refuses a step that breaks this, a `pi` step, and a codex step on a row with no `context_window`; see [Compaction threshold](agents.md#compaction-threshold). Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. A value over `100` written by hand is a wrong value, as in [Wrong values written by hand](#wrong-values-written-by-hand). |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a

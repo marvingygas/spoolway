@@ -1024,8 +1024,11 @@ YML
 silent_about "a gated step's contract carries no withheld block" \
   "not available to you" \
   "$SPOOLWAY" prompt contract --pipeline gate-check --step check
-says "and still holds the pass for the person who opens the pane" \
-  "A pass is held here for a person, who opens this pane." \
+says "and still holds the pass for a person" \
+  "A pass is held here for a person. Your handoff is what" \
+  "$SPOOLWAY" prompt contract --pipeline gate-check --step check
+says "and tells the lane what the person needs in its handoff" \
+  "1. What" \
   "$SPOOLWAY" prompt contract --pipeline gate-check --step check
 rm -f .spoolway/pipelines/gate-check.yml
 
@@ -1067,7 +1070,17 @@ GATE_TASK="tab-shell"
   cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
 
-GATE_OUT=$("$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip" 2>&1)
+# A held report with no handoff is refused (exit 2) before anything is
+# recorded: the task stays where it was, file and stage both.
+GATE_BEFORE=$(cat "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md")
+exit_code "a held pass with no handoff is refused" 2 \
+  "$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip"
+if [ "$(stage_of "$GATE_TASK")" = blocked ] \
+  && [ "$(cat "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md")" = "$GATE_BEFORE" ]
+then ok "and a refused held report leaves the task file untouched"
+else bad "and a refused held report leaves the task file untouched"; fi
+
+GATE_OUT=$("$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip" --handoff "the strip is fixed; check it renders" 2>&1)
 GATE_STATUS=$?
 if [ "$GATE_STATUS" -eq 0 ] && grep -qF "held here for a person, at \`look\`'s gate" <<<"$GATE_OUT"
 then
@@ -1077,6 +1090,8 @@ else
 (exit $GATE_STATUS)"
   sed 's/^/        /' <<<"$GATE_OUT"
 fi
+has "and its handoff is printed under the held line" \
+  "  the strip is fixed; check it renders" <(printf '%s\n' "$GATE_OUT")
 if [ "$(stage_of "$GATE_TASK")" = paused ]; then
   ok "and the task lands on paused rather than carried past the gate to e2e"
 else
@@ -1106,10 +1121,10 @@ fi
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
 rm -f .spoolway/pipelines/gate-hold.yml
 
-# The same pass off a gated *command* step is not held. A command has no work
-# for the unblocker to stand in for, so the pass hands it back to itself and
-# `deploy` runs again; holding it would let `resume` read the pause as a caught
-# pass and send a command that never exited 0 down its `on_pass`.
+# A command step cannot be gated: it has no lane to tell the person what it
+# did, so a pipeline that declares `gate:` on a `run:` step is refused with
+# both ways out named. The file is removed straight after, so no later check
+# in this suite reads a pipeline that fails to load.
 cat > .spoolway/pipelines/gate-command.yml <<'YML'
 steps:
   - id: deploy
@@ -1123,35 +1138,11 @@ steps:
     model: fake-local
     on_pass: done
 YML
-
-CMD_TASK="tab-deploy"
-{
-  echo "---"
-  echo "id: $CMD_TASK"
-  echo "title: a gated command failed, blocked by hand"
-  echo "stage: blocked"
-  echo "blocked_from: deploy"
-  echo "pipeline: gate-command"
-  echo "group: live"
-  echo
-  echo "---"
-  cat "$BODY"
-} > "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
-
-CMD_OUT=$("$SPOOLWAY" report "$CMD_TASK" --pass -m "fixed the deploy" 2>&1)
-CMD_STATUS=$?
-if [ "$CMD_STATUS" -eq 0 ] && [ "$(stage_of "$CMD_TASK")" = deploy ]; then
-  ok "an unblocker's pass off a gated command step hands it back to run again"
-else
-  bad "an unblocker's pass off a gated command step hands it back to run again \
-(exit $CMD_STATUS, at \`$(stage_of "$CMD_TASK")\`)"
-  sed 's/^/        /' <<<"$CMD_OUT"
-fi
-lacks "and no gate pause is left that resume could read as a caught pass" \
-  "paused_by:" "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
-
-rm -f "$SPOOLWAY_PROJECT_HOME/queue/$CMD_TASK.md"
+refuses "a gate on a command step is refused, with both fixes named" \
+  "Delete \`gate:\`, or put it on the agent step after \`deploy\`" \
+  "$SPOOLWAY" pipeline check
 rm -f .spoolway/pipelines/gate-command.yml
+works "and the project loads again once it is gone" "$SPOOLWAY" pipeline check
 
 # ------------------------------------------------------------- the queue screen
 # The one thing no unit test can reach: bare `spoolway`'s queue tab reading

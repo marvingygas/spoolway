@@ -379,7 +379,7 @@ impl ConfigPaths {
 }
 
 /// `spoolway config contract`: every setting `config.toml` may carry, its
-/// values, its default and one sentence about it — rendered from
+/// values and one sentence about it — rendered from
 /// [`crate::confkv::reference_table`], the same register the file's own
 /// header table is written from, so a setting is documented once rather than
 /// copied a second time into this command's own prose.

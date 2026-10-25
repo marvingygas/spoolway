@@ -2633,9 +2633,10 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// One failed row for each task in the queue whose `gate_at:` names a step its
-/// pipeline lacks, except one already at `done`. The dispatcher parks such a
-/// task when it is still on `queued`; one past that, or already parked, is
-/// named here all the same, while the pipeline edit can still be undone.
+/// pipeline lacks, or a command step (a hand edit, or a step turned into a
+/// command), except one already at `done`. The dispatcher parks such a task
+/// when it is still on `queued`; one past that, or already parked, is named
+/// here all the same, while the pipeline edit can still be undone.
 fn stale_gate_checks(tasks: &[Task], pipelines: &Pipelines) -> Vec<Finding> {
     tasks
         .iter()
@@ -2827,7 +2828,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
         ));
 
         // Two enabled jobs on one routine fire neither. Each of the two is
-        // named, with the other's store, so whichever is deleted is found.
+        // named, with the other's store, so whichever is deactivated is found.
         let others = job.clashing_jobs(repo, &jobs);
         findings.push(Finding::Check(
             format!("job `{name}` is the only job on its routine"),
@@ -2839,8 +2840,8 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
                     .map(|other| format!("`{}` (in {})", other.name, other.source.display()))
                     .collect();
                 Err(anyhow::anyhow!(
-                    "{} also run{} routine `{}`, so neither fires — delete one on the routines \
-                     tab (o → delete job) or point it at another routine",
+                    "{} also run{} routine `{}`, so neither fires — deactivate one on the \
+                     routines tab (o → deactivate job) or point it at another routine",
                     named.join(", "),
                     if named.len() == 1 { "s" } else { "" },
                     job.relative_target(repo)
@@ -3670,6 +3671,13 @@ mod tests {
         let clash = format!("{clash:#}");
         assert!(
             clash.contains("`two`") && clash.contains("jobs.toml"),
+            "{clash}"
+        );
+        assert!(
+            clash.ends_with(
+                "deactivate one on the routines tab (o → deactivate job) or point it at \
+                 another routine"
+            ),
             "{clash}"
         );
         let second = check("job `two` is the only job on its routine")
@@ -6681,6 +6689,36 @@ mod tests {
             }),
             "{warnings:?}"
         );
+    }
+
+    /// A queued task whose `gate_at:` names a command step is a failed row
+    /// naming the step, the same as one naming no step. Fails without
+    /// `command_gate_at` in `stale_gate_at`: no row is raised.
+    #[test]
+    fn a_gate_at_a_command_step_has_is_a_failed_row() {
+        let pipelines = Pipelines::builtin();
+        let tasks: Vec<Task> = [("stale", "handover"), ("fine", "blocked")]
+            .into_iter()
+            .map(|(id, gate)| {
+                Task::parse(
+                    std::path::PathBuf::from(format!("{id}.md")),
+                    &format!(
+                        "---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"
+                    ),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let findings = stale_gate_checks(&tasks, &pipelines);
+        assert_eq!(findings.len(), 1);
+        match &findings[0] {
+            Finding::Check(label, Err(why)) => {
+                assert_eq!(label, "gate of task `stale`");
+                assert!(format!("{why}").contains("runs a command"), "{why}");
+            }
+            _ => panic!("expected one failed check"),
+        }
     }
 
     /// A queued task whose `gate_at:` names a step its pipeline lacks is a

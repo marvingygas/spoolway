@@ -106,6 +106,14 @@ reading the file whole.
    subject and every area under its single group. Each option's `description` is one plain
    sentence on what that count trades away.
 
+   **A group count the ballot did not draw is redrawn.** The person may type a count into
+   Other, or ask for one in a note on any option. Draw the group ballot again with that
+   count second, marked `(chosen)`. Put one count above it and two below, floored at 1. At
+   the floor, add the missing counts above instead. A count that was the recommended one
+   keeps its `(Recommended)` mark. Draw each count in the group layout above. The answer to
+   the redrawn ballot stands, unless it asks for yet another count the ballot did not draw.
+   Then redraw again. A pick of any count the ballot drew is taken as picked.
+
    **Then, for each group, in dependency order, route each subject inside it to a pipeline and
    decompose against that pipeline's own shape.** Read the pipelines before choosing task
    boundaries. Let their purpose and steps shape the split instead of fitting pipelines onto
@@ -220,54 +228,23 @@ reading the file whole.
    pull request for, names a pull request from a fork (`isCrossRepository` is true — its
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
-   **Before step 3 writes anything, confirm the whole breakdown when a pick changed.**
-   Ask one confirm ballot after the last task ballot when any pick was not the recommended
-   one. That is a non-recommended option on the group ballot or on any task ballot, or a split
-   typed into Other. When every pick was the recommended one, skip it and go straight to
-   step 3.
+   **A split no ballot drew is asked again, and nothing else is.** Only a count, or a
+   different breakdown asked for in words, is an unseen split. That covers a count typed
+   into Other or asked for in a note on any option. It also covers a re-route asked for in
+   Other, such as `make 2 a bugfix`. A `from` note is not an unseen split. The note
+   mechanism above handles it. When one note holds both, resolve its `from` parts first and
+   draw their bases in the redraw.
 
-   Ask it with one AskUserQuestion. Open the question text with `Write this breakdown? You picked <n> tasks for
-   <group>, not the recommended <m>.` Name each pick that was not recommended. Then draw
-   every group on one line with its `base` or `after` part, and every task under it on one
-   row with its size and pipeline. Number the tasks once across the whole breakdown, not per
-   group. Draw no sentences:
+   Redraw the task ballot with the asked-for count second, marked `(chosen)`. Put one count
+   above it and two below, floored at 1. At the floor, add the missing counts above instead.
+   A count that was the recommended one keeps its `(Recommended)` mark. Draw each count's
+   breakdown in the layout above. Draw the person's own breakdown under the chosen count.
+   Open the question text with the usual `Split <group>: <counts> tasks` line, naming the
+   redrawn counts. Ask it again with one AskUserQuestion.
 
-   ```
-   1  cart-core                    base  main
-      1  cart-totals      medium   impl
-      2  cart-discounts   small    impl_tdd
-
-   2  cart-empty                   base  main
-      3  cart-empty       small    bugfix
-   ```
-
-   Give it two options. `Write them` has the description `the tasks are written as drawn`.
-   `Pick again` has the description `back to the split ballot`.
-   `Write them` goes on to step 3. `Pick again` asks the group ballot again, and every ballot
-   after it.
-
-   **A note on the confirm ballot re-routes a task or moves a chain's base.** The person may
-   add a note to the option they pick. A note holds parts, comma-separated, such as
-   `2 to impl, 3 from #412`. A part is `<task> to <pipeline>` or `<task> from <branch or
-   #pr>`. `<task>` is a task's number or id from this ballot. A `to` part sets that task's
-   pipeline. A `from` part is checked and resolved the way the task ballot's note is, and is
-   refused for the same reasons.
-
-   Check every `to` part against the pipeline names in step 1's `spoolway task contract`.
-   When a `to` part names a pipeline that is not there, bring the confirm ballot back
-   unchanged. Open it with the notes line, such as `notes: 2 to bugfx`. Then say ``No
-   pipeline is named `bugfx`. This project has:`` and list every pipeline name. End with
-   `Pick again, with a note naming one of them.`
-
-   When a part names a task that is not on the ballot, bring the confirm ballot back
-   unchanged, with that problem named.
-
-   When every part is accepted, draw the confirm ballot again with the change in place.
-   Open it with the notes line, such as `notes: 2 to impl, 3 from #412`. Draw the same rows,
-   with each re-routed task's new pipeline and each moved chain's new `base`. Ask it again.
-   An answer with no note stands. A `to` part may move a group's last task onto a pipeline
-   with no `last_of_chain` step. Then say so on the redrawn ballot, the way step 4 says its
-   own swap.
+   The answer to the redrawn ballot stands, unless it asks for yet another unseen split.
+   Then redraw again. A pick of any count a ballot drew is taken as picked, with no further
+   question. Then go on to step 3.
 
 3. **Write one file per task**, with **Write**, at
    `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape

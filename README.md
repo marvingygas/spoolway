@@ -71,42 +71,23 @@ A gate can pause a task for a person after a step reports.
 
 ## Install
 
-```
-npm install -g spoolway
-```
+spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 
-Or with Homebrew, on macOS or Linux (x64, arm64):
+| Method | Command | Notes |
+|---|---|---|
+| herdr plugin | `herdr plugin install marvingygas/spoolway` | See [The herdr plugin](docs/herdr-plugin.md). |
+| npm | `npm install -g spoolway` | |
+| Homebrew | `brew install marvingygas/tap/spoolway` | macOS and Linux (x64, arm64). `spoolway update` runs `brew upgrade`. |
+| Standalone | `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh \| sh` | Installs to `~/.local/bin`. Updated manually. See [Standalone download](docs/installation.md#standalone-download) for the file per platform. |
+| Source | `cargo install --path .` | In a clone of this repository. |
 
-```
-brew install marvingygas/tap/spoolway
-```
+### Updating
 
-The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release, through
-whichever of the two installed it. Run `spoolway sync` in each project to list the files the new
-release rewrites and apply them when you confirm. `spoolway whats-new` prints the release notes
-offline.
-
-Or download one file that needs nothing else and never updates itself:
-
-```
-curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
-```
-
-It installs to `~/.local/bin`. Run the same line again to update. See
-[Standalone download](docs/installation.md#standalone-download) for the file per platform.
-
-From source instead, in a clone of this repository:
-
-```
-cargo install --path .
-```
-
-As a herdr plugin:
-
-```
-herdr plugin install marvingygas/spoolway
-```
+| Command | What it does |
+|---|---|
+| `spoolway update` | Installs a newer release, through brew for a Homebrew install. A standalone binary never updates itself: run the install line again. |
+| `spoolway sync` | Run in each project after an update. Lists the files the new release rewrites and applies them when you confirm. |
+| `spoolway whats-new` | Prints the release notes offline. |
 
 Platform notes and requirements in full: **[Installation and setup](docs/installation.md)**.
 
@@ -250,7 +231,7 @@ routine  = "nightly"       # a top-level folder under .spoolway/routines/
 ```
 
 The routines tab shows a routine's job above its tasks. Press `o` on the routine to edit,
-pause or delete it.
+deactivate or activate it. A job is deleted only with its routine.
 
 ## Trials
 

@@ -128,8 +128,9 @@ pub enum Command {
     /// it is so you don't have to.
     ///
     /// A task on `blocked` resumes the step it stopped on. A task on `paused`
-    /// finished a `gate: true` step and is waiting for you to let it past —
-    /// this sends it on to wherever the step's `on_pass` points. `--stage`
+    /// finished a gated step and is waiting for you to let it past —
+    /// this sends it where the held outcome points: the step's `on_pass` for
+    /// a pass, its `on_fail` for a fail. `--stage`
     /// overrides that route by hand, and still works on a paused task:
     /// naming a step is you choosing where it goes, gate or no gate.
     Resume(ResumeArgs),
@@ -1164,6 +1165,9 @@ pub struct ReportArgs {
     /// Repeat for each. Written into the task file's `## Handoff` as
     /// `` - `<step>` — <text> `` in the same save that routes the task —
     /// alongside `--pass`, `--fail` or `--block`, and whatever the outcome.
+    /// A blank one is left out. A report a gate holds needs at least one:
+    /// they are printed under the held line for the person who answers the
+    /// gate.
     #[arg(long, value_name = "TEXT")]
     pub handoff: Vec<String>,
 }
@@ -1821,8 +1825,8 @@ pub struct PromptContractArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Print the config format: every setting, its values, its default and
-    /// one sentence — rendered from the same register `config.toml`'s own
+    /// Print the config format: every setting, its values and one
+    /// sentence — rendered from the same register `config.toml`'s own
     /// header table writes, so a setting is documented once.
     Contract,
 

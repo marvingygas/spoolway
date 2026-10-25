@@ -25,8 +25,8 @@ pub struct Entry {
 
 /// One entry of the config surface: a dotted key (a profile name or a model
 /// glob written as a placeholder, since the entry is generic across every one
-/// that exists), what it may be set to, what it defaults to, and one sentence
-/// about it.
+/// that exists), what it may be set to, and one sentence about it. Defaults are
+/// not here: `docs/configuration.md` lists them per section.
 ///
 /// The single register both surfaces render from — [`crate::config::Config::
 /// render`]'s reference table and the settings screen's per-entry note (see
@@ -37,7 +37,6 @@ pub struct Entry {
 pub struct Reference {
     pub key: &'static str,
     pub values: &'static str,
-    pub default: &'static str,
     pub sentence: &'static str,
 }
 
@@ -50,285 +49,210 @@ const TIER_RATE_KEY: &str = "models.<glob>.above_<N>k_tokens.<rate>";
 pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.lane_quiet",
-        values: "<duration>",
-        default: "15m",
-        sentence: "How long a lane may say nothing before the dispatcher reminds it to \
-                    report. Not how often a pass looks — the dispatcher polls at a fixed \
-                    rate nobody sets.",
+        values: "time, e.g. 15m",
+        sentence: "How long an agent may stay silent before spoolway asks it for an update.",
     },
     Reference {
         key: "dispatch.auto_commit",
         values: "true, false",
-        default: "true",
-        sentence: "Whether spoolway commits a lane's leftover work when its step settles.",
+        sentence: "Commit any work an agent left uncommitted when its step ends.",
     },
     Reference {
         key: "dispatch.priority",
         values: "group, any, reserve",
-        default: "group",
-        sentence: "Whether a free slot is filled from every ready task, from the group \
-                    already landing first, or kept for a started group until it is done.",
+        sentence: "Who gets a free slot: group = finish started groups first, any = no \
+                    preference, reserve = also hold a slot for a started group.",
     },
     Reference {
         key: "dispatch.lane_child_ceiling",
-        values: "<duration>",
-        default: "1h",
-        sentence: "How long a lane may be excused for a process it started that is still \
-                    running before the reminder loop treats it as silent anyway.",
+        values: "time, e.g. 1h",
+        sentence: "How long an agent may wait on a program it started before spoolway \
+                    stops it and asks for help.",
     },
     Reference {
         key: "dispatch.visible_lanes",
-        values: "<count>, all",
-        default: "3",
-        sentence: "How many of a task's most recent lanes stay open; each new agent step \
-                    or shown command closes the oldest finished ones. Older versions kept \
-                    every lane.",
+        values: "number, all",
+        sentence: "How many of a task's panes stay open. Older finished ones are closed.",
     },
     Reference {
         key: "dispatch.hide_commands",
         values: "true, false",
-        default: "false",
-        sentence: "Whether a command step runs without a pane. Off, its pane stays open \
-                    after it exits, counting toward `visible_lanes`.",
+        sentence: "Run command steps without opening a pane.",
     },
     Reference {
         key: "dispatch.lane_layout",
         values: "panes, tabs",
-        default: "panes",
-        sentence: "Whether a task's steps are panes of one tab, or each step opens in a tab \
-                    of its own, named after the step.",
+        sentence: "Show a task's steps as panes in one tab, or give each step its own tab.",
     },
     Reference {
         key: "unattended.enabled",
         values: "true, false",
-        default: "false",
-        sentence: "Whether this run stops for a person, or resumes every block itself \
-                    with `max_output_tokens` as the only brake.",
+        sentence: "Run without a person: a blocked task goes to an agent (the unblocker) \
+                    instead of waiting for you.",
     },
     Reference {
         key: "unattended.max_output_tokens",
-        values: "<tokens>",
-        default: "0",
-        sentence: "Output tokens one unattended run may spend before the dispatcher \
-                    stops starting work; 0 is no ceiling.",
+        values: "number",
+        sentence: "Stop starting new work once an unattended run has used this many \
+                    output tokens. 0 = no limit.",
     },
     Reference {
         key: "unattended.max_cost_usd",
-        values: "<dollars>",
-        default: "0",
-        sentence: "Dollars one unattended run may spend before the dispatcher stops \
-                    starting work, priced from the resolved model table; 0 is no ceiling.",
+        values: "dollars",
+        sentence: "Stop starting new work once an unattended run has spent this much. 0 = \
+                    no limit.",
     },
     Reference {
         key: "unattended.blocked_agent",
-        values: "<profile>",
-        default: "claude",
-        sentence: "Which `[agents.*]` profile staffs `blocked` in an unattended run, for \
-                    every pipeline that does not declare its own `blocked` step.",
+        values: "profile name",
+        sentence: "Which agent fixes blocked tasks in an unattended run.",
     },
     Reference {
         key: "unattended.blocked_model",
-        values: "<model>",
-        default: "claude-opus-5",
-        sentence: "The model that profile runs, staffing `blocked`. Blank refuses to start \
-                    an unattended run: nobody would be able to clear a block.",
+        values: "model name",
+        sentence: "Which model it uses. Must be set for an unattended run.",
     },
     Reference {
         key: "unattended.blocked_effort",
-        values: "<level>",
-        default: "(blank)",
-        sentence: "How hard that model thinks, staffing `blocked`.",
+        values: "level, or blank",
+        sentence: "How much effort that model puts in.",
     },
     Reference {
         key: "unattended.blocked_session",
         values: "true, false",
-        default: "true",
-        sentence: "Whether the lane staffing `blocked` carries its own earlier session \
-                    forward.",
+        sentence: "Let it continue its earlier conversation instead of starting fresh.",
     },
     Reference {
         key: "unattended.blocked_prompt",
-        values: "<name>",
-        default: "unblocker",
-        sentence: "Prompt the lane staffing `blocked` runs.",
+        values: "prompt name",
+        sentence: "Which prompt it is given.",
     },
     Reference {
         key: "housekeeping.update_check",
         values: "true, false",
-        default: "true",
-        sentence: "Whether spoolway tells a person at a keyboard that a newer release is out.",
+        sentence: "Tell you when a newer spoolway release is out.",
     },
     Reference {
         key: "housekeeping.calibrate_window",
-        values: "<duration>",
-        default: "14d",
-        sentence: "How far back `spoolway-calibrate` reads: archived tasks finished inside \
-                    the window, and the ledger entries beside them.",
+        values: "time, e.g. 14d",
+        sentence: "How far back spoolway-calibrate looks at finished tasks.",
     },
     Reference {
         key: "housekeeping.retention_days",
-        values: "<days>",
-        default: "30",
-        sentence: "How long system-prompts/, commands/, tracking/, headless/ (its logs/ \
-                    included) and scratch/ keep an entry before it is deleted; 0 keeps \
-                    everything forever. scratch/, headless/, commands/ and tracking/ keep \
-                    an entry for as long as its task is still in queue/. archive/ is \
-                    governed by housekeeping.archive_retention_days instead. queue/, \
-                    pending/, worktrees/ and plans/ are never swept.",
+        values: "days",
+        sentence: "Delete old logs and temporary files after this many days. 0 = keep forever.",
     },
     Reference {
         key: "housekeeping.archive_retention_days",
-        values: "<days>",
-        default: "0",
-        sentence: "How long a finished task keeps its file in archive/ before it is \
-                    deleted, along with its line in archive/index.jsonl; 0 keeps every \
-                    finished task forever. Each task is about 25 KB. A deleted task \
-                    can no longer be named in `depends_on`, and falls out of what \
-                    `spoolway eval` and `calibrate_window` read.",
+        values: "days",
+        sentence: "Delete finished tasks from the archive after this many days. 0 = keep forever.",
     },
     Reference {
         key: "watch.dirs",
-        values: "<path>, ...",
-        default: "(empty)",
-        sentence: "Directories whose own sessions are counted beside the lanes. The \
-                    project root is always watched; these are extra. Absolute, or \
-                    ~-relative.",
+        values: "folders",
+        sentence: "Extra folders whose agent sessions count toward this project's cost. \
+                    The project folder always counts.",
     },
     Reference {
         key: "issue_tracking.hook",
-        values: "<filename>",
-        default: "(blank)",
-        sentence: "A bare filename, resolved inside `.spoolway/hooks/` (a home-mode \
-                    workspace's own `config/hooks/`); blank runs no hook and changes nothing \
-                    about a task's `queued`, `blocked`, `paused` or `done`.",
+        values: "file name, or blank",
+        sentence: "Script in the hooks folder that updates your issue tracker as tasks \
+                    move. Blank = none.",
     },
     Reference {
         key: "issue_tracking.project_key",
-        values: "<string>",
-        default: "(blank)",
-        sentence: "Opaque to spoolway — `owner/repo` on github, a project key on jira — \
-                    handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.",
+        values: "text",
+        sentence: "Your project in the tracker, e.g. owner/repo on GitHub. Passed to the hook.",
     },
     Reference {
         key: "issue_tracking.key_in_names",
         values: "true, false",
-        default: "true",
-        sentence: "Whether a `slug=` the hook answers prefixes the group, branch and \
-                    worktree name `queue add` generates — `task/<slug>-<id>`. With no hook, \
-                    or a blank `hook`, there is no `slug=` to prefix with, so this changes \
-                    nothing either way.",
+        sentence: "Put the issue key in branch and worktree names.",
     },
     Reference {
         key: "agents.<profile>.kind",
-        values: "<agent kind>",
-        default: "one per shipped profile",
-        sentence: "Which agent binary this profile launches.",
+        values: "claude, codex, pi",
+        sentence: "Which agent program this profile starts.",
     },
     Reference {
         key: "agents.<profile>.concurrency",
-        values: "<n>",
-        default: "unset — omitted means no cap",
-        sentence: "Most lanes of this profile running at once; 0 is unlimited. A cap on the \
-                   harness — a local model's own count is `models.<glob>.slots`.",
+        values: "number",
+        sentence: "Most agents of this profile running at once. 0 = no limit.",
     },
     Reference {
         key: "agents.<profile>.session_reuse_ctx",
-        values: "0, 1..=100",
-        default: "20",
-        sentence: "How large a carried session may be, as a percentage of the model's \
-                    context window, before a fresh one opens instead; 0 is off.",
+        values: "0 to 100",
+        sentence: "Continue an earlier conversation only while it fills less than this % \
+                    of the context window. 0 = always.",
     },
     Reference {
         key: "agents.<profile>.session_blocked_ctx",
-        values: "0, 1..=100",
-        default: "40",
-        sentence: "Percentage of the model's context window a *running* lane's last turn may \
-                    reach before the dispatcher stops it and blocks the task; 0 is off. Must be \
-                    above `session_reuse_ctx` when both are nonzero. The reading is only taken \
-                    at turn boundaries, so the ceiling can be overshot.",
+        values: "0 to 100",
+        sentence: "Stop an agent once its conversation fills this % of the context \
+                    window. 0 = never.",
     },
     Reference {
         key: "agents.<profile>.permission_mode",
-        values: "<mode>",
-        default: "the kind's own first mode (absent on a kind with none)",
-        sentence: "Which approval mode this profile's lanes are started with. Absent on a \
-                    kind that has none.",
+        values: "mode name",
+        sentence: "Which permission mode the agent starts in.",
     },
     Reference {
         key: "models.<glob>.context_window",
-        values: "<tokens>",
-        default: "0 (unset)",
-        sentence: "What one session of this model gets to work in. `session_reuse_ctx` and \
-                    `session_blocked_ctx` take their percentage of it, so a session step \
-                    against a model with this unset never reuses or blocks on size.",
+        values: "tokens",
+        sentence: "How many tokens the model can hold. 0 = use the built-in value.",
     },
     Reference {
         key: "models.<glob>.compact_ctx",
-        values: "1..=100",
-        default: "(unset)",
-        sentence: "Percentage of the agent's own window at which its auto-compaction \
-                    fires. Unset keeps the agent's default. Must be below \
-                    `session_blocked_ctx` on every step that pairs them. Claude and codex \
-                    only.",
+        values: "1 to 100",
+        sentence: "At what % full the agent shortens its conversation to make room. \
+                    Claude and codex only.",
     },
     Reference {
         key: "models.<glob>.input",
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "Cost per million input tokens.",
+        values: "dollars per 1M tokens",
+        sentence: "Price of input tokens. 0 = use the built-in price.",
     },
     Reference {
         key: "models.<glob>.output",
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "Cost per million output tokens.",
+        values: "dollars per 1M tokens",
+        sentence: "Price of output tokens. 0 = use the built-in price.",
     },
     Reference {
         key: "models.<glob>.cache_read",
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "Cost per million cached tokens read.",
+        values: "dollars per 1M tokens",
+        sentence: "Price of reading cached tokens. 0 = use the built-in price.",
     },
     Reference {
         key: "models.<glob>.cache_write_5m",
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "Cost per million tokens written to a 5-minute cache.",
+        values: "dollars per 1M tokens",
+        sentence: "Price of writing tokens to a 5-minute cache. 0 = use the built-in price.",
     },
     Reference {
         key: "models.<glob>.cache_write_1h",
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "Cost per million tokens written to a 1-hour cache.",
+        values: "dollars per 1M tokens",
+        sentence: "Price of writing tokens to a 1-hour cache. 0 = use the built-in price.",
     },
     Reference {
         key: TIER_RATE_KEY,
-        values: "<USD per 1M tokens>",
-        default: "0",
-        sentence: "The same five rates, charged once a prompt passes N thousand tokens. \
-                    One such tier per model.",
+        values: "dollars per 1M tokens",
+        sentence: "Higher prices that apply once a prompt is longer than N thousand tokens.",
     },
     Reference {
         key: "models.<glob>.prompt_cache_ttl",
-        values: "<duration>",
-        default: "none",
-        sentence: "How long a session's prompt cache is trusted to stay warm. A resume \
-                    past it opens a fresh session. \"0\" turns it off.",
+        values: "time, e.g. 1h",
+        sentence: "Start a fresh conversation if the last reply is older than this. 0 = no limit.",
     },
     Reference {
         key: "models.<glob>.slots",
-        values: "<n>",
-        default: "0",
-        sentence: "How many lanes this model may run at once, replacing its \
-                    profile's `concurrency`; 0 leaves the profile in charge.",
+        values: "number",
+        sentence: "Most agents using this model at once. Replaces the profile's \
+                    concurrency. 0 = use concurrency.",
     },
     Reference {
         key: "models.<glob>.local",
         values: "true, false",
-        default: "false",
-        sentence: "Whether this model runs on hardware you own. Setting it on a model that \
-                    carries `slots` silences doctor's note that it should \
-                    probably say so.",
+        sentence: "Mark a model that runs on your own machine. It only turns off doctor's \
+                    warnings about it.",
     },
 ];
 
@@ -361,8 +285,8 @@ pub fn note(key: &str) -> Option<&'static str> {
 }
 
 /// The reference table [`crate::config::Config::render`] writes at the top of
-/// every `config.toml`: every key, its possible values, its default and one
-/// sentence about it, pointing at the doc that says more.
+/// every `config.toml`: every key, its possible values and one sentence about
+/// it, pointing at the doc that says more.
 ///
 /// Unfenced, unlike a pipeline file's own key reference — `config.toml` is
 /// spoolway's from top to bottom, so there is no project prose beside it that
@@ -370,18 +294,17 @@ pub fn note(key: &str) -> Option<&'static str> {
 pub fn reference_table() -> String {
     let key_w = REFERENCE.iter().map(|r| r.key.len()).max().unwrap_or(0);
     let val_w = REFERENCE.iter().map(|r| r.values.len()).max().unwrap_or(0);
-    let def_w = REFERENCE.iter().map(|r| r.default.len()).max().unwrap_or(0);
 
     let mut out = String::new();
     out.push_str("# Full reference: docs/configuration.md\n#\n");
     out.push_str(&format!(
-        "# {:key_w$}  {:val_w$}  {:def_w$}  Meaning\n",
-        "Key", "Values", "Default"
+        "# {:key_w$}  {:val_w$}  Meaning\n",
+        "Key", "Values"
     ));
     for r in REFERENCE {
         out.push_str(&format!(
-            "# {:key_w$}  {:val_w$}  {:def_w$}  {}\n",
-            r.key, r.values, r.default, r.sentence
+            "# {:key_w$}  {:val_w$}  {}\n",
+            r.key, r.values, r.sentence
         ));
     }
     out.push('\n');
@@ -2081,13 +2004,13 @@ mod tests {
         let entry = |key: &str| entries.iter().find(|e| e.key == key).unwrap();
 
         let window = entry("models.claude-opus-5.context_window");
-        // The window is what `session_reuse_ctx`/`session_blocked_ctx` take a
-        // percentage of — not a planning-only number (finding 26).
+        // The window is how many tokens the model can hold — not a
+        // planning-only number (finding 26).
         let window_note = window.note.unwrap();
-        assert!(window_note.contains("session_reuse_ctx"));
+        assert!(window_note.contains("tokens the model can hold"));
         assert!(!window_note.contains("planning"));
         let input = entry("models.claude-opus-5.input");
-        assert!(input.note.unwrap().contains("input tokens"));
+        assert!(input.note.unwrap().contains("Price of input tokens"));
         assert_ne!(window.note, input.note);
     }
 
@@ -2234,9 +2157,9 @@ mod tests {
     fn a_models_tier_rate_takes_the_tier_note_not_the_base_one() {
         let base = note("models.m.input").unwrap();
         let tier = note("models.m.above_100k_tokens.input").unwrap();
-        assert_eq!(base, "Cost per million input tokens.");
+        assert_eq!(base, "Price of input tokens. 0 = use the built-in price.");
         assert!(
-            tier.contains("once a prompt passes N thousand tokens"),
+            tier.contains("once a prompt is longer than N thousand tokens"),
             "{tier}"
         );
         assert_eq!(

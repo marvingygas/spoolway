@@ -100,21 +100,24 @@ the page that buys nothing.
   match what the page actually has, each `href`/`id` pair using the same slug. The index
   scrolls on its own once it outgrows the viewport, so a long one costs the reader nothing
   and is never a reason to trim the page down to fit.
-- `<h1>` — the branch's own name for this, not a title you invent.
+- `<h1>` — when step 1 read a tracker item, the item's ref and then its title, both from
+  `spoolway issue show`, such as `KAN-15 Standalone download`. A ref that is a bare number is
+  written `#<n>`, such as `#57 Standalone download`. A plan with no tracker item keeps its slug
+  as the heading.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
   question for the person.
-- Context's lead, `.standfirst` — the one sentence a person can approve or reject, naming
-  the outcome this plan means to produce. It is the page's lead and there is no second one:
-  nothing stands above Context but the name, the tagline and the path.
-- Context's paragraph — two or three sentences: what is true today, and the pressure on it.
-- `.refs` lists (context and each decision) — a `<code>path</code>` and what it already explains;
-  delete the list where there is nothing to point at.
+- Context's `.standfirst` — one block of at most three sentences. It opens on the outcome this
+  plan means to produce, in a sentence a person can approve or reject. Then it says what is true
+  today and the pressure on it. It is the page's lead, and nothing stands above Context but the
+  name, the tagline and the path.
+- Context's `.refs` list — every path the plan touches, once, each a `<code>path</code>` and what
+  it already explains. Records carry no list of their own.
 - Each decision's `<h3>` — the decision stated as a decision, not a component.
-- `.forces` — one or two sentences on what makes this a choice at all.
-- The decision's figure — drawn or mocked, per "The record's figure" below.
-- The paragraph after the figure — what it does not show: the name, the default, the thing a
-  reader would otherwise get wrong.
+- The decision's paragraph — at most four sentences: why this is a choice at all, and what to
+  look at in the figure.
+- The decision's figure — drawn or mocked, per "The record's figure" below. It has no caption,
+  and no paragraph follows it.
 - `.change` — the record's last line, painted highlighted: one plain sentence stating the
   change that will now happen. The slot takes the sentence alone; a CSS `::before` rule paints
   "After implementation: " ahead of it — never type the prefix yourself.
@@ -182,7 +185,7 @@ a browser — `spoolway-tasks` reads it by name and learns nothing about the mar
 **Fill it last, in one pass once the rest of the page is done** — never mirrored slot by slot as
 each section above it is written; the block is prose written once, not markup kept in step with
 markup. It carries every heading, every paragraph, every mock panel and every decision's
-`forces` and `change` line, from Context through Mockup, in the page's own order. The
+`change` line, from Context through Mockup, in the page's own order. The
 change line starts with "After implementation: " written out in full. A figure that has no Markdown form of its own appears as `[figure] `
 followed by that figure's `aria-label`. A revision rewrites the whole block, the same pass it
 rewrites the prose and figures it followed.

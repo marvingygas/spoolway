@@ -4,8 +4,9 @@
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
 //! onto a renamed pipeline. Its new job and edit job walk the cron expression
 //! and the pipeline, then save through [`crate::jobs::write`] — see
-//! [`NewJobWalk`]. Pause, resume and delete are [`set_enabled`] and
-//! [`delete_job`]. No `jobs add`, no config key. A job only schedules:
+//! [`NewJobWalk`]. Deactivate and activate are [`set_enabled`]; no popup
+//! here deletes a job, which leaves only with the routine the routines tab's
+//! delete routine removes. No `jobs add`, no config key. A job only schedules:
 //! nothing here queues its routine, which fires when the dispatcher's clock
 //! crosses the schedule — running a routine now is the routines tab's
 //! `enter`.
@@ -36,6 +37,14 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    print!("{}", render_jobs_list(repo, &jobs, now_epoch));
+    Ok(())
+}
+
+/// [`jobs_list`]'s table, its summary line and its store counts, built as a
+/// string so a test can assert on it directly rather than capturing stdout.
+fn render_jobs_list(repo: &Repo, jobs: &[Job], now_epoch: i64) -> String {
+    let mut out = String::new();
     let rows: Vec<[String; 6]> = jobs
         .iter()
         .map(|job| {
@@ -71,31 +80,33 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
         out.trim_end().to_string()
     };
 
-    println!("{}", line(&headers.map(str::to_string)));
+    out.push_str(&line(&headers.map(str::to_string)));
+    out.push('\n');
     for row in &rows {
-        println!("{}", line(row));
+        out.push_str(&line(row));
+        out.push('\n');
     }
 
-    let enabled = jobs.iter().filter(|job| job.spec.enabled).count();
-    println!();
-    println!(
-        "{} job{}, {enabled} enabled.",
+    let active = jobs.iter().filter(|job| job.spec.enabled).count();
+    out.push('\n');
+    out.push_str(&format!(
+        "{} job{}, {active} active.\n",
         jobs.len(),
         if jobs.len() == 1 { "" } else { "s" }
-    );
+    ));
     let stores = [repo.user_jobs_file(), repo.jobs_file()];
     let labels: Vec<String> = stores.iter().map(|path| store_label(repo, path)).collect();
     let width = labels.iter().map(|label| label.len()).max().unwrap_or(0);
     for (path, label) in stores.iter().zip(&labels) {
         let count = jobs.iter().filter(|job| &job.source == path).count();
-        println!("  {label:<width$}   {count}");
+        out.push_str(&format!("  {label:<width$}   {count}\n"));
     }
     for note in jobs.iter().filter_map(Job::unknown_keys_note) {
-        println!();
-        println!("warning: {note}");
+        out.push('\n');
+        out.push_str(&format!("warning: {note}\n"));
     }
 
-    Ok(())
+    out
 }
 
 /// A sample `[jobs.<name>]` table, valid on its own — `sample_table_parses`
@@ -241,7 +252,7 @@ struct Row {
     /// Keys in the job's table that no job reads. Empty when it has none.
     unknown_keys: Vec<String>,
     source: String,
-    /// Local RFC 3339, or `null` when the job is paused, the expression will
+    /// Local RFC 3339, or `null` when the job is inactive, the expression will
     /// not parse, or it can never fire.
     next: Option<String>,
     /// Epoch seconds of the last firing, or `null`.
@@ -274,11 +285,12 @@ impl Row {
     }
 }
 
-/// The NEXT column: `paused` for a disabled job, else a relative "in 5h 48m"
-/// when soon, a weekday and time within the week, or a full date beyond it.
+/// The NEXT column: `inactive` for a disabled job, else a relative "in 5h
+/// 48m" when soon, a weekday and time within the week, or a full date beyond
+/// it.
 fn next_cell(job: &Job) -> String {
     if !job.spec.enabled {
-        return "paused".to_string();
+        return "inactive".to_string();
     }
     if crate::cron::Cron::parse(&job.spec.schedule).is_err() {
         return "bad expr".to_string();
@@ -338,9 +350,8 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 
 // ---------------------------------------------------------------------------
 // The popups. The routines tab in `queue` opens them from a routine's options
-// menu: a cron field and a pipeline picker to write a job, and the popup
-// that asks before a job is deleted. The tab draws and keys them; what each
-// accepts and how a job is saved lives here.
+// menu: a cron field and a pipeline picker to write a job. The tab draws and
+// keys them; what each accepts and how a job is saved lives here.
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the schedule and pipeline popups.
@@ -603,29 +614,40 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Some(at) => at.format("%a %-d %b %H:%M").to_string(),
         None => "never".to_string(),
     };
+    // Edit job keeps an inactive job inactive, and its routine's menu then
+    // offers activate job, not deactivate job, so the notice names that.
+    let toggle = if draft.enabled {
+        "deactivate"
+    } else {
+        "activate"
+    };
     Notice::new(
         "job saved",
         format!(
-            "{} runs {when}, on {}.\nNext: {next}.\nEdit, pause or delete it with o on its routine.",
+            "{} runs {when}, on {}.\nNext: {next}.\nEdit or {toggle} it with o on its routine.",
             draft.name(),
             draft.pipeline,
         ),
     )
 }
 
-/// `resume`/`pause` for the message the pause toggle prints on failure — the
+/// `activate`/`deactivate` for the message the toggle prints on failure — the
 /// spec passed to `write` already carries the target state.
-fn pause_verb(will_be_enabled: bool) -> &'static str {
-    if will_be_enabled { "resume" } else { "pause" }
+fn toggle_verb(will_be_enabled: bool) -> &'static str {
+    if will_be_enabled {
+        "activate"
+    } else {
+        "deactivate"
+    }
 }
 
-/// Pause `job` (`enabled` false) or resume it (`enabled` true), written
-/// back to the store its own `scope` names and nowhere else, so a job is
-/// never copied into the other store. The routines tab's pause job and
-/// resume job come here. The state wanted is passed rather than
-/// flipped, so a job paused by another hand since its menu opened is not
-/// resumed by a pick that said pause. `Err` is the popup that says why the
-/// store was not written.
+/// Deactivate `job` (`enabled` false) or activate it (`enabled` true),
+/// written back to the store its own `scope` names and nowhere else, so a job
+/// is never copied into the other store. The routines tab's deactivate job
+/// and activate job come here. The state wanted is passed rather than
+/// flipped, so a job deactivated by another hand since its menu opened is not
+/// activated by a pick that said deactivate. `Err` is the popup that says why
+/// the store was not written.
 pub(super) fn set_enabled(
     repo: &Repo,
     job: &Job,
@@ -633,7 +655,7 @@ pub(super) fn set_enabled(
 ) -> std::result::Result<(), Notice> {
     let mut spec = job.spec.clone();
     spec.enabled = enabled;
-    let verb = pause_verb(enabled);
+    let verb = toggle_verb(enabled);
     jobs::write(repo, job.scope, &job.name, &spec).map_err(|err| {
         Notice::new(
             verb,
@@ -642,21 +664,6 @@ pub(super) fn set_enabled(
                  try again.",
                 job.name,
                 store_label(repo, &store_of(repo, job.scope)),
-            ),
-        )
-    })
-}
-
-/// Delete the job `name` from the store `scope` names, and from no other —
-/// the routines tab's delete job comes here once its popup is answered.
-/// `Err` is the popup that says why it was not.
-pub(super) fn delete_job(repo: &Repo, name: &str, scope: Scope) -> std::result::Result<(), Notice> {
-    jobs::delete_in(repo, scope, name).map_err(|err| {
-        Notice::new(
-            "delete this job",
-            format!(
-                "Could not delete the job `{name}`: {err:#}. Its store may be read-only; fix \
-                 that and try again."
             ),
         )
     })
@@ -690,17 +697,18 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         .any(|job| job.name == name && draft.editing.as_deref() != Some(name.as_str()));
     if taken {
         return Err(format!(
-            "A job named `{name}` already exists. Delete it first — from `{}` or `{}` — then \
-             save this one.",
+            "A job named `{name}` already exists, in `{}` or `{}`. Pick another name and save \
+             again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
         ));
     }
 
-    // A routine has at most one job, paused or not: two enabled jobs on one
-    // routine fire neither, and a paused one would clash once resumed. The
-    // second is refused here, whichever store holds the first. Targets are
-    // compared as resolved paths, so `nightly/` and `nightly` are one routine.
+    // A routine has at most one job, active or not: two enabled jobs on one
+    // routine fire neither, and an inactive one would clash once activated.
+    // The second is refused here, whichever store holds the first. Targets
+    // are compared as resolved paths, so `nightly/` and `nightly` are one
+    // routine.
     let wanted = repo.routines_dir().join(&draft.routine);
     if let Some(holder) = current.iter().find(|job| {
         draft.editing.as_deref() != Some(job.name.as_str())
@@ -708,7 +716,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
     }) {
         return Err(format!(
             "Routine `{}` already has the job `{}`, in `{}`. A routine has at most one job: \
-             delete that job first, or pick another routine.",
+             edit that job instead, or pick another routine.",
             draft.routine,
             holder.name,
             store_label(repo, &holder.source),
@@ -788,7 +796,7 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
 /// The `Next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
-        return "paused".to_string();
+        return "inactive".to_string();
     }
     if crate::cron::Cron::parse(&job.spec.schedule).is_err() {
         return "will not parse".to_string();
@@ -871,21 +879,6 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     )
 }
 
-/// The options menu's delete job, as a popup over job `name`: what deleting
-/// it removes, and its one answer.
-pub(super) fn delete_panel(name: &str) -> Vec<String> {
-    crate::screen::ask(
-        "delete this job",
-        &[
-            String::new(),
-            clip(&format!("  {name}")),
-            "  its schedule is removed from the store.".to_string(),
-        ],
-        &["delete".to_string()],
-        0,
-    )
-}
-
 /// The pipeline picker's overlay: every pipeline the repo defines, narrowed by
 /// the typed query, as answers — the highlighted one showing the first line
 /// of its own description under its name, and a blank row under that.
@@ -927,13 +920,10 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 /// project; see `crate::screen`'s own tests.
 #[cfg(test)]
 pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
-    vec![
-        ("delete job", delete_panel("nightly-audit")),
-        (
-            "jobs pipeline picker",
-            pipeline_panel(&Pipelines::builtin(), "", 0),
-        ),
-    ]
+    vec![(
+        "jobs pipeline picker",
+        pipeline_panel(&Pipelines::builtin(), "", 0),
+    )]
 }
 
 #[cfg(test)]
@@ -1035,6 +1025,91 @@ mod tests {
         assert!(json["cron_grammar"].as_str().unwrap().contains("0-59"));
     }
 
+    /// The `enabled` key's text speaks of deactivating and activating a job,
+    /// the words the routines tab's menu uses, not of pausing one — `paused`
+    /// is a task's stage.
+    #[test]
+    fn the_enabled_key_says_deactivate_and_activating() {
+        let (repo, _root_guard) = fixture("jobs-contract-enabled-words");
+        let contract = build_jobs_contract(&repo);
+        let text = &contract
+            .keys
+            .iter()
+            .find(|key| key.name == "enabled")
+            .unwrap()
+            .text;
+        assert!(text.contains("to deactivate a job"), "{text}");
+        assert!(text.contains("activating it removes the key"), "{text}");
+        assert!(!text.contains("pause"), "{text}");
+        assert!(!text.contains("resum"), "{text}");
+    }
+
+    /// A disabled job reads `inactive` in NEXT, with the column widened to
+    /// hold it, and the summary counts the active ones.
+    #[test]
+    fn jobs_list_says_inactive_for_a_disabled_job() {
+        let (repo, _root_guard) = fixture("jobs-list-inactive");
+        jobs::write(
+            &repo,
+            Scope::Project,
+            "dependabot-review",
+            &JobSpec {
+                schedule: "0 */2 * * *".to_string(),
+                pipeline: "dependabot".to_string(),
+                routine: "dependabot".to_string(),
+                enabled: false,
+                ..JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        let jobs = jobs::load(&repo).unwrap();
+
+        let text = render_jobs_list(&repo, &jobs, Local::now().timestamp());
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[..4],
+            [
+                "NAME               SCOPE    SCHEDULE     PIPELINE    NEXT      LAST",
+                "dependabot-review  project  0 */2 * * *  dependabot  inactive  -",
+                "",
+                "1 job, 0 active.",
+            ],
+            "{text}"
+        );
+    }
+
+    /// A store that cannot be written turns the toggle into a popup that
+    /// names what was being done: deactivate on the way off, activate on
+    /// the way back on.
+    #[test]
+    fn set_enabled_names_activate_or_deactivate_when_the_store_will_not_write() {
+        let (repo, _root_guard) = fixture("jobs-set-enabled-fails");
+        let job = Job {
+            name: "nightly-audit".to_string(),
+            scope: Scope::User,
+            spec: JobSpec {
+                routine: "nightly".to_string(),
+                ..JobSpec::neutral()
+            },
+            source: repo.user_jobs_file(),
+            unknown_keys: Vec::new(),
+        };
+        // A directory where the store file goes, so the write cannot read it.
+        std::fs::create_dir_all(repo.user_jobs_file()).unwrap();
+
+        for (enabled, verb) in [(false, "deactivate"), (true, "activate")] {
+            let notice = set_enabled(&repo, &job, enabled).unwrap_err();
+            assert_eq!(notice.title, verb);
+            assert!(
+                notice
+                    .text
+                    .starts_with(&format!("Could not {verb} the job `nightly-audit`")),
+                "{}",
+                notice.text
+            );
+        }
+    }
+
     #[test]
     fn a_json_row_carries_schedule_error_only_when_the_expression_will_not_parse() {
         let (repo, _root_guard) = fixture("jobs-json-shape");
@@ -1121,7 +1196,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("\nEdit, pause or delete it with o on its routine."),
+            text.ends_with("\nEdit or deactivate it with o on its routine."),
             "{text}"
         );
 
@@ -1137,6 +1212,23 @@ mod tests {
         let text = saved_notice(&draft).text;
         assert!(
             text.starts_with("audit runs at midnight, on bugfix.\n"),
+            "{text}"
+        );
+    }
+
+    /// An inactive job saved through edit job stays inactive, so "job
+    /// saved" points at activate job, the item its routine's menu offers.
+    #[test]
+    fn saved_notice_names_activate_for_an_inactive_job() {
+        let mut draft = Draft::new(&Pipelines::builtin());
+        draft.routine = "nightly".to_string();
+        draft.pipeline = "bugfix".to_string();
+        draft.schedule = "0 3 * * *".to_string();
+        draft.enabled = false;
+
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.ends_with("\nEdit or activate it with o on its routine."),
             "{text}"
         );
     }
@@ -1177,6 +1269,10 @@ mod tests {
             refusal.contains("`first`") && refusal.contains("at most one job"),
             "{refusal}"
         );
+        assert!(
+            refusal.ends_with("edit that job instead, or pick another routine."),
+            "{refusal}"
+        );
         assert_eq!(jobs::load(&repo).unwrap().len(), 1, "nothing was written");
 
         draft.editing = Some("first".to_string());
@@ -1208,6 +1304,10 @@ mod tests {
 
         let refusal = commit_draft(&repo, draft).unwrap_err();
         assert!(refusal.contains("already exists"), "{refusal}");
+        assert!(
+            refusal.ends_with("Pick another name and save again."),
+            "{refusal}"
+        );
         assert!(
             refusal.contains(&store_label(&repo, &repo.user_jobs_file()))
                 && refusal.contains(&store_label(&repo, &repo.jobs_file())),

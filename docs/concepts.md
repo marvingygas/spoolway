@@ -18,7 +18,7 @@ The terms spoolway uses. Every other page assumes them.
 | Worker slot | One unit of an agent profile's concurrency. |
 | Prompt | A Markdown file a step runs its lane with. |
 | Outcome | What a step reports: `pass`, `fail`, `block` or `pause`. |
-| Gate | A step whose pass a person must let through. |
+| Gate | An agent step whose pass, fail or both a person must let through. |
 
 ## Project
 
@@ -227,7 +227,8 @@ The dispatcher composes it into the lane's system prompt. See [Prompts](prompts.
 
 ## Gate
 
-A step with `gate: true` stops the task on `paused` after its pass. A single task can do the
+An agent step with `gate:` stops the task on `paused` when it reports the outcome the gate holds:
+`on_pass` holds a pass, `on_fail` holds a fail and `always` holds either. A single task can do the
 same with `gate_at: <step>` in its task, and a `gate_at` catches whatever the step reports:
 pass, fail, block, or a loop-max bound for `blocked`. A `gate_at` is spent when it fires. The
 task pauses once, and a later report from the same step runs straight through unless something
@@ -236,10 +237,13 @@ a caught block or loop-max to `blocked`, the same place it would have reached un
 `blocked` has no `on_pass`. A `gate_at: blocked` that caught the unblocker's pass sends the task
 to the step the unblocker named with `--stage`. Without `--stage`, it sends the task to the `on_pass`
 of the step it stopped at, and hands a command step back to itself.
-A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
-exit, and `gate_at` holds any exit.
+A command step has no lane to say what it did, so it cannot be gated. Put the gate on the agent
+step after it.
 Picking another step in the board's resume picker sends it to a step you name instead. The
 picker's last row, `done`, closes the task.
+
+A report a gate holds must carry at least one `--handoff`. The pane ends with the held line and
+those handoffs: what the step did and how to check it.
 
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a
 deploy or a release.
