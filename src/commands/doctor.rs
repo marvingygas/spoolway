@@ -2827,7 +2827,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
         ));
 
         // Two enabled jobs on one routine fire neither. Each of the two is
-        // named, with the other's store, so whichever is deleted is found.
+        // named, with the other's store, so whichever is deactivated is found.
         let others = job.clashing_jobs(repo, &jobs);
         findings.push(Finding::Check(
             format!("job `{name}` is the only job on its routine"),
@@ -2839,8 +2839,8 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
                     .map(|other| format!("`{}` (in {})", other.name, other.source.display()))
                     .collect();
                 Err(anyhow::anyhow!(
-                    "{} also run{} routine `{}`, so neither fires — delete one on the routines \
-                     tab (o → delete job) or point it at another routine",
+                    "{} also run{} routine `{}`, so neither fires — deactivate one on the \
+                     routines tab (o → deactivate job) or point it at another routine",
                     named.join(", "),
                     if named.len() == 1 { "s" } else { "" },
                     job.relative_target(repo)
@@ -3670,6 +3670,13 @@ mod tests {
         let clash = format!("{clash:#}");
         assert!(
             clash.contains("`two`") && clash.contains("jobs.toml"),
+            "{clash}"
+        );
+        assert!(
+            clash.ends_with(
+                "deactivate one on the routines tab (o → deactivate job) or point it at \
+                 another routine"
+            ),
             "{clash}"
         );
         let second = check("job `two` is the only job on its routine")
