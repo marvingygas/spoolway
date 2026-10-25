@@ -190,14 +190,22 @@ pub fn report(
     // What this step wants the next one to know, credited to the step that
     // said it — written whatever the outcome, since a lane that blocked can
     // still have learned something worth leaving behind. Appended one line
-    // per `--handoff`, in the same save that routes the task, so a dependent
-    // task's `spoolway queue show` never finds the note without the routing
-    // that made it current.
-    for handoff in &args.handoff {
-        task.append_to_section(
-            "## Handoff",
-            &format!("- `{current}` — {}\n", handoff.trim().replace('\n', " ")),
-        );
+    // per non-blank `--handoff`, in the same save that routes the task, so a
+    // dependent task's `spoolway queue show` never finds the note without the
+    // routing that made it current.
+    //
+    // Normalised once, here, and read again by the held report's refusal and
+    // its pane below, so what the person reads and what `## Handoff` keeps
+    // are the same list. A blank `--handoff` says nothing, so it is left out
+    // of all three rather than written as an empty bullet.
+    let handoffs: Vec<String> = args
+        .handoff
+        .iter()
+        .map(|handoff| handoff.trim().replace('\n', " "))
+        .filter(|handoff| !handoff.is_empty())
+        .collect();
+    for handoff in &handoffs {
+        task.append_to_section("## Handoff", &format!("- `{current}` — {handoff}\n"));
     }
 
     // Nothing here checks what a lane wrote against a path list any more —
@@ -259,12 +267,6 @@ pub fn report(
     // `gated_at` names the step whose gate holds an unblocker's pass. A
     // `UsageRefusal`, since the lane corrects it by reporting again, so it
     // reads under `error:` with its lines broken as given.
-    let handoffs: Vec<String> = args
-        .handoff
-        .iter()
-        .map(|handoff| handoff.trim().replace('\n', " "))
-        .filter(|handoff| !handoff.is_empty())
-        .collect();
     if gated && handoffs.is_empty() {
         return Err(UsageRefusal(format!(
             "this {outcome} is held at `{}`'s gate for a person, and carries no\n\
@@ -8283,7 +8285,8 @@ mod tests {
 
     /// A held report's handoffs land in `## Handoff`, in order and credited
     /// to the step, where a step after the gate reads them, and the Status
-    /// Log gets the two lines it always did. No section is added.
+    /// Log gets the two lines it always did. No section is added, and a
+    /// blank handoff is left out of the file as it is out of the pane.
     #[test]
     fn a_held_reports_handoffs_land_in_the_handoff_section() {
         let (repo, _root_guard) = fixture("held-report-handoffs");
@@ -8307,7 +8310,11 @@ mod tests {
             &pipelines,
             "ship",
             Outcome::Pass,
-            &["shipped the build", "open https://example.test and log in"],
+            &[
+                "shipped the build",
+                "  ",
+                "open https://example.test and log in",
+            ],
         )
         .unwrap();
 

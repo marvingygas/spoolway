@@ -1164,6 +1164,9 @@ pub struct ReportArgs {
     /// Repeat for each. Written into the task file's `## Handoff` as
     /// `` - `<step>` — <text> `` in the same save that routes the task —
     /// alongside `--pass`, `--fail` or `--block`, and whatever the outcome.
+    /// A blank one is left out. A report a gate holds needs at least one:
+    /// they are printed under the held line for the person who answers the
+    /// gate.
     #[arg(long, value_name = "TEXT")]
     pub handoff: Vec<String>,
 }

@@ -18922,7 +18922,7 @@ mod tests {
     /// them, but nothing more: spoolway still holds the pass on its own, in
     /// `commands::report`, and nothing here asks the lane to hold it too.
     #[test]
-    fn a_gated_step_tells_its_lane_a_person_opens_this_pane_and_parks_its_pass() {
+    fn a_gated_step_tells_its_lane_its_pass_is_held_and_parks_it() {
         let (repo, _root_guard) = fixture("checkpoint-holds");
         let pipelines = gated_pipeline();
         let step = pipelines.get("default").unwrap().step("release").unwrap();
