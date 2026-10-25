@@ -1092,7 +1092,8 @@ mod tests {
         ("Sun", "weekday"),
         ("Mo", "weekday"),
         ("Tu", "weekday"),
-        ("We", "weekday"),
+        // "We" is left out of these two-letter forms: it opens English
+        // sentences, so allowing it would let "We could not ..." through.
         ("Th", "weekday"),
         ("Fr", "weekday"),
         ("Sa", "weekday"),
@@ -1367,6 +1368,7 @@ mod tests {
             ("(Delete the routine)", "Delete"),
             ("edit src/Cargo.toml", "Cargo"),
             ("queued — Waiting", "Waiting"),
+            ("We could not reach it", "We"),
         ] {
             let found = capital_violation(line).map(|(_, word)| word);
             assert_eq!(found.as_deref(), Some(word), "{line}");
@@ -1462,7 +1464,7 @@ mod tests {
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
             let frames = crate::screen::shell::drive_frames(&repo, keys);
-            screens.extend(walk_screens("queue tab", &frames));
+            screens.extend(walk_screens("queue", &frames));
         }
         // A project with nothing in it, where each tab says so and the
         // dispatch tab greets instead of listing.
@@ -1477,7 +1479,7 @@ mod tests {
         for (i, keys) in empty_walks.iter().enumerate() {
             let (repo, _guard) = crate::status::testutil::fixture(&format!("capitals-empty-{i}"));
             let frames = crate::screen::shell::drive_frames(&repo, keys);
-            screens.extend(walk_screens("queue tab", &frames));
+            screens.extend(walk_screens("queue", &frames));
         }
         for (name, panel) in [
             crate::status::asking_panels(),

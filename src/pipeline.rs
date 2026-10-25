@@ -2758,9 +2758,11 @@ impl Pipelines {
         pipelines
     }
 
-    /// [`Pipelines::builtin`] with every description swapped for a lowercase
-    /// stand-in. A description is text a pipeline's author wrote, which a
-    /// screen shows as a row value; the shipped ones start with a capital.
+    /// [`Pipelines::builtin`] with every pipeline's own description swapped
+    /// for a lowercase stand-in. Step descriptions stay: no screen draws
+    /// them, only `queue route` prints them. A description is text a
+    /// pipeline's author wrote, which a screen shows as a row value; the
+    /// shipped ones start with a capital.
     /// A test that checks the words a screen brings itself for capitals
     /// draws its pickers over these, so the shipped prose stays out of it.
     #[cfg(test)]
