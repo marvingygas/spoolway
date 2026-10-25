@@ -4997,9 +4997,10 @@ fn filters_label(
 /// sits one column in from the key line's own leading space, so one more is
 /// added in front to line the first key up under the frame's first column
 /// of content. No `[↑↓] move` leads it: no other tab lists the arrows on
-/// its key line, which only the popups name. The trials table trades `[e] export`
-/// for `[enter] open`: it has nothing to export, and a trial to open. Nor
-/// has it a `[t]`, which names the figures the other two would switch to.
+/// its key line, which only the popups name. The trials table trades
+/// `[e] export` for `[enter] open`: it has nothing to export, and a trial
+/// to open. Nor has it a `[t]`, which names the figures the other two would
+/// switch to.
 fn footer(table: TableKind, figures: Figures) -> String {
     let tab = ("tab", table.next().label());
     let flip = ("t", figures.other().label(table));
