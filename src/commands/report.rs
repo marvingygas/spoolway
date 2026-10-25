@@ -256,7 +256,9 @@ pub fn report(
     // Refused now, after `route` has only touched `task` in memory and before
     // the worktree is committed or the task saved, so nothing of a refused
     // report is recorded: no commit, no Status Log line, no moved stage.
-    // `gated_at` names the step whose gate holds an unblocker's pass.
+    // `gated_at` names the step whose gate holds an unblocker's pass. A
+    // `UsageRefusal`, since the lane corrects it by reporting again, so it
+    // reads under `error:` with its lines broken as given.
     let handoffs: Vec<String> = args
         .handoff
         .iter()
@@ -264,12 +266,13 @@ pub fn report(
         .filter(|handoff| !handoff.is_empty())
         .collect();
     if gated && handoffs.is_empty() {
-        bail!(
-            "this {outcome} is held at `{}`'s gate for a person, and carries no handoff for \
-             them. Report again with at least one --handoff: what this step did, in plain \
-             words, then how to verify it. Nothing was recorded.",
+        return Err(UsageRefusal(format!(
+            "this {outcome} is held at `{}`'s gate for a person, and carries no\n\
+             handoff for them. Report again with at least one --handoff: what this step\n\
+             did, in plain words, then how to verify it. Nothing was recorded.",
             gated_at.as_deref().unwrap_or(&current),
-        );
+        ))
+        .into());
     }
 
     // Committing is deterministic, so it is not left to a model. Every lane
@@ -8246,8 +8249,9 @@ mod tests {
     }
 
     /// A pass a gate would hold, with no handoff or only blank ones, is
-    /// refused in the words a person reads, and the task file is left
-    /// byte for byte as it was: no Status Log line, no handoff, no stage.
+    /// refused as a usage refusal, in the words and lines a person reads, and
+    /// the task file is left byte for byte as it was: no Status Log line, no
+    /// handoff, no stage.
     #[test]
     fn a_bare_held_report_is_refused_and_records_nothing() {
         let (repo, _root_guard) = fixture("bare-held-report");
@@ -8259,14 +8263,14 @@ mod tests {
         let before = std::fs::read_to_string(&task.path).unwrap();
 
         for handoff in [&[][..], &["", "   "][..]] {
-            let refusal = report_with_handoffs(&repo, &pipelines, "ship", Outcome::Pass, handoff)
-                .unwrap_err()
-                .to_string();
+            let err = report_with_handoffs(&repo, &pipelines, "ship", Outcome::Pass, handoff)
+                .unwrap_err();
+            let refusal = err.downcast_ref::<UsageRefusal>().expect("a usage refusal");
             assert_eq!(
-                refusal,
-                "this pass is held at `deploy`'s gate for a person, and carries no handoff \
-                 for them. Report again with at least one --handoff: what this step did, in \
-                 plain words, then how to verify it. Nothing was recorded."
+                refusal.to_string(),
+                "this pass is held at `deploy`'s gate for a person, and carries no\n\
+                 handoff for them. Report again with at least one --handoff: what this step\n\
+                 did, in plain words, then how to verify it. Nothing was recorded."
             );
             assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
             assert_eq!(queued(&repo, "ship").stage(), "deploy");
