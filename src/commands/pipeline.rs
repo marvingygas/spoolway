@@ -1131,8 +1131,9 @@ fn live_task_problems(
             ));
         }
         // `gate_at` names a step too, but the holds compare it with a step
-        // id, so a name no step has never matches and the task runs past
-        // where its author asked it to stop.
+        // id: a name no step has never matches, and a command step's exit is
+        // never held, so either way the task runs past where its author
+        // asked it to stop.
         if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
             problems.push(crate::commands::stale_gate_note(task, pipeline, gate_at));
         }
@@ -1382,6 +1383,15 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
         bail!(
             "{} (pipeline `{name}`)",
             crate::pipeline::unknown_gate_message(step_id, raw)
+        );
+    }
+    // The same goes for a `gate:` on a command step. Load validates the
+    // patched pipeline and refuses it, which drops this step's whole patch
+    // entry as ignored — every other field patched on the step with it.
+    if probe.kind() == crate::pipeline::StepKind::Command && probe.gate.is_some() {
+        bail!(
+            "{} (pipeline `{name}`)",
+            crate::pipeline::command_gate_message(step_id)
         );
     }
 
@@ -6042,6 +6052,36 @@ mod tests {
                 "nothing should be written on a refusal"
             );
             pipeline_override(repo, "demo", &format!("{step}.gate=always")).unwrap();
+        });
+    }
+
+    /// A `gate:` on a command step is refused before the patch is written,
+    /// naming both fixes, so it cannot drop the step's other patched fields
+    /// when load later refuses it.
+    #[test]
+    fn pipeline_override_refuses_a_gate_on_a_command_step() {
+        let pipeline = "steps:\n  - id: publish\n    run: make publish\n    on_pass: announce\n  \
+                        - id: announce\n    agent: pi\n    model: claude-sonnet-5\n    \
+                        on_pass: done\n";
+        with_repo_and_pipeline("command-gate", "demo", pipeline, |repo| {
+            pipeline_override(repo, "demo", "publish.timeout=5m").unwrap();
+            let err = pipeline_override(repo, "demo", "publish.gate=true").unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("step `publish` runs a command but declares `gate:`")
+                    && msg.contains("put it on the agent step after `publish`"),
+                "{msg}"
+            );
+            let patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                .unwrap()
+                .unwrap();
+            assert!(
+                patch.steps["publish"].get("gate").is_none(),
+                "the refused gate should not be written: {:?}",
+                patch.steps["publish"]
+            );
+            assert!(patch.steps["publish"].get("timeout").is_some());
+            pipeline_override(repo, "demo", "announce.gate=always").unwrap();
         });
     }
 

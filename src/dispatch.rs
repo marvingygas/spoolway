@@ -2203,9 +2203,8 @@ impl<'a> Dispatcher<'a> {
                             });
                         }
                         false => {
-                            let message = with_walk_note(None, walked_past);
                             crate::commands::bank_walked_past(&mut tasks[index], &to_bank);
-                            tasks[index].set_stage(&destination, message.as_deref());
+                            tasks[index].set_stage(&destination, walked_past.as_deref());
                             // `persist` answers `false` when something —
                             // a `spoolway report`, a `pause`, `unqueue` or `r`
                             // on the board — landed mid-pass and dropped this
@@ -2554,12 +2553,13 @@ impl<'a> Dispatcher<'a> {
         }
         if stage == crate::pipeline::QUEUED {
             let id = task.id().to_string();
-            // A `gate_at:` no step has is never matched, so the task would
-            // run to `done` past where its author asked it to stop. It waits
-            // on `paused` with the gate named, before the `started` hook fires
-            // or a lane starts (the `queued` hook has already run above); a
-            // resume sends it back here, and parks it again until the task
-            // file names a step.
+            // A `gate_at:` no step has, or one naming a command step, is
+            // never held, so the task would run to `done` past where its
+            // author asked it to stop. It waits on `paused` with the gate
+            // named, before the `started` hook fires or a lane starts (the
+            // `queued` hook has already run above); a resume sends it back
+            // here, and parks it again until the task file names an agent
+            // step.
             if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
                 let note = crate::commands::stale_gate_note(task, pipeline, gate_at);
                 let line = crate::commands::stale_gate_line(task, pipeline, gate_at);

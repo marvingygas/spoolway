@@ -2633,9 +2633,10 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// One failed row for each task in the queue whose `gate_at:` names a step its
-/// pipeline lacks, except one already at `done`. The dispatcher parks such a
-/// task when it is still on `queued`; one past that, or already parked, is
-/// named here all the same, while the pipeline edit can still be undone.
+/// pipeline lacks, or a command step (a hand edit, or a step turned into a
+/// command), except one already at `done`. The dispatcher parks such a task
+/// when it is still on `queued`; one past that, or already parked, is named
+/// here all the same, while the pipeline edit can still be undone.
 fn stale_gate_checks(tasks: &[Task], pipelines: &Pipelines) -> Vec<Finding> {
     tasks
         .iter()

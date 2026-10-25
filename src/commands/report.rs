@@ -2028,6 +2028,31 @@ pub fn held_unblocker_pass(task: &Task, gated: &str) -> bool {
             .is_some_and(|report| matches!(report.outcome.parse::<Outcome>(), Ok(Outcome::Pass)))
 }
 
+/// Whether `gated`, a command step, holds a pass its own command never gave.
+///
+/// No release files a hold on a command step's exit any more, but a task an
+/// earlier one left on `paused` still carries it: that release held an
+/// unblocker's `--pass` from `blocked` at the origin's gate whatever kind of
+/// step the origin was, filing `last_report` from `blocked`. A pause filed
+/// from the command step itself would have `last_report.step == gated`, so
+/// any other step marks the unblocker's pass. Nothing ran at the step after
+/// that pass, so letting it past down `on_pass` would send on a command that
+/// never exited 0; such a task is handed back to the step instead, to run
+/// again, which is where a pass from `blocked` takes it now. It reads only the
+/// task, never the step's `gate:`, so it still answers once `gate:` is gone
+/// from the command step.
+/// [`resume_road`] and the board's `(next)` row both ask this, so the road
+/// and the row name the same step.
+pub fn command_pass_handed_back(task: &Task, step: &crate::pipeline::Step, gated: &str) -> bool {
+    step.kind() == crate::pipeline::StepKind::Command
+        && task
+            .front
+            .last_report
+            .as_ref()
+            .is_some_and(|report| report.step != gated)
+        && caught_at(task, gated).is_some()
+}
+
 /// What a pause is holding, once it is known to be a catch at all — see
 /// [`caught_at`], which is what tells a catch apart from a pause raised from
 /// `blocked` itself.
@@ -2062,7 +2087,9 @@ pub enum Caught {
 /// answer once it is set. `report`'s own hold files `last_report` from
 /// `gated` in the same save. The exception is the hold on an unblocker's
 /// pass from `blocked` at a gated step: it sets `paused_by` with
-/// `last_report` from `blocked`. A task already sitting on
+/// `last_report` from `blocked`. `route` still makes it for a gated agent
+/// step, and an earlier release made it for a command step too, which
+/// [`command_pass_handed_back`] tells apart. A task already sitting on
 /// `paused` from before `paused_by` existed carries none, so the fallback
 /// this was built on outright — `last_report.step == gated`, filed only by a
 /// road that actually caught something — still answers for it.
@@ -2142,7 +2169,10 @@ pub enum ResumeRoad {
         /// What the pause caught — see [`caught_at`].
         caught: Option<Caught>,
         /// A pause raised from `blocked` itself rather than a catch at
-        /// `gated`, which resumes through [`cleared_block_target`].
+        /// `gated`, which resumes through [`cleared_block_target`], or a
+        /// gated command step held on an unblocker's pass by an earlier
+        /// release, which [`command_pass_handed_back`] sends straight back
+        /// onto `gated`.
         cleared_block: bool,
         destination: String,
     },
@@ -2232,9 +2262,19 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
         // it here has to reach exactly there too, rather than the plain
         // `on_pass` below, which is what an ordinary gate means and is not what
         // a person clearing this one is answering.
-        let cleared_block =
-            caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str());
-        let destination = if cleared_block {
+        //
+        // `handed_back` is the same answer for a task an earlier release held
+        // at a gated command step on an unblocker's pass: it carries a catch,
+        // but one `blocked` filed rather than the command, so it too goes
+        // back onto the step to run, not down the `on_pass` of a command that
+        // never exited 0. The block it clears is the same one, so it is
+        // reported as a cleared block.
+        let handed_back = command_pass_handed_back(task, step, &gated);
+        let cleared_block = handed_back
+            || (caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str()));
+        let destination = if handed_back {
+            gated.clone()
+        } else if cleared_block {
             cleared_block_target(task, pipeline, false)
         } else if held_unblocker_pass(task, &gated) {
             // `gate_at: blocked` held the unblocker's own pass. `blocked` has
@@ -2251,7 +2291,8 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
             crate::pipeline::BLOCKED.to_string()
         } else if caught == Some(Caught::Fail) {
             // A held failure resumes down the route the failure chose, for an
-            // agent step and a command step alike. Sending it down `on_pass`
+            // agent step and, for a task an earlier release held, a command
+            // step alike. Sending it down `on_pass`
             // would carry a failed review or a red suite on as if it passed;
             // a person who means to wave it through picks the `on_pass` step
             // by hand.
@@ -6308,6 +6349,75 @@ mod tests {
         assert_eq!(
             resume_road(&task, &pipelines).unwrap().destination(),
             crate::pipeline::BLOCKED,
+        );
+    }
+
+    /// A pipeline whose `deploy` is a `run:` step that goes on to `done` on a
+    /// pass, with `blocked` staffed. It carries no `gate:` — load refuses one
+    /// on a command step — because the state under test is a task an earlier
+    /// release left on `paused`, which is read from the task alone.
+    fn deploy_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+                     - id: deploy\n    run: 'exit 1'\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// A task paused at `deploy` with `last_report` filed from
+    /// `reported_from`, as an earlier release's gate left it: from `deploy`
+    /// for the command's own exit, from `blocked` for an unblocker's pass.
+    fn held_at_deploy(repo: &Repo, reported_from: &str) -> Task {
+        add(repo, "tab-shell", &[]);
+        let mut task = queued(repo, "tab-shell");
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.front.paused_at = Some("deploy".into());
+        task.front.paused_by = Some(Gate::Step.as_str().to_string());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: reported_from.into(),
+            ..crate::task::LastReport::neutral()
+        });
+        task.save().unwrap();
+        task
+    }
+
+    /// A task an earlier release left held at a command step, from an
+    /// unblocker's pass, is resumed back onto the step rather than down its
+    /// `on_pass`: the command never exited 0. `resume_road`, which `queue
+    /// route` and the board's `(next)` row read, names the step too. Fails
+    /// without the `command_pass_handed_back` branch of `resume_road`, which
+    /// sends it to `done`.
+    #[test]
+    fn a_command_pass_an_unblocker_gave_is_resumed_onto_the_step() {
+        let (repo, _root_guard) = unattended_fixture("held-unblocker-command-pass");
+        let pipelines = deploy_pipelines();
+        let task = held_at_deploy(&repo, crate::pipeline::BLOCKED);
+
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            "deploy"
+        );
+
+        resume(&repo, &pipelines, &resume_args("tab-shell", None), None).unwrap();
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), "deploy");
+        assert_eq!(task.front.paused_at, None);
+        assert_eq!(task.front.paused_by, None);
+    }
+
+    /// A pause filed from the command step itself is not an unblocker's pass,
+    /// and still takes `on_pass` on resume.
+    #[test]
+    fn a_command_pass_the_command_gave_still_takes_on_pass() {
+        let (repo, _root_guard) = unattended_fixture("held-command-own-pass");
+        let pipelines = deploy_pipelines();
+        let task = held_at_deploy(&repo, "deploy");
+
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            "done"
         );
     }
 
