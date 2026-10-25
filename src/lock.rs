@@ -30,7 +30,7 @@ const ATTENDED: &str = "attended";
 ///
 /// A type of its own so `spoolway dispatch` can tell this loss, which is a
 /// second start that raced the first past its up-front check, from a real
-/// error, and answer it with the documented `Dispatcher already running`
+/// error, and answer it with the documented `dispatcher already running`
 /// line and exit code. Every other caller still reads it as an ordinary
 /// error, through `Display`.
 #[derive(Debug)]

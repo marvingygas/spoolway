@@ -437,7 +437,7 @@ mod tests {
     fn a_refused_start_names_the_way_in_under_its_own_title() {
         let panel = popup(
             false,
-            "Open herdr and start spoolway there:\n\n  herdr\n  spoolway",
+            "open herdr and start spoolway there:\n\n  herdr\n  spoolway",
         );
         let body: Vec<&str> = panel
             .iter()
@@ -451,7 +451,7 @@ mod tests {
             body[1..panel.len() - 1],
             [
                 "",
-                "Open herdr and start spoolway there:",
+                "open herdr and start spoolway there:",
                 "",
                 "herdr",
                 "spoolway",
@@ -473,7 +473,7 @@ mod tests {
         let panel = popup(
             true,
             "unattended.max_cost_usd reached: $5.02 of $5.00\n\
-             Every task is where its last lane left it.",
+             every task is where its last lane left it.",
         );
         assert!(
             panel[0].starts_with(&format!("{TOP_LEFT}─ the dispatcher stopped ")),
@@ -484,7 +484,7 @@ mod tests {
             "{panel:?}"
         );
         assert!(
-            panel[3].contains("Every task is where its last lane left it."),
+            panel[3].contains("every task is where its last lane left it."),
             "{panel:?}"
         );
     }
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn a_child_refused_before_it_ran_says_it_did_not_start() {
         let mut child = child(
-            "printf 'spoolway: Open herdr and start spoolway there:\\n\\n  herdr\\n  spoolway\\n' >&2; \
+            "printf 'spoolway: open herdr and start spoolway there:\\n\\n  herdr\\n  spoolway\\n' >&2; \
              exit 1",
         );
         let panel = wait_ended(&mut child).expect("an unasked exit gets a popup");
@@ -570,7 +570,7 @@ mod tests {
             "{panel:?}"
         );
         assert!(
-            panel[2].starts_with("│  Open herdr and start spoolway there:"),
+            panel[2].starts_with("│  open herdr and start spoolway there:"),
             "{panel:?}"
         );
         assert!(
@@ -585,7 +585,7 @@ mod tests {
     fn a_clean_exit_it_was_not_asked_for_says_it_stopped() {
         let mut child = child(
             "printf 'unattended.max_cost_usd reached: $5.02 of $5.00\\n\\
-             Every task is where its last lane left it.\\n' >&2",
+             every task is where its last lane left it.\\n' >&2",
         );
         let panel = wait_ended(&mut child).expect("an unasked exit gets a popup");
         assert!(

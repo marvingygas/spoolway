@@ -1984,7 +1984,7 @@ mod tests {
 
     /// The same line every time, with no count behind it — five plain,
     /// back-to-back calls against a repo whose lock another dispatcher
-    /// already holds all read exactly `Dispatcher already running`, the
+    /// already holds all read exactly `dispatcher already running`, the
     /// fifth exactly like the first.
     #[test]
     fn a_held_lock_is_refused_the_same_way_every_time() {
@@ -2178,7 +2178,7 @@ mod tests {
     }
 
     /// One task's chain-base mismatch does not stop the dispatcher from
-    /// starting: the running pass holds that one task with the "A chain has
+    /// starting: the running pass holds that one task with the "a chain has
     /// one base" line, and every other task goes on.
     #[test]
     fn a_chain_base_mismatch_does_not_stop_the_dispatcher_from_starting() {

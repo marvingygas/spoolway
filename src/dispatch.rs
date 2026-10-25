@@ -11517,7 +11517,7 @@ mod tests {
             "the hold does not claim the base is missing: {reason}"
         );
         assert!(
-            !fix.contains("Set `base:`"),
+            !fix.contains("set `base:`"),
             "and does not send a person to edit a task that is right: {fix}"
         );
         assert!(

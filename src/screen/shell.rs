@@ -2228,7 +2228,7 @@ mod tests {
         let panel = refused_panel(&[crate::reload::Reason {
             what: "fix-login: sitting on `review`, which pipeline `feature` no longer defines"
                 .to_string(),
-            fix: "Put `review` back in feature.yml, or wait until fix-login has left it, then \
+            fix: "put `review` back in feature.yml, or wait until fix-login has left it, then \
                   reload again."
                 .to_string(),
         }]);
@@ -2243,7 +2243,7 @@ mod tests {
                 row("fix-login: sitting on `review`, which pipeline `feature`"),
                 row("no longer defines"),
                 row(""),
-                row("Put `review` back in feature.yml, or wait until fix-login"),
+                row("put `review` back in feature.yml, or wait until fix-login"),
                 row("has left it, then press u again."),
                 row(""),
                 row("[enter] confirm"),
