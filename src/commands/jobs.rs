@@ -626,7 +626,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
     Notice::new(
         "job saved",
         format!(
-            "{} runs {when}, on {}.\nNext: {next}.\nEdit or {toggle} it with o on its routine.",
+            "{} runs {when}, on {}.\nnext: {next}.\nedit or {toggle} it with o on its routine.",
             draft.name(),
             draft.pipeline,
         ),
@@ -662,7 +662,7 @@ pub(super) fn set_enabled(
         Notice::new(
             verb,
             format!(
-                "Could not {verb} the job `{}` in `{}`: {err:#}. Check the file is writable and \
+                "could not {verb} the job `{}` in `{}`: {err:#}. check the file is writable and \
                  try again.",
                 job.name,
                 store_label(repo, &store_of(repo, job.scope)),
@@ -683,12 +683,12 @@ pub(super) fn set_enabled(
 fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String> {
     let name = draft.name();
     if draft.editing.is_none() && draft.routine.is_empty() {
-        return Err("Pick a routine before saving — a job runs one.".to_string());
+        return Err("pick a routine before saving — a job runs one.".to_string());
     }
 
     let current = jobs::load(repo).map_err(|err| {
         format!(
-            "Could not read the job stores to check that `{name}` is free: {err:#}. Fix `{}` or \
+            "could not read the job stores to check that `{name}` is free: {err:#}. fix `{}` or \
              `{}` — or run `spoolway doctor` for the exact fault — then save again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
@@ -699,7 +699,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         .any(|job| job.name == name && draft.editing.as_deref() != Some(name.as_str()));
     if taken {
         return Err(format!(
-            "A job named `{name}` already exists, in `{}` or `{}`. Pick another name and save \
+            "a job named `{name}` already exists, in `{}` or `{}`. pick another name and save \
              again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
@@ -717,7 +717,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
             && job.target(repo).is_ok_and(|target| target == wanted)
     }) {
         return Err(format!(
-            "Routine `{}` already has the job `{}`, in `{}`. A routine has at most one job: \
+            "routine `{}` already has the job `{}`, in `{}`. a routine has at most one job: \
              edit that job instead, or pick another routine.",
             draft.routine,
             holder.name,
@@ -737,7 +737,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
 
     jobs::write(repo, draft.scope, &name, &spec).map_err(|err| {
         format!(
-            "Could not save the job `{name}` to `{}`: {err:#}. Check the file is writable and try \
+            "could not save the job `{name}` to `{}`: {err:#}. check the file is writable and try \
              again.",
             store_label(repo, &store_of(repo, draft.scope)),
         )
@@ -1105,7 +1105,7 @@ mod tests {
             assert!(
                 notice
                     .text
-                    .starts_with(&format!("Could not {verb} the job `nightly-audit`")),
+                    .starts_with(&format!("could not {verb} the job `nightly-audit`")),
                 "{}",
                 notice.text
             );
@@ -1198,7 +1198,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("\nEdit or deactivate it with o on its routine."),
+            text.ends_with("\nedit or deactivate it with o on its routine."),
             "{text}"
         );
 
@@ -1230,7 +1230,7 @@ mod tests {
 
         let text = saved_notice(&draft).text;
         assert!(
-            text.ends_with("\nEdit or activate it with o on its routine."),
+            text.ends_with("\nedit or activate it with o on its routine."),
             "{text}"
         );
     }
@@ -1307,7 +1307,7 @@ mod tests {
         let refusal = commit_draft(&repo, draft).unwrap_err();
         assert!(refusal.contains("already exists"), "{refusal}");
         assert!(
-            refusal.ends_with("Pick another name and save again."),
+            refusal.ends_with("pick another name and save again."),
             "{refusal}"
         );
         assert!(

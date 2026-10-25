@@ -4675,7 +4675,7 @@ enum Mode {
         then: Resume,
     },
     /// What a screen submit queued — [`queued_panel`]'s popup, opening on
-    /// `Hook executed successfully` when the hook ran. `enter` closes it, the
+    /// `hook executed successfully` when the hook ran. `enter` closes it, the
     /// same as [`Mode::Outcome`].
     ///
     /// `routines` is the routines pane the submit came from, when it did:
@@ -5106,7 +5106,7 @@ fn issue_question_panel(
     let mut body = vec![
         String::new(),
         clip(
-            "Deactivate issue tracking for selected groups:".to_string(),
+            "deactivate issue tracking for selected groups:".to_string(),
             width,
         ),
         String::new(),
@@ -5260,7 +5260,7 @@ impl<'a> PopupHook<'a> {
         crate::screen::boxed(
             "issue tracking",
             &issue_body([format!(
-                "Progress: {}{}",
+                "progress: {}{}",
                 "█".repeat(filled),
                 "░".repeat(PROGRESS_BAR_CELLS - filled)
             )]),
@@ -5301,7 +5301,7 @@ impl TicketLog for PopupHook<'_> {
 }
 
 /// [`Mode::Queued`] for a batch that queued `names`, one per task, each its
-/// [`Task::display_name`]: `Hook executed successfully` when `hook_ran`,
+/// [`Task::display_name`]: `hook executed successfully` when `hook_ran`,
 /// then the count queued over every task it queued. Then the tasks it left
 /// out, `not_queued`, when there are any — see [`not_queued_lines`]. It
 /// ends on `dispatcher` — [`dispatcher_line`] — a blank row below the list,
@@ -5324,7 +5324,7 @@ fn queued_panel(
     let mut lines = Vec::new();
     if !names.is_empty() {
         if hook_ran {
-            lines.extend(["Hook executed successfully".to_string(), String::new()]);
+            lines.extend(["hook executed successfully".to_string(), String::new()]);
         }
         lines.push(format!("queued {}", plural(names.len(), "task")));
         lines.extend(names.iter().map(|name| format!("  {name}")));
@@ -5414,8 +5414,8 @@ fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
 /// the popup leaves the line off rather than claim a state it never read.
 fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
     match crate::lock::Lock::holder(&repo.lock_file()) {
-        Ok(Some(_)) => Some("Dispatcher is running"),
-        Ok(None) => Some("Start the dispatcher to begin working"),
+        Ok(Some(_)) => Some("dispatcher is running"),
+        Ok(None) => Some("start the dispatcher to begin working"),
         Err(_) => None,
     }
 }
@@ -5649,7 +5649,7 @@ pub(crate) struct ScreenState {
     gates: std::collections::BTreeMap<TaskKey, String>,
     /// The branch the board's own checkout has out — what `enter` hands a
     /// task that names no `base:` of its own, and so what the tasks pane's
-    /// `Lands in:` row shows for one. `None` on a detached checkout, where
+    /// `lands in:` row shows for one. `None` on a detached checkout, where
     /// `enter` refuses rather than guess, and in the tests that open the
     /// screen with no checkout behind it.
     board_branch: Option<String>,
@@ -5841,13 +5841,13 @@ fn opening_message(
     };
     let lead = match queueable_group_listed(groups) {
         true => format!(
-            "Not listed under {}: {} there {has} no `group:` and `id:` this could read, so \
+            "not listed under {}: {} there {has} no `group:` and `id:` this could read, so \
              a group beside {them} may be missing tasks:",
             dir.display(),
             plural(skipped.len(), "task"),
         ),
         false => format!(
-            "Nothing to list under {} — {} there {has} no `group:` and `id:` this could read:",
+            "nothing to list under {} — {} there {has} no `group:` and `id:` this could read:",
             dir.display(),
             plural(skipped.len(), "task"),
         ),
@@ -5855,8 +5855,8 @@ fn opening_message(
     Some(format!(
         "{lead}\n\n\
          {}\n\n\
-         A row on this screen is a `group:` value, so a task without one has no row \
-         to be. Run `spoolway task contract --from {}` for the real reason on each.",
+         a row on this screen is a `group:` value, so a task without one has no row \
+         to be. run `spoolway task contract --from {}` for the real reason on each.",
         files.join("\n"),
         dir.display()
     ))
@@ -6065,7 +6065,7 @@ fn run_screen_from(
         // has been handled, so this is also what wakes the reader for the
         // next one, the same cadence the inline `branch_at` call this
         // replaces always ran at: the board can be left open while its
-        // checkout moves to another branch, and the `Lands in:` row must
+        // checkout moves to another branch, and the `lands in:` row must
         // eventually name the branch `enter` would read right now, just
         // from whatever the reader last landed rather than a read of its
         // own.
@@ -6927,8 +6927,8 @@ fn plans_notice(err: &str) -> Mode {
     outcome(
         "plans not listed",
         format!(
-            "Plan pages are missing from this list, because {err}.\n\n\
-             Make that path one this user can read, or repair it if it will \
+            "plan pages are missing from this list, because {err}.\n\n\
+             make that path one this user can read, or repair it if it will \
              not parse, and the next read lists them."
         ),
     )
@@ -7251,7 +7251,7 @@ fn find_job(repo: &Repo, job: &JobRef) -> std::result::Result<crate::jobs::Job, 
         .find(|found| found.name == job.name && found.scope == job.scope)
         .ok_or_else(|| {
             format!(
-                "the job {} is no longer in the {} store, so there is nothing to change. Press \
+                "the job {} is no longer in the {} store, so there is nothing to change. press \
                  o on the routine again to see the jobs it has now.",
                 job.name,
                 job.scope.label()
@@ -7346,7 +7346,7 @@ fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
         _ => ("run", "are", "them"),
     };
     Some(format!(
-        "{} also {run} {routine} and {are} active. Deactivate {them} first, then activate this \
+        "{} also {run} {routine} and {are} active. deactivate {them} first, then activate this \
          one.",
         others.join(", "),
     ))
@@ -8068,9 +8068,9 @@ fn layout_for(width: usize, height: usize) -> Layout {
 
 /// The column every row's value starts at in [`labeled_row`]'s wide layout:
 /// four columns of indent, then the widest labels this pane ever draws —
-/// `Description:` and `Starts from:`, at 13 characters padded — so
-/// `Pipeline:`, `Depends on:`, `Starts from:`, `Lands in:`, `Gate:` and
-/// `Description:` all line up under each other regardless of which one owns
+/// `description:` and `starts from:`, at 13 characters padded — so
+/// `pipeline:`, `depends on:`, `starts from:`, `lands in:`, `gate:` and
+/// `description:` all line up under each other regardless of which one owns
 /// a given row. A constant rather than something measured off
 /// the label set at draw time — see the non-goal this is: the labels are
 /// fixed, so the column never has anything to measure.
@@ -8305,7 +8305,7 @@ fn groups_pane_lines(
 
 /// What the tasks pane says beside a plan row: the skill that cuts a plan
 /// page into tasks.
-const PLAN_HINT: &str = "Use /spoolway-tasks";
+const PLAN_HINT: &str = "use /spoolway-tasks";
 
 /// The characters a tasks-pane row spends before its own name even starts:
 /// the cursor marker and the space after it — half of [`ROW_PREFIX_COLUMNS`],
@@ -8418,17 +8418,17 @@ pub(crate) fn tasks_pane_lines(
             .pipeline
             .clone()
             .unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
-        lines.extend(labeled_row("Pipeline:", &pipeline, width));
+        lines.extend(labeled_row("pipeline:", &pipeline, width));
 
         let depends_value = if task.depends_on.is_empty() {
             "-".to_string()
         } else {
             task.depends_on.join(", ")
         };
-        lines.extend(labeled_row("Depends on:", &depends_value, width));
+        lines.extend(labeled_row("depends on:", &depends_value, width));
 
         // Where the task starts and where it lands, on every task. `base:`
-        // names only where the work lands, so it is `Lands in:`; a task
+        // names only where the work lands, so it is `lands in:`; a task
         // naming none is sent on the board checkout's branch — see
         // `board_branch` — and `-` shows only when the checkout is detached
         // and `enter` would refuse it. A task starts from its own
@@ -8446,16 +8446,16 @@ pub(crate) fn tasks_pane_lines(
             .clone()
             .or_else(|| task.depends_on.first().cloned())
             .unwrap_or_else(|| lands_in.clone());
-        lines.extend(labeled_row("Starts from:", &starts_from, width));
-        lines.extend(labeled_row("Lands in:", &lands_in, width));
+        lines.extend(labeled_row("starts from:", &starts_from, width));
+        lines.extend(labeled_row("lands in:", &lands_in, width));
 
         if let Some(step) = state.gates.get(&task_key(task)) {
-            lines.extend(labeled_row("Gate:", step, width));
+            lines.extend(labeled_row("gate:", step, width));
         }
         // A task with no `title:` draws no row at all rather than an
         // empty one — `parse_submission` is what refuses it, at submit time.
         if let Some(description) = &task.description {
-            lines.extend(labeled_row("Description:", description, width));
+            lines.extend(labeled_row("description:", description, width));
         }
 
         if i == state.task_cursor {
@@ -8532,9 +8532,9 @@ fn routine_folder_lines(
 /// [`routine_details_lines`] draws under the job config: the highlighted
 /// folder's own tasks — every one at or below it, the same set `enter`
 /// would queue — each drawn the same `labeled_row` way [`tasks_pane_lines`]
-/// draws a pending task, minus the `Gate:` row a routine has no gate picker to set
-/// and the `Starts from:` and `Lands in:` rows, which this pane has never
-/// drawn, plus a `Problem:` row under any task whose id another routine
+/// draws a pending task, minus the `gate:` row a routine has no gate picker to set
+/// and the `starts from:` and `lands in:` rows, which this pane has never
+/// drawn, plus a `problem:` row under any task whose id another routine
 /// file also holds. That row is why this takes every folder and
 /// `routines_dir`, not only the highlighted one. Comes back with
 /// each task's start and the highlighted one's range, the same as
@@ -8574,7 +8574,7 @@ fn routine_task_lines(
         lines.push(task_row(marker, &task.id, "", width));
 
         let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
-        lines.extend(labeled_row("Pipeline:", &pipeline, width));
+        lines.extend(labeled_row("pipeline:", &pipeline, width));
 
         let depends_on = super::pending::depends_on(&task.doc);
         let depends_value = if depends_on.is_empty() {
@@ -8582,16 +8582,16 @@ fn routine_task_lines(
         } else {
             depends_on.join(", ")
         };
-        lines.extend(labeled_row("Depends on:", &depends_value, width));
+        lines.extend(labeled_row("depends on:", &depends_value, width));
 
         if let Some(description) = &task.description {
-            lines.extend(labeled_row("Description:", description, width));
+            lines.extend(labeled_row("description:", description, width));
         }
 
         // A shared id makes these files one routine, so the pane says so
         // beside the task rather than leaving it to `doctor`.
         if let Some(clash) = clashes.iter().find(|clash| clash.id == task.id) {
-            lines.extend(labeled_row("Problem:", &clash.refusal(routines_dir), width));
+            lines.extend(labeled_row("problem:", &clash.refusal(routines_dir), width));
         }
 
         if i == nav.task_cursor {
@@ -8604,12 +8604,12 @@ fn routine_task_lines(
 /// The routines pane's job config for `folder`, the top of the details pane:
 /// a blank row, then the rows below, then a blank row before the tasks.
 ///
-/// - No job on the routine: `Schedule:` reads `none`.
-/// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
-///   `Job:` rows, the values `spoolway jobs list` gives each.
+/// - No job on the routine: `schedule:` reads `none`.
+/// - One job: its `schedule:`, `pipeline:`, `scope:`, `next:`, `last:` and
+///   `job:` rows, the values `spoolway jobs list` gives each.
 /// - Two or more jobs on it, active or not: every one of them, listed by
 ///   [`routine_jobs_lines`].
-/// - Stores that will not load: one `Jobs:` row naming the error.
+/// - Stores that will not load: one `jobs:` row naming the error.
 ///
 /// Which jobs are on the routine is [`jobs_on`]'s to say.
 fn routine_job_lines(
@@ -8622,24 +8622,24 @@ fn routine_job_lines(
     let jobs = match jobs {
         Ok(jobs) => jobs,
         Err(err) => {
-            lines.extend(config_row("Jobs:", &format!("will not load: {err}"), width));
+            lines.extend(config_row("jobs:", &format!("will not load: {err}"), width));
             lines.push(String::new());
             return lines;
         }
     };
     match jobs_on(repo, jobs, folder).as_slice() {
-        [] => lines.extend(config_row("Schedule:", "none", width)),
+        [] => lines.extend(config_row("schedule:", "none", width)),
         [job] => {
-            lines.extend(config_row("Schedule:", &job.spec.schedule, width));
-            lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
-            lines.extend(config_row("Scope:", job.scope.label(), width));
-            lines.extend(config_row("Next:", &super::jobs::detail_next(job), width));
+            lines.extend(config_row("schedule:", &job.spec.schedule, width));
+            lines.extend(config_row("pipeline:", &job.spec.pipeline, width));
+            lines.extend(config_row("scope:", job.scope.label(), width));
+            lines.extend(config_row("next:", &super::jobs::detail_next(job), width));
             lines.extend(config_row(
-                "Last:",
+                "last:",
                 &super::jobs::detail_last(repo, &job.name),
                 width,
             ));
-            lines.extend(config_row("Job:", &job.name, width));
+            lines.extend(config_row("job:", &job.name, width));
         }
         several => lines.extend(routine_jobs_lines(several, width)),
     }
@@ -8724,7 +8724,7 @@ fn orphan_jobs<'a>(
             let missing = fault.as_ref().is_some_and(|fault| fault.missing);
             let reason = match fault {
                 Some(fault) if fault.missing => {
-                    format!("No routine {} under {routines_dir}.", job.spec.routine)
+                    format!("no routine {} under {routines_dir}.", job.spec.routine)
                 }
                 Some(fault) => format!("{}.", fault.reason),
                 // `routine_fault` has nothing to say about a `routine` that
@@ -8755,7 +8755,7 @@ fn highlighted_orphan<'a, 'b>(
     orphans.get(nav.folder_cursor.checked_sub(routines.len())?)
 }
 
-/// The `Jobs:` block for a routine two or more jobs run: a headline saying
+/// The `jobs:` block for a routine two or more jobs run: a headline saying
 /// which of them fires, one row per job sorted by name with its scope and,
 /// when inactive, `inactive`, and the fix under them.
 ///
@@ -8772,11 +8772,11 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let (headline, fix) = match live.as_slice() {
         [] => (
             format!("{} run this routine, all inactive", on.len()),
-            "Activate one with o to fire it.",
+            "activate one with o to fire it.",
         ),
         [job] => (
             format!("{} run this routine; only {} fires", on.len(), job.name),
-            "Deactivate the active one with o before activating another.",
+            "deactivate the active one with o before activating another.",
         ),
         _ => (
             format!(
@@ -8785,14 +8785,14 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
                 if two { "neither" } else { "none" }
             ),
             if two {
-                "Deactivate one with o to fire the other."
+                "deactivate one with o to fire the other."
             } else {
-                "Deactivate all but one with o to fire it."
+                "deactivate all but one with o to fire it."
             },
         ),
     };
 
-    let mut lines = config_row("Jobs:", &headline, width);
+    let mut lines = config_row("jobs:", &headline, width);
     // The names sit two columns in under the headline's text, and the
     // scopes line up three columns past the longest name. A row too wide
     // for the pane puts its scope on a line of its own, further in, rather
@@ -8892,7 +8892,7 @@ fn routine_details_lines(
 }
 
 /// The details of a job row, an [`Orphan`]: the job's own config rows, the
-/// ones [`routine_job_lines`] draws for a routine's one job, with `Next:`
+/// ones [`routine_job_lines`] draws for a routine's one job, with `next:`
 /// saying it never fires, then why and what to do about it. There are no
 /// tasks under it, since it runs no routine.
 fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<String> {
@@ -8902,21 +8902,21 @@ fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<Strin
         false => "never, it runs no routine",
     };
     let mut lines = vec![String::new()];
-    lines.extend(config_row("Schedule:", &job.spec.schedule, width));
-    lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
-    lines.extend(config_row("Scope:", job.scope.label(), width));
-    lines.extend(config_row("Next:", next, width));
+    lines.extend(config_row("schedule:", &job.spec.schedule, width));
+    lines.extend(config_row("pipeline:", &job.spec.pipeline, width));
+    lines.extend(config_row("scope:", job.scope.label(), width));
+    lines.extend(config_row("next:", next, width));
     lines.extend(config_row(
-        "Last:",
+        "last:",
         &super::jobs::detail_last(repo, &job.name),
         width,
     ));
-    lines.extend(config_row("Job:", &job.name, width));
+    lines.extend(config_row("job:", &job.name, width));
     lines.push(String::new());
     lines.extend(wrapped(CONFIG_INDENT, &orphan.reason, width));
     lines.extend(wrapped(
         CONFIG_INDENT,
-        "Press o to point this job at a routine.",
+        "press o to point this job at a routine.",
         width,
     ));
     lines
@@ -9189,7 +9189,7 @@ fn screen_footer(panes: &Panes, state: &ScreenState) -> String {
 /// every other function in this module is held to, rather than each
 /// threading `routines`, `routines_dir` and `pipelines` through as three
 /// separate parameters. `repo` is for [`reload_jobs`] while the screen sits
-/// idle, and for the routines pane's `Last:` row.
+/// idle, and for the routines pane's `last:` row.
 struct Panes<'a> {
     repo: &'a Repo,
     routines: &'a [RoutineFolder],
@@ -10372,7 +10372,7 @@ fn build_trial_arm(
     if let Some(gate_at) = crate::commands::command_gate_at(&arm, pipeline) {
         bail!(
             "{name} has `gate_at: {gate_at}`, which runs a command in pipeline `{}` — only an \
-             agent step can be held for a person. Untick `{}` in the trial, or change or drop \
+             agent step can be held for a person. untick `{}` in the trial, or change or drop \
              `gate_at:` in {name} so it names an agent step every ticked pipeline has.",
             pipeline.name,
             pipeline.name
@@ -10381,7 +10381,7 @@ fn build_trial_arm(
     if let Some(gate_at) = unmatched_gate_at(&arm, pipeline) {
         bail!(
             "{name} has `gate_at: {gate_at}`, which is no step of pipeline `{}`. \
-             Untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
+             untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
              names a step every ticked pipeline has.",
             pipeline.name,
             pipeline.name
@@ -10625,14 +10625,14 @@ fn check_trial_gates(
             // carries, so the remedy is the tick, not the file.
             Some(crate::dispatch::Hidden::Skip) => bail!(
                 "{name} has `gate_at: {gate_at}`, but the trial skips `{gate_at}` on pipeline \
-                 `{}`, so the gate would never fire. Untick `{gate_at}` in the trial's skips \
+                 `{}`, so the gate would never fire. untick `{gate_at}` in the trial's skips \
                  for `{}`, or change or drop `gate_at:` in {name}.",
                 pipeline.name,
                 pipeline.name
             ),
             Some(why) => bail!(
                 "{name} has `gate_at: {gate_at}`, but the copy on pipeline `{}` will never run \
-                 `{gate_at}`: {}, so the gate would never fire. Untick `{}` in the trial, or \
+                 `{gate_at}`: {}, so the gate would never fire. untick `{}` in the trial, or \
                  change or drop `gate_at:` in {name}.",
                 pipeline.name,
                 why.refusal(),
@@ -11044,7 +11044,7 @@ fn delete_pending_panel(
     let noun = if count == 1 { "task" } else { "tasks" };
     let mut body = vec![
         String::new(),
-        clip(format!("Delete {count} pending {noun}:"), width),
+        clip(format!("delete {count} pending {noun}:"), width),
         String::new(),
     ];
     let note = |task: &super::pending_delete::DeleteEntry| {
@@ -11087,9 +11087,9 @@ fn delete_pending_panel(
 
 /// The text of the notice a delete opens when the pending directory no
 /// longer gives the list its popup showed.
-const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
-                               Nothing was deleted.\n\
-                               Pick delete again to see the current list.";
+const PENDING_CHANGED: &str = "pending tasks changed after the popup opened.\n\
+                               nothing was deleted.\n\
+                               pick delete again to see the current list.";
 
 /// The last line of a notice for a delete that failed: what to fix before
 /// picking delete again, chosen by the kind of error removing a file gave.
@@ -11098,9 +11098,9 @@ const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
 fn delete_remedy(kind: Option<std::io::ErrorKind>) -> &'static str {
     match kind {
         Some(std::io::ErrorKind::PermissionDenied) => {
-            "Fix the file's permissions, then pick delete again."
+            "fix the file's permissions, then pick delete again."
         }
-        _ => "Fix the error above, then pick delete again.",
+        _ => "fix the error above, then pick delete again.",
     }
 }
 
@@ -11138,7 +11138,7 @@ fn after_pending_delete(
             .flat_map(|group| &group.tasks)
             .any(|task| task_key(task) == *key)
     });
-    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    let reread = |err: &str| format!("the pending task list would not read again: {err}");
     match answer {
         DeleteOutcome::Removed => match reread_err {
             Some(err) => outcome("tasks deleted", reread(&err)),
@@ -11231,7 +11231,7 @@ fn begin_plan_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
 fn delete_plan_panel(title: &str, page: &Path) -> Vec<String> {
     let body = [
         String::new(),
-        "Delete 1 plan page:".to_string(),
+        "delete 1 plan page:".to_string(),
         String::new(),
         format!("  {}", plan_file(page)),
     ];
@@ -11263,7 +11263,7 @@ fn after_plan_delete(
         }
     };
     adopt_groups(fresh, groups, state);
-    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    let reread = |err: &str| format!("the pending task list would not read again: {err}");
     let file = plan_file(page);
     match answer {
         PlanDeleteOutcome::Removed => match reread_err {
@@ -11271,7 +11271,7 @@ fn after_plan_delete(
             None => Mode::Browsing,
         },
         PlanDeleteOutcome::Named => {
-            let mut text = format!("A task names {file} in plan: now.\nNothing was deleted.");
+            let mut text = format!("a task names {file} in plan: now.\nnothing was deleted.");
             if let Some(err) = reread_err {
                 text.push_str(&format!("\n\n{}", reread(&err)));
             }
@@ -16099,7 +16099,7 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ delete group cart ")),
             "{last}"
         );
-        assert!(last.contains("Delete 4 pending tasks:"), "{last}");
+        assert!(last.contains("delete 4 pending tasks:"), "{last}");
         assert!(last.contains("(depends on cart-totals)"), "{last}");
         assert_eq!(
             last.matches("[enter] confirm   [esc] close").count(),
@@ -16165,7 +16165,7 @@ mod tests {
             [
                 "╭─ delete group cart ─────────────────────────────╮",
                 "│                                                 │",
-                "│  Delete 4 pending tasks:                        │",
+                "│  delete 4 pending tasks:                        │",
                 "│                                                 │",
                 "│  cart                                           │",
                 "│    cart-empty-state                             │",
@@ -16187,7 +16187,7 @@ mod tests {
             [
                 "╭─ delete cart-empty-state ───────╮",
                 "│                                 │",
-                "│  Delete 1 pending task:         │",
+                "│  delete 1 pending task:         │",
                 "│                                 │",
                 "│  cart                           │",
                 "│    cart-empty-state             │",
@@ -16214,7 +16214,7 @@ mod tests {
             [
                 "╭─ delete cart-totals ──────────────────────────╮",
                 "│                                               │",
-                "│  Delete 3 pending tasks:                      │",
+                "│  delete 3 pending tasks:                      │",
                 "│                                               │",
                 "│  cart                                         │",
                 "│    cart-totals                                │",
@@ -16336,7 +16336,7 @@ mod tests {
         assert!(panel[16].contains("> delete"), "{panel:#?}");
         // 11 rows of listing: the group, nine tasks and the marker.
         assert!(panel[14].contains("↓ 16 more"), "{panel:#?}");
-        assert!(panel[2].contains("Delete 25 pending tasks:"), "{panel:#?}");
+        assert!(panel[2].contains("delete 25 pending tasks:"), "{panel:#?}");
     }
 
     /// `esc` closes the popup with every file still there, and any other
@@ -16495,7 +16495,7 @@ mod tests {
         assert!(
             notice
                 .text
-                .starts_with("The pending task list would not read again: "),
+                .starts_with("the pending task list would not read again: "),
             "{}",
             notice.text
         );
@@ -16504,7 +16504,7 @@ mod tests {
         };
         assert!(
             notice.text.starts_with(&format!(
-                "{PENDING_CHANGED}\n\nThe pending task list would not read again: "
+                "{PENDING_CHANGED}\n\nthe pending task list would not read again: "
             )),
             "{}",
             notice.text
@@ -16578,9 +16578,9 @@ mod tests {
             [
                 "╭─ not deleted ───────────────────────────────────╮",
                 "│                                                 │",
-                "│  Pending tasks changed after the popup opened.  │",
-                "│  Nothing was deleted.                           │",
-                "│  Pick delete again to see the current list.     │",
+                "│  pending tasks changed after the popup opened.  │",
+                "│  nothing was deleted.                           │",
+                "│  pick delete again to see the current list.     │",
                 "│                                                 │",
                 "│  [enter] confirm                                │",
                 "╰─────────────────────────────────────────────────╯",
@@ -16631,7 +16631,7 @@ mod tests {
                 "│  left:                                                │",
                 "│    cart-totals.md                                     │",
                 "│                                                       │",
-                "│  Fix the file's permissions, then pick delete again.  │",
+                "│  fix the file's permissions, then pick delete again.  │",
                 "│                                                       │",
                 "│  [enter] confirm                                      │",
                 "╰───────────────────────────────────────────────────────╯",
@@ -16657,7 +16657,7 @@ mod tests {
             "/q/cart-totals.md is not in the pending directory, so nothing was removed\n\n\
              removed:\n  nothing\n\n\
              left:\n  cart-totals.md\n\n\
-             Fix the error above, then pick delete again."
+             fix the error above, then pick delete again."
         );
     }
 
@@ -16694,7 +16694,7 @@ mod tests {
         assert!(
             notice
                 .text
-                .ends_with("\n\nFix the file's permissions, then pick delete again."),
+                .ends_with("\n\nfix the file's permissions, then pick delete again."),
             "{}",
             notice.text
         );
@@ -16964,7 +16964,7 @@ mod tests {
         assert!(out.contains("id: in-a-sample"), "{out}");
     }
 
-    /// The task pane's `Depends on:` row reads `depends_on` straight off a
+    /// The task pane's `depends on:` row reads `depends_on` straight off a
     /// task, without validating it — and reads nothing else. The
     /// task here carries a `touches` too, to hold the pane to not
     /// showing it.
@@ -16979,7 +16979,7 @@ mod tests {
     }
 
     /// A task naming no `depends_on` — or carrying no fence at all — reads as
-    /// an empty list rather than an error: the pane shows `Depends on:  -`
+    /// an empty list rather than an error: the pane shows `depends on:  -`
     /// for the first case and never panics on either.
     #[test]
     fn depends_on_defaults_to_an_empty_list() {
@@ -17043,7 +17043,7 @@ mod tests {
             assert!(!left.is_empty(), "expected the one group to have a row");
             assert!(
                 right.len() >= 3,
-                "expected a blank line, the task row and its Pipeline: row, got {right:?}"
+                "expected a blank line, the task row and its pipeline: row, got {right:?}"
             );
 
             let rendered = two_pane_frame(&left, &right, "pending", "one", layout).join("\n");
@@ -17773,7 +17773,7 @@ mod tests {
         .expect_err("bugfix has no `implement` step");
         let said = format!("{err:#}");
         assert!(said.contains("gated.md has `gate_at: implement`"), "{said}");
-        assert!(said.contains("Untick `bugfix`"), "{said}");
+        assert!(said.contains("untick `bugfix`"), "{said}");
         assert!(!said.contains("gated-1"), "{said}");
 
         let default = pipelines.get("default").unwrap();
@@ -17832,7 +17832,7 @@ mod tests {
         assert!(said.contains("a.md has `gate_at: work`"), "{said}");
         assert!(said.contains("the trial skips `work`"), "{said}");
         assert!(said.contains("the gate would never fire"), "{said}");
-        assert!(said.contains("Untick `work`"), "{said}");
+        assert!(said.contains("untick `work`"), "{said}");
         assert!(!said.contains("its own skip:"), "{said}");
 
         let said = judge(vec![
@@ -18331,7 +18331,7 @@ mod tests {
             "the task is named by its own id, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Depends on:")),
+            lines.iter().any(|line| line.contains("depends on:")),
             "the task still says what it depends on, got {lines:?}"
         );
 
@@ -18381,7 +18381,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Pipeline:") && line.contains("default")),
+                .any(|line| line.contains("pipeline:") && line.contains("default")),
             "tasks_pane_lines must still draw the task's own pipeline off the \
              field list_groups already filled in, got {lines:?}"
         );
@@ -18400,7 +18400,7 @@ mod tests {
     }
 
     /// A task's own `title:` reaches the tasks pane under its own
-    /// `Description:` label — the one sentence a person picks by.
+    /// `description:` label — the one sentence a person picks by.
     #[test]
     fn a_tasks_title_reaches_the_tasks_pane() {
         let (repo, _root_guard) = fixture("screen-description");
@@ -18421,7 +18421,7 @@ mod tests {
         );
     }
 
-    /// A task with no `title:` at all draws no `Description:` row,
+    /// A task with no `title:` at all draws no `description:` row,
     /// rather than an empty one. `parse_submission` is what refuses it, at
     /// submit time — the pane just has nothing to draw.
     #[test]
@@ -18438,9 +18438,9 @@ mod tests {
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
-        // task row, its Pipeline:, Depends on:, Starts from: and Lands in:
+        // task row, its pipeline:, depends on:, starts from: and lands in:
         // rows — nothing
-        // past it, since this task has no title to draw a Description:
+        // past it, since this task has no title to draw a description:
         // row from. The task names no `pipeline:` either, and there is
         // no project default to show in its place any more.
         assert_eq!(
@@ -18448,10 +18448,10 @@ mod tests {
             vec![
                 String::new(),
                 "  wire".to_string(),
-                format!("    {:<LABEL_FIELD$}{}", "Pipeline:", TRIAL_UNASSIGNED),
-                "    Depends on:  -".to_string(),
-                "    Starts from: -".to_string(),
-                "    Lands in:    -".to_string(),
+                format!("    {:<LABEL_FIELD$}{}", "pipeline:", TRIAL_UNASSIGNED),
+                "    depends on:  -".to_string(),
+                "    starts from: -".to_string(),
+                "    lands in:    -".to_string(),
             ],
             "{lines:?}"
         );
@@ -18570,12 +18570,12 @@ mod tests {
             vec![
                 String::new(),
                 "  tracking-open".to_string(),
-                "    Pipeline:    default".to_string(),
-                "    Depends on:  -".to_string(),
-                "    Starts from: task/gh-412-checkout".to_string(),
-                "    Lands in:    task/gh-412-checkout".to_string(),
-                "    Gate:        review".to_string(),
-                "    Description: tracking-open, done".to_string(),
+                "    pipeline:    default".to_string(),
+                "    depends on:  -".to_string(),
+                "    starts from: task/gh-412-checkout".to_string(),
+                "    lands in:    task/gh-412-checkout".to_string(),
+                "    gate:        review".to_string(),
+                "    description: tracking-open, done".to_string(),
             ],
             "{lines:?}"
         );
@@ -18607,11 +18607,11 @@ mod tests {
             vec![
                 String::new(),
                 "  cart-discounts".to_string(),
-                "    Pipeline:    default".to_string(),
-                "    Depends on:  cart-totals".to_string(),
-                "    Starts from: cart-totals".to_string(),
-                "    Lands in:    plan/other".to_string(),
-                "    Description: cart-discounts, done".to_string(),
+                "    pipeline:    default".to_string(),
+                "    depends on:  cart-totals".to_string(),
+                "    starts from: cart-totals".to_string(),
+                "    lands in:    plan/other".to_string(),
+                "    description: cart-discounts, done".to_string(),
             ],
             "{lines:?}"
         );
@@ -18639,8 +18639,8 @@ mod tests {
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
         assert!(
-            lines.contains(&"    Starts from: main".to_string())
-                && lines.contains(&"    Lands in:    plan/other".to_string()),
+            lines.contains(&"    starts from: main".to_string())
+                && lines.contains(&"    lands in:    plan/other".to_string()),
             "{lines:?}"
         );
     }
@@ -18675,13 +18675,13 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            rows("Lands in:"),
-            vec!["    Lands in:    feat/checkout"; 2],
+            rows("lands in:"),
+            vec!["    lands in:    feat/checkout"; 2],
             "{lines:?}"
         );
         assert_eq!(
-            rows("Starts from:"),
-            vec!["    Starts from: feat/checkout"; 2],
+            rows("starts from:"),
+            vec!["    starts from: feat/checkout"; 2],
             "{lines:?}"
         );
     }
@@ -18707,15 +18707,15 @@ mod tests {
             vec![
                 String::new(),
                 "  wire".to_string(),
-                "    Pipeline:".to_string(),
+                "    pipeline:".to_string(),
                 "      default".to_string(),
-                "    Depends on:".to_string(),
+                "    depends on:".to_string(),
                 "      -".to_string(),
-                "    Starts from:".to_string(),
+                "    starts from:".to_string(),
                 "      -".to_string(),
-                "    Lands in:".to_string(),
+                "    lands in:".to_string(),
                 "      -".to_string(),
-                "    Description:".to_string(),
+                "    description:".to_string(),
                 "      wire, done".to_string(),
             ],
             "{lines:?}"
@@ -18777,7 +18777,7 @@ mod tests {
         let state = ScreenState::new();
 
         let (lines, starts, _) = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 52);
-        assert_eq!(lines, ["", "  Use /spoolway-tasks"]);
+        assert_eq!(lines, ["", "  use /spoolway-tasks"]);
         assert!(starts.is_empty(), "a plan row has no task rows: {starts:?}");
     }
 
@@ -19086,7 +19086,7 @@ mod tests {
                     "─".repeat(13)
                 ),
                 "│                                  │".to_string(),
-                "│  Delete 1 plan page:             │".to_string(),
+                "│  delete 1 plan page:             │".to_string(),
                 "│                                  │".to_string(),
                 "│    plans/2026-10-21-search.html  │".to_string(),
                 "│                                  │".to_string(),
@@ -19136,7 +19136,7 @@ mod tests {
         assert_eq!(notice.title, "not deleted");
         assert_eq!(
             notice.text,
-            "A task names plans/2026-10-21-search.html in plan: now.\nNothing was deleted."
+            "a task names plans/2026-10-21-search.html in plan: now.\nnothing was deleted."
         );
         assert!(groups.iter().all(|g| g.state != GroupState::Plan));
     }
@@ -19195,7 +19195,7 @@ mod tests {
                 "│  Permission denied (os error 13)                      │",
                 "│    plans/2026-10-21-search.html                       │",
                 "│                                                       │",
-                "│  Fix the file's permissions, then pick delete again.  │",
+                "│  fix the file's permissions, then pick delete again.  │",
                 "│                                                       │",
                 "│  [esc] close                                          │",
                 "╰───────────────────────────────────────────────────────╯",
@@ -19214,7 +19214,7 @@ mod tests {
         assert_eq!(
             notice.text,
             "Is a directory (os error 21)\n  plans/2026-10-21-search.html\n\n\
-             Fix the error above, then pick delete again."
+             fix the error above, then pick delete again."
         );
     }
 
@@ -19240,7 +19240,7 @@ mod tests {
         std::fs::set_permissions(&dir, perms).unwrap();
         assert!(page.exists());
         assert!(held.contains("plan not deleted"), "enter closed it: {held}");
-        assert!(held.contains("Fix the file's permissions"), "{held}");
+        assert!(held.contains("fix the file's permissions"), "{held}");
         assert!(
             !closed.contains("plan not deleted"),
             "esc kept it: {closed}"
@@ -20652,7 +20652,7 @@ mod tests {
         };
         let said = format!("{mode:?}");
         assert!(said.contains("the trial skips `implement`"), "{said}");
-        assert!(said.contains("Untick `implement`"), "{said}");
+        assert!(said.contains("untick `implement`"), "{said}");
         assert_eq!(
             repo.queue_dir().read_dir().unwrap().count(),
             0,
@@ -21067,10 +21067,10 @@ mod tests {
         // No dispatcher holds this fixture's lock, so the popup ends by
         // saying one has to be started.
         assert!(
-            frame.contains("│  Start the dispatcher to begin working "),
+            frame.contains("│  start the dispatcher to begin working "),
             "{frame}"
         );
-        assert!(!frame.contains("Dispatcher is running"), "{frame}");
+        assert!(!frame.contains("dispatcher is running"), "{frame}");
     }
 
     /// The queued popup as the plan's mockup draws it: the task list, a
@@ -21090,7 +21090,7 @@ mod tests {
             &ids,
             false,
             &[],
-            Some("Start the dispatcher to begin working"),
+            Some("start the dispatcher to begin working"),
             None,
         ) else {
             panic!("a landed batch is Mode::Queued");
@@ -21106,7 +21106,7 @@ mod tests {
                 "│    task-labels                                           │",
                 "│    jira-story-subtasks                                   │",
                 "│                                                          │",
-                "│  Start the dispatcher to begin working                   │",
+                "│  start the dispatcher to begin working                   │",
                 "│                                                          │",
                 "│  [enter] confirm                                         │",
                 format!("{BOTTOM_LEFT}──────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
@@ -21141,7 +21141,7 @@ mod tests {
             &ids,
             false,
             &not_queued,
-            Some("Dispatcher is running"),
+            Some("dispatcher is running"),
             None,
         ) else {
             panic!("a landed batch is Mode::Queued");
@@ -21175,7 +21175,7 @@ mod tests {
                 "doesn't exist. Set starts_from: in the task front matter and",
                 "requeue.",
                 "",
-                "Dispatcher is running",
+                "dispatcher is running",
                 "",
                 "[enter] confirm",
             ],
@@ -21209,7 +21209,7 @@ mod tests {
     fn a_batch_the_hook_ran_for_says_so_above_the_queued_list() {
         let ids = vec!["cart-01".to_string(), "search-01".to_string()];
         let Mode::Queued { panel, .. } =
-            queued_panel(&ids, true, &[], Some("Dispatcher is running"), None)
+            queued_panel(&ids, true, &[], Some("dispatcher is running"), None)
         else {
             panic!("a landed batch is Mode::Queued");
         };
@@ -21225,13 +21225,13 @@ mod tests {
             body[1..panel.len() - 1],
             [
                 "",
-                "Hook executed successfully",
+                "hook executed successfully",
                 "",
                 "queued 2 tasks",
                 "cart-01",
                 "search-01",
                 "",
-                "Dispatcher is running",
+                "dispatcher is running",
                 "",
                 "[enter] confirm",
             ],
@@ -21239,14 +21239,14 @@ mod tests {
         );
     }
 
-    /// A live dispatcher's lock turns the line into `Dispatcher is running`.
+    /// A live dispatcher's lock turns the line into `dispatcher is running`.
     /// This process takes the dispatcher's own lock, the one a real
     /// `spoolway dispatch` holds for as long as it runs.
     #[test]
     fn a_held_dispatcher_lock_says_the_dispatcher_is_running() {
         let (repo, _root_guard) = fixture("queued-popup-dispatcher-running");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        assert_eq!(dispatcher_line(&repo), Some("Dispatcher is running"));
+        assert_eq!(dispatcher_line(&repo), Some("dispatcher is running"));
     }
 
     /// Only the dispatcher's lock decides the line: the screen's own lock,
@@ -21258,7 +21258,7 @@ mod tests {
         let _screen = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         assert_eq!(
             dispatcher_line(&repo),
-            Some("Start the dispatcher to begin working")
+            Some("start the dispatcher to begin working")
         );
     }
 
@@ -21280,8 +21280,8 @@ mod tests {
             panic!("a landed batch is Mode::Queued");
         };
         let flat = panel.join("\n");
-        assert!(!flat.contains("Dispatcher is running"), "{flat}");
-        assert!(!flat.contains("Start the dispatcher"), "{flat}");
+        assert!(!flat.contains("dispatcher is running"), "{flat}");
+        assert!(!flat.contains("start the dispatcher"), "{flat}");
         assert!(flat.contains("[enter] confirm"), "{flat}");
     }
 
@@ -22328,8 +22328,8 @@ mod tests {
 
         let saved = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r")).to_string();
         assert!(saved.contains("─ job saved "), "{saved}");
-        assert!(saved.contains("Schedule:    0 3 * * 1-5"), "{saved}");
-        assert!(!saved.contains("Schedule:    none"), "{saved}");
+        assert!(saved.contains("schedule:    0 3 * * 1-5"), "{saved}");
+        assert!(!saved.contains("schedule:    none"), "{saved}");
     }
 
     /// Edit schedule is offered only over the routine list: the details pane's menu
@@ -22401,9 +22401,9 @@ mod tests {
             saved.contains("maintenance runs at 03:00, Monday to Friday, on bugfix."),
             "{saved}"
         );
-        assert!(saved.contains("Next: "), "{saved}");
+        assert!(saved.contains("next: "), "{saved}");
         assert!(
-            saved.contains("Edit or deactivate it with o on its routine."),
+            saved.contains("edit or deactivate it with o on its routine."),
             "{saved}"
         );
         // The key line under the frame is the popup's own `[enter]
@@ -22434,7 +22434,7 @@ mod tests {
 
         assert!(last.contains("─ not saved "), "{last}");
         assert!(
-            last.contains("A job named `nightly` already exists, in"),
+            last.contains("a job named `nightly` already exists, in"),
             "{last}"
         );
         let jobs = crate::jobs::load(&repo).unwrap();
@@ -22591,7 +22591,7 @@ mod tests {
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(!last.contains("deactivate job"), "the menu closed: {last}");
         assert!(
-            last.contains("Next:        inactive"),
+            last.contains("next:        inactive"),
             "the details pane says so: {last}"
         );
 
@@ -22669,7 +22669,7 @@ mod tests {
             last.contains("nightly-b also runs nightly and is active."),
             "{last}"
         );
-        assert!(last.contains("Deactivate it first,"), "{last}");
+        assert!(last.contains("deactivate it first,"), "{last}");
         assert!(last.contains("then activate this one."), "{last}");
         let after = (
             std::fs::read_to_string(repo.user_jobs_file()).unwrap(),
@@ -22704,7 +22704,7 @@ mod tests {
         assert_eq!(notice.title, "activate job");
         assert_eq!(
             notice.text,
-            "nightly-b, nightly-c also run nightly and are active. Deactivate them first, \
+            "nightly-b, nightly-c also run nightly and are active. deactivate them first, \
              then activate this one."
         );
         let enabled: Vec<bool> = crate::jobs::load(&repo)
@@ -23126,7 +23126,7 @@ mod tests {
         assert_eq!(starts, [0, 1]);
     }
 
-    /// A job row's details are the job's config, `Next:` saying it never
+    /// A job row's details are the job's config, `next:` saying it never
     /// fires, then why and what to do, with no tasks, for a job whose
     /// routine is missing. A job on a task file says that instead.
     #[test]
@@ -23156,20 +23156,20 @@ mod tests {
             details(2),
             [
                 "",
-                "  Schedule:    0 3 * * 1-5",
-                "  Pipeline:    impl_fast",
-                "  Scope:       user",
-                "  Next:        never, its routine is missing",
-                "  Last:        never",
-                "  Job:         nightly-old",
+                "  schedule:    0 3 * * 1-5",
+                "  pipeline:    impl_fast",
+                "  scope:       user",
+                "  next:        never, its routine is missing",
+                "  last:        never",
+                "  job:         nightly-old",
                 "",
-                "  No routine nightly-old under .spoolway/routines/.",
-                "  Press o to point this job at a routine.",
+                "  no routine nightly-old under .spoolway/routines/.",
+                "  press o to point this job at a routine.",
             ]
         );
         let task_file = details(3);
-        assert_eq!(task_file[4], "  Next:        never, it runs no routine");
-        assert_eq!(task_file[6], "  Job:         deps-only");
+        assert_eq!(task_file[4], "  next:        never, it runs no routine");
+        assert_eq!(task_file[6], "  job:         deps-only");
         assert_eq!(
             task_file[8],
             "  nightly/audit-deps.md is a task, not a routine."
@@ -23306,10 +23306,10 @@ mod tests {
         );
         let job = &crate::jobs::load(&repo).unwrap()[0];
 
-        // `Next:` is read off the clock, which can cross a firing between
+        // `next:` is read off the clock, which can cross a firing between
         // drawing the pane and working out the value here, so either side of
         // the draw is accepted, and the row is then compared as the earlier.
-        let next = |when: String| format!("  Next:        {when}");
+        let next = |when: String| format!("  next:        {when}");
         let before = next(super::super::jobs::detail_next(job));
         let mut pane = details_at(&repo, MOCKUP_DETAILS_WIDTH);
         let after = next(super::super::jobs::detail_next(job));
@@ -23319,18 +23319,18 @@ mod tests {
             pane,
             [
                 "",
-                "  Schedule:    0 */2 * * *",
-                "  Pipeline:    dependabot",
-                "  Scope:       project",
+                "  schedule:    0 */2 * * *",
+                "  pipeline:    dependabot",
+                "  scope:       project",
                 &before,
-                "  Last:        never",
-                "  Job:         dependabot-review",
+                "  last:        never",
+                "  job:         dependabot-review",
                 "",
                 "  tasks",
                 "    review-dependabot-prs",
-                "      Pipeline:    dependabot",
-                "      Depends on:  -",
-                "      Description: chore(deps): review and merge open Dependabot pull",
+                "      pipeline:    dependabot",
+                "      depends on:  -",
+                "      description: chore(deps): review and merge open Dependabot pull",
                 "                   requests",
             ],
             "{pane:#?}"
@@ -23348,7 +23348,7 @@ mod tests {
             pane[..5],
             [
                 "",
-                "  Schedule:    none",
+                "  schedule:    none",
                 "",
                 "  tasks",
                 "    review-dependabot-prs"
@@ -23381,10 +23381,10 @@ mod tests {
             pane[..8],
             [
                 "",
-                "  Jobs:        2 run this routine, so neither fires",
+                "  jobs:        2 run this routine, so neither fires",
                 "                 dependabot-review   project",
                 "                 dependabot-weekly   user",
-                "               Deactivate one with o to fire the other.",
+                "               deactivate one with o to fire the other.",
                 "",
                 "  tasks",
                 "    review-dependabot-prs",
@@ -23418,10 +23418,10 @@ mod tests {
             pane[..7],
             [
                 "",
-                "  Jobs:        2 run this routine; only b-live fires",
+                "  jobs:        2 run this routine; only b-live fires",
                 "                 a-paused   user, inactive",
                 "                 b-live     project",
-                "               Deactivate the active one with o before activating",
+                "               deactivate the active one with o before activating",
                 "               another.",
                 "",
             ],
@@ -23454,12 +23454,12 @@ mod tests {
             pane[..9],
             [
                 "",
-                "  Jobs:",
+                "  jobs:",
                 "    2 run this routine, so neither",
                 "    fires",
                 "      dependabot-review   project",
                 "      dependabot-weekly   user",
-                "    Deactivate one with o to fire",
+                "    deactivate one with o to fire",
                 "    the other.",
                 "",
             ],
@@ -23499,14 +23499,14 @@ mod tests {
             pane[..10],
             [
                 "",
-                "  Jobs:",
+                "  jobs:",
                 "    2 run this routine, all",
                 "    inactive",
                 "      dependabot-review",
                 "        project, inactive",
                 "      dependabot-weekly",
                 "        user, inactive",
-                "    Activate one with o to fire it.",
+                "    activate one with o to fire it.",
                 "",
             ],
             "{pane:#?}"
@@ -23524,7 +23524,7 @@ mod tests {
 
         let pane = details_pane(&repo);
         assert!(
-            pane[1].starts_with("  Jobs:        will not load: "),
+            pane[1].starts_with("  jobs:        will not load: "),
             "{pane:#?}"
         );
         let tasks = pane
@@ -26308,7 +26308,7 @@ group_description: search
             /// 44 cells full.
             fn bar(filled: usize) -> String {
                 format!(
-                    "Progress: {}{}",
+                    "progress: {}{}",
                     "█".repeat(filled),
                     "░".repeat(44 - filled)
                 )
@@ -26325,13 +26325,13 @@ group_description: search
             /// The `issue tracking` progress popups in `drawn`, in the order
             /// they were drawn, each cut down to its rows by [`popup_rows`].
             /// The question carries the same title, so a frame counts only
-            /// when it holds the bar's `Progress: ` label.
+            /// when it holds the bar's `progress: ` label.
             fn running_popups(drawn: &str) -> Vec<Vec<String>> {
                 drawn
                     .split("\x1b[?2026h\x1b[H")
                     .filter(|frame| {
                         frame.contains(&format!("{TOP_LEFT}─ issue tracking "))
-                            && frame.contains("Progress: ")
+                            && frame.contains("progress: ")
                     })
                     .map(|frame| popup_rows(frame, "issue tracking"))
                     .collect()
@@ -26348,7 +26348,7 @@ group_description: search
                 let first = shop_order(&repo)[0].clone();
                 let mut expected = vec![
                     String::new(),
-                    "Deactivate issue tracking for selected groups:".to_string(),
+                    "deactivate issue tracking for selected groups:".to_string(),
                     String::new(),
                 ];
                 expected.extend(shop_rows(&repo, &first, &[]));
@@ -26383,7 +26383,7 @@ group_description: search
                     [
                         "╭─ issue tracking ─────────────────────────────────────────────────╮",
                         "│                                                                  │",
-                        "│  Deactivate issue tracking for selected groups:                  │",
+                        "│  deactivate issue tracking for selected groups:                  │",
                         "│                                                                  │",
                         rows[0],
                         rows[1],
@@ -26624,7 +26624,7 @@ depends_on: [search-old]
                         "  cart-empty-state",
                         "  cart-totals",
                         "",
-                        "Start the dispatcher to begin working",
+                        "start the dispatcher to begin working",
                         "",
                         "[enter] confirm",
                     ],
@@ -26676,13 +26676,13 @@ depends_on: [search-old]
                     rows,
                     [
                         "",
-                        "Hook executed successfully",
+                        "hook executed successfully",
                         "",
                         "queued 2 tasks",
                         "  cart-empty-state",
                         "  cart-totals",
                         "",
-                        "Start the dispatcher to begin working",
+                        "start the dispatcher to begin working",
                         "",
                         "[enter] confirm",
                     ],
@@ -26715,7 +26715,7 @@ depends_on: [search-old]
                 assert_eq!(hook_calls(&repo).len(), 2);
                 let frame = last_frame(&drawn);
                 let rows = popup_rows(frame, "queued");
-                assert_eq!(rows[1], "Hook executed successfully", "{frame}");
+                assert_eq!(rows[1], "hook executed successfully", "{frame}");
                 assert!(!frame.contains("created"), "{frame}");
             }
 
@@ -26787,7 +26787,7 @@ ticket: \"#9\"
                 assert!(!frame.contains("names prefixed"), "{frame}");
                 assert_eq!(
                     popup_rows(frame, "queued")[..4],
-                    ["", "Hook executed successfully", "", "queued 2 tasks"],
+                    ["", "hook executed successfully", "", "queued 2 tasks"],
                     "{frame}"
                 );
                 let top = frame
@@ -26827,7 +26827,7 @@ group_description: audit
                 assert_eq!(
                     rows[1..5],
                     [
-                        "Deactivate issue tracking for selected groups:",
+                        "deactivate issue tracking for selected groups:",
                         "",
                         "> [ ] nightly   1 task",
                         "",
@@ -26922,7 +26922,7 @@ group_description: audit
                 let frame = last_frame(&drawn);
                 assert_eq!(
                     popup_rows(frame, "queued")[..4],
-                    ["", "Hook executed successfully", "", "queued 1 task"],
+                    ["", "hook executed successfully", "", "queued 1 task"],
                     "{frame}"
                 );
             }
