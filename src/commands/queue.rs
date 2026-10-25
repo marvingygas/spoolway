@@ -4737,9 +4737,9 @@ enum Mode {
     /// The options menu's edit schedule popups, the schedule then the
     /// pipeline, over the routines pane `nav` describes: writing a new job
     /// for the routine highlighted when it was picked when it has none, or
-    /// rewriting that routine's job, opened on its own values. The popups, their keys and
-    /// the save live in [`super::jobs::NewJobWalk`], and `esc` on either
-    /// comes back here having written nothing.
+    /// rewriting that routine's job, opened on its own values. The popups,
+    /// their keys and the save live in [`super::jobs::NewJobWalk`], and `esc`
+    /// on either comes back here having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
@@ -4752,8 +4752,9 @@ enum Mode {
     /// `cursor`; `esc` goes back to the pane having written nothing.
     ///
     /// `folders` is the routines as they were when edit schedule was
-    /// picked, by name and path, held for the same reason [`Mode::DeletePending`] holds
-    /// its set: the popup is drawn with no routines list to read.
+    /// picked, by name and path, held for the same reason
+    /// [`Mode::DeletePending`] holds its set: the popup is drawn with no
+    /// routines list to read.
     PickRoutine {
         nav: RoutineNav,
         job: JobRef,
@@ -4820,8 +4821,9 @@ impl OptionsMenu {
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
 /// gate, `t` trial, `s` save as routine, and the routines tab's `n`, now
-/// edit schedule, and `x` delete routine. Delete on the pending screen and open plan never
-/// had a key of their own, and neither did the routines tab's job items.
+/// edit schedule, and `x` delete routine. Delete on the pending screen and
+/// open plan never had a key of their own, and neither did the routines
+/// tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
@@ -5221,7 +5223,7 @@ struct PopupHook<'a> {
     redraw: &'a mut dyn FnMut(&[String]),
 }
 
-/// Cells in the progress bar. With the `Progress: ` label, it fills the
+/// Cells in the progress bar. With the `progress: ` label, it fills the
 /// [`ISSUE_BODY_WIDTH`] row exactly, so the box keeps the width of the
 /// popups it is swapped with.
 const PROGRESS_BAR_CELLS: usize = 44;
@@ -22332,11 +22334,11 @@ mod tests {
         assert!(!saved.contains("schedule:    none"), "{saved}");
     }
 
-    /// Edit schedule is offered only over the routine list: the details pane's menu
-    /// does not list it, and `down` then `enter` there still picks open task,
-    /// its one item, rather than a schedule popup. Headless, so open task
-    /// surfaces its refusal instead of opening an editor pane in a real
-    /// multiplexer.
+    /// Edit schedule is offered only over the routine list: the details
+    /// pane's menu does not list it, and `down` then `enter` there still picks
+    /// open task, its one item, rather than a schedule popup. Headless, so
+    /// open task surfaces its refusal instead of opening an editor pane in a
+    /// real multiplexer.
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
         let (repo, _root_guard) = fixture("routine-new-job-tasks-pane");
@@ -22777,8 +22779,8 @@ mod tests {
     }
 
     /// A job gone from its store between `o` and the pick is not written
-    /// back: edit schedule and deactivate job both open a popup saying so, and the
-    /// store stays without it.
+    /// back: edit schedule and deactivate job both open a popup saying so,
+    /// and the store stays without it.
     #[test]
     fn a_job_item_whose_job_is_gone_changes_nothing_and_says_so() {
         use crate::jobs::Scope;

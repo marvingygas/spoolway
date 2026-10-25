@@ -249,7 +249,7 @@ mod tests {
         let last = |id: &str| {
             lines
                 .iter()
-                .position(|l| l.contains("Description:") && l.contains(&format!("{id}, done")))
+                .position(|l| l.contains("description:") && l.contains(&format!("{id}, done")))
         };
         let blocks: Vec<(usize, usize)> = ids
             .iter()

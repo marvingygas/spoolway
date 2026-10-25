@@ -3,7 +3,7 @@
 //! routines tab writes a job through. That tab is where a person writes a
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
 //! onto a renamed pipeline. Its edit schedule walks the cron expression and
-//! the pipeline, then save through [`crate::jobs::write`] — see
+//! the pipeline, then saves through [`crate::jobs::write`] — see
 //! [`NewJobWalk`]. Deactivate and activate are [`set_enabled`]; no popup
 //! here deletes a job, which leaves only with the routine the routines tab's
 //! delete routine removes. No `jobs add`, no config key. A job only schedules:
@@ -613,7 +613,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Err(_) => format!("on `{schedule}`"),
     };
     let next = match jobs::next_fire(schedule) {
-        Some(at) => at.format("%a %-d %b %H:%M").to_string(),
+        Some(at) => at.format(FIRING_TIME).to_string(),
         None => "never".to_string(),
     };
     // Edit schedule keeps an inactive job inactive, and its routine's menu then
@@ -795,11 +795,11 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// How the routines tab's details pane writes a time on its `next:` and
-/// `last:` rows: `Mon 26 Oct 03:00`, with no comma, the same as the `job
-/// saved` notice writes its next firing, so one pane never shows the same
-/// moment two ways.
-const DETAIL_TIME: &str = "%a %-d %b %H:%M";
+/// How the routines tab writes a job's firing time: `Mon 26 Oct 03:00`, with
+/// no comma. The details pane's `next:` and `last:` rows and the `job saved`
+/// notice's `next:` line all use it, so the tab never shows the same moment
+/// two ways.
+const FIRING_TIME: &str = "%a %-d %b %H:%M";
 
 /// The `next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
@@ -810,7 +810,7 @@ pub(super) fn detail_next(job: &Job) -> String {
         return "will not parse".to_string();
     }
     match jobs::next_fire(&job.spec.schedule) {
-        Some(when) => when.format(DETAIL_TIME).to_string(),
+        Some(when) => when.format(FIRING_TIME).to_string(),
         None => "never".to_string(),
     }
 }
@@ -819,7 +819,7 @@ pub(super) fn detail_next(job: &Job) -> String {
 pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
         Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
-            Some(when) => format!("{}  ok", when.with_timezone(&Local).format(DETAIL_TIME)),
+            Some(when) => format!("{}  ok", when.with_timezone(&Local).format(FIRING_TIME)),
             None => "never".to_string(),
         },
         None => "never".to_string(),
