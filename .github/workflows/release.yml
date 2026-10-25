@@ -309,8 +309,10 @@ jobs:
   # at checksums read back from that release, so it can never name a file that
   # is not there. A failure here leaves npm and the release published without
   # a formula, which is why each error says so. A re-run is safe: the push is
-  # skipped when the tap already names this version, and the install proof
-  # runs either way.
+  # skipped when the tap already names this version or a newer one, so an old
+  # tag can never replace a newer formula. The install proof runs again for
+  # this version, and is skipped when the tap has moved on, because it would
+  # install the newer version and fail the version check.
   homebrew:
     needs: assets
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish)
@@ -326,7 +328,8 @@ jobs:
 
       # The token is checked first, before the formula is written or the tap
       # is touched. Only whether it is set is passed in; the push step is the
-      # one step that reads its value.
+      # one step that reads its value, and it deletes the clone that holds it
+      # before the install step runs.
       - name: Write the formula
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then
@@ -354,30 +357,47 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Push it to the tap
+        id: push
         run: |
           published() {
             echo "Error: $1" >&2
             echo "npm and the GitHub release for $VERSION are already published." >&2
-            echo "Check that HOMEBREW_TAP_TOKEN can write to marvingygas/homebrew-tap, then re-run this job." >&2
+            echo "$2" >&2
             exit 1
           }
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/marvingygas/homebrew-tap.git" tap ||
-            published "marvingygas/homebrew-tap could not be cloned, so the formula was not pushed."
-          cd tap
-          # The formula has no version line, so its urls name the version.
-          if grep -qF "/releases/download/${VERSION}/" Formula/spoolway.rb 2>/dev/null; then
-            echo "The tap already names spoolway ${VERSION#v}, so nothing was pushed."
-            exit 0
-          fi
+          token_advice="Check that HOMEBREW_TAP_TOKEN can write to marvingygas/homebrew-tap, then re-run this job."
+          # The clone keeps the token in tap/.git/config. Removing it on every
+          # way out keeps the token off the disk the install step runs on. The
+          # path is absolute because the script moves into the clone.
+          tap_dir="$PWD/tap"
+          trap 'rm -rf "$tap_dir"' EXIT
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/marvingygas/homebrew-tap.git" "$tap_dir" ||
+            published "marvingygas/homebrew-tap could not be cloned, so the formula was not pushed." "$token_advice"
+          cd "$tap_dir"
+          state="$(node ../scripts/tap-state.mjs "${VERSION#v}" Formula/spoolway.rb)" ||
+            published "the version in the tap's formula could not be read; the reason is above." \
+              "Fix Formula/spoolway.rb in marvingygas/homebrew-tap by hand, then re-run this job."
+          case "$state" in
+            same)
+              echo "The tap already names spoolway ${VERSION#v}, so nothing was pushed."
+              exit 0
+              ;;
+            newer)
+              echo "The tap already names a newer spoolway than ${VERSION#v}, so nothing was pushed and the install proof was skipped."
+              echo "newer=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
           mkdir -p Formula
           cp ../spoolway.rb Formula/spoolway.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/spoolway.rb
           git commit -m "spoolway ${VERSION#v}" ||
-            published "the formula for spoolway ${VERSION#v} could not be committed to the tap."
+            published "the formula for spoolway ${VERSION#v} could not be committed to the tap." \
+              "Read the git error above, fix what it names, then re-run this job."
           git push origin HEAD ||
-            published "pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed."
+            published "pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed." "$token_advice"
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -385,6 +405,7 @@ jobs:
       # formula and not the local copy. All three brew checks must pass and
       # the binary must report the tagged version.
       - name: Install it
+        if: steps.push.outputs.newer != 'true'
         run: |
           published() {
             echo "Error: $1" >&2

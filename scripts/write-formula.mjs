@@ -10,9 +10,11 @@
 // download file is not part of the formula. A download with no checksum line
 // is an error, because a formula without its checksum cannot be installed.
 //
-// The formula has no `version` line: Homebrew reads the version from the url,
-// and `brew audit --strict` rejects a version line that repeats it. The desc
-// says "command-line" for the same audit.
+// A release version has no `version` line: Homebrew reads the version from
+// the url, and `brew audit --strict` rejects a line that repeats it. A
+// prerelease like 0.15.0-rc.1 is the exception. Homebrew reads "64" from the
+// "arm64" in its urls, so the line is printed there, where the audit accepts
+// it. The desc says "command-line" for the same audit.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -31,15 +33,21 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
 
 const sums = readSums(sumsPath);
 const { targets } = JSON.parse(fs.readFileSync(targetsPath, "utf8"));
-const downloads = new Map(
-  targets.filter((t) => t.download).map((t) => [t.os + "/" + t.cpu, t.download]),
-);
+const downloads = new Map();
+for (const t of targets.filter((t) => t.download)) {
+  const key = t.os + "/" + t.cpu;
+  const earlier = downloads.get(key);
+  if (earlier) {
+    fail(`${targetsPath} names two downloads for ${key}, ${earlier.download} (${earlier.pkg}) and ${t.download} (${t.pkg}), so the formula could pair the platform with the wrong file. Give only one of those targets a "download" name.`);
+  }
+  downloads.set(key, t);
+}
 
 const base = `https://github.com/marvingygas/spoolway/releases/download/v${version}`;
 
 /// One `on_arm`/`on_intel` block. Homebrew calls x64 "intel".
 function block(os, cpu) {
-  const download = downloads.get(`${os}/${cpu}`);
+  const download = downloads.get(`${os}/${cpu}`)?.download;
   if (!download) {
     fail(`${targetsPath} has no download file for ${os} ${cpu}, so the formula would miss a platform. Add a "download" name to that target.`);
   }
@@ -56,10 +64,13 @@ function block(os, cpu) {
   ].join("\n");
 }
 
+// Homebrew wants `version` after `homepage` and before `license`.
+const versionLine = version.includes("-") ? `  version "${version}"\n` : "";
+
 process.stdout.write(`class Spoolway < Formula
   desc "Descriptive agent workflow builder run by a minimal command-line state machine"
   homepage "https://github.com/marvingygas/spoolway"
-  license "MIT"
+${versionLine}  license "MIT"
 
   on_macos do
 ${block("darwin", "arm64")}
