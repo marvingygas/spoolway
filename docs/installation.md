@@ -56,6 +56,19 @@ in herdr's marketplace.
 `herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
 the two disagree. See [Testing](testing.md).
 
+## Homebrew
+
+On macOS or Linux (x64, arm64), install from the project's tap:
+
+```
+brew install marvingygas/tap/spoolway
+```
+
+The first install adds the tap `marvingygas/tap`. Every release updates its formula, and
+`spoolway update` upgrades the copy through `brew upgrade`. See
+[Keeping spoolway current](#keeping-spoolway-current). The formula has no musl build, so a musl
+Linux system installs through npm or the standalone download instead.
+
 ## Standalone download
 
 One file, nothing else to install. It never updates itself: run the install line again to get the

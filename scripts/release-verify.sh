@@ -8,9 +8,10 @@
 # body and a real install.
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
-# public. npm is used only for the one check that installs it, and that check
-# is skipped with a note when npm is missing. Nothing here authenticates to
-# npm: every read is of a public package.
+# public. npm is used only for the check that installs it from the registry,
+# and brew only for the check that installs it from the tap. Each is skipped
+# with a note when its tool is missing. Nothing here authenticates to npm or
+# to the tap: every read is of a public package or repository.
 set -euo pipefail
 
 say() { printf '%s\n' "$*" >&2; }
@@ -155,4 +156,73 @@ else
   say "release-verify: npm is not on this machine — skipping the real-install check"
 fi
 
-say "release-verify: $tag is published — tag on origin, ${#pkgs[@]} platform packages plus the wrapper, $expected release assets, a body matching the tagged section, and $install_summary"
+# 7. A real Homebrew install of the formula the release workflow pushed to the
+#    tap, run wherever brew is present (it supports Linux, so the maintainer's
+#    WSL qualifies). Skipped with a note, like the npm check, when brew is
+#    missing. The brew copy is `$(brew --prefix)/bin/spoolway`, and brew's bin
+#    can sit ahead of the npm copy on PATH, so a copy this check installed is
+#    removed again, and so is a tap it added. A copy that was there before is
+#    upgraded and left installed, since removing it would take something away
+#    from the maintainer.
+brew_formula=marvingygas/tap/spoolway
+brew_tap=marvingygas/tap
+brew_summary="brew is not on this machine, so the brew install check was skipped"
+if command -v brew >/dev/null 2>&1; then
+  brew_formula_was=0
+  brew_tap_was=0
+  brew_touched=0
+  # Read whole before grep sees them: `grep -q` quits at the first match, and
+  # a listing killed by SIGPIPE under pipefail would read as "was not there",
+  # which would make the cleanup uninstall a copy the maintainer already had.
+  brew_installed="$(brew list --full-name --formula)" || die "brew list failed, so it is not known whether $brew_formula is installed"
+  brew_taps="$(brew tap)" || die "brew tap failed, so it is not known whether $brew_tap is added"
+  grep -qxF "$brew_formula" <<<"$brew_installed" && brew_formula_was=1
+  grep -qxF "$brew_tap" <<<"$brew_taps" && brew_tap_was=1
+  # Runs on every exit, including a `die` halfway through the install, which
+  # is when a half-installed copy is most likely to be left behind. A failure
+  # here is reported and does not replace the exit status that got us here.
+  cleanup_brew() {
+    [ "$brew_touched" = 1 ] || return 0
+    if [ "$brew_formula_was" = 0 ]; then
+      brew uninstall --formula "$brew_formula" >/dev/null 2>&1 \
+        || say "release-verify: could not remove $brew_formula — run: brew uninstall $brew_formula"
+    fi
+    if [ "$brew_tap_was" = 0 ]; then
+      brew untap "$brew_tap" >/dev/null 2>&1 \
+        || say "release-verify: could not remove the tap $brew_tap — run: brew untap $brew_tap"
+    fi
+  }
+  # One trap per shell: this replaces the npm check's, so it removes that
+  # check's scratch directory as well when there is one.
+  trap 'cleanup_brew; [ -z "${install_dir:-}" ] || rm -rf "$install_dir"' EXIT
+  brew_touched=1
+  for attempt in 1 2 3; do
+    # `brew update` first, so a tap cloned on an earlier release hands over
+    # the formula for this one. Upgrading a copy that is already current only
+    # warns, so the same command serves both cases.
+    if { brew update --quiet \
+         && if [ "$brew_formula_was" = 1 ]; then brew upgrade "$brew_formula"; else brew install "$brew_formula"; fi; } >/dev/null; then
+      break
+    fi
+    [ "$attempt" -lt 3 ] || die "brew could not install $brew_formula — run: brew install $brew_formula"
+    say "release-verify: brew install $brew_formula failed (attempt $attempt) — trying again in 30s"
+    sleep 30
+  done
+  brew_bin="$(brew --prefix)/bin/spoolway"
+  got="$("$brew_bin" --version)" \
+    || die "the brew-installed $brew_bin would not run"
+  case "$got" in
+    *"$version"*) ;;
+    *) die "brew-installed spoolway reports '$got', not $version — run: brew update && brew upgrade $brew_formula" ;;
+  esac
+  if [ "$brew_formula_was" = 1 ]; then
+    say "release-verify: brew upgraded $brew_formula to $version and it reports $version, then left it installed"
+  else
+    say "release-verify: brew installed $brew_formula $version and it reports $version, then removed it"
+  fi
+  brew_summary="a real brew install checked"
+else
+  say "release-verify: brew is not on this machine — skipping the brew install check"
+fi
+
+say "release-verify: $tag is published — tag on origin, ${#pkgs[@]} platform packages plus the wrapper, $expected release assets, a body matching the tagged section, $install_summary, and $brew_summary"

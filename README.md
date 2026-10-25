@@ -75,8 +75,15 @@ A gate can pause a task for a person after a step reports.
 npm install -g spoolway
 ```
 
+Or with Homebrew, on macOS or Linux (x64, arm64):
+
+```
+brew install marvingygas/tap/spoolway
+```
+
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release. Run
+musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release, through
+whichever of the two installed it. Run
 `spoolway sync` in each project to list the files the new release rewrites and apply them when
 you confirm. `spoolway whats-new` prints the release notes offline.
 
