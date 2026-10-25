@@ -630,7 +630,8 @@ spoolway report --pass -m "shipped" \
 ```
 
 Each note is written to `## Handoff` as `` - `<step>` — <text> ``. A dependent task's reading
-list points at it.
+list points at it. A report that a gate holds needs at least one note. See
+[`spoolway report`](cli-reference.md#spoolway-report-task).
 
 ## Archiving
 

@@ -242,6 +242,9 @@ step after it.
 Picking another step in the board's resume picker sends it to a step you name instead. The
 picker's last row, `done`, closes the task.
 
+A report a gate holds must carry at least one `--handoff`. The pane ends with the held line and
+those handoffs: what the step did and how to check it.
+
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a
 deploy or a release.
 

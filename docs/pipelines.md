@@ -592,6 +592,11 @@ The lane runs and reports as usual. On the outcome the gate holds, the task land
 its pane stays open. A command step's exit is never held, and neither is a command step named by a
 task's `gate_at:`.
 
+The lane is told which of its reports are held, and that a held report needs at least one
+`--handoff` for the person who opens the pane. `spoolway report` refuses a held report with none.
+The handoffs are written into `## Handoff` and printed under the held line, which is the last
+thing the pane shows. See [`spoolway report`](cli-reference.md#spoolway-report-task).
+
 On the board, press `r` on the paused row. After a caught pass, the picker preselects the
 `on_pass` route, so `enter` lets the task past. Pick another step to send the task there
 instead.

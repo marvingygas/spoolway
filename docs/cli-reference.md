@@ -2204,7 +2204,26 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `--block` | | The step cannot be finished: something unexpected is in the way, or the planned solution does not work out. Escalate |
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
-| `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
+| `--handoff <TEXT>` | | One thing the next step should know. Repeatable. A blank one is left out. Written into `## Handoff`. A report a gate holds needs at least one |
+
+A report a gate holds, with no non-empty `--handoff`, is refused with exit 2. Nothing is recorded, and the task stays where it was:
+
+```
+error: this pass is held at `deploy`'s gate for a person, and carries no
+handoff for them. Report again with at least one --handoff: what this step
+did, in plain words, then how to verify it. Nothing was recorded.
+```
+
+A report that is held prints the held line, then each `--handoff` of the report indented, and nothing after them:
+
+```
+ship: deploy --pass--> paused - held here for a person
+
+  shipped the build
+  open https://example.test and log in
+```
+
+A pass from `blocked` held at an origin step's gate adds ``, at `<step>`'s gate`` to the held line.
 
 A report from a `queued`, `paused` or `hook_failed` task is refused, because no lane works at any of those stages. The refusal names the next action: `spoolway resume <task>` for a paused task, `spoolway resume <task>` to run the hook again for a `hook_failed` task, and waiting for the dispatcher for a queued one.
 
