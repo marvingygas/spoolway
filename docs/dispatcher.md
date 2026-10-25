@@ -364,7 +364,7 @@ at all. The frame is then cut from the bottom so it never scrolls the terminal.
 
 ### The empty board
 
-With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
+With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`. `[u] update config` joins it under the rule in [Keys](#keys).
 
 ```
 Good afternoon, Marvin.
@@ -527,8 +527,9 @@ The key line under the board reads `[enter] start dispatching   [o] options   [q
 reads `stop dispatching` while the dispatcher is running, and `q` shows only inside the dispatch
 tab. `[r] resume` joins it, between the `enter` pair and `[o] options`, only while the `▸`
 cursor sits on a row it can resume. `[u] update config` joins it, between `[o] options` and
-`[q] quit`, while any dispatcher holds the lock. On an empty board it sits between `enter` and
-`q`.
+`[q] quit`, only while a dispatcher holds the lock and the `update` notice names something a
+reload would load. On an empty board it sits between `enter` and `q`. It is drawn in normal
+text, and every other pair on the line is dim.
 
 | Key | What it does |
 |---|---|
@@ -536,7 +537,7 @@ cursor sits on a row it can resume. `[u] update config` joins it, between `[o] o
 | `o` | Open the options menu of the row under the cursor. See [Options menu](#options-menu). |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started resumes at once with no picker. A `hook_failed` row also resumes at once and runs its hook again. See [Resume picker](#resume-picker). |
 | `k` | Open the skip panel for a `hook_failed` row. Does nothing on any other row. See [Skip panel](#skip-panel). |
-| `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while no dispatcher holds the lock, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
+| `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while `[u] update config` is not on the key line, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
 | `ctrl-c` | Stop the run. |
 
 Every menu and panel these keys open lists its answers under its text, with `>` on the
